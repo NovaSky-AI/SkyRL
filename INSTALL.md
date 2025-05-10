@@ -10,6 +10,7 @@ The main prerequisites are:
 - [CUDA Toolkit 12.4](https://developer.nvidia.com/cuda-12-4-0-download-archive) (versions greater than 12.4 might also work)
 - `build-essential`: This is needed for `torch-memory-saver`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation): We use the `uv` + `ray` integration to easily manage dependencies in multi-node training.
+- `python` 3.12
 - `ray` 2.43.0
 
 
