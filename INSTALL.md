@@ -3,7 +3,7 @@
 ## Pre-requisites
 
 > [!TIP]
-> For an easy-to-use Dockerfile, see [Dockerfile.skyrl](./docker/Dockerfile.skyrl).
+> For an easy-to-use Dockerfile, see [Dockerfile.skyrl](./docker/Dockerfile.skyrl)
 
 
 The main prerequisites are: 
