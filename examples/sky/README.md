@@ -11,8 +11,6 @@ Make sure to have followed the installation commands in [INSTALL.md](../../INSTA
 ### Start Ray
 Start ray in your cluster following the guide: https://docs.ray.io/en/latest/ray-core/starting-ray.html 
 
-For a single machine, this step can be skipped since it will happen automatically on running the training script.
-
 ### Data preparation
 
 We provide the datasets we used on HuggingFace: https://huggingface.co/novasky-ai 
