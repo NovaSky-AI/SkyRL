@@ -30,31 +30,17 @@
 
 
 # Getting Started
-This repository contains training code for the `SkyRL-v0` release. Our implementation is a fork of [VeRL](https://github.com/volcengine/verl).
+This repository contains training code for the `SkyRL-v0` release. Our implementation is a fork of [VeRL](https://github.com/volcengine/verl).  
 
 ## Installation
 
-The only pre-requisite is having `uv` [installed](https://docs.astral.sh/uv/getting-started/installation) on your system. We use the `uv` + `ray` integration to easily manage dependencies in multi-node training. 
+The first step is to clone our repository:
 
-### Clone SkyRL
 ```bash 
 git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL
 ```
 
-### Installation dry run
-
-You can dry run your installation with the following command: 
-
-```bash
-uv run --isolated --frozen pip show torch
-```
-
-NOTE: With a CPU head node, you might encounter installation issues with `torch-memory-saver`. To fix this, you need to install CUDA and make sure your CUDA libraries are linked in `/usr/lib`. For example, 
-
-```bash
-sudo ln -s /usr/local/cuda-12.4/compat/libcuda.so /usr/lib/libcuda.so
-sudo ln -s /usr/local/cuda-12.4/compat/libcuda.so.1 /usr/lib/libcuda.so.1
-```
+For detailed installation instructions, please refer to [INSTALL.md](./INSTALL.md)
 
 ## Scripts for reproduction
 
