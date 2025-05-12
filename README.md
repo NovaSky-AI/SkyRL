@@ -57,7 +57,7 @@ We report the evaluation result on SWE-Bench-Verified below:
 
 
 # Acknowledgement
-This work is done at [Berkeley Sky Computing Lab](https://sky.cs.berkeley.edu/), with the amazing compute support from [Lambda Labs](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), [Anyscale](https://www.anyscale.com/), and [Databricks](https://www.databricks.com/).
+This work is done at [Berkeley Sky Computing Lab](https://sky.cs.berkeley.edu/), with the amazing compute support from [Lambda Labs](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), [Anyscale](https://www.anyscale.com/), [Databricks](https://www.databricks.com/), and [AMD](https://www.amd.com/).
 
 We would also like to thank [Ying Sheng](https://sites.google.com/view/yingsheng/home), [Chenyang Zhao](https://zhaochenyang20.github.io/Chayenne/) from [SGLang](https://github.com/sgl-project/sglang) team for supporting SGLang async rollout integration, and [Kaichao You](https://youkaichao.github.io/research), [Simon Mo](https://github.com/simon-mo) from [vLLM](https://github.com/vllm-project/vllm) team for supporting vLLM performance optimization.
 
