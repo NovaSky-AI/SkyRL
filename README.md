@@ -91,7 +91,7 @@ The code in this repository is mostly described in the post below. Please consid
 ```bibtex
 @misc{liu2025skyrlsql,
       title={SkyRL-SQL: Matching o4-mini on Text2SQL with Multi-Turn RL},
-      author={Shu Liu and Sumanth Hegde and Shiyi Cao and Alan Zhu and Dacheng Li and Tyler Griggs and Shu Liu and Eric Tang and Akshay Malik and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
+      author={Shu Liu and Sumanth Hegde and Shiyi Cao and Alan Zhu and Dacheng Li and Tyler Griggs and Eric Tang and Akshay Malik and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
       year={2025},
 }
 ```

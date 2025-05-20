@@ -1,6 +1,6 @@
 # SkyRL-SQL Reproduction Scripts
 
-We provide the exact scripts to reproduce our results for SkyRL-SQL-7B. 
+We provide the exact scripts to reproduce our results for SkyRL-SQL-7B. The implementation is based on [SearchR1](https://github.com/PeterGriffinJin/Search-R1) implementation of agent loop.  
 
 ## Pre-requisite
 
@@ -19,7 +19,6 @@ Make sure to download the dataset and update the path in `DATA_PATH` in the scri
 ```bash 
 huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data --local-dir <path_to_dir> --repo-type dataset
 ```
-
 
 ### Setup Environment variables
 

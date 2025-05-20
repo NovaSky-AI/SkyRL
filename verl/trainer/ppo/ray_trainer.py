@@ -928,9 +928,6 @@ class RayPPOTrainer(object):
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
-                print(f"input_ids shape: {batch_dict['input_ids'].shape}")  # Should be (640, ...)
-                print(f"db_id length: {len(batch_dict['db_id'])}")  # Should be 640
-
                 # pop those keys for generation
                 if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
                     gen_batch = batch.pop(

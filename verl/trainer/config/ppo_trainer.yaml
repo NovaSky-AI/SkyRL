@@ -219,9 +219,6 @@ algorithm:
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
-  state_masking:
-    start_state_marker: "<observation>"
-    end_state_marker: "</observation>"
 
 trainer:
   balance_batch: True

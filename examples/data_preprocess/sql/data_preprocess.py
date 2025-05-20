@@ -1,4 +1,3 @@
-# python data_prepare.py --input PRIME-RL/Eurus-2-RL-Data --output ./data/math/ --math
 import os
 
 from datasets import Dataset
