@@ -22,11 +22,12 @@
 
 
 # News
+- **[2025/05/20]** 🎉 We released [SkyRL-SQL-7B](https://huggingface.co/NovaSky-AI/SkyRL-SQL-7B): a multi-turn RL model for Text-to-SQL, trained on just 653 samples and outperforming GPT-4o and o4-mini! 
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
-
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
+- 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-v0)
 
 
 # Getting Started
@@ -43,18 +44,35 @@ git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL
 
 For detailed installation instructions, please refer to [INSTALL.md](./INSTALL.md)
 
-## Scripts for reproduction
+## Scripts for Reproduction
 
-For reproducing our results for SkyRL-Agent-14B-v0, SkyRL-Agent-8B-v0, and SkyRL-Agent-7B-v0 you can refer to [examples/sky](./examples/sky/README.md).
+### SkyRL-Agent 
+
+For reproducing our results for SkyRL-Agent-14B-v0, SkyRL-Agent-8B-v0, and SkyRL-Agent-7B-v0 you can refer to [examples/sky/swebench](./examples/sky/swebench/README.md).
+
+### SkyRL-SQL-7B
+For reproducing our results for SkyRL-SQL-7B, you can refer to [examples/sky/sql](./examples/sky/sql/README.md).
 
 # Evaluation
-We report the evaluation result on SWE-Bench-Verified below:
+We report evaluation results of different downstream tasks as below. 
+
+## SWE-Bench
+We report the evaluation result on SWE-Bench-Verified below.
 
 | Model              | Base                 | Base Performance | Performance | Training Time |
 |--------------------|----------------------|------------------|-------------|---------------|
 | SkyRL-Agent-7B-v0  | OpenHands-7B-Agent   | 11%              | 14.6%       | 16hrs 8xH100  |
 | SkyRL-Agent-8B-v0  | Qwen3-8B no thinking | 3.6%             | 9.4%        | 27hrs 8xH200  |
 | SkyRL-Agent-14B-v0 | Qwen3-14B thinking   | 18%              | 21.6%       | 20hrs 8xH200  |
+
+## Text-to-SQL 
+We report the evaluation result on a range of Spider benchmarks (evaluated in 5 turns) below. 
+| Model                        | Spider-Dev | Spider-Test | Spider-Realistic | Spider-DK | Spider-Syn | Avg  |
+|-----------------------------|------------|-------------|------------------|-----------|------------|---------------|
+| Qwen-2.5-Coder-7B-Instruct  | 76.4       | 79.4        | 73.0             | 63.4      | 65.4       | 71.5          |
+| o4-mini                     | 79.5       | 81.5        | 81.9             | 71.4      | 70.0       | 76.9          |
+| GPT-4o                      | 81.2       | 82.7        | 80.5             | 71.6      | 73.7       | 77.9          |
+| SkyRL-SQL-7B         | 83.8 (+7.4%)| 85 (+5.6%)  | 80.9 (+7.9%)     | 72.1 (+9.7%)| 73.7 (+8.3%)| 79.1 (+7.6%)      |
 
 
 # Acknowledgement
@@ -70,5 +88,13 @@ The code in this repository is mostly described in the post below. Please consid
   title     = {SkyRL-v0: Train Real-World Long-Horizon Agents via Reinforcement Learning},
   author    = {Shiyi Cao and Sumanth Hegde and Dacheng Li and Tyler Griggs and Shu Liu and Eric Tang and Jiayi Pan and Xingyao Wang and Akshay Malik and Graham Neubig and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
   year      = {2025},
+}
+```
+
+```bibtex
+@misc{liu2025skyrlsql,
+      title={SkyRL-SQL-7B: Matching o4-mini on Text2SQL with Multi-turn RL},
+      author={Shu Liu and Sumanth Hegde and Shiyi Cao and Alan Zhu and Dacheng Li and Tyler Griggs and Shu Liu and Eric Tang and Akshay Malik and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
+      year={2025},
 }
 ```

@@ -184,6 +184,9 @@ class TaskRunner:
         elif reward_manager_name == 'swebench':
             from verl.workers.reward_manager import SWEBenchRewardManager
             reward_manager_cls = SWEBenchRewardManager
+        elif reward_manager_name == 'sql':
+            from verl.workers.reward_manager import SQLRewardManager
+            reward_manager_cls = SQLRewardManager
         else:
             raise NotImplementedError
 

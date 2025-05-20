@@ -1,12 +1,12 @@
 PROJECT_NAME='oh-7b-training'
-EXPERIMENT_NAME='SkyRL-Agent-7b-v0-stage1'
+EXPERIMENT_NAME='SkyRL-Agent-7b-v0-stage2'
 DATA_PATH="<path_to_swegym_dataset>"
-SFT_MODEL_PATH='NovaSky-AI/SWE-Gym-OpenHands-7B-Agent'
+SFT_MODEL_PATH='PATH_FROM_STAGE1'
 CKPT_PATH='<path_to_ckpt>'
 
 
 BATCH_SIZE=16
-MAX_NUM_ITERS=15
+MAX_NUM_ITERS=25
 NUM_TRAJ=16
 MAX_PARALLEL_AGENTS=64
 SAVE_FREQ=1
@@ -29,7 +29,7 @@ TOP_P=0.95
 
 
 
-PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env -m verl.trainer.main_ppo \
+PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env.swebench -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=["$DATA_PATH/train.parquet"] \
     data.val_files=["$DATA_PATH/validation.parquet"] \

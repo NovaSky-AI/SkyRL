@@ -1,47 +1,48 @@
-PROJECT_NAME='oh-training-qwen3-14b-ppo'
-EXPERIMENT_NAME='oh-training-qwen3-14b-32bsz-16r-temp0.6-clip-0.28-35turn'
+PROJECT_NAME='oh-training-qwen3-no-thinking-8b-grpo'
+EXPERIMENT_NAME='oh-training-qwen3-8b-32bsz-16r-temp0.6-25turn-easy'
 DATA_PATH="<path_to_swegym_dataset>"
-SFT_MODEL_PATH='Qwen/Qwen3-14B' 
-CRITIC_MODEL_PATH=$SFT_MODEL_PATH
+SFT_MODEL_PATH='Qwen/Qwen3-8B' 
 CKPT_PATH='<path_to_ckpt>'
 
+
 BATCH_SIZE=32
-MAX_NUM_ITERS=35
+MAX_NUM_ITERS=25
 NUM_TRAJ=8
-MAX_PARALLEL_AGENTS=192
+MAX_PARALLEL_AGENTS=64
 SAVE_FREQ=1
 
 USE_KL_LOSS=True
 KL_LOSS_COEF=0.001
 KL_LOSS_TYPE=low_var_kl
-ENTROPY_COEFF=0.001
+ENTROPY_COEFF=0
 CLIP_RATIO_LOW=0.2
-CLIP_RATIO_HIGH=0.28
+CLIP_RATIO_HIGH=0.2
 
+GPU_MEM_UTIL=0.8
+TP_SIZE=1
 # Assumes a h200 node
 # For 2xH100: change tp size -> 2, sequence parallel size -> 2, nnodes -> 2
-GPU_MEM_UTIL=0.8
-TP_SIZE=2
 NNODES=1
 SP_SIZE=1
-
-
 TEMPERATURE=0.6
 TOP_P=0.95
 
-PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=gae \
+
+
+PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env.swebench -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=grpo \
     data.train_files=["$DATA_PATH/train.parquet"] \
     data.val_files=["$DATA_PATH/validation.parquet"] \
     data.train_batch_size=$BATCH_SIZE \
-    data.max_prompt_length=31744 \
-    data.max_response_length=3072 \
+    data.max_prompt_length=31232 \
+    data.max_response_length=1536 \
     data.truncation='error' \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=$BATCH_SIZE \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE \
     actor_rollout_ref.actor.use_kl_loss=$USE_KL_LOSS \
     actor_rollout_ref.actor.kl_loss_coef=$KL_LOSS_COEF \
     actor_rollout_ref.actor.kl_loss_type=$KL_LOSS_TYPE \
@@ -49,17 +50,8 @@ PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env -m v
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE \
     actor_rollout_ref.actor.clip_ratio_low=$CLIP_RATIO_LOW \
     actor_rollout_ref.actor.clip_ratio_high=$CLIP_RATIO_HIGH \
-    critic.optim.lr=1e-5 \
-    critic.ulysses_sequence_parallel_size=$SP_SIZE \
-    critic.model.use_remove_padding=True \
-    critic.model.path=$CRITIC_MODEL_PATH \
-    critic.model.enable_gradient_checkpointing=True \
-    critic.ppo_micro_batch_size_per_gpu=1 \
-    critic.model.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$TP_SIZE \
     actor_rollout_ref.rollout.name=async \
@@ -70,11 +62,13 @@ PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env -m v
     actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.rollout.sampling_params.top_p=$TOP_P \
     actor_rollout_ref.rollout.top_p=$TOP_P \
+    actor_rollout_ref.rollout.sampling_params.top_k=20 \
+    actor_rollout_ref.rollout.sampling_params.repetition_penalty=1.5 \
     actor_rollout_ref.rollout.max_parallel_agents=$MAX_PARALLEL_AGENTS \
     actor_rollout_ref.rollout.max_iterations=$MAX_NUM_ITERS \
     actor_rollout_ref.rollout.enable_memory_saver=True \
+    actor_rollout_ref.rollout.qwen3_enable_thinking=False \
     +actor_rollout_ref.rollout.max_starting_message_length=12000 \
-    actor_rollout_ref.rollout.remove_think_tokens=True \
     actor_rollout_ref.actor.masking=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \

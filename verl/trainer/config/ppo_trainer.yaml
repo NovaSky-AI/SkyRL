@@ -132,6 +132,12 @@ actor_rollout_ref:
       temperature: 0
       n: 1
       do_sample: False # default eager for validation
+    sql:
+      max_prompt_length: 512
+      max_response_length: 512
+      max_start_length: 256
+      max_obs_length: 512
+      db_path: null
   exchange_size: -1
   
 
@@ -213,6 +219,9 @@ algorithm:
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
+  state_masking:
+    start_state_marker: "<observation>"
+    end_state_marker: "</observation>"
 
 trainer:
   balance_batch: True

@@ -6,7 +6,9 @@ import os
 from functools import partial
 from json import JSONDecodeError
 
+import os
 import torch
+import traceback
 import sglang as sgl
 import torch.distributed
 from omegaconf import DictConfig
@@ -17,7 +19,6 @@ from tensordict import TensorDict
 
 from verl import DataProto
 from verl.workers.rollout.base import BaseRollout
-from verl.workers.agentic.codeact import CodeActAgentGroup
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'INFO'))
@@ -80,7 +81,6 @@ class AsyncRollout(BaseRollout):
         self.sampling_params.update({
             "skip_special_tokens": False,
         })
-
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto | None:
         # print(f"nodedup in generate seq {torch.distributed.get_rank()=} {self.tp_rank=} {prompts.non_tensor_batch=}")
         logger.info(f"nodedup in generate seq {torch.distributed.get_rank()=} {self.tp_rank=}")
@@ -92,25 +92,59 @@ class AsyncRollout(BaseRollout):
         sampling_params.update(kwargs)
         print("final sampling params:", sampling_params)
         device = torch.cuda.current_device()
+        if sampling_params.get("n", 1) > 1: 
+            raise ValueError("Sampling parameter `n` is not supported for multi-turn agentic tasks. For generating multiple trajectories per instance, please use `rollout.n_trajectories` instead.")
         
-        codeact_agent_group = CodeActAgentGroup(
-            batch=prompts,
-            num_trajectories=self.config.n_trajectories,
-            infer_engine=self.engine,
-            max_prompt_length=self.config.prompt_length,
-            max_response_length=self.config.response_length,
-            max_starting_message_length=self.config.max_starting_message_length,
-            max_parallel_agents=self.config.max_parallel_agents // self.device_mesh.size(0),
-            max_eval_parallel_agents=self.config.max_eval_parallel_agents // self.device_mesh.size(0),
-            max_iterations = self.config.max_iterations,
-            tokenizer=self.engine.tokenizer_manager.tokenizer,
-            sampling_params=sampling_params,
-            device=device,
-            log_messages_dir=self.config.log_messages_dir,
-            remove_think_tokens=self.config.remove_think_tokens,
-            qwen3_enable_thinking=self.config.qwen3_enable_thinking,
-        )
+        if self.config.task_type == "swegym":
+            from verl.workers.agentic.swe_agent.codeact import CodeActAgentGroup
+            codeact_agent_group = CodeActAgentGroup(
+                batch=prompts,
+                num_trajectories=self.config.n_trajectories,
+                infer_engine=self.engine,
+                max_prompt_length=self.config.prompt_length,
+                max_response_length=self.config.response_length,
+                max_starting_message_length=self.config.max_starting_message_length,
+                max_parallel_agents=self.config.max_parallel_agents // self.device_mesh.size(0),
+                max_eval_parallel_agents=self.config.max_eval_parallel_agents // self.device_mesh.size(0),
+                max_iterations = self.config.max_iterations,
+                tokenizer=self.engine.tokenizer_manager.tokenizer,
+                sampling_params=sampling_params,
+                device=device,
+                log_messages_dir=self.config.log_messages_dir,
+                remove_think_tokens=self.config.remove_think_tokens,
+                qwen3_enable_thinking=self.config.qwen3_enable_thinking,
+            )
 
-        results = codeact_agent_group.run()
+            results = codeact_agent_group.run()
+        elif self.config.task_type == "sql":
+            try: 
+                from verl.workers.agentic.llm_sql_agent.sqlact import SQLActAgentGroup
+                from verl.workers.agentic.llm_sql_agent.generation import GenerationConfig
+                total_world_size = torch.distributed.get_world_size()
+                gen_config = GenerationConfig(
+                    max_turns=self.config.max_iterations,
+                    max_start_length=self.config.sql.max_start_length,
+                    max_prompt_length=self.config.sql.max_prompt_length,
+                    max_response_length=self.config.sql.max_response_length,
+                    max_obs_length=self.config.sql.max_obs_length,
+                    num_gpus= total_world_size // self.device_mesh.size(0),
+                    db_path=self.config.sql.db_path,
+                    no_think_rl=False,
+                )
+                agent_group = SQLActAgentGroup(
+                    batch=prompts,
+                    infer_engine=self.engine,
+                    num_trajectories=self.config.n_trajectories,
+                    gen_config=gen_config,
+                    tokenizer=self.engine.tokenizer_manager.tokenizer, 
+                    sampling_params=self.sampling_params,
+                )
+                results = agent_group.run()
+            except Exception as e:
+                print(f"DEBUG: Encountered an exception: {e}")
+                print(f"Traceback: \n\n\n{traceback.print_exc()}")
+                raise e
+        else:
+            raise NotImplementedError(f"Task type {self.task_type} is not supported.")
         logger.info(f"nodedup finish generate seq {torch.distributed.get_rank()=} {self.tp_rank=}")
         return results

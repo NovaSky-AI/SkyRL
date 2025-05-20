@@ -6,7 +6,7 @@ We provide exact scripts to reproduce our results for SkyRL-Agent-7B-v0, SkyRL-A
 
 ### Installation
 
-Make sure to have followed the installation commands in [INSTALL.md](../../INSTALL.md). 
+Make sure to have followed the installation commands in [INSTALL.md](../../../INSTALL.md). 
 
 ### Start Ray
 Start ray in your cluster following the guide: https://docs.ray.io/en/latest/ray-core/starting-ray.html 
@@ -21,7 +21,7 @@ Make sure to download the dataset and update the path in `DATA_PATH` in the scri
 
 ### Setup Environment variables
 
-We use a [`.env`](../../.env) file to pass environment variables to all the processes created by Ray. Make sure to set `WANDB_API_KEY`,  `ALLHANDS_API_KEY` and `SANDBOX_REMOTE_RUNTIME_API_URL`. 
+We use a [`.env`](../../../.env.swebench) file to pass environment variables to all the processes created by Ray. Make sure to set `WANDB_API_KEY`, `ALLHANDS_API_KEY` and `SANDBOX_REMOTE_RUNTIME_API_URL`.
 
 ## Running the scripts
 

@@ -1,0 +1,3 @@
+SGLANG_HOST_IP="127.0.0.1"
+HOST_IP="127.0.0.1"
+WANDB_API_KEY="<wandb_api_key>"

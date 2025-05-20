@@ -543,6 +543,8 @@ class RayPPOTrainer(object):
             
             if self.config.actor_rollout_ref.rollout.task_type == "swegym": 
                 non_tensor_batch_keys = ["instance"]
+            elif self.config.actor_rollout_ref.rollout.task_type == "sql":
+                non_tensor_batch_keys = ["db_id", "data_source"]
             else:
                 non_tensor_batch_keys = ["raw_prompt_ids"]
 
@@ -926,6 +928,9 @@ class RayPPOTrainer(object):
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
+                print(f"input_ids shape: {batch_dict['input_ids'].shape}")  # Should be (640, ...)
+                print(f"db_id length: {len(batch_dict['db_id'])}")  # Should be 640
+
                 # pop those keys for generation
                 if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
                     gen_batch = batch.pop(
@@ -938,6 +943,11 @@ class RayPPOTrainer(object):
                     if self.config.actor_rollout_ref.rollout.task_type == "swegym":  # TODO(haoran): pass arg list here
                         gen_batch = batch.pop(batch_keys=batch_keys,
                                                 non_tensor_batch_keys=['instance'])
+                    elif self.config.actor_rollout_ref.rollout.task_type == "sql":
+                        gen_batch = batch.pop(batch_keys=batch_keys,
+                                                non_tensor_batch_keys=["db_id", "data_source"])
+                        
+                        # print(f"Gen batch non tensor batch keys: {gen_batch.non_tensor_batch}")
                     else:
                         gen_batch = batch.pop(batch_keys=batch_keys,
                                                 non_tensor_batch_keys=['raw_prompt_ids'])

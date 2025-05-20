@@ -33,7 +33,7 @@ from torch.distributed.fsdp.api import ShardingStrategy, ShardedStateDictConfig,
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
-from verl.utils.torch_functional import (broadcast_dict_tensor, allgather_dict_tensors)
+from verl.utils.torch_functional import (broadcast_dict_tensor, allgather_dict_tensors, all_gather_dict_non_tensors)
 from verl.utils.debug import log_gpu_memory_usage
 from sglang.srt.entrypoints.verl_engine import VerlEngine
 from .base import BaseShardingManager
@@ -131,6 +131,11 @@ class FSDPSGLangShardingManager(BaseShardingManager):
                                             size=self.device_mesh["infer_tp"].mesh.size()[0],
                                             group=self.device_mesh["infer_tp"].get_group(),
                                             dim=0)
+        data.non_tensor_batch = all_gather_dict_non_tensors(
+                            data.non_tensor_batch,
+                            size=self.device_mesh["infer_tp"].mesh.size()[0],
+                            group=self.device_mesh["infer_tp"].get_group(),
+                        )
         return data
 
     def postprocess_data(self, data: DataProto) -> DataProto:

@@ -1,0 +1,5 @@
+__pycache__
+*egg-info*
+/dataset/
+outputs*
+outputs/*
