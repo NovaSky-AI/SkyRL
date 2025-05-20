@@ -22,13 +22,12 @@
 
 
 # News
-- **[2025/05/20]** 🎉 We released [SkyRL-SQL-7B](https://huggingface.co/NovaSky-AI/SkyRL-SQL-7B): a multi-turn RL model for Text-to-SQL, trained on just 653 samples and outperforming GPT-4o and o4-mini! 
+- **[2025/05/20]** 🎉 We released SkyRL-SQL: a multi-turn RL training pipeline for Text-to-SQL, along with SkyRL-SQL-7B — a model trained on just 653 samples that outperforms both GPT-4o and o4-mini!
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
-- 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-v0)
-
 
 # Getting Started
 This repository contains training code for the `SkyRL-v0` release. Our implementation is a fork of [VeRL](https://github.com/volcengine/verl).   
