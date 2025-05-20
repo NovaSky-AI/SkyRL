@@ -29,7 +29,7 @@ We use a [`.env`](../../.env) file to pass environment variables to all the proc
 
 ## Running the scripts
 
-For  SkyRL-Agent-14B-v0 Thinking mode, use [run_SkyRL_agent_qwen14b_t.sh](./run_SkyRL_agent_qwen14b_t.sh) and for SkyRL-Agent-8B-v0 Non-Thinking Mode, use [run_SkyRL_agent_qwen8b_nt.sh](./run_SkyRL_agent_qwen8b_nt.sh). For SkyRL-Agent-7B-v0, use [run_SkyRL_agent_oh7b_s1.sh](./run_SkyRL_agent_oh7b_s1.sh) and [run_SkyRL_agent_oh7b_s2.sh](./run_SkyRL_agent_oh7b_s2.sh).
+For  SkyRL-Agent-14B-v0 Thinking mode, use [run_skyrl_agent_qwen14b_t.sh](./run_skyrl_agent_qwen14b_t.sh) and for SkyRL-Agent-8B-v0 Non-Thinking Mode, use [run_skyrl_agent_qwen8b_nt.sh](./run_skyrl_agent_qwen8b_nt.sh). For SkyRL-Agent-7B-v0, use [run_skyrl_agent_oh7b_s1.sh](./run_skyrl_agent_oh7b_s1.sh) and [run_skyrl_agent_oh7b_s2.sh](./run_skyrl_agent_oh7b_s2.sh).
 The scripts are meant to be run from the git root. The default settings are meant for a 8xH200 node. For a 8xH100 node, we recommend the following modifications:
 
 ```bash
