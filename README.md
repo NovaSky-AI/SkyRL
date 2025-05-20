@@ -5,8 +5,6 @@
 [![🌐 NovaSky](https://img.shields.io/badge/-Visit%20Website-5865F2?style=for-the-badge)](https://novasky-ai.github.io/) [![Github](https://img.shields.io/badge/SkyRL-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/NovaSky-AI/SkyRL) [![Twitter](https://img.shields.io/badge/NovaSky-white?style=for-the-badge&logo=X&logoColor=000&color=000&labelColor=white)](https://x.com/NovaSkyAI) [![Hugging Face Collection](https://img.shields.io/badge/NovaSky-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/NovaSky-AI) [![Discord](https://img.shields.io/badge/NovaSky-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RBAjeWSA)
 
 
-
-
 <div align="center" style="font-family: Arial, sans-serif;">
   <p>
     <a href="#news" style="text-decoration: none; font-weight: bold;">News</a> •
@@ -92,7 +90,7 @@ The code in this repository is mostly described in the post below. Please consid
 
 ```bibtex
 @misc{liu2025skyrlsql,
-      title={SkyRL-SQL-7B: Matching o4-mini on Text2SQL with Multi-turn RL},
+      title={SkyRL-SQL: Matching o4-mini on Text2SQL with Multi-Turn RL},
       author={Shu Liu and Sumanth Hegde and Shiyi Cao and Alan Zhu and Dacheng Li and Tyler Griggs and Shu Liu and Eric Tang and Akshay Malik and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
       year={2025},
 }
