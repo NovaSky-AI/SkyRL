@@ -260,7 +260,7 @@ def get_instance_docker_image(instance_id: str) -> str:
 # Helper function for sandbox config
 def get_default_sandbox_config_for_eval():
     return SandboxConfig(
-        use_host_network=False,
+        use_host_network=True,
         timeout=300,
         api_key=os.environ.get('ALLHANDS_API_KEY', None),
         remote_runtime_api_url=os.environ.get('SANDBOX_REMOTE_RUNTIME_API_URL'),
@@ -851,7 +851,7 @@ class CodeActAgentGroup:
                 default_agent='OnlineCodeActAgent',
                 run_as_openhands=False,
                 max_iterations=self.max_iterations,
-                runtime='remote',
+                runtime='docker',
                 sandbox=sandbox_config,
                 workspace_base=None,
                 workspace_mount_path=None,
@@ -1128,7 +1128,7 @@ class CodeActAgentGroup:
             sandbox_config.remote_runtime_resource_factor = 1
             config = AppConfig(
                 run_as_openhands=False,
-                runtime="remote",
+                runtime="docker",
                 sandbox=sandbox_config,
                 # do not mount workspace
                 workspace_base=None,
