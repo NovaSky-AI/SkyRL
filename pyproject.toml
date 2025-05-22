@@ -82,6 +82,7 @@ conflicts = [
 [project.optional-dependencies]
 swebench = [
     'sglang[all]==0.4.6.post1', 
+    # We explictly use a flashinfer wheel from their index because the wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime (very slow).
     "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=cbc4acb4aed7c4b00887a557dac484315327a063e25ac1ed4ee8eef54edf9ef6",
     # Use flash attention with torch 2.6 since sglang 0.4.6.post1 requires torch 2.6
     "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl"
@@ -92,6 +93,7 @@ sql = [
     # Use flash attention with torch 2.5 since sglang 0.4.4.post4 requires torch 2.5
     "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl"
 ]
+test = ['pytest', 'yapf', 'py-spy']
 
 [tool.uv.sources]
 openhands-ai = { path = "./SkyRL-OpenHands", editable = true }
