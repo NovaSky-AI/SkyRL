@@ -15,6 +15,8 @@ from sglang.srt.function_call_parser import FunctionCallParser
 from sglang.srt.openai_api.protocol import Tool
 from torch.distributed import DeviceMesh
 from tensordict import TensorDict
+# NOTE (sumanthrh): Ideally, we can guard this import and run it only for the swe bench task. 
+# However, in openhands' long chain of dependencies, the import for `scantree` fails when this is done.
 from verl.workers.agentic.swe_agent.codeact import CodeActAgentGroup
 
 from verl import DataProto
