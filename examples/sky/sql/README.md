@@ -34,7 +34,12 @@ You can download the datasets from:
 
 The datasets include BIRD, Spider, ScienceBenchmark, EHRSQL, Spider2-SQLite, Spider-DK, Spider-Realistic, Spider-Syn, and SynSQL-2.5M. In our training pipeline, we only need to access databases from SynSQL-2.5M and Spider. 
 
-Unzip `data.zip` in this folder, and set the corresponding `DB_PATH` in the training script below. 
+Unzip `data.zip` in this folder, and set the corresponding `DB_PATH` in the training script below. You can e.g. download and unzip the data by running
+
+```bash
+huggingface-cli download seeklhy/OmniSQL-datasets data.zip --repo-type dataset --local-dir <path_to_file.zip>
+unzip <path_to_file.zip>
+```
 
 
 ## Running the scripts 
