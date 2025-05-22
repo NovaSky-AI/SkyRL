@@ -40,3 +40,6 @@ Unzip `data.zip` in this folder, and set the corresponding `DB_PATH` in the trai
 ## Running the scripts 
 
 We provide a script [run_skyrl_sql.sh](./run_skyrl_sql.sh) for reproducing our results for SkyRL-SQL-7B.
+
+## Evaluation 
+Reference our fork of the [OmniSQL repo](https://github.com/lynnliu030/OmniSQL/tree/main/evaluate_skysql) for evaluating the model. 
