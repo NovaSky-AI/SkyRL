@@ -63,9 +63,8 @@ class AsyncRollout(BaseRollout):
                 enable_memory_saver=config.enable_memory_saver,
                 mem_fraction_static=config.gpu_memory_utilization,
                 tp_size=device_mesh.size(1),
-                log_level="debug",
+                log_level="INFO",
                 # enable_metrics=True,
-                attention_backend="flashinfer",
             )
             print(f"nodedup {torch.distributed.get_rank() = } releasing memory occupation")
             self.engine.release_memory_occupation()
