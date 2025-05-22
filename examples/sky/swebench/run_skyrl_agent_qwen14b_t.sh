@@ -29,7 +29,7 @@ SP_SIZE=1
 TEMPERATURE=0.6
 TOP_P=0.95
 
-PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env.swebench -m verl.trainer.main_ppo \
+PYTHONUNBUFFERED=1 uv run --isolated --extra swebench --directory . --frozen --env-file .env.swebench -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_files=["$DATA_PATH/train.parquet"] \
     data.val_files=["$DATA_PATH/validation.parquet"] \

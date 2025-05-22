@@ -29,7 +29,7 @@ TOP_P=0.95
 
 
 
-PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env.swebench -m verl.trainer.main_ppo \
+PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --extra swebench --env-file .env.swebench -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=["$DATA_PATH/train.parquet"] \
     data.val_files=["$DATA_PATH/validation.parquet"] \

@@ -29,7 +29,20 @@ Execute the following command from the root project directory:
 uv run --isolated --frozen python -c 'import ray; ray.init(); print("Success!")'
 ```
 
-This will trigger a fresh environment build on your system. 
+This will trigger a fresh environment build on your system. We use extras to isolate conflicting dependencies between tasks. We recommend performing the same dry run for the task of interest: 
+
+### Installation dry run for Swebench
+
+```bash
+uv run --isolated --extra swebench --frozen python -c 'import ray; ray.init(); print("Success!")'
+```
+
+### Installation dry run for SQL
+
+
+```bash
+uv run --isolated --extra sql --frozen python -c 'import ray; ray.init(); print("Success!")'
+```
 
 ## Common installation issues
 

@@ -1,5 +1,4 @@
 __pycache__
-*egg-info*
+*.egg-info/
 /dataset/
-outputs*
-outputs/*
+/outputs/
