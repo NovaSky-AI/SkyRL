@@ -66,10 +66,10 @@ We report the evaluation result on SWE-Bench-Verified below.
 We report the evaluation result on a range of Spider benchmarks (evaluated in 5 turns) below. 
 | Model                        | Spider-Dev | Spider-Test | Spider-Realistic | Spider-DK | Spider-Syn | Avg  |
 |-----------------------------|------------|-------------|------------------|-----------|------------|---------------|
-| Qwen-2.5-Coder-7B-Instruct  | 76.4       | 79.4        | 73.0             | 63.4      | 65.4       | 71.5          |
-| o4-mini                     | 79.5       | 81.5        | 81.9             | 71.4      | 70.0       | 76.9          |
-| GPT-4o                      | 81.2       | 82.7        | 80.5             | 71.6      | 73.7       | 77.9          |
-| SkyRL-SQL-7B         | 83.8 (+7.4%)| 85 (+5.6%)  | 80.9 (+7.9%)     | 72.1 (+9.7%)| 73.7 (+8.3%)| 79.1 (+7.6%)      |
+| Qwen-2.5-Coder-7B-Instruct  | 77.1       | 79.6        | 74.2             | 62.8      | 66.2       | 72.0          |
+| o4-mini                     | 80.6       | 81.8        | 81.2             | 70.8      | 72.1       | 77.3          |
+| GPT-4o                      | 81.3       | 82.4        | 80.1             | 72.1      | 71.9       | 77.6          |
+| SkyRL-SQL-7B         | 83.9 (+6.8%)| 85.2 (+5.6%)  | 81.1  (+6.9%)     | 72.0 (+9.2%)| 73.7 (+7.5%)| 79.2 (+7.2%)      |
 
 
 # Acknowledgement
@@ -90,8 +90,8 @@ The code in this repository is mostly described in the post below. Please consid
 
 ```bibtex
 @misc{liu2025skyrlsql,
-      title={SkyRL-SQL: Matching o4-mini on Text2SQL with Multi-Turn RL},
-      author={Shu Liu and Sumanth Hegde and Shiyi Cao and Alan Zhu and Dacheng Li and Tyler Griggs and Eric Tang and Akshay Malik and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
+      title={SkyRL-SQL: Matching GPT-4o and o4-mini on Text2SQL with Multi-Turn RL},
+      author={Shu Liu and Sumanth Hegde and Shiyi Cao and Alan Zhu and and Dacheng Li and Tyler Griggs and Eric Tang and Akshay Malik and Kourosh Hakhamaneshi and Richard Liaw and Philipp Moritz and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
       year={2025},
 }
 ```
