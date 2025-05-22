@@ -972,7 +972,7 @@ class CodeActAgentGroup:
 
         return return_val
     
-    def _apply_patch_and_evaluate(self, runtime, model_patch, instance_id, trajectory_id, test_spec):
+    async def _apply_patch_and_evaluate(self, runtime, model_patch, instance_id, trajectory_id, test_spec):
         """Apply patch and evaluate the solution."""
         model_patch = process_git_patch(model_patch)
         # Get patch and save it to /tmp/patch.diff
@@ -1017,92 +1017,114 @@ class CodeActAgentGroup:
         elif 'APPLY_PATCH_PASS' in apply_patch_output:
             logger.info(f'[{instance_id}, {trajectory_id}] {APPLY_PATCH_PASS}:\n{apply_patch_output}')
 
-            # Run eval script in background and save output to log file
-            log_file = '/tmp/eval_output.log'
-            action = CmdRunAction(command=f'/tmp/eval.sh > {log_file} 2>&1 & echo $!')
-            action.set_hard_timeout(300)  # Short timeout just to get the process ID
-            obs = runtime.run_action(action)
+            try:
+                results = await self.segym_client.send_and_wait_for_replies(
+                msgs=[{
+                    "instance_id": instance_id,
+                    "patch": model_patch
+                }],
+                wait_timeout=600,
+            )
+                result = results["sandbox_harness"][0]["payload"]
+                resolved = all([x for x in result["tests"].values()])
+                time_taken = result.get("time", -1)
 
-            if isinstance(obs, CmdOutputObservation) and obs.exit_code == 0:
-                pid = obs.content.split()[-1].strip()
+                self.results[instance_id][trajectory_id]['resolved'] = resolved
                 logger.info(
-                    f'[{instance_id}, {trajectory_id}] Evaluation process started with PID: {pid}'
+                    f"[{instance_id}, {trajectory_id}] SEGymClient report: resolved={resolved}, time={time_taken}"
                 )
+            except Exception as e:
+                logger.error(
+                    f'[{instance_id}, {trajectory_id}] Error when using SEGymClient: {e}'
+                )
+                self.results[instance_id][trajectory_id]['resolved'] = False
 
-                # Poll for completion
-                start_time = time.time()
-                timeout = 1200  # 20 minutes
-                while True:
-                    seconds_elapsed = time.time() - start_time
-                    if seconds_elapsed > timeout:
-                        raise Exception(
-                            f'[{instance_id}, {trajectory_id}] Evaluation timed out after {timeout} seconds'
-                        )
-                    check_action = CmdRunAction(
-                        command=f'ps -p {pid} > /dev/null; echo $?'
-                    )
-                    check_action.set_hard_timeout(300)
-                    check_obs = runtime.run_action(check_action)
-                    if (
-                        isinstance(check_obs, CmdOutputObservation)
-                        and check_obs.content.split()[-1].strip() == '1'
-                    ):
-                        logger.info(
-                            f'[{instance_id}, {trajectory_id}] Evaluation process completed after {seconds_elapsed} seconds'
-                        )
-                        break
-                    logger.info(
-                        f'[{instance_id}, {trajectory_id}] [{seconds_elapsed:.0f}s] Evaluation still running, waiting...'
-                    )
-                    time.sleep(30)  # Wait for 30 seconds before checking again
+            # # Run eval script in background and save output to log file
+            # log_file = '/tmp/eval_output.log'
+            # action = CmdRunAction(command=f'/tmp/eval.sh > {log_file} 2>&1 & echo $!')
+            # action.set_hard_timeout(300)  # Short timeout just to get the process ID
+            # obs = runtime.run_action(action)
 
-                # Read the log file
-                cat_action = CmdRunAction(command=f'cat {log_file}')
-                cat_action.set_hard_timeout(300)
-                cat_obs = runtime.run_action(cat_action)
+            # if isinstance(obs, CmdOutputObservation) and obs.exit_code == 0:
+            #     pid = obs.content.split()[-1].strip()
+            #     logger.info(
+            #         f'[{instance_id}, {trajectory_id}] Evaluation process started with PID: {pid}'
+            #     )
 
-                # Grade answer
-                if isinstance(cat_obs, CmdOutputObservation) and cat_obs.exit_code == 0:
-                    test_output = cat_obs.content
-                    assert isinstance(test_output, str)
-                    # instance['test_result']['test_output'] = test_output
+            #     # Poll for completion
+            #     start_time = time.time()
+            #     timeout = 1200  # 20 minutes
+            #     while True:
+            #         seconds_elapsed = time.time() - start_time
+            #         if seconds_elapsed > timeout:
+            #             raise Exception(
+            #                 f'[{instance_id}, {trajectory_id}] Evaluation timed out after {timeout} seconds'
+            #             )
+            #         check_action = CmdRunAction(
+            #             command=f'ps -p {pid} > /dev/null; echo $?'
+            #         )
+            #         check_action.set_hard_timeout(300)
+            #         check_obs = runtime.run_action(check_action)
+            #         if (
+            #             isinstance(check_obs, CmdOutputObservation)
+            #             and check_obs.content.split()[-1].strip() == '1'
+            #         ):
+            #             logger.info(
+            #                 f'[{instance_id}, {trajectory_id}] Evaluation process completed after {seconds_elapsed} seconds'
+            #             )
+            #             break
+            #         logger.info(
+            #             f'[{instance_id}, {trajectory_id}] [{seconds_elapsed:.0f}s] Evaluation still running, waiting...'
+            #         )
+            #         time.sleep(30)  # Wait for 30 seconds before checking again
 
-                    # Get report from test output
-                    logger.info(f'[{instance_id}, {trajectory_id}] Grading answer...')
+            #     # Read the log file
+            #     cat_action = CmdRunAction(command=f'cat {log_file}')
+            #     cat_action.set_hard_timeout(300)
+            #     cat_obs = runtime.run_action(cat_action)
+
+            #     # Grade answer
+            #     if isinstance(cat_obs, CmdOutputObservation) and cat_obs.exit_code == 0:
+            #         test_output = cat_obs.content
+            #         assert isinstance(test_output, str)
+            #         # instance['test_result']['test_output'] = test_output
+
+            #         # Get report from test output
+            #         logger.info(f'[{instance_id}, {trajectory_id}] Grading answer...')
                     
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        # Create a directory structure that matches the expected format
-                        # NOTE: this is a hack to make the eval report format consistent
-                        # with the original SWE-Bench eval script
-                        log_dir = os.path.join(temp_dir, 'logs', instance_id.lower())
-                        os.makedirs(log_dir, exist_ok=True)
-                        test_output_path = os.path.join(log_dir, 'test_output.txt')
-                        with open(test_output_path, 'w') as f:
-                            f.write(test_output)
-                        try:
-                            _report = get_eval_report(
-                                test_spec=test_spec,
-                                prediction={
-                                    'model_patch': model_patch,
-                                    'instance_id': instance_id,
-                                },
-                                log_path=test_output_path,
-                                include_tests_status=True,
-                            )
-                            report = _report[instance_id]
-                            logger.info(
-                                f"[{instance_id}, {trajectory_id}] report: {report}\nResult for [{instance_id}, {trajectory_id}]: resolved: {report['resolved']}"
-                            )
-                            self.results[instance_id][trajectory_id]['resolved'] = report[
-                                'resolved'
-                            ]
-                        except Exception as e:
-                            logger.error(
-                                f'[{instance_id}, {trajectory_id}] Error when getting eval report: {e}'
-                            )
-                            self.results[instance_id][trajectory_id]['resolved'] = False
-            else:
-                raise Exception(f'[{instance_id}, {trajectory_id}] Error when starting eval:\n{obs.content}')
+            #         with tempfile.TemporaryDirectory() as temp_dir:
+            #             # Create a directory structure that matches the expected format
+            #             # NOTE: this is a hack to make the eval report format consistent
+            #             # with the original SWE-Bench eval script
+            #             log_dir = os.path.join(temp_dir, 'logs', instance_id.lower())
+            #             os.makedirs(log_dir, exist_ok=True)
+            #             test_output_path = os.path.join(log_dir, 'test_output.txt')
+            #             with open(test_output_path, 'w') as f:
+            #                 f.write(test_output)
+            #             try:
+            #                 _report = get_eval_report(
+            #                     test_spec=test_spec,
+            #                     prediction={
+            #                         'model_patch': model_patch,
+            #                         'instance_id': instance_id,
+            #                     },
+            #                     log_path=test_output_path,
+            #                     include_tests_status=True,
+            #                 )
+            #                 report = _report[instance_id]
+            #                 logger.info(
+            #                     f"[{instance_id}, {trajectory_id}] report: {report}\nResult for [{instance_id}, {trajectory_id}]: resolved: {report['resolved']}"
+            #                 )
+            #                 self.results[instance_id][trajectory_id]['resolved'] = report[
+            #                     'resolved'
+            #                 ]
+            #             except Exception as e:
+            #                 logger.error(
+            #                     f'[{instance_id}, {trajectory_id}] Error when getting eval report: {e}'
+            #                 )
+            #                 self.results[instance_id][trajectory_id]['resolved'] = False
+            # else:
+            #     raise Exception(f'[{instance_id}, {trajectory_id}] Error when starting eval:\n{obs.content}')
         else:
             raise Exception(
                 f'[{instance_id}] Unexpected output when applying patch:\n{apply_patch_output}'
