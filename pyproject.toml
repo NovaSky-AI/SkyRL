@@ -16,7 +16,7 @@ name = "verl"
 # We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
 # (PEP 621 calls this "dynamic version"). 
 # The actual version is specified in the [tool.setuptools.dynamic] section below.
-dynamic = ["version", "optional-dependencies", "authors", "urls"]
+dynamic = ["version"]
 
 description = "verl: Volcano Engine Reinforcement Learning for LLM"
 license = {file = "LICENSE"}  # or "Apache-2.0", if you prefer an SPDX identifier
@@ -44,8 +44,6 @@ dependencies=[
   "hf_transfer",
   "torchdata",
   "openhands-ai",
-  'sglang[all]==0.4.4.post4', 
-  "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl",
   "streamlit",
   "whatthepatch",
   "retry",
@@ -65,13 +63,35 @@ dependencies=[
   "browsergym-visualwebarena==0.10.2",
   'tensordict<=0.6.2',
   'torch-memory-saver>=0.0.5',
-  'vllm>=0.7.3'
+  'vllm>=0.7.3',
 ]
 
 [tool.uv]
-find-links = ["https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python"]
-override-dependencies = ["ray==2.43.0", "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl", "xgrammar==0.1.17"]
+override-dependencies = ["ray==2.43.0", "xgrammar==0.1.17"]
+conflicts = [
+    [
+        { extra = "swebench" },
+        { extra = "sql" },
+    ],
+]
 
+# NOTE (sumanthrh): This is a hack pending more investigation.
+# Currently, sglang 0.4.6.post1 is needed for swebench training - this is to support Qwen3 models 
+# However, with the SQL task, we've noticed that using 0.4.6.post1 leads to a 10x slowdown in generation time compared to 0.4.4.post1. 
+# Dependency management with sglang is messy at the moment. I've not been able to track down the root cause yet. 
+[project.optional-dependencies]
+swebench = [
+    'sglang[all]==0.4.6.post1', 
+    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=cbc4acb4aed7c4b00887a557dac484315327a063e25ac1ed4ee8eef54edf9ef6",
+    # Use flash attention with torch 2.6 since sglang 0.4.6.post1 requires torch 2.6
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl"
+]
+sql = [
+    'sglang[all]==0.4.4.post4', 
+    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.5-cp38-abi3-linux_x86_64.whl#sha256=74fe5bf85068e12cf93100f47b932ed0c7a8547ec93905f62eab604dccbb68bd",
+    # Use flash attention with torch 2.5 since sglang 0.4.4.post4 requires torch 2.5
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl"
+]
 
 [tool.uv.sources]
 openhands-ai = { path = "./SkyRL-OpenHands", editable = true }

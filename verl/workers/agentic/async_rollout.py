@@ -1,6 +1,5 @@
-# TODO(haoran): stuck in the loop
-# TODO(haoran): time control; loss_mask
-# TODO(haoran): check reason for loading weight
+
+# Modified from: https://github.com/volcengine/verl/pull/917 
 import logging
 import os
 from functools import partial
@@ -16,6 +15,7 @@ from sglang.srt.function_call_parser import FunctionCallParser
 from sglang.srt.openai_api.protocol import Tool
 from torch.distributed import DeviceMesh
 from tensordict import TensorDict
+from verl.workers.agentic.swe_agent.codeact import CodeActAgentGroup
 
 from verl import DataProto
 from verl.workers.rollout.base import BaseRollout
@@ -63,8 +63,9 @@ class AsyncRollout(BaseRollout):
                 enable_memory_saver=config.enable_memory_saver,
                 mem_fraction_static=config.gpu_memory_utilization,
                 tp_size=device_mesh.size(1),
-                log_level="INFO",
+                log_level="debug",
                 # enable_metrics=True,
+                attention_backend="flashinfer",
             )
             print(f"nodedup {torch.distributed.get_rank() = } releasing memory occupation")
             self.engine.release_memory_occupation()
@@ -96,7 +97,6 @@ class AsyncRollout(BaseRollout):
             raise ValueError("Sampling parameter `n` is not supported for multi-turn agentic tasks. For generating multiple trajectories per instance, please use `rollout.n_trajectories` instead.")
         
         if self.config.task_type == "swegym":
-            from verl.workers.agentic.swe_agent.codeact import CodeActAgentGroup
             codeact_agent_group = CodeActAgentGroup(
                 batch=prompts,
                 num_trajectories=self.config.n_trajectories,
@@ -104,8 +104,8 @@ class AsyncRollout(BaseRollout):
                 max_prompt_length=self.config.prompt_length,
                 max_response_length=self.config.response_length,
                 max_starting_message_length=self.config.max_starting_message_length,
-                max_parallel_agents=self.config.max_parallel_agents // self.device_mesh.size(0),
-                max_eval_parallel_agents=self.config.max_eval_parallel_agents // self.device_mesh.size(0),
+                max_parallel_agents=max(self.config.max_parallel_agents // self.device_mesh.size(0), 1),
+                max_eval_parallel_agents=max(self.config.max_eval_parallel_agents // self.device_mesh.size(0), 1),
                 max_iterations = self.config.max_iterations,
                 tokenizer=self.engine.tokenizer_manager.tokenizer,
                 sampling_params=sampling_params,
@@ -117,33 +117,28 @@ class AsyncRollout(BaseRollout):
 
             results = codeact_agent_group.run()
         elif self.config.task_type == "sql":
-            try: 
-                from verl.workers.agentic.llm_sql_agent.sqlact import SQLActAgentGroup
-                from verl.workers.agentic.llm_sql_agent.generation import GenerationConfig
-                total_world_size = torch.distributed.get_world_size()
-                gen_config = GenerationConfig(
-                    max_turns=self.config.max_iterations,
-                    max_start_length=self.config.sql.max_start_length,
-                    max_prompt_length=self.config.sql.max_prompt_length,
-                    max_response_length=self.config.sql.max_response_length,
-                    max_obs_length=self.config.sql.max_obs_length,
-                    num_gpus= total_world_size // self.device_mesh.size(0),
-                    db_path=self.config.sql.db_path,
-                    no_think_rl=False,
-                )
-                agent_group = SQLActAgentGroup(
-                    batch=prompts,
-                    infer_engine=self.engine,
-                    num_trajectories=self.config.n_trajectories,
-                    gen_config=gen_config,
-                    tokenizer=self.engine.tokenizer_manager.tokenizer, 
-                    sampling_params=self.sampling_params,
-                )
-                results = agent_group.run()
-            except Exception as e:
-                print(f"DEBUG: Encountered an exception: {e}")
-                print(f"Traceback: \n\n\n{traceback.print_exc()}")
-                raise e
+            from verl.workers.agentic.llm_sql_agent.sqlact import SQLActAgentGroup
+            from verl.workers.agentic.llm_sql_agent.generation import GenerationConfig
+            total_world_size = torch.distributed.get_world_size()
+            gen_config = GenerationConfig(
+                max_turns=self.config.max_iterations,
+                max_start_length=self.config.sql.max_start_length,
+                max_prompt_length=self.config.sql.max_prompt_length,
+                max_response_length=self.config.sql.max_response_length,
+                max_obs_length=self.config.sql.max_obs_length,
+                num_gpus= total_world_size // self.device_mesh.size(0),
+                db_path=self.config.sql.db_path,
+                no_think_rl=False,
+            )
+            agent_group = SQLActAgentGroup(
+                batch=prompts,
+                infer_engine=self.engine,
+                num_trajectories=self.config.n_trajectories,
+                gen_config=gen_config,
+                tokenizer=self.engine.tokenizer_manager.tokenizer, 
+                sampling_params=self.sampling_params,
+            )
+            results = agent_group.run()
         else:
             raise NotImplementedError(f"Task type {self.task_type} is not supported.")
         logger.info(f"nodedup finish generate seq {torch.distributed.get_rank()=} {self.tp_rank=}")

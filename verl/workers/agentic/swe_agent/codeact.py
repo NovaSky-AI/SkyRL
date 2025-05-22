@@ -482,7 +482,7 @@ class OnlineCodeActAgent(Agent):
                 actions = codeact_function_calling.response_to_actions(
                     self.convert_str_to_completion_format(fn_call_messages)
                 )
-                print(f"Take action: {type(actions)}")
+                print(f"Take action: {[type(action) for action in actions]}")
                 
                 for action in actions:
                     self.pending_actions.append(action)

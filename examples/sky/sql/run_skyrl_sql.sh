@@ -22,7 +22,7 @@ GRAD_CLIP=0.5
 BATCH_SIZE=256
 TP_SIZE=4
 
-PYTHONUNBUFFERED=1 uv run --isolated --directory . --frozen --env-file .env.sql -m verl.trainer.main_ppo \
+PYTHONUNBUFFERED=1 uv run --extra sql --isolated --directory . --frozen --env-file .env.sql -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_batch_size=$BATCH_SIZE \
