@@ -19,15 +19,13 @@ from transformers import AutoTokenizer
 
 import openhands
 import openhands.agenthub.codeact_agent.function_calling as codeact_function_calling
+from openhands.agenthub.codeact_agent import CodeActAgent
 from openhands.controller.agent import Agent
 from openhands.controller.state.state import State, AgentState
-from openhands.core.config import LLMConfig, AgentConfig, SandboxConfig, AppConfig
+from openhands.core.config import LLMConfig, AgentConfig, AppConfig
 from openhands.core.main import create_runtime, run_controller
 from openhands.core.logger import openhands_logger as logger
 from openhands.core.message import Message, TextContent
-from openhands.core.message_utils import (
-    events_to_messages,
-)
 from openhands.core.exceptions import (
     AgentStuckInLoopError,
     FunctionCallNotExistsError,
@@ -44,6 +42,7 @@ from openhands.events.action import (
 )
 from openhands.events.event import EventSource
 from openhands.memory.condenser import Condenser
+from openhands.memory.condenser.condenser import Condensation, View
 from openhands.core.config.condenser_config import (
     NoOpCondenserConfig,
 )
@@ -55,18 +54,18 @@ from openhands.llm.llm import LLM
 from openhands.utils.prompt import PromptManager
 from openhands.utils.async_utils import call_sync_from_async, call_async_from_sync
 
-from swegym.harness.test_spec import make_test_spec
-from swegym.harness.run_evaluation import (
-    APPLY_PATCH_FAIL,
-    APPLY_PATCH_PASS,
-)
-from swegym.harness.grading import get_eval_report
 from openhands.events.action import CmdRunAction
 from openhands.events.observation import CmdOutputObservation
-from .utils import process_git_patch
-
-DOCKER_IMAGE_PREFIX = os.environ.get('EVAL_DOCKER_IMAGE_PREFIX', 'docker.io/xingyaoww/')
-logger.info(f'Using docker image prefix: {DOCKER_IMAGE_PREFIX}')
+from .utils import (
+    process_git_patch, 
+    get_config, 
+    get_instance_docker_image, 
+    get_instruction, 
+    initialize_runtime, 
+    complete_runtime,
+    is_fatal_evaluation_error,
+    get_default_sandbox_config_for_eval
+)
 
 # this is for the tokenizer.apply_chat_template to be able to generate assistant masks directly
 # todo: this is a hack, we should find a better way to do this
@@ -250,28 +249,7 @@ def codeact_user_response(
             )
     return msg
 
-def get_instance_docker_image(instance_id: str) -> str:
-    image_name = 'sweb.eval.x86_64.' + instance_id
-    image_name = image_name.replace(
-        '__', '_s_'
-    )  # to comply with docker image naming convention
-    return (DOCKER_IMAGE_PREFIX.rstrip('/') + '/' + image_name).lower()
-
-# Helper function for sandbox config
-def get_default_sandbox_config_for_eval():
-    return SandboxConfig(
-        use_host_network=False,
-        timeout=300,
-        api_key=os.environ.get('ALLHANDS_API_KEY', None),
-        remote_runtime_api_url=os.environ.get('SANDBOX_REMOTE_RUNTIME_API_URL'),
-        keep_runtime_alive=False,
-        remote_runtime_init_timeout=3600,
-        remote_runtime_api_timeout=120,
-        remote_runtime_enable_retries=True,
-        remote_runtime_class='sysbox',
-    )
-
-class OnlineCodeActAgent(Agent):
+class OnlineCodeActAgent(CodeActAgent):
     """
     An online implementation of CodeActAgent that leverages infer's asynchronous capabilities
     for a single agent instance.
@@ -279,25 +257,27 @@ class OnlineCodeActAgent(Agent):
     
     def __init__(
         self,
+        agent_config: AgentConfig,
         instance_id: int,
         trajectory_id: int,
         max_prompt_length: int = 1024,
         infer_engine=None,
         tokenizer=None,
         sampling_params=None,
+        vision_is_active=False,
         qwen3_enable_thinking: bool = True,
     ) -> None:
         """
         Initialize a single OnlineCodeActAgent instance.
         """
         # dummy value to let openhands tracks the name
-        llm = LLM(LLMConfig(model="dummy"))
+        llm = LLM(LLMConfig(model="dummy", 
+                            max_message_chars=32768))
 
-        super().__init__(llm, AgentConfig())
+        super().__init__(llm, agent_config)
         
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
-        self.reset()
         self.step_count = 0
         self.infer_engine = infer_engine
         self.sampling_params = sampling_params
@@ -306,33 +286,10 @@ class OnlineCodeActAgent(Agent):
         self.instance_id = instance_id
         self.trajectory_id = trajectory_id
         
-        # Initialize tools
-        self.tools = codeact_function_calling.get_tools(
-            codeact_enable_browsing=False,
-            codeact_enable_jupyter=False,
-            codeact_enable_llm_editor=False,
-        )
-        
-        # Initialize prompt manager
-        self.prompt_manager = PromptManager(
-            microagent_dir=os.path.join(
-                os.path.dirname(os.path.dirname(openhands.__file__)),
-                'microagents',
-            ),
-            prompt_dir=os.path.join(os.path.dirname(openhands.agenthub.codeact_agent.__file__), 'prompts'),
-            disabled_microagents=None,
-        )
-        
-        # Initialize condenser
-        self.condenser = Condenser.from_config(NoOpCondenserConfig())
-        
-        # Initialize state
-        self.pending_actions = deque()
-        
         # will be set in _initialize_runtime_for_agent
         self.runtime = None
         self.instruction = None
-        self.config = None
+        self.app_config = None
 
         self.qwen3_enable_thinking = qwen3_enable_thinking
 
@@ -341,68 +298,7 @@ class OnlineCodeActAgent(Agent):
         if self.runtime:
             # remove all threads in event stream
             self.runtime.event_stream.close()
-            
             self.runtime.close()
-
-
-        
-    def _initial_messages(self) -> list[Message]:
-        """Creates the initial messages (including the system prompt) for the LLM conversation."""
-        return [
-            Message(
-                role='system',
-                content=[
-                    TextContent(
-                        text=self.prompt_manager.get_system_message(),
-                        cache_prompt=False,  # Assuming caching is active
-                    )
-                ],
-            )
-        ]
-        
-    def _enhance_messages(self, messages: list[Message]) -> list[Message]:
-        """Enhances the user message with additional context based on keywords matched."""
-        results: list[Message] = []
-        is_first_message_handled = False
-
-        for msg in messages:
-            if msg.role == 'user' and not is_first_message_handled:
-                is_first_message_handled = True
-                # Compose the first user message with examples
-                self.prompt_manager.add_examples_to_initial_message(msg)
-
-                # Add repo/runtime info if enabled
-                if self.config.get_agent_config().enable_prompt_extensions:
-                    self.prompt_manager.add_info_to_initial_message(msg)
-
-            # Enhance the user message with additional context based on keywords matched
-            if msg.role == 'user':
-                self.prompt_manager.enhance_message(msg)
-
-            results.append(msg)
-
-        return results
-        
-    def _get_messages(self, state: State) -> List[Message]:
-        """Get the message history for this agent."""
-        # Start with initial messages (system prompt)
-        messages = self._initial_messages()
-        
-        # If using a condenser, condense the history
-        events = self.condenser.condensed_history(state)
-        
-        # Convert history events to messages
-        messages += events_to_messages(
-            events,
-            max_message_chars=32768,  # Default value, adjust as needed
-            vision_is_active=False,  # Assuming vision is not active
-            enable_som_visual_browsing=False,  # Assuming SOM visual browsing is not enabled
-        )
-        
-        messages = self._enhance_messages(messages)
-        
-        return messages
-
     
     # Conversion utility function
     def convert_str_to_completion_format(self, fn_call_messages):
@@ -432,7 +328,6 @@ class OnlineCodeActAgent(Agent):
         response_str = res["text"]
         return response_str
 
-
     async def step(self, state: State) -> Action:
         """Generate a response using batched infer."""
         self.step_count += 1
@@ -446,7 +341,20 @@ class OnlineCodeActAgent(Agent):
             return AgentFinishAction()
 
         # prepare what we want to send to the LLM
-        messages = self._get_messages(state)
+        condensed_history: list[Event] = []
+        match self.condenser.condensed_history(state):
+            case View(events=events):
+                condensed_history = events
+
+            case Condensation(action=condensation_action):
+                return condensation_action
+
+        logger.debug(
+            f'Processing {len(condensed_history)} events from a total of {len(state.history)} events'
+        )
+
+        initial_user_message = self._get_initial_user_message(state.history)
+        messages = self._get_messages(condensed_history, initial_user_message)
         messages = self.llm.format_messages_for_llm(messages)
         messages = convert_fncall_messages_to_non_fncall_messages(
                     messages, self.tools
@@ -460,6 +368,7 @@ class OnlineCodeActAgent(Agent):
                 return AgentFinishAction(thought="The context is too long. Exit now.")
 
             response_str = call_async_from_sync(self.generate, input_ids=input_ids, sampling_params=self.sampling_params)
+            print(f"instance id {self.instance_id}, trajectory {self.trajectory_id}, response {response_str}")
             
             if not response_str:
                 # If we got an empty response (possible error), return a message action
@@ -480,7 +389,8 @@ class OnlineCodeActAgent(Agent):
                     message, self.tools
                 )
                 actions = codeact_function_calling.response_to_actions(
-                    self.convert_str_to_completion_format(fn_call_messages)
+                    self.convert_str_to_completion_format(fn_call_messages),
+                    mcp_tool_names=list(self.mcp_tools.keys())
                 )
                 print(f"Take action: {[type(action) for action in actions]}")
                 
@@ -514,7 +424,20 @@ class OnlineCodeActAgent(Agent):
     
     def get_final_messages(self, state: State) -> List[Message]:
         """Get the final messages for this agent."""
-        messages = self._get_messages(state)
+        condensed_history: list[Event] = []
+        match self.condenser.condensed_history(state):
+            case View(events=events):
+                condensed_history = events
+
+            case Condensation(action=condensation_action):
+                return condensation_action
+
+        logger.debug(
+            f'Processing {len(condensed_history)} events from a total of {len(state.history)} events'
+        )
+
+        initial_user_message = self._get_initial_user_message(state.history)
+        messages = self._get_messages(condensed_history, initial_user_message)
         messages = self.llm.format_messages_for_llm(messages)
         messages = convert_fncall_messages_to_non_fncall_messages(
                     messages, self.tools
@@ -537,7 +460,6 @@ class OnlineCodeActAgent(Agent):
     
 
 Agent.register('OnlineCodeActAgent', OnlineCodeActAgent) 
-
 
 
 class CodeActAgentGroup:
@@ -803,9 +725,18 @@ class CodeActAgentGroup:
         """Initialize agent instances for each task."""
         for data_item in self.batch:
             instance_id = data_item.non_tensor_batch['instance']['instance_id']
+            #  TODO(@csy): add condenser config
+            agent_config = AgentConfig(
+                enable_jupyter=False,
+                enable_browsing=False,
+                enable_llm_editor=False,
+                condenser=NoOpCondenserConfig(),
+                enable_prompt_extensions=False,
+            )
             self.agents[instance_id] = {}
             for n in range(self.num_trajectories):
                 self.agents[instance_id][n] = OnlineCodeActAgent(
+                    agent_config=agent_config,
                     instance_id=instance_id,
                     trajectory_id=n,
                     max_prompt_length=self.max_prompt_length,
@@ -821,50 +752,14 @@ class CodeActAgentGroup:
     async def _initialize_runtime_for_agent(self, batch_id: int, trajectory_id: int) -> None:
         """Initialize the runtime for a specific agent."""
         instance_id = self.batch[batch_id].non_tensor_batch['instance']['instance_id']
+        data_source = self.batch[batch_id].non_tensor_batch['data_source']
+        print("data_source", data_source)
         instance = pd.Series(self.batch[batch_id].non_tensor_batch['instance'])
         agent = self.agents[instance_id][trajectory_id]
+        agent_config = agent.config
         
         try:
-            # Configure sandbox
-            RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
-            SWE_BENCH_CONTAINER_IMAGE = 'ghcr.io/opendevin/eval-swe-bench:full-v1.2.1'
-            
-            if os.environ.get('USE_INSTANCE_IMAGE', 'true').lower() == 'true':
-                # Use a different instance image for each instance of swe-bench eval
-                base_container_image = get_instance_docker_image(instance_id)
-                logger.info(
-                    f'Using instance container image: {base_container_image}. '
-                    f'Please make sure this image exists. '
-                    f'Submit an issue on https://github.com/All-Hands-AI/OpenHands if you run into any issues.'
-                )
-            else:
-                base_container_image = SWE_BENCH_CONTAINER_IMAGE
-                logger.info(f'Using swe-bench container image: {base_container_image}')
-            
-            sandbox_config = get_default_sandbox_config_for_eval()
-            sandbox_config.base_container_image = base_container_image
-            sandbox_config.enable_auto_lint = True
-            sandbox_config.use_host_network = False
-            sandbox_config.platform = 'linux/amd64'
-            
-            app_config = AppConfig(
-                default_agent='OnlineCodeActAgent',
-                run_as_openhands=False,
-                max_iterations=self.max_iterations,
-                runtime='remote',
-                sandbox=sandbox_config,
-                workspace_base=None,
-                workspace_mount_path=None,
-            )
-            agent_config = AgentConfig(
-                codeact_enable_jupyter=False,
-                codeact_enable_browsing=False,
-                codeact_enable_llm_editor=False,
-                condenser=NoOpCondenserConfig(),
-                enable_prompt_extensions=False,
-            )
-            app_config.set_agent_config(agent_config)
-            agent.config = app_config
+            app_config = get_config(instance_id, self.max_iterations, agent_config)
             
             # Create runtime
             runtime = create_runtime(app_config)
@@ -872,14 +767,13 @@ class CodeActAgentGroup:
             # Connect runtime
             await runtime.connect()
             
-            # Initialize runtime
-            from .utils import initialize_runtime, get_instruction
             # initialize_runtime(runtime, instance)
-            await call_sync_from_async(initialize_runtime, runtime, instance)
+            await call_sync_from_async(initialize_runtime, runtime, instance, data_source)
             
             # Store the runtime and instruction
             agent.runtime = runtime
             agent.instruction = get_instruction(instance)
+            agent.app_config = app_config
             
             logger.info(f"Successfully initialized runtime for instance {instance_id}")
         except Exception as e:
@@ -904,8 +798,8 @@ class CodeActAgentGroup:
         try:
             # Run the agent controller
             state = await run_controller(
-                config=agent.config,
-                initial_user_action=MessageAction(content=agent.instruction),
+                config=agent.app_config,
+                initial_user_action=agent.instruction,
                 runtime=runtime,
                 agent=agent,
                 fake_user_response_fn=codeact_user_response,
@@ -914,7 +808,6 @@ class CodeActAgentGroup:
             if state:
                 print(state.last_error)
             
-            from .utils import complete_runtime, is_fatal_evaluation_error
             # Check for fatal errors
             if state and is_fatal_evaluation_error(state.last_error):
                 logger.error(f"Fatal error in agent {instance_id}: {state.last_error}")
@@ -972,8 +865,21 @@ class CodeActAgentGroup:
 
         return return_val
     
-    def _apply_patch_and_evaluate(self, runtime, model_patch, instance_id, trajectory_id, test_spec):
+    def _apply_patch_and_evaluate(self, runtime, model_patch, instance_id, trajectory_id, test_spec, dataset):
         """Apply patch and evaluate the solution."""
+        if 'swe-gym' in dataset:
+            from swegym.harness.grading import get_eval_report
+            from swegym.harness.run_evaluation import (
+                APPLY_PATCH_FAIL,
+                APPLY_PATCH_PASS,
+            )
+        else:  # Newer version of SWE-Bench have different import paths
+            from swebench.harness.grading import get_eval_report
+            from swebench.harness.run_evaluation import (
+                APPLY_PATCH_FAIL,
+                APPLY_PATCH_PASS,
+            )
+        
         model_patch = process_git_patch(model_patch)
         # Get patch and save it to /tmp/patch.diff
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1080,14 +986,19 @@ class CodeActAgentGroup:
                         with open(test_output_path, 'w') as f:
                             f.write(test_output)
                         try:
+                            if 'swe-gym' in dataset:
+                                # SWE-Gym uses a different version of the package, hence a different eval report argument
+                                extra_kwargs['log_path'] = test_output_path
+                            else:
+                                extra_kwargs['test_log_path'] = test_output_path
                             _report = get_eval_report(
                                 test_spec=test_spec,
                                 prediction={
                                     'model_patch': model_patch,
                                     'instance_id': instance_id,
                                 },
-                                log_path=test_output_path,
                                 include_tests_status=True,
+                                **extra_kwargs,
                             )
                             report = _report[instance_id]
                             logger.info(
@@ -1108,10 +1019,18 @@ class CodeActAgentGroup:
                 f'[{instance_id}] Unexpected output when applying patch:\n{apply_patch_output}'
             )
     
-    async def _evaluate_agent(self, batch_id: int, trajectory_id: int) -> None:
+    async def _evaluate_agent(self, batch_id: int, trajectory_id: int, dataset: str) -> None:
         """Initialize the runtime for a specific agent."""
         instance_id = self.batch[batch_id].non_tensor_batch['instance']['instance_id']
         instance = pd.Series(self.batch[batch_id].non_tensor_batch['instance'])
+        if 'swe-gym' in dataset:
+            from swegym.harness.test_spec import (
+                make_test_spec,
+            )
+        else:  # Newer version of SWE-Bench have different import paths
+            from swebench.harness.test_spec.test_spec import (
+                make_test_spec,
+            )
         test_spec = make_test_spec(instance=instance)
         
         try:
@@ -1149,7 +1068,7 @@ class CodeActAgentGroup:
                 raise Exception(f"No git patch found for instance {instance_id}, trajectory {trajectory_id}")
             
             
-            await call_sync_from_async(self._apply_patch_and_evaluate, runtime, model_patch, instance_id, trajectory_id, test_spec)
+            await call_sync_from_async(self._apply_patch_and_evaluate, runtime, model_patch, instance_id, trajectory_id, test_spec, dataset)
                 
         except Exception as e:
             logger.error(f"Failed to evaluate traj {trajectory_id} for instance {instance_id}: {str(e)}")
@@ -1286,10 +1205,11 @@ class CodeActAgentGroup:
         async def eval_one_agent():
             batch_idx, trajectory_id = await eval_queue.get()
             instance_id = self.batch[batch_idx].non_tensor_batch['instance']['instance_id']
+            data_source = self.batch[batch_idx].non_tensor_batch['data_source']
             start_time = time.time()
             try:
                 logger.info(f"Evaluating agent for instance {instance_id}, trajectory {trajectory_id}")
-                await self._evaluate_agent(batch_idx, trajectory_id)
+                await self._evaluate_agent(batch_idx, trajectory_id, data_source)
                 elapsed = time.time() - start_time
                 
                 print(f"Successfully completed evaluating instance {instance_id}, trajectory {trajectory_id} in {elapsed:.2f}s")

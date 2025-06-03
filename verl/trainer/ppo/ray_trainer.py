@@ -542,7 +542,7 @@ class RayPPOTrainer(object):
             sample_inputs.extend(input_texts)
             
             if self.config.actor_rollout_ref.rollout.task_type == "swegym": 
-                non_tensor_batch_keys = ["instance"]
+                non_tensor_batch_keys = ["instance", "data_source"]
             elif self.config.actor_rollout_ref.rollout.task_type == "sql":
                 non_tensor_batch_keys = ["db_id", "data_source"]
             else:
@@ -939,7 +939,7 @@ class RayPPOTrainer(object):
                     
                     if self.config.actor_rollout_ref.rollout.task_type == "swegym":  # TODO(haoran): pass arg list here
                         gen_batch = batch.pop(batch_keys=batch_keys,
-                                                non_tensor_batch_keys=['instance'])
+                                                non_tensor_batch_keys=["instance", "data_source"])
                     elif self.config.actor_rollout_ref.rollout.task_type == "sql":
                         gen_batch = batch.pop(batch_keys=batch_keys,
                                                 non_tensor_batch_keys=["db_id", "data_source"])
