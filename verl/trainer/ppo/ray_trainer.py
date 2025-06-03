@@ -545,6 +545,9 @@ class RayPPOTrainer(object):
                 non_tensor_batch_keys = ["instance"]
             elif self.config.actor_rollout_ref.rollout.task_type == "sql":
                 non_tensor_batch_keys = ["db_id", "data_source"]
+            elif self.config.actor_rollout_ref.rollout.task_type == "torl":
+                # no need to add any keys
+                non_tensor_batch_keys = []
             else:
                 non_tensor_batch_keys = ["raw_prompt_ids"]
 
@@ -943,7 +946,9 @@ class RayPPOTrainer(object):
                     elif self.config.actor_rollout_ref.rollout.task_type == "sql":
                         gen_batch = batch.pop(batch_keys=batch_keys,
                                                 non_tensor_batch_keys=["db_id", "data_source"])
-                        
+                    elif self.config.actor_rollout_ref.rollout.task_type == "torl":
+                        gen_batch = batch.pop(batch_keys=batch_keys,
+                                                non_tensor_batch_keys=[])
                         # print(f"Gen batch non tensor batch keys: {gen_batch.non_tensor_batch}")
                     else:
                         gen_batch = batch.pop(batch_keys=batch_keys,

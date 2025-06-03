@@ -49,6 +49,9 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         # assume that the instance id is in the extra_info
         # print(f"Inside reward score init: calling into compute score")
         res = openhands_swebench.compute_score(solution_str, ground_truth, extra_info['instance_id'], data_source)
+    elif data_source in ["torl"]:
+        from . import math_torl
+        res = math_torl.compute_score(solution_str, ground_truth)
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 

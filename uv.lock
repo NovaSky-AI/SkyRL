@@ -10,6 +10,7 @@ resolution-markers = [
 conflicts = [[
     { package = "verl", extra = "sql" },
     { package = "verl", extra = "swebench" },
+    { package = "verl", extra = "torl" },
 ]]
 
 [manifest]
@@ -29,8 +30,8 @@ dependencies = [
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/97/33/47bbd507e3a851d33d19ce7b2141c5ea3689bfae91ba168044d7db24b0e9/accelerate-1.7.0.tar.gz", hash = "sha256:e8a2a5503d6237b9eee73cc8d36cf543f9c2d8dd2c6713450b322f5e6d53a610", size = 376026, upload-time = "2025-05-15T10:00:52.117Z" }
 wheels = [
@@ -244,6 +245,19 @@ wheels = [
 ]
 
 [[package]]
+name = "arrow"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "types-python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2e/00/0f6e8fcdb23ea632c866620cc872729ff43ed91d284c866b515c6342b173/arrow-1.3.0.tar.gz", hash = "sha256:d4540617648cb5f895730f1ad8c82a65f2dad0166f57b75f3ca54759c4d67a85", size = 131960, upload-time = "2023-09-30T22:11:18.25Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f8/ed/e97229a566617f2ae958a6b13e7cc0f585470eac730a73e9e82c32a3cdd2/arrow-1.3.0-py3-none-any.whl", hash = "sha256:c728b120ebc00eb84e01882a6f5e7927a53960aa990ce7dd2b10f39005a67f80", size = 66419, upload-time = "2023-09-30T22:11:16.072Z" },
+]
+
+[[package]]
 name = "astor"
 version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -262,12 +276,30 @@ wheels = [
 ]
 
 [[package]]
+name = "async-lru"
+version = "2.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/4d/71ec4d3939dc755264f680f6c2b4906423a304c3d18e96853f0a595dfe97/async_lru-2.0.5.tar.gz", hash = "sha256:481d52ccdd27275f42c43a928b4a50c3bfb2d67af4e78b170e3e0bb39c66e5bb", size = 10380, upload-time = "2025-03-16T17:25:36.919Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/49/d10027df9fce941cb8184e78a02857af36360d33e1721df81c5ed2179a1a/async_lru-2.0.5-py3-none-any.whl", hash = "sha256:ab95404d8d2605310d345932697371a5f40def0487c03d6d0ad9138de52c9943", size = 6069, upload-time = "2025-03-16T17:25:35.422Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "25.3.0"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5a/b0/1367933a8532ee6ff8d63537de4f1177af4bff9f3e829baf7331f595bb24/attrs-25.3.0.tar.gz", hash = "sha256:75d7cefc7fb576747b2c81b4442d4d4a1ce0900973527c011d1030fd3bf4af1b", size = 812032, upload-time = "2025-03-13T11:10:22.779Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/77/06/bb80f5f86020c4551da315d78b3ab75e8228f89f0162f2c3a819e407941a/attrs-25.3.0-py3-none-any.whl", hash = "sha256:427318ce031701fea540783410126f03899a97ffc6f61596ad581ac2e40e3bc3", size = 63815, upload-time = "2025-03-13T11:10:21.14Z" },
+]
+
+[[package]]
+name = "babel"
+version = "2.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/6b/d52e42361e1aa00709585ecc30b3f9684b3ab62530771402248b1b1d6240/babel-2.17.0.tar.gz", hash = "sha256:0c54cffb19f690cdcc52a3b50bcbf71e07a808d1c80d549f2459b9d2cf0afb9d", size = 9951852, upload-time = "2025-02-01T15:17:41.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/b8/3fe70c75fe32afc4bb507f75563d39bc5642255d1d94f1f23604725780bf/babel-2.17.0-py3-none-any.whl", hash = "sha256:4d0b53093fdfb4b21c92b5213dba5a1b23885afa8383709427046b21c366e5f2", size = 10182537, upload-time = "2025-02-01T15:17:37.39Z" },
 ]
 
 [[package]]
@@ -356,6 +388,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/13/99/a2e644e0a2039977beb67abbc1f48f6f6c7e0f0c345665811cfa2880b196/blake3-1.0.5-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:21240932fc914fd719e2d33297f29742c28a31d8a96cb666ec4679bf2c35aa48", size = 555543, upload-time = "2025-05-19T20:07:17.056Z" },
     { url = "https://files.pythonhosted.org/packages/45/15/80d9b2866af5d7ec4c665bb961b16d3db9a9527a80de78e44b828129d51f/blake3-1.0.5-cp312-cp312-win32.whl", hash = "sha256:cba3e6d12bd310b5ff4970daddd7e77a0ca383678e1f0a1ec414d4c7cb083f9d", size = 234714, upload-time = "2025-05-19T20:07:18.321Z" },
     { url = "https://files.pythonhosted.org/packages/09/a5/76cd4402c685ad1d336351f22483bc2ecd48e5604ba5f5ad340e22b8703a/blake3-1.0.5-cp312-cp312-win_amd64.whl", hash = "sha256:adb54b8bfe4fb2e8106b3a1bddc3614d2de555d2b657861068160176ff723eb0", size = 222127, upload-time = "2025-05-19T20:07:19.579Z" },
+]
+
+[[package]]
+name = "bleach"
+version = "6.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "webencodings" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/9a/0e33f5054c54d349ea62c277191c020c2d6ef1d65ab2cb1993f91ec846d1/bleach-6.2.0.tar.gz", hash = "sha256:123e894118b8a599fd80d3ec1a6d4cc7ce4e5882b1317a7e1ba69b56e95f991f", size = 203083, upload-time = "2024-10-29T18:30:40.477Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/55/96142937f66150805c25c4d0f31ee4132fd33497753400734f9dfdcbdc66/bleach-6.2.0-py3-none-any.whl", hash = "sha256:117d9c6097a7c3d22fd578fcd8d35ff1e125df6736f554da4e432fdd63f31e5e", size = 163406, upload-time = "2024-10-29T18:30:38.186Z" },
+]
+
+[package.optional-dependencies]
+css = [
+    { name = "tinycss2" },
 ]
 
 [[package]]
@@ -694,9 +743,9 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "pydantic", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
+    { name = "pydantic", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/40/e0/d9529aae2d2425d214e5a50497df4532d3f9e21c8d2023037c701f8a37d3/compressed-tensors-0.9.1.tar.gz", hash = "sha256:3cf5cd637f0186c184dd5bbbbf941356b1225199b49c6a45bf0909d65907f686", size = 63060, upload-time = "2025-01-23T18:41:01.813Z" }
 wheels = [
@@ -749,7 +798,7 @@ name = "cryptography"
 version = "45.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f6/47/92a8914716f2405f33f1814b97353e3cfa223cd94a77104075d42de3099e/cryptography-45.0.2.tar.gz", hash = "sha256:d784d57b958ffd07e9e226d17272f9af0c41572557604ca7554214def32c26bf", size = 743865, upload-time = "2025-05-18T02:46:34.986Z" }
 wheels = [
@@ -810,6 +859,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a9/95/a3dbbb5028f35eafb79008e7522a75244477d2838f38cbb722248dabc2a8/cycler-0.12.1.tar.gz", hash = "sha256:88bb128f02ba341da8ef447245a9e138fae777f6a23943da4540077d3601eb1c", size = 7615, upload-time = "2023-10-07T05:32:18.335Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30", size = 8321, upload-time = "2023-10-07T05:32:16.783Z" },
+]
+
+[[package]]
+name = "dashscope"
+version = "1.23.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "requests" },
+    { name = "websocket-client" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/91/ab7719b9b689a9bfaa8c9b7d9b72aa3501534c6d8eaec547beb812d742e9/dashscope-1.23.3-py3-none-any.whl", hash = "sha256:011717456e8aa25df9b402c8ad4af478a6cd079a902099403fd7fb3cfd0b0535", size = 1278568, upload-time = "2025-05-14T09:12:13.275Z" },
 ]
 
 [[package]]
@@ -882,6 +944,15 @@ dependencies = [
 wheels = [
     { url = "https://files.pythonhosted.org/packages/11/79/936af42edf90a7bd4e41a6cac89c913d4b47fa48a26b042d5129a9242ee3/decord-0.6.0-py3-none-manylinux2010_x86_64.whl", hash = "sha256:51997f20be8958e23b7c4061ba45d0efcd86bffd5fe81c695d0befee0d442976", size = 13602299, upload-time = "2021-06-14T21:30:55.486Z" },
     { url = "https://files.pythonhosted.org/packages/6c/be/e15b5b866da452e62635a7b27513f31cb581fa2ea9cc9b768b535d62a955/decord-0.6.0-py3-none-win_amd64.whl", hash = "sha256:02665d7c4f1193a330205a791bc128f7e108eb6ae5b67144437a02f700943bad", size = 24733380, upload-time = "2021-06-14T21:30:57.766Z" },
+]
+
+[[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
 ]
 
 [[package]]
@@ -980,7 +1051,7 @@ name = "docker"
 version = "7.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
     { name = "requests" },
     { name = "urllib3" },
 ]
@@ -1055,6 +1126,15 @@ name = "english-words"
 version = "2.0.1"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/d1/78b51ad44e4a318ee4f6d32a0b344a918d5fd690de0b0ff6a116b1bc97cf/english-words-2.0.1.tar.gz", hash = "sha256:a4105c57493bb757a3d8973fcf8e1dc05e7ca09c836dff467c3fb445f84bc43d", size = 8151936, upload-time = "2023-05-24T15:10:50.093Z" }
+
+[[package]]
+name = "eval-type-backport"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/ea/8b0ac4469d4c347c6a385ff09dc3c048c2d021696664e26c7ee6791631b5/eval_type_backport-0.2.2.tar.gz", hash = "sha256:f0576b4cf01ebb5bd358d02314d31846af5e07678387486e2c798af0e7d849c1", size = 9079, upload-time = "2024-12-21T20:09:46.005Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/31/55cd413eaccd39125368be33c46de24a1f639f2e12349b0361b4678f3915/eval_type_backport-0.2.2-py3-none-any.whl", hash = "sha256:cb6ad7c393517f476f96d456d0412ea80f0a8cf96f6892834cd9340149111b0a", size = 5830, upload-time = "2024-12-21T20:09:44.175Z" },
+]
 
 [[package]]
 name = "evaluate"
@@ -1161,6 +1241,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/27/00/171ff9f67859b2daf34d11a60bf596d9b22921f41c1b0eb9ea267baf6ed6/fastcore-1.8.2.tar.gz", hash = "sha256:8d50abd09b4d484589488dab7d78594d681de3466a84d2d1beb8b6db0d0c00b7", size = 75441, upload-time = "2025-05-09T02:46:21.44Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/56/5ea99d5057146e273c90175e7fb40e52b803739c961e50a1dd0fe2dfa645/fastcore-1.8.2-py3-none-any.whl", hash = "sha256:8e66134d9acc411ffdddde64e080e46814e24011c6368b5c9d50165ee8140e8b", size = 78180, upload-time = "2025-05-09T02:46:19.323Z" },
+]
+
+[[package]]
+name = "fastjsonschema"
+version = "2.21.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8b/50/4b769ce1ac4071a1ef6d86b1a3fb56cdc3a37615e8c5519e1af96cdac366/fastjsonschema-2.21.1.tar.gz", hash = "sha256:794d4f0a58f848961ba16af7b9c85a3e88cd360df008c59aac6fc5ae9323b5d4", size = 373939, upload-time = "2024-12-02T10:55:15.133Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/2b/0817a2b257fe88725c25589d89aec060581aabf668707a8d03b2e9e0cb2a/fastjsonschema-2.21.1-py3-none-any.whl", hash = "sha256:c9e5b7e908310918cf494a434eeb31384dd84a98b57a30bcb1f535015b554667", size = 23924, upload-time = "2024-12-02T10:55:07.599Z" },
 ]
 
 [[package]]
@@ -1318,6 +1407,15 @@ wheels = [
 ]
 
 [[package]]
+name = "fqdn"
+version = "1.5.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/3e/a80a8c077fd798951169626cde3e239adeba7dab75deb3555716415bd9b0/fqdn-1.5.1.tar.gz", hash = "sha256:105ed3677e767fb5ca086a0c1f4bb66ebc3c100be518f0e0d755d9eae164d89f", size = 6015, upload-time = "2021-03-11T07:16:29.08Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/58/8acf1b3e91c58313ce5cb67df61001fc9dcd21be4fadb76c1a2d540e09ed/fqdn-1.5.1-py3-none-any.whl", hash = "sha256:3a179af3761e4df6eb2e026ff9e1a3033d3587bf980a0b1b2e1e5d08d7358014", size = 9121, upload-time = "2021-03-11T07:16:28.351Z" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1383,8 +1481,8 @@ name = "gevent"
 version = "24.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "(platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_python_implementation != 'CPython' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "greenlet", marker = "platform_python_implementation == 'CPython' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "cffi", marker = "(platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_python_implementation != 'CPython' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_python_implementation != 'CPython' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_python_implementation != 'CPython' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'win32' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "greenlet", marker = "platform_python_implementation == 'CPython' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
     { name = "zope-event" },
     { name = "zope-interface" },
 ]
@@ -1981,7 +2079,7 @@ wheels = [
 
 [package.optional-dependencies]
 hf-xet = [
-    { name = "hf-xet", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "hf-xet", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 
 [[package]]
@@ -2073,7 +2171,7 @@ name = "ipykernel"
 version = "6.29.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "appnope", marker = "sys_platform == 'darwin' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "appnope", marker = "sys_platform == 'darwin'" },
     { name = "comm" },
     { name = "debugpy" },
     { name = "ipython" },
@@ -2139,6 +2237,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3e/48/d3dbac45c2814cb73812f98dd6b38bbcc957a4e7bb31d6ea9c03bf94ed87/ipywidgets-8.1.7.tar.gz", hash = "sha256:15f1ac050b9ccbefd45dccfbb2ef6bed0029d8278682d569d71b8dd96bee0376", size = 116721, upload-time = "2025-05-05T12:42:03.489Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/6a/9166369a2f092bd286d24e6307de555d63616e8ddb373ebad2b5635ca4cd/ipywidgets-8.1.7-py3-none-any.whl", hash = "sha256:764f2602d25471c213919b8a1997df04bef869251db4ca8efba1b76b1bd9f7bb", size = 139806, upload-time = "2025-05-05T12:41:56.833Z" },
+]
+
+[[package]]
+name = "isoduration"
+version = "20.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "arrow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7c/1a/3c8edc664e06e6bd06cce40c6b22da5f1429aa4224d0c590f3be21c91ead/isoduration-20.11.0.tar.gz", hash = "sha256:ac2f9015137935279eac671f94f89eb00584f940f5dc49462a0c4ee692ba1bd9", size = 11649, upload-time = "2020-11-01T11:00:00.312Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/55/e5326141505c5d5e34c5e0935d2908a74e4561eca44108fbfb9c13d2911a/isoduration-20.11.0-py3-none-any.whl", hash = "sha256:b2904c2a4228c3d44f409c8ae8e2370eb21a26f7ac2ec5446df141dde3452042", size = 11321, upload-time = "2020-11-01T10:59:58.02Z" },
 ]
 
 [[package]]
@@ -2222,6 +2332,36 @@ wheels = [
 ]
 
 [[package]]
+name = "json5"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/be/c6c745ec4c4539b25a278b70e29793f10382947df0d9efba2fa09120895d/json5-0.12.0.tar.gz", hash = "sha256:0b4b6ff56801a1c7dc817b0241bca4ce474a0e6a163bfef3fc594d3fd263ff3a", size = 51907, upload-time = "2025-04-03T16:33:13.201Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/9f/3500910d5a98549e3098807493851eeef2b89cdd3032227558a104dfe926/json5-0.12.0-py3-none-any.whl", hash = "sha256:6d37aa6c08b0609f16e1ec5ff94697e2cbbfbad5ac112afa05794da9ab7810db", size = 36079, upload-time = "2025-04-03T16:33:11.927Z" },
+]
+
+[[package]]
+name = "jsonlines"
+version = "4.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/35/87/bcda8e46c88d0e34cad2f09ee2d0c7f5957bccdb9791b0b934ec84d84be4/jsonlines-4.0.0.tar.gz", hash = "sha256:0c6d2c09117550c089995247f605ae4cf77dd1533041d366351f6f298822ea74", size = 11359, upload-time = "2023-09-01T12:34:44.187Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f8/62/d9ba6323b9202dd2fe166beab8a86d29465c41a0288cbe229fac60c1ab8d/jsonlines-4.0.0-py3-none-any.whl", hash = "sha256:185b334ff2ca5a91362993f42e83588a360cf95ce4b71a73548502bda52a7c55", size = 8701, upload-time = "2023-09-01T12:34:42.563Z" },
+]
+
+[[package]]
+name = "jsonpointer"
+version = "3.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/0a/eebeb1fa92507ea94016a2a790b93c2ae41a7e18778f85471dc54475ed25/jsonpointer-3.0.0.tar.gz", hash = "sha256:2b2d729f2091522d61c3b31f82e11870f60b68f43fbc705cb76bf4b832af59ef", size = 9114, upload-time = "2024-06-10T19:24:42.462Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/92/5e77f98553e9e75130c78900d000368476aed74276eb8ae8796f65f00918/jsonpointer-3.0.0-py2.py3-none-any.whl", hash = "sha256:13e088adc14fca8b6aa8177c044e12701e6ad4b28ff10e65f2267a90109c9942", size = 7595, upload-time = "2024-06-10T19:24:40.698Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.23.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2236,6 +2376,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/69/4a/4f9dbeb84e8850557c02365a0eee0649abe5eb1d84af92a25731c6c0f922/jsonschema-4.23.0-py3-none-any.whl", hash = "sha256:fbadb6f8b144a8f8cf9f0b89ba94501d143e50411a1278633f56a7acf7fd5566", size = 88462, upload-time = "2024-07-08T18:40:00.165Z" },
 ]
 
+[package.optional-dependencies]
+format-nongpl = [
+    { name = "fqdn" },
+    { name = "idna" },
+    { name = "isoduration" },
+    { name = "jsonpointer" },
+    { name = "rfc3339-validator" },
+    { name = "rfc3986-validator" },
+    { name = "uri-template" },
+    { name = "webcolors" },
+]
+
 [[package]]
 name = "jsonschema-specifications"
 version = "2025.4.1"
@@ -2246,6 +2398,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bf/ce/46fbd9c8119cfc3581ee5643ea49464d168028cfb5caff5fc0596d0cf914/jsonschema_specifications-2025.4.1.tar.gz", hash = "sha256:630159c9f4dbea161a6a2205c3011cc4f18ff381b189fff48bb39b9bf26ae608", size = 15513, upload-time = "2025-04-23T12:34:07.418Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/01/0e/b27cdbaccf30b890c40ed1da9fd4a3593a5cf94dae54fb34f8a4b74fcd3f/jsonschema_specifications-2025.4.1-py3-none-any.whl", hash = "sha256:4653bffbd6584f7de83a67e0d620ef16900b390ddc7939d56684d6c81e33f1af", size = 18437, upload-time = "2025-04-23T12:34:05.422Z" },
+]
+
+[[package]]
+name = "jupyter"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ipykernel" },
+    { name = "ipywidgets" },
+    { name = "jupyter-console" },
+    { name = "jupyterlab" },
+    { name = "nbconvert" },
+    { name = "notebook" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/58/f3/af28ea964ab8bc1e472dba2e82627d36d470c51f5cd38c37502eeffaa25e/jupyter-1.1.1.tar.gz", hash = "sha256:d55467bceabdea49d7e3624af7e33d59c37fff53ed3a350e1ac957bed731de7a", size = 5714959, upload-time = "2024-08-30T07:15:48.299Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/64/285f20a31679bf547b75602702f7800e74dbabae36ef324f716c02804753/jupyter-1.1.1-py2.py3-none-any.whl", hash = "sha256:7a59533c22af65439b24bbe60373a4e95af8f16ac65a6c00820ad378e3f7cc83", size = 2657, upload-time = "2024-08-30T07:15:47.045Z" },
 ]
 
 [[package]]
@@ -2265,17 +2434,161 @@ wheels = [
 ]
 
 [[package]]
+name = "jupyter-console"
+version = "6.6.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ipykernel" },
+    { name = "ipython" },
+    { name = "jupyter-client" },
+    { name = "jupyter-core" },
+    { name = "prompt-toolkit" },
+    { name = "pygments" },
+    { name = "pyzmq" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bd/2d/e2fd31e2fc41c14e2bcb6c976ab732597e907523f6b2420305f9fc7fdbdb/jupyter_console-6.6.3.tar.gz", hash = "sha256:566a4bf31c87adbfadf22cdf846e3069b59a71ed5da71d6ba4d8aaad14a53539", size = 34363, upload-time = "2023-03-06T14:13:31.02Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/77/71d78d58f15c22db16328a476426f7ac4a60d3a5a7ba3b9627ee2f7903d4/jupyter_console-6.6.3-py3-none-any.whl", hash = "sha256:309d33409fcc92ffdad25f0bcdf9a4a9daa61b6f341177570fdac03de5352485", size = 24510, upload-time = "2023-03-06T14:13:28.229Z" },
+]
+
+[[package]]
 name = "jupyter-core"
 version = "5.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "platformdirs" },
-    { name = "pywin32", marker = "(platform_python_implementation != 'PyPy' and sys_platform == 'win32') or (platform_python_implementation == 'PyPy' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "pywin32", marker = "platform_python_implementation != 'PyPy' and sys_platform == 'win32'" },
     { name = "traitlets" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/00/11/b56381fa6c3f4cc5d2cf54a7dbf98ad9aa0b339ef7a601d6053538b079a7/jupyter_core-5.7.2.tar.gz", hash = "sha256:aa5f8d32bbf6b431ac830496da7392035d6f61b4f54872f15c4bd2a9c3f536d9", size = 87629, upload-time = "2024-03-12T12:37:35.652Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/fb/108ecd1fe961941959ad0ee4e12ee7b8b1477247f30b1fdfd83ceaf017f0/jupyter_core-5.7.2-py3-none-any.whl", hash = "sha256:4f7315d2f6b4bcf2e3e7cb6e46772eba760ae459cd1f59d29eb57b0a01bd7409", size = 28965, upload-time = "2024-03-12T12:37:32.36Z" },
+]
+
+[[package]]
+name = "jupyter-events"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jsonschema", extra = ["format-nongpl"], marker = "(extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra != 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "packaging" },
+    { name = "python-json-logger" },
+    { name = "pyyaml" },
+    { name = "referencing" },
+    { name = "rfc3339-validator" },
+    { name = "rfc3986-validator" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/c3/306d090461e4cf3cd91eceaff84bede12a8e52cd821c2d20c9a4fd728385/jupyter_events-0.12.0.tar.gz", hash = "sha256:fc3fce98865f6784c9cd0a56a20644fc6098f21c8c33834a8d9fe383c17e554b", size = 62196, upload-time = "2025-02-03T17:23:41.485Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/48/577993f1f99c552f18a0428731a755e06171f9902fa118c379eb7c04ea22/jupyter_events-0.12.0-py3-none-any.whl", hash = "sha256:6464b2fa5ad10451c3d35fabc75eab39556ae1e2853ad0c0cc31b656731a97fb", size = 19430, upload-time = "2025-02-03T17:23:38.643Z" },
+]
+
+[[package]]
+name = "jupyter-lsp"
+version = "2.2.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jupyter-server" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/85/b4/3200b0b09c12bc3b72d943d923323c398eff382d1dcc7c0dbc8b74630e40/jupyter-lsp-2.2.5.tar.gz", hash = "sha256:793147a05ad446f809fd53ef1cd19a9f5256fd0a2d6b7ce943a982cb4f545001", size = 48741, upload-time = "2024-04-09T17:59:44.918Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/e0/7bd7cff65594fd9936e2f9385701e44574fc7d721331ff676ce440b14100/jupyter_lsp-2.2.5-py3-none-any.whl", hash = "sha256:45fbddbd505f3fbfb0b6cb2f1bc5e15e83ab7c79cd6e89416b248cb3c00c11da", size = 69146, upload-time = "2024-04-09T17:59:43.388Z" },
+]
+
+[[package]]
+name = "jupyter-server"
+version = "2.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "argon2-cffi" },
+    { name = "jinja2" },
+    { name = "jupyter-client" },
+    { name = "jupyter-core" },
+    { name = "jupyter-events" },
+    { name = "jupyter-server-terminals" },
+    { name = "nbconvert" },
+    { name = "nbformat" },
+    { name = "overrides" },
+    { name = "packaging" },
+    { name = "prometheus-client" },
+    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "pyzmq" },
+    { name = "send2trash" },
+    { name = "terminado" },
+    { name = "tornado" },
+    { name = "traitlets" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/41/c8/ba2bbcd758c47f1124c4ca14061e8ce60d9c6fd537faee9534a95f83521a/jupyter_server-2.16.0.tar.gz", hash = "sha256:65d4b44fdf2dcbbdfe0aa1ace4a842d4aaf746a2b7b168134d5aaed35621b7f6", size = 728177, upload-time = "2025-05-12T16:44:46.245Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/46/1f/5ebbced977171d09a7b0c08a285ff9a20aafb9c51bde07e52349ff1ddd71/jupyter_server-2.16.0-py3-none-any.whl", hash = "sha256:3d8db5be3bc64403b1c65b400a1d7f4647a5ce743f3b20dbdefe8ddb7b55af9e", size = 386904, upload-time = "2025-05-12T16:44:43.335Z" },
+]
+
+[[package]]
+name = "jupyter-server-terminals"
+version = "0.5.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "terminado" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/d5/562469734f476159e99a55426d697cbf8e7eb5efe89fb0e0b4f83a3d3459/jupyter_server_terminals-0.5.3.tar.gz", hash = "sha256:5ae0295167220e9ace0edcfdb212afd2b01ee8d179fe6f23c899590e9b8a5269", size = 31430, upload-time = "2024-03-12T14:37:03.049Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/2d/2b32cdbe8d2a602f697a649798554e4f072115438e92249624e532e8aca6/jupyter_server_terminals-0.5.3-py3-none-any.whl", hash = "sha256:41ee0d7dc0ebf2809c668e0fc726dfaf258fcd3e769568996ca731b6194ae9aa", size = 13656, upload-time = "2024-03-12T14:37:00.708Z" },
+]
+
+[[package]]
+name = "jupyterlab"
+version = "4.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "async-lru" },
+    { name = "httpx" },
+    { name = "ipykernel" },
+    { name = "jinja2" },
+    { name = "jupyter-core" },
+    { name = "jupyter-lsp" },
+    { name = "jupyter-server" },
+    { name = "jupyterlab-server" },
+    { name = "notebook-shim" },
+    { name = "packaging" },
+    { name = "setuptools" },
+    { name = "tornado" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d3/2d/d1678dcf2db66cb4a38a80d9e5fcf48c349f3ac12f2d38882993353ae768/jupyterlab-4.4.3.tar.gz", hash = "sha256:a94c32fd7f8b93e82a49dc70a6ec45a5c18281ca2a7228d12765e4e210e5bca2", size = 23032376, upload-time = "2025-05-26T11:18:00.996Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/4d/7dd5c2ffbb960930452a031dc8410746183c924580f2ab4e68ceb5b3043f/jupyterlab-4.4.3-py3-none-any.whl", hash = "sha256:164302f6d4b6c44773dfc38d585665a4db401a16e5296c37df5cba63904fbdea", size = 12295480, upload-time = "2025-05-26T11:17:56.607Z" },
+]
+
+[[package]]
+name = "jupyterlab-pygments"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/51/9187be60d989df97f5f0aba133fa54e7300f17616e065d1ada7d7646b6d6/jupyterlab_pygments-0.3.0.tar.gz", hash = "sha256:721aca4d9029252b11cfa9d185e5b5af4d54772bb8072f9b7036f4170054d35d", size = 512900, upload-time = "2023-11-23T09:26:37.44Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/dd/ead9d8ea85bf202d90cc513b533f9c363121c7792674f78e0d8a854b63b4/jupyterlab_pygments-0.3.0-py3-none-any.whl", hash = "sha256:841a89020971da1d8693f1a99997aefc5dc424bb1b251fd6322462a1b8842780", size = 15884, upload-time = "2023-11-23T09:26:34.325Z" },
+]
+
+[[package]]
+name = "jupyterlab-server"
+version = "2.27.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "babel" },
+    { name = "jinja2" },
+    { name = "json5" },
+    { name = "jsonschema" },
+    { name = "jupyter-server" },
+    { name = "packaging" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0a/c9/a883ce65eb27905ce77ace410d83587c82ea64dc85a48d1f7ed52bcfa68d/jupyterlab_server-2.27.3.tar.gz", hash = "sha256:eb36caca59e74471988f0ae25c77945610b887f777255aa21f8065def9e51ed4", size = 76173, upload-time = "2024-07-16T17:02:04.149Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/09/2032e7d15c544a0e3cd831c51d77a8ca57f7555b2e1b2922142eddb02a84/jupyterlab_server-2.27.3-py3-none-any.whl", hash = "sha256:e697488f66c3db49df675158a77b3b017520d772c6e1548c7d9bcc5df7944ee4", size = 59700, upload-time = "2024-07-16T17:02:01.115Z" },
 ]
 
 [[package]]
@@ -2374,8 +2687,8 @@ dependencies = [
     { name = "scikit-image" },
     { name = "text-generation" },
     { name = "tiktoken" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
     { name = "types-tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/46/5f/f9f948eeffc803f41864169bdf162a36660cf3d0e4d322be5b757720e29c/libvisualwebarena-0.0.14.tar.gz", hash = "sha256:7e660179f60f1df8d884204f2b742a2117e7fe050823d839ca5744ea1c0709a7", size = 7545223, upload-time = "2024-10-04T19:37:54.529Z" }
@@ -2399,8 +2712,8 @@ dependencies = [
     { name = "playwright" },
     { name = "text-generation" },
     { name = "tiktoken" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
     { name = "types-tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ea/a1/94238187b6c5225be340ebcaf86dd9c1befbc4836cdc7d20439727042237/libwebarena-0.0.3.tar.gz", hash = "sha256:3d05fae6749931aaf26e6c80fd665725dfeab41ac4848f168c407dbe3de89baf", size = 107054, upload-time = "2024-05-14T19:50:33.238Z" }
@@ -2925,6 +3238,15 @@ opencv = [
 ]
 
 [[package]]
+name = "mistune"
+version = "3.1.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/79/bda47f7dd7c3c55770478d6d02c9960c430b0cf1773b72366ff89126ea31/mistune-3.1.3.tar.gz", hash = "sha256:a7035c21782b2becb6be62f8f25d3df81ccb4d6fa477a6525b15af06539f02a0", size = 94347, upload-time = "2025-03-19T14:27:24.955Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/4d/23c4e4f09da849e127e9f123241946c23c1e30f45a88366879e064211815/mistune-3.1.3-py3-none-any.whl", hash = "sha256:1a32314113cff28aa6432e99e522677c8587fd83e3d51c29b82a52409c842bd9", size = 53410, upload-time = "2025-03-19T14:27:23.451Z" },
+]
+
+[[package]]
 name = "modal"
 version = "0.73.173"
 source = { registry = "https://pypi.org/simple" }
@@ -3076,6 +3398,61 @@ wheels = [
 ]
 
 [[package]]
+name = "nbclient"
+version = "0.10.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jupyter-client" },
+    { name = "jupyter-core" },
+    { name = "nbformat" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/66/7ffd18d58eae90d5721f9f39212327695b749e23ad44b3881744eaf4d9e8/nbclient-0.10.2.tar.gz", hash = "sha256:90b7fc6b810630db87a6d0c2250b1f0ab4cf4d3c27a299b0cde78a4ed3fd9193", size = 62424, upload-time = "2024-12-19T10:32:27.164Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/6d/e7fa07f03a4a7b221d94b4d586edb754a9b0dc3c9e2c93353e9fa4e0d117/nbclient-0.10.2-py3-none-any.whl", hash = "sha256:4ffee11e788b4a27fabeb7955547e4318a5298f34342a4bfd01f2e1faaeadc3d", size = 25434, upload-time = "2024-12-19T10:32:24.139Z" },
+]
+
+[[package]]
+name = "nbconvert"
+version = "7.16.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "bleach", extra = ["css"], marker = "(extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra != 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "defusedxml" },
+    { name = "jinja2" },
+    { name = "jupyter-core" },
+    { name = "jupyterlab-pygments" },
+    { name = "markupsafe" },
+    { name = "mistune" },
+    { name = "nbclient" },
+    { name = "nbformat" },
+    { name = "packaging" },
+    { name = "pandocfilters" },
+    { name = "pygments" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/59/f28e15fc47ffb73af68a8d9b47367a8630d76e97ae85ad18271b9db96fdf/nbconvert-7.16.6.tar.gz", hash = "sha256:576a7e37c6480da7b8465eefa66c17844243816ce1ccc372633c6b71c3c0f582", size = 857715, upload-time = "2025-01-28T09:29:14.724Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/9a/cd673b2f773a12c992f41309ef81b99da1690426bd2f96957a7ade0d3ed7/nbconvert-7.16.6-py3-none-any.whl", hash = "sha256:1375a7b67e0c2883678c48e506dc320febb57685e5ee67faa51b18a90f3a712b", size = 258525, upload-time = "2025-01-28T09:29:12.551Z" },
+]
+
+[[package]]
+name = "nbformat"
+version = "5.10.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fastjsonschema" },
+    { name = "jsonschema" },
+    { name = "jupyter-core" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/fd/91545e604bc3dad7dca9ed03284086039b294c6b3d75c0d2fa45f9e9caf3/nbformat-5.10.4.tar.gz", hash = "sha256:322168b14f937a5d11362988ecac2a4952d3d8e3a2cbeb2319584631226d5b3a", size = 142749, upload-time = "2024-04-04T11:20:37.371Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/82/0340caa499416c78e5d8f5f05947ae4bc3cba53c9f038ab6e9ed964e22f1/nbformat-5.10.4-py3-none-any.whl", hash = "sha256:3b48d6c8fbca4b299bf3982ea7db1af21580e4fec269ad087b9e81588891200b", size = 78454, upload-time = "2024-04-04T11:20:34.895Z" },
+]
+
+[[package]]
 name = "nest-asyncio"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3142,6 +3519,34 @@ wheels = [
 ]
 
 [[package]]
+name = "notebook"
+version = "7.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jupyter-server" },
+    { name = "jupyterlab" },
+    { name = "jupyterlab-server" },
+    { name = "notebook-shim" },
+    { name = "tornado" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/21/4f83b15e483da4f4f63928edd0cb08b6e7d33f8a15c23b116a90c44c6235/notebook-7.4.3.tar.gz", hash = "sha256:a1567481cd3853f2610ee0ecf5dfa12bb508e878ee8f92152c134ef7f0568a76", size = 13881668, upload-time = "2025-05-26T14:27:21.656Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/1b/16c809d799e3ddd7a97c8b43734f79624b74ddef9707e7d92275a13777bc/notebook-7.4.3-py3-none-any.whl", hash = "sha256:9cdeee954e04101cadb195d90e2ab62b7c9286c1d4f858bf3bb54e40df16c0c3", size = 14286402, upload-time = "2025-05-26T14:27:17.339Z" },
+]
+
+[[package]]
+name = "notebook-shim"
+version = "0.2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jupyter-server" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/d2/92fa3243712b9a3e8bafaf60aac366da1cada3639ca767ff4b5b3654ec28/notebook_shim-0.2.4.tar.gz", hash = "sha256:b4b2cfa1b65d98307ca24361f5b30fe785b53c3fd07b7a47e89acb5e6ac638cb", size = 13167, upload-time = "2024-02-14T23:35:18.353Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/33/bd5b9137445ea4b680023eb0469b2bb969d61303dedb2aac6560ff3d14a1/notebook_shim-0.2.4-py3-none-any.whl", hash = "sha256:411a5be4e9dc882a074ccbcae671eda64cceb068767e9a3419096986560e1cef", size = 13307, upload-time = "2024-02-14T23:35:16.286Z" },
+]
+
+[[package]]
 name = "numba"
 version = "0.60.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3152,8 +3557,8 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "llvmlite", version = "0.43.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-sql'" },
+    { name = "llvmlite", version = "0.43.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3c/93/2849300a9184775ba274aba6f82f303343669b0592b7bb0849ea713dabb0/numba-0.60.0.tar.gz", hash = "sha256:5df6158e5584eece5fc83294b949fd30b9f1125df7708862205217e068aabf16", size = 2702171, upload-time = "2024-06-13T18:11:19.869Z" }
 wheels = [
@@ -3175,8 +3580,8 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "llvmlite", version = "0.44.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "llvmlite", version = "0.44.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3c/88/c13a935f200fda51384411e49840a8e7f70c9cb1ee8d809dd0f2477cf7ef/numba-0.61.0.tar.gz", hash = "sha256:888d2e89b8160899e19591467e8fdd4970e07606e1fbc248f239c89818d5f925", size = 2816484, upload-time = "2025-01-20T11:32:37.75Z" }
 wheels = [
@@ -3701,8 +4106,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "referencing" },
     { name = "requests" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
@@ -3727,6 +4132,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/1d/a36292b6198986bd9c3ff8c24355deb82ed5475403379ee40b5b5473e2e3/outlines_core-0.1.26-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e86a1bb46adc5cbf6dfd7a7fe4105e0e2a4c6e041732a053126b41c521a1f223", size = 343201, upload-time = "2024-12-12T23:38:34.631Z" },
     { url = "https://files.pythonhosted.org/packages/08/63/5dd2b5a364412f674b6edcb59b0c21513bdb07cdcc7613b064c1a0660d01/outlines_core-0.1.26-cp312-cp312-win32.whl", hash = "sha256:19f462f6b00935708677ad27cb4df55e0e17f6ffe713ab750f5f2683b090f95d", size = 233970, upload-time = "2024-12-12T23:38:37.318Z" },
     { url = "https://files.pythonhosted.org/packages/a5/56/8adf0b7446d1e975c2314454813c59eb7b195889908a2932ed34148c113c/outlines_core-0.1.26-cp312-cp312-win_amd64.whl", hash = "sha256:9b36bff12779e58883747116893a17b3551bbd10865878b951b03a44d112229a", size = 243578, upload-time = "2024-12-12T23:38:39.964Z" },
+]
+
+[[package]]
+name = "overrides"
+version = "7.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/36/86/b585f53236dec60aba864e050778b25045f857e17f6e5ea0ae95fe80edd2/overrides-7.7.0.tar.gz", hash = "sha256:55158fa3d93b98cc75299b1e67078ad9003ca27945c76162c1c0766d6f91820a", size = 22812, upload-time = "2024-01-27T21:01:33.423Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/ab/fc8290c6a4c722e5514d80f62b2dc4c4df1a68a41d1364e625c35990fcf3/overrides-7.7.0-py3-none-any.whl", hash = "sha256:c7ed9d062f78b8e4c1a7b70bd8796b35ead4d9f510227ef9c5dc7626c60d7e49", size = 17832, upload-time = "2024-01-27T21:01:31.393Z" },
 ]
 
 [[package]]
@@ -3760,6 +4174,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pandocfilters"
+version = "1.5.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/6f/3dd4940bbe001c06a65f88e36bad298bc7a0de5036115639926b0c5c0458/pandocfilters-1.5.1.tar.gz", hash = "sha256:002b4a555ee4ebc03f8b66307e287fa492e4a77b4ea14d3f934328297bb4939e", size = 8454, upload-time = "2024-01-18T20:08:13.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/af/4fbc8cab944db5d21b7e2a5b8e9211a03a79852b1157e2c102fcc61ac440/pandocfilters-1.5.1-py2.py3-none-any.whl", hash = "sha256:93be382804a9cdb0a7267585f157e5d1731bbe5545a85b268d6f5fe6232de2bc", size = 8663, upload-time = "2024-01-18T20:08:11.28Z" },
+]
+
+[[package]]
 name = "parso"
 version = "0.8.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3787,6 +4210,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pebble"
+version = "5.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/5b/90bf2acce03a12750a570cede27b9cddd4b6f5f2cf4de1048231bb21c382/pebble-5.1.1.tar.gz", hash = "sha256:4e91a5b8e48b30b26eaa5391ba2cf65fbb3594fba17b88bc0b3351cf849d0305", size = 38672, upload-time = "2025-03-16T16:23:08.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/a7/bece0e6b17b75506c4bf13eb79728931e2f240d7928a02f0e6d2ca9c41e9/pebble-5.1.1-py3-none-any.whl", hash = "sha256:c262c94159cf6419fd4ac27ff72408650a16d6c3cf000171fb2a0386038c416e", size = 34598, upload-time = "2025-03-16T16:22:26.954Z" },
+]
+
+[[package]]
 name = "peft"
 version = "0.15.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3798,11 +4230,11 @@ dependencies = [
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
     { name = "tqdm" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/65/faa18cd8ffbe0f742c3f2559770646cce2574b9cd28a2a05e8d36f64e968/peft-0.15.2.tar.gz", hash = "sha256:7059029f4d42a092ded1aa117dd366a46084aef638bdd593f6ab0195d5427fcd", size = 472952, upload-time = "2025-04-15T15:27:53.09Z" }
 wheels = [
@@ -4366,7 +4798,7 @@ name = "pytest"
 version = "8.3.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -4500,6 +4932,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pywinpty"
+version = "2.0.15"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/7c/917f9c4681bb8d34bfbe0b79d36bbcd902651aeab48790df3d30ba0202fb/pywinpty-2.0.15.tar.gz", hash = "sha256:312cf39153a8736c617d45ce8b6ad6cd2107de121df91c455b10ce6bba7a39b2", size = 29017, upload-time = "2025-02-03T21:53:23.265Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/e5/9714def18c3a411809771a3fbcec70bffa764b9675afb00048a620fca604/pywinpty-2.0.15-cp312-cp312-win_amd64.whl", hash = "sha256:83a8f20b430bbc5d8957249f875341a60219a4e971580f2ba694fbfb54a45ebc", size = 1405243, upload-time = "2025-02-03T21:56:52.476Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4566,6 +5007,49 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/70/01/392eba83c8e47b946b929d7c46e0f04b35e9671f8bb6fc36b6f7945b4de8/qtpy-2.4.3.tar.gz", hash = "sha256:db744f7832e6d3da90568ba6ccbca3ee2b3b4a890c3d6fbbc63142f6e4cdf5bb", size = 66982, upload-time = "2025-02-11T15:09:25.759Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/69/76/37c0ccd5ab968a6a438f9c623aeecc84c202ab2fabc6a8fd927580c15b5a/QtPy-2.4.3-py3-none-any.whl", hash = "sha256:72095afe13673e017946cc258b8d5da43314197b741ed2890e563cf384b51aa1", size = 95045, upload-time = "2025-02-11T15:09:24.162Z" },
+]
+
+[[package]]
+name = "qwen-agent"
+version = "0.0.26"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dashscope" },
+    { name = "eval-type-backport" },
+    { name = "json5" },
+    { name = "jsonlines" },
+    { name = "jsonschema" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "tiktoken" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/62/97539cefbb7d1a3639bd3898b554ba316ce28ffb598689b4591869756a76/qwen-agent-0.0.26.tar.gz", hash = "sha256:16a9b121dcb00a2005a31bbef6bdf34b9ef908ff28bf129271a46defc8047cdd", size = 7048611, upload-time = "2025-05-29T09:31:22.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/c6/1f0cd5ff75e9634038578fc13373526017924c467b56ac4810dc93800798/qwen_agent-0.0.26-py3-none-any.whl", hash = "sha256:823f10b01626022a91b25bdf74c2bcc58e2c0c450b24a2a560365e8eb3b2ac44", size = 7124039, upload-time = "2025-05-29T09:31:19.898Z" },
+]
+
+[package.optional-dependencies]
+code-interpreter = [
+    { name = "anyio" },
+    { name = "fastapi" },
+    { name = "jupyter" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "seaborn" },
+    { name = "sympy" },
+    { name = "uvicorn" },
+]
+python-executor = [
+    { name = "multiprocess" },
+    { name = "numpy" },
+    { name = "pebble" },
+    { name = "python-dateutil" },
+    { name = "scipy" },
+    { name = "sympy" },
+    { name = "timeout-decorator" },
 ]
 
 [[package]]
@@ -4705,6 +5189,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9d/72/75d0b85443fbc8d9f38d08d2b1b67cc184ce35280e4a3813cda2f445f3a4/retry-0.9.2.tar.gz", hash = "sha256:f8bfa8b99b69c4506d6f5bd3b0aabf77f98cdb17f3c9fc3f5ca820033336fba4", size = 6448, upload-time = "2016-05-11T13:58:51.541Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/0d/53aea75710af4528a25ed6837d71d117602b01946b307a3912cb3cfcbcba/retry-0.9.2-py2.py3-none-any.whl", hash = "sha256:ccddf89761fa2c726ab29391837d4327f819ea14d244c232a1d24c67a2f98606", size = 7986, upload-time = "2016-05-11T13:58:39.925Z" },
+]
+
+[[package]]
+name = "rfc3339-validator"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/28/ea/a9387748e2d111c3c2b275ba970b735e04e15cdb1eb30693b6b5708c4dbd/rfc3339_validator-0.1.4.tar.gz", hash = "sha256:138a2abdf93304ad60530167e51d2dfb9549521a836871b88d7f4695d0022f6b", size = 5513, upload-time = "2021-05-12T16:37:54.178Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/44/4e421b96b67b2daff264473f7465db72fbdf36a07e05494f50300cc7b0c6/rfc3339_validator-0.1.4-py2.py3-none-any.whl", hash = "sha256:24f6ec1eda14ef823da9e36ec7113124b39c04d50a4d3d3a3c2859577e7791fa", size = 3490, upload-time = "2021-05-12T16:37:52.536Z" },
+]
+
+[[package]]
+name = "rfc3986-validator"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/88/f270de456dd7d11dcc808abfa291ecdd3f45ff44e3b549ffa01b126464d0/rfc3986_validator-0.1.1.tar.gz", hash = "sha256:3d44bde7921b3b9ec3ae4e3adca370438eccebc676456449b145d533b240d055", size = 6760, upload-time = "2019-10-28T16:00:19.144Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/51/17023c0f8f1869d8806b979a2bffa3f861f26a3f1a66b094288323fba52f/rfc3986_validator-0.1.1-py2.py3-none-any.whl", hash = "sha256:2f235c432ef459970b4306369336b9d5dbdda31b510ca1e327636e01f528bfa9", size = 4242, upload-time = "2019-10-28T16:00:13.976Z" },
 ]
 
 [[package]]
@@ -4912,6 +5417,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/86/59/a451d7420a77ab0b98f7affa3a1d78a313d2f7281a57afb1a34bae8ab412/seaborn-0.13.2.tar.gz", hash = "sha256:93e60a40988f4d65e9f4885df477e2fdaff6b73a9ded434c1ab356dd57eefff7", size = 1457696, upload-time = "2024-01-25T13:21:52.551Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/83/11/00d3c3dfc25ad54e731d91449895a79e4bf2384dc3ac01809010ba88f6d5/seaborn-0.13.2-py3-none-any.whl", hash = "sha256:636f8336facf092165e27924f223d3c62ca560b1f2bb5dff7ab7fad265361987", size = 294914, upload-time = "2024-01-25T13:21:49.598Z" },
+]
+
+[[package]]
+name = "send2trash"
+version = "1.8.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/3a/aec9b02217bb79b87bbc1a21bc6abc51e3d5dcf65c30487ac96c0908c722/Send2Trash-1.8.3.tar.gz", hash = "sha256:b18e7a3966d99871aefeb00cfbcfdced55ce4871194810fc71f4aa484b953abf", size = 17394, upload-time = "2024-04-07T00:01:09.267Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/40/b0/4562db6223154aa4e22f939003cb92514c79f3d4dccca3444253fd17f902/Send2Trash-1.8.3-py3-none-any.whl", hash = "sha256:0c31227e0bd08961c7665474a3d1ef7193929fedda4233843689baa056be46c9", size = 18072, upload-time = "2024-04-07T00:01:07.438Z" },
 ]
 
 [[package]]
@@ -5239,7 +5753,7 @@ name = "sqlalchemy"
 version = "2.0.41"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "greenlet", marker = "platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "greenlet", marker = "platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/63/66/45b165c595ec89aa7dcc2c1cd222ab269bc753f1fc7a1e68f8481bd957bf/sqlalchemy-2.0.41.tar.gz", hash = "sha256:edba70118c4be3c2b1f90754d308d0b79c6fe2c0fdc52d8ddf603916f83f4db9", size = 9689424, upload-time = "2025-05-14T17:10:32.339Z" }
@@ -5321,7 +5835,7 @@ dependencies = [
     { name = "toml" },
     { name = "tornado" },
     { name = "typing-extensions" },
-    { name = "watchdog", marker = "sys_platform != 'darwin' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "watchdog", marker = "sys_platform != 'darwin' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f0/46/9b3f73886f82d27849ce1e7a74ae7c39f5323e46da0b6e8847ad4c25f44c/streamlit-1.45.1.tar.gz", hash = "sha256:e37d56c0af5240dbc240976880e81366689c290a559376417246f9b3f51b4217", size = 9463953, upload-time = "2025-05-12T20:40:30.562Z" }
 wheels = [
@@ -5448,8 +5962,8 @@ dependencies = [
     { name = "cloudpickle" },
     { name = "numpy" },
     { name = "orjson" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d2/17/a2bdb51d5d1b2f06debdf8f60c159cf328c778b6cc8103940f2079e2e767/tensordict-0.6.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:529515ffcb0c6ab5d1c0c85798defe8972e5390412c356c79b87f4073e48b537", size = 668892, upload-time = "2024-11-14T15:02:37.036Z" },
@@ -5463,6 +5977,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ca/6c/3d75c196ac07ac8749600b60b03f4f6094d54e132c4d94ebac6ee0e0add0/termcolor-3.1.0.tar.gz", hash = "sha256:6a6dd7fbee581909eeec6a756cff1d7f7c376063b14e4a298dc4980309e55970", size = 14324, upload-time = "2025-04-30T11:37:53.791Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/bd/de8d508070629b6d84a30d01d57e4a65c69aa7f5abe7560b8fad3b50ea59/termcolor-3.1.0-py3-none-any.whl", hash = "sha256:591dd26b5c2ce03b9e43f391264626557873ce1d379019786f99b0c2bee140aa", size = 7684, upload-time = "2025-04-30T11:37:52.382Z" },
+]
+
+[[package]]
+name = "terminado"
+version = "0.18.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ptyprocess", marker = "os_name != 'nt'" },
+    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "tornado" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/11/965c6fd8e5cc254f1fe142d547387da17a8ebfd75a3455f637c663fb38a0/terminado-0.18.1.tar.gz", hash = "sha256:de09f2c4b85de4765f7714688fff57d3e75bad1f909b589fde880460c753fd2e", size = 32701, upload-time = "2024-03-12T14:34:39.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/9e/2064975477fdc887e47ad42157e214526dcad8f317a948dee17e1659a62f/terminado-0.18.1-py3-none-any.whl", hash = "sha256:a4468e1b37bb318f8a86514f65814e1afc977cf29b3992a4500d9dd305dcceb0", size = 14154, upload-time = "2024-03-12T14:34:36.569Z" },
 ]
 
 [[package]]
@@ -5510,6 +6038,24 @@ wheels = [
 ]
 
 [[package]]
+name = "timeout-decorator"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/80/f8/0802dd14c58b5d3d72bb9caa4315535f58787a1dc50b81bbbcaaa15451be/timeout-decorator-0.5.0.tar.gz", hash = "sha256:6a2f2f58db1c5b24a2cc79de6345760377ad8bdc13813f5265f6c3e63d16b3d7", size = 4754, upload-time = "2020-11-15T00:53:06.506Z" }
+
+[[package]]
+name = "tinycss2"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "webencodings" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7a/fd/7a5ee21fd08ff70d3d33a5781c255cbe779659bd03278feb98b19ee550f4/tinycss2-1.4.0.tar.gz", hash = "sha256:10c0972f6fc0fbee87c3edb76549357415e94548c1ae10ebccdea16fb404a9b7", size = 87085, upload-time = "2024-10-24T14:58:29.895Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e6/34/ebdc18bae6aa14fbee1a08b63c015c72b64868ff7dae68808ab500c492e2/tinycss2-1.4.0-py3-none-any.whl", hash = "sha256:3a49cf47b7675da0b15d0c6e1df8df4ebd96e9394bb905a5775adb0d884c5289", size = 26610, upload-time = "2024-10-24T14:58:28.029Z" },
+]
+
+[[package]]
 name = "tokenizers"
 version = "0.21.1"
 source = { registry = "https://pypi.org/simple" }
@@ -5554,26 +6100,26 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "fsspec", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "jinja2", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "networkx", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "setuptools", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "sympy", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "triton", version = "3.1.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "typing-extensions", marker = "extra == 'extra-4-verl-sql'" },
+    { name = "filelock", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "fsspec", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "jinja2", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "networkx", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "setuptools", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "sympy", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "triton", version = "3.1.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "typing-extensions", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/5c/36c114d120bfe10f9323ed35061bc5878cc74f3f594003854b0ea298942f/torch-2.5.1-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:ed231a4b3a5952177fafb661213d690a72caaad97d5824dd4fc17ab9e15cec03", size = 906389343, upload-time = "2024-10-29T17:37:06.758Z" },
@@ -5593,27 +6139,27 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "fsspec", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "jinja2", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "networkx", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "setuptools", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "sympy", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "triton", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "typing-extensions", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "filelock", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "fsspec", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "jinja2", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "networkx", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cufft-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cusolver-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cusparse-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-cusparselt-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-nccl-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "nvidia-nvtx-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "setuptools", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "sympy", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "triton", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "typing-extensions", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/35/0c52d708144c2deb595cd22819a609f78fdd699b95ff6f0ebcd456e3c7c1/torch-2.6.0-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:2bb8987f3bb1ef2675897034402373ddfc8f5ef0e156e2d8cfc47cacafdda4a9", size = 766624563, upload-time = "2025-01-29T16:23:19.084Z" },
@@ -5651,7 +6197,7 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/03/ab/151037a41e2cf4a5d489dfe5e7196b755e0fd83958d5ca7ad8ed85afcb1c/torchaudio-2.5.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:f1cbfdfd1bbdfbe7289d47a74f36ff6c5d87c3205606202fef5a7fb693f61cf0", size = 1798042, upload-time = "2024-10-29T17:41:27.454Z" },
@@ -5671,7 +6217,7 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/4a/d71b932bda4171970bdf4997541b5c778daa0e2967ed5009d207fca86ded/torchaudio-2.6.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:7d0e4b08c42325bf4b887de9a25c44ed882997001740e1bd7d901f65581cf1ab", size = 1812899, upload-time = "2025-01-29T16:29:41.021Z" },
@@ -5686,8 +6232,8 @@ version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
     { name = "urllib3" },
 ]
 wheels = [
@@ -5705,9 +6251,9 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "numpy", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "pillow", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "pillow", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c5/eb/4ba19616378f2bc085999432fded2b7dfdbdccc6dd0fc293203452508100/torchvision-0.20.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:1a31256ff945d64f006bb306813a7c95a531fe16bfb2535c837dd4c104533d7a", size = 1787553, upload-time = "2024-10-29T17:40:50.63Z" },
@@ -5790,16 +6336,16 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "huggingface-hub", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "packaging", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "pyyaml", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "regex", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "requests", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "safetensors", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "tokenizers", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "tqdm", marker = "extra == 'extra-4-verl-sql'" },
+    { name = "filelock", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "huggingface-hub", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "packaging", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "pyyaml", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "regex", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "requests", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "safetensors", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "tokenizers", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "tqdm", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/38/75/6ebdae4d6f4574f47139a070445245537e43482d006f615af8e23d5bf05e/transformers-4.51.0.tar.gz", hash = "sha256:2d302563ff6c2cc2d0e88ef352cf059f9a21ce18102fd43662bb1246f70b8a84", size = 8925571, upload-time = "2025-04-05T20:08:55.21Z" }
 wheels = [
@@ -5817,16 +6363,16 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "huggingface-hub", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "packaging", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "pyyaml", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "regex", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "requests", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "safetensors", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "tokenizers", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "tqdm", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "filelock", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "huggingface-hub", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "packaging", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "pyyaml", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "regex", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "requests", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "safetensors", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "tokenizers", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "tqdm", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/85/9182a14e0cceb6ababd37c9832d99f1c939e89854c80fa676ee0dbb8615b/transformers-4.51.1.tar.gz", hash = "sha256:206ea0b75dfde142ed7495b911da76579dce6ea249cc3695fdd29a544a9e007b", size = 8935230, upload-time = "2025-04-08T09:23:41.883Z" }
 wheels = [
@@ -5939,7 +6485,7 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "filelock", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/78/eb/65f5ba83c2a123f6498a3097746607e5b2f16add29e36765305e4ac7fdd8/triton-3.1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c8182f42fd8080a7d39d666814fa36c5e30cc00ea7eeeb1a2983dbb4c99a0fdc", size = 209551444, upload-time = "2024-10-14T16:05:53.433Z" },
@@ -5980,6 +6526,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/52/68/943c3aeaf14624712a0357c4a67814dba5cea36d194f5c764dad7959a00c/types-certifi-2021.10.8.3.tar.gz", hash = "sha256:72cf7798d165bc0b76e1c10dd1ea3097c7063c42c21d664523b928e88b554a4f", size = 2095, upload-time = "2022-06-09T15:19:05.244Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/63/2463d89481e811f007b0e1cd0a91e52e141b47f9de724d20db7b861dcfec/types_certifi-2021.10.8.3-py3-none-any.whl", hash = "sha256:b2d1e325e69f71f7c78e5943d410e650b4707bb0ef32e4ddf3da37f54176e88a", size = 2136, upload-time = "2022-06-09T15:19:03.127Z" },
+]
+
+[[package]]
+name = "types-python-dateutil"
+version = "2.9.0.20250516"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/88/d65ed807393285204ab6e2801e5d11fbbea811adcaa979a2ed3b67a5ef41/types_python_dateutil-2.9.0.20250516.tar.gz", hash = "sha256:13e80d6c9c47df23ad773d54b2826bd52dbbb41be87c3f339381c1700ad21ee5", size = 13943, upload-time = "2025-05-16T03:06:58.385Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c5/3f/b0e8db149896005adc938a1e7f371d6d7e9eca4053a29b108978ed15e0c2/types_python_dateutil-2.9.0.20250516-py3-none-any.whl", hash = "sha256:2b2b3f57f9c6a61fba26a9c0ffb9ea5681c9b83e69cd897c6b5f668d9c0cab93", size = 14356, upload-time = "2025-05-16T03:06:57.249Z" },
 ]
 
 [[package]]
@@ -6068,6 +6623,15 @@ wheels = [
 ]
 
 [[package]]
+name = "uri-template"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/c7/0336f2bd0bcbada6ccef7aaa25e443c118a704f828a0620c6fa0207c1b64/uri-template-1.3.0.tar.gz", hash = "sha256:0e00f8eb65e18c7de20d595a14336e9f337ead580c70934141624b6d1ffdacc7", size = 21678, upload-time = "2023-06-21T01:49:05.374Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/00/3fca040d7cf8a32776d3d81a00c8ee7457e00f80c649f1e4a863c8321ae9/uri_template-1.3.0-py3-none-any.whl", hash = "sha256:a44a133ea12d44a0c0f06d7d42a52d71282e77e2f937d8abd5655b8d56fc1363", size = 11140, upload-time = "2023-06-21T01:49:03.467Z" },
+]
+
+[[package]]
 name = "uritemplate"
 version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -6100,11 +6664,11 @@ wheels = [
 
 [package.optional-dependencies]
 standard = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
     { name = "httptools" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32') or (platform_python_implementation == 'PyPy' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform == 'cygwin' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform == 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32') or (platform_python_implementation == 'PyPy' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_python_implementation == 'PyPy' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_python_implementation == 'PyPy' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform == 'cygwin' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform == 'cygwin' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform == 'cygwin' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform == 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform == 'win32' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform == 'win32' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
     { name = "watchfiles" },
     { name = "websockets" },
 ]
@@ -6160,10 +6724,10 @@ dependencies = [
     { name = "tensordict" },
     { name = "torch-memory-saver" },
     { name = "torchdata" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "vllm", version = "0.7.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "vllm", version = "0.8.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "vllm", version = "0.7.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "vllm", version = "0.8.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
     { name = "wandb" },
     { name = "whatthepatch" },
 ]
@@ -6172,17 +6736,24 @@ dependencies = [
 sql = [
     { name = "flash-attn", version = "2.7.4.post1", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl" } },
     { name = "flashinfer-python", version = "0.2.3+cu124torch2.5", source = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.5-cp38-abi3-linux_x86_64.whl" } },
-    { name = "sglang", version = "0.4.4.post4", source = { registry = "https://pypi.org/simple" }, extra = ["all"], marker = "extra == 'extra-4-verl-sql'" },
+    { name = "sglang", version = "0.4.4.post4", source = { registry = "https://pypi.org/simple" }, extra = ["all"], marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 swebench = [
     { name = "flash-attn", version = "2.7.4.post1", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl" } },
     { name = "flashinfer-python", version = "0.2.3+cu124torch2.6", source = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl" } },
-    { name = "sglang", version = "0.4.6.post1", source = { registry = "https://pypi.org/simple" }, extra = ["all"], marker = "extra == 'extra-4-verl-swebench'" },
+    { name = "sglang", version = "0.4.6.post1", source = { registry = "https://pypi.org/simple" }, extra = ["all"], marker = "extra == 'extra-4-verl-swebench' or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
 ]
 test = [
     { name = "py-spy" },
     { name = "pytest" },
     { name = "yapf" },
+]
+torl = [
+    { name = "flash-attn", version = "2.7.4.post1", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl" } },
+    { name = "flashinfer-python", version = "0.2.3+cu124torch2.6", source = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl" } },
+    { name = "json5" },
+    { name = "qwen-agent", extra = ["code-interpreter", "python-executor"], marker = "(extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra != 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "sglang", version = "0.4.6.post1", source = { registry = "https://pypi.org/simple" }, extra = ["all"], marker = "(extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra != 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
 ]
 
 [package.metadata]
@@ -6199,12 +6770,15 @@ requires-dist = [
     { name = "evaluate" },
     { name = "flash-attn", marker = "extra == 'sql'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-attn", marker = "extra == 'swebench'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl" },
+    { name = "flash-attn", marker = "extra == 'torl'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'sql'", url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.5-cp38-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'swebench'", url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl" },
+    { name = "flashinfer-python", marker = "extra == 'torl'", url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl" },
     { name = "func-timeout" },
     { name = "gdown" },
     { name = "hf-transfer" },
     { name = "hydra-core" },
+    { name = "json5", marker = "extra == 'torl'" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "openhands-ai", editable = "SkyRL-OpenHands" },
@@ -6215,11 +6789,13 @@ requires-dist = [
     { name = "pybind11" },
     { name = "pylatexenc" },
     { name = "pytest", marker = "extra == 'test'" },
+    { name = "qwen-agent", extras = ["code-interpreter", "python-executor"], marker = "extra == 'torl'" },
     { name = "ray", extras = ["default"], specifier = ">=2.10" },
     { name = "retry" },
     { name = "seaborn" },
     { name = "sglang", extras = ["all"], marker = "extra == 'sql'", specifier = "==0.4.4.post4" },
     { name = "sglang", extras = ["all"], marker = "extra == 'swebench'", specifier = "==0.4.6.post1" },
+    { name = "sglang", extras = ["all"], marker = "extra == 'torl'", specifier = "==0.4.6.post1" },
     { name = "streamlit" },
     { name = "swebench", git = "https://github.com/SWE-Gym/SWE-Bench-Fork.git" },
     { name = "swegym", git = "https://github.com/SWE-Gym/SWE-Bench-Package.git" },
@@ -6234,7 +6810,7 @@ requires-dist = [
     { name = "whatthepatch" },
     { name = "yapf", marker = "extra == 'test'" },
 ]
-provides-extras = ["swebench", "sql", "test"]
+provides-extras = ["swebench", "sql", "torl", "test"]
 
 [[package]]
 name = "virtualenv"
@@ -6261,49 +6837,49 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "aiohttp", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "blake3", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "cloudpickle", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "compressed-tensors", version = "0.9.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "depyf", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "einops", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "fastapi", extra = ["standard"], marker = "extra == 'extra-4-verl-sql'" },
-    { name = "filelock", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "gguf", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "importlib-metadata", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "lark", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "lm-format-enforcer", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "mistral-common", extra = ["opencv"], marker = "extra == 'extra-4-verl-sql'" },
-    { name = "msgspec", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "numba", version = "0.60.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "openai", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "outlines", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "partial-json-parser", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "pillow", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "prometheus-client", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "prometheus-fastapi-instrumentator", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "protobuf", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "psutil", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "py-cpuinfo", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "pydantic", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "pyyaml", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "pyzmq", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "ray", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "requests", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "sentencepiece", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "setuptools", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "six", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "tiktoken", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "tokenizers", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torchaudio", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torchvision", version = "0.20.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "tqdm", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "typing-extensions", marker = "extra == 'extra-4-verl-sql'" },
-    { name = "xformers", version = "0.0.28.post3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "xgrammar", marker = "extra == 'extra-4-verl-sql'" },
+    { name = "aiohttp", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "blake3", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "cloudpickle", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "compressed-tensors", version = "0.9.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "depyf", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "einops", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "fastapi", extra = ["standard"], marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "filelock", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "gguf", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "importlib-metadata", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "lark", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "lm-format-enforcer", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "mistral-common", extra = ["opencv"], marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "msgspec", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "numba", version = "0.60.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "openai", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "outlines", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "partial-json-parser", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "pillow", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "prometheus-client", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "prometheus-fastapi-instrumentator", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "protobuf", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "psutil", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "py-cpuinfo", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "pydantic", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "pyyaml", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "pyzmq", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "ray", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "requests", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "sentencepiece", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "setuptools", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "six", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "tiktoken", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "tokenizers", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torchaudio", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torchvision", version = "0.20.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "tqdm", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "typing-extensions", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "xformers", version = "0.0.28.post3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "xgrammar", marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f5/73/87825ee293f0e721eb8aadbd0cf9c3436d4e3b3458322878f1f6e7398a0d/vllm-0.7.3.tar.gz", hash = "sha256:841cc30bd4ffbc037e8b8bf6dbacbedc60cc0b2abb60366873b185159a1204e6", size = 5575258, upload-time = "2025-02-20T18:02:08.197Z" }
 wheels = [
@@ -6321,57 +6897,57 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "aiohttp", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "blake3", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "cachetools", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "cloudpickle", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "compressed-tensors", version = "0.9.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "depyf", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "einops", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "fastapi", extra = ["standard"], marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "filelock", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "gguf", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "huggingface-hub", extra = ["hf-xet"], marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "importlib-metadata", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "lark", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "llguidance", marker = "(platform_machine == 'aarch64' and extra != 'extra-4-verl-sql') or (platform_machine == 'arm64' and extra != 'extra-4-verl-sql') or (platform_machine == 'x86_64' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "lm-format-enforcer", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "mistral-common", extra = ["opencv"], marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "msgspec", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "ninja", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "numba", version = "0.61.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "openai", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "opencv-python-headless", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "outlines", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "partial-json-parser", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "pillow", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "prometheus-client", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "prometheus-fastapi-instrumentator", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "protobuf", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "psutil", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "py-cpuinfo", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "pydantic", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "python-json-logger", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "pyyaml", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "pyzmq", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "ray", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "requests", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "scipy", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "sentencepiece", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "setuptools", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "six", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "tiktoken", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "tokenizers", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "torchaudio", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "torchvision", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "tqdm", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "typing-extensions", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "watchfiles", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "xformers", version = "0.0.29.post2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "xgrammar", marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
+    { name = "aiohttp", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "blake3", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "cachetools", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "cloudpickle", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "compressed-tensors", version = "0.9.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "depyf", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "einops", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "fastapi", extra = ["standard"], marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "filelock", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "gguf", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "huggingface-hub", extra = ["hf-xet"], marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "importlib-metadata", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "lark", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "llguidance", marker = "(platform_machine == 'aarch64' and extra != 'extra-4-verl-sql') or (platform_machine == 'arm64' and extra != 'extra-4-verl-sql') or (platform_machine == 'x86_64' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "lm-format-enforcer", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "mistral-common", extra = ["opencv"], marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "msgspec", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "ninja", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "numba", version = "0.61.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "numpy", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "openai", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "opencv-python-headless", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "outlines", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "partial-json-parser", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "pillow", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "prometheus-client", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "prometheus-fastapi-instrumentator", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "protobuf", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "psutil", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "py-cpuinfo", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "pydantic", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "python-json-logger", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "pyyaml", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "pyzmq", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "ray", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "requests", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "scipy", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "sentencepiece", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "setuptools", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "six", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "tiktoken", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "tokenizers", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "torchaudio", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "torchvision", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "tqdm", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "typing-extensions", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "watchfiles", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "xformers", version = "0.0.29.post2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "xgrammar", marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/62/ef/238efdf161d527e7872f1792f731fbddcc17ad6362dd43b23dd6c91add1c/vllm-0.8.3.tar.gz", hash = "sha256:475a39d1093b8ef8a905d63eafe0c6c9b8f4f4c2ae2d23f1f3d0fae5e37bb4bd", size = 6618606, upload-time = "2025-04-06T06:47:20.952Z" }
 wheels = [
@@ -6466,6 +7042,33 @@ wheels = [
 ]
 
 [[package]]
+name = "webcolors"
+version = "24.11.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/29/061ec845fb58521848f3739e466efd8250b4b7b98c1b6c5bf4d40b419b7e/webcolors-24.11.1.tar.gz", hash = "sha256:ecb3d768f32202af770477b8b65f318fa4f566c22948673a977b00d589dd80f6", size = 45064, upload-time = "2024-11-11T07:43:24.224Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/e8/c0e05e4684d13459f93d312077a9a2efbe04d59c393bc2b8802248c908d4/webcolors-24.11.1-py3-none-any.whl", hash = "sha256:515291393b4cdf0eb19c155749a096f779f7d909f7cceea072791cb9095b92e9", size = 14934, upload-time = "2024-11-11T07:43:22.529Z" },
+]
+
+[[package]]
+name = "webencodings"
+version = "0.5.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0b/02/ae6ceac1baeda530866a85075641cec12989bd8d31af6d5ab4a3e8c92f47/webencodings-0.5.1.tar.gz", hash = "sha256:b36a1c245f2d304965eb4e0a82848379241dc04b865afcc4aab16748587e1923", size = 9721, upload-time = "2017-04-05T20:21:34.189Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/24/2a3e3df732393fed8b3ebf2ec078f05546de641fe1b667ee316ec1dcf3b7/webencodings-0.5.1-py2.py3-none-any.whl", hash = "sha256:a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78", size = 11774, upload-time = "2017-04-05T20:21:32.581Z" },
+]
+
+[[package]]
+name = "websocket-client"
+version = "1.8.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/30/fba0d96b4b5fbf5948ed3f4681f7da2f9f64512e1d303f94b4cc174c24a5/websocket_client-1.8.0.tar.gz", hash = "sha256:3239df9f44da632f96012472805d40a23281a991027ce11d2f45a6f24ac4c3da", size = 54648, upload-time = "2024-04-23T22:16:16.976Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/84/44687a29792a70e111c5c477230a72c4b957d88d16141199bf9acb7537a3/websocket_client-1.8.0-py3-none-any.whl", hash = "sha256:17b44cc997f5c498e809b22cdf2d9c7a9e71c02c8cc2b6c56e7c2d1239bfa526", size = 58826, upload-time = "2024-04-23T22:16:14.422Z" },
+]
+
+[[package]]
 name = "websockets"
 version = "15.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -6555,8 +7158,8 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "numpy", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "numpy", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/00/d8/7301b2044e29b384b6ec009ed37002f4df48906a2a772654e8386fa3b730/xformers-0.0.28.post3.tar.gz", hash = "sha256:c7a2392c874dfd8f38b73e14492baf048a4f50f77ddf522bfcf6ebf5ee84d567", size = 7758532, upload-time = "2024-10-30T20:57:52.913Z" }
 wheels = [
@@ -6571,8 +7174,8 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "numpy", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "numpy", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine == 'aarch64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/27/ed/04ec7ef97a7e1c836add41ef5a2aef8cbdd45c0190ca42cc08f3c21e2b7b/xformers-0.0.29.post2.tar.gz", hash = "sha256:6ca3d1a6db6f2abff25c1154adee96987f77f4dfd5141771805afa5fc13e9395", size = 8468494, upload-time = "2025-02-01T02:33:48.209Z" }
 wheels = [
@@ -6590,12 +7193,12 @@ dependencies = [
     { name = "pydantic" },
     { name = "sentencepiece" },
     { name = "tiktoken" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql'" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra != 'extra-4-verl-sql'" },
-    { name = "triton", version = "3.1.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and platform_system == 'linux' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_system != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
-    { name = "triton", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and platform_system == 'linux' and sys_platform != 'linux') or (platform_machine == 'x86_64' and platform_system == 'linux' and extra != 'extra-4-verl-sql') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench')" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "transformers", version = "4.51.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-sql' or (extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-swebench' or extra == 'extra-4-verl-torl' or extra != 'extra-4-verl-sql'" },
+    { name = "triton", version = "3.1.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and platform_system == 'linux' and sys_platform == 'linux' and extra == 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (platform_system != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (platform_system != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (platform_system != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (sys_platform != 'linux' and extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl') or (sys_platform != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra != 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl')" },
+    { name = "triton", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and platform_system == 'linux' and sys_platform != 'linux') or (platform_machine == 'x86_64' and platform_system == 'linux' and extra != 'extra-4-verl-sql') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (platform_system != 'linux' and extra == 'extra-4-verl-swebench' and extra == 'extra-4-verl-torl') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-swebench') or (extra == 'extra-4-verl-sql' and extra == 'extra-4-verl-torl')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e6/f9/6d530ce703cf5aae65d594a5ab984b9c0c4956e6fdbcc3279e8b1eaa358e/xgrammar-0.1.17.tar.gz", hash = "sha256:8f6cd7b3436482ad8c94b6cc93892a7f36381315c443e8e7f256f8d71c3efdee", size = 1679977, upload-time = "2025-03-25T11:08:13.458Z" }
 wheels = [

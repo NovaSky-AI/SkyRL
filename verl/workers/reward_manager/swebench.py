@@ -65,16 +65,6 @@ async def parallel_compute_score_async(evaluation_func,
         if extra_info is None:
             extra_info = [None] * len(tasks)
         # Create tasks for all rows
-        """
-        results = []
-        for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info):
-            print(f"Using eval func: {evaluation_func}")
-            cur_score = evaluation_func(task, completion, reference, task_extra_info)
-            results.append([cur_score])
-            print(f"Get score: {cur_score}")
-        """
-            # results.append(single_compute_score(evaluation_func, completion, reference, task, task_extra_info, executor, timeout=300.)) 
-        # """
         tasks_async = [
             single_compute_score(evaluation_func, completion, reference, task, task_extra_info, executor, timeout=300.)
             for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info)
@@ -89,7 +79,6 @@ async def parallel_compute_score_async(evaluation_func,
                 except Exception as kill_err:
                     print('shut down failed: ' + str(kill_err))
             raise
-        # """
 
     # Process results
     for result, completion, reference, task in zip(results, completions, references, tasks):

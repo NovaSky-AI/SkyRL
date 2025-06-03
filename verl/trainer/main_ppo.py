@@ -187,6 +187,9 @@ class TaskRunner:
         elif reward_manager_name == 'sql':
             from verl.workers.reward_manager import SQLRewardManager
             reward_manager_cls = SQLRewardManager
+        elif reward_manager_name == 'torl':
+            from verl.workers.reward_manager import ToRLRewardManager
+            reward_manager_cls = ToRLRewardManager
         else:
             raise NotImplementedError
 
