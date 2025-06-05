@@ -753,13 +753,12 @@ class CodeActAgentGroup:
         """Initialize the runtime for a specific agent."""
         instance_id = self.batch[batch_id].non_tensor_batch['instance']['instance_id']
         data_source = self.batch[batch_id].non_tensor_batch['data_source']
-        print("data_source", data_source)
         instance = pd.Series(self.batch[batch_id].non_tensor_batch['instance'])
         agent = self.agents[instance_id][trajectory_id]
         agent_config = agent.config
         
         try:
-            app_config = get_config(instance_id, self.max_iterations, agent_config)
+            app_config = get_config(instance, self.max_iterations, agent_config, data_source)
             
             # Create runtime
             runtime = create_runtime(app_config)
@@ -873,9 +872,15 @@ class CodeActAgentGroup:
                 APPLY_PATCH_FAIL,
                 APPLY_PATCH_PASS,
             )
+        elif 'swe-smith' in dataset:
+            from swesmith.harness.grading import get_eval_report
+            from swebench.harness.constants import (
+                APPLY_PATCH_FAIL,
+                APPLY_PATCH_PASS,
+            )
         else:  # Newer version of SWE-Bench have different import paths
             from swebench.harness.grading import get_eval_report
-            from swebench.harness.run_evaluation import (
+            from swebench.harness.constants import (
                 APPLY_PATCH_FAIL,
                 APPLY_PATCH_PASS,
             )
@@ -1027,6 +1032,8 @@ class CodeActAgentGroup:
             from swegym.harness.test_spec import (
                 make_test_spec,
             )
+        elif 'swe-smith' in dataset:
+            from .swesmith_utils import make_test_spec
         else:  # Newer version of SWE-Bench have different import paths
             from swebench.harness.test_spec.test_spec import (
                 make_test_spec,
@@ -1036,7 +1043,7 @@ class CodeActAgentGroup:
         try:
             # Configure sandbox
             # We use a different instance image for the each instance of swe-bench eval
-            base_container_image = get_instance_docker_image(instance_id)
+            base_container_image = get_instance_docker_image(instance, dataset)
             logger.info(
                 f'Using instance container image: {base_container_image}. '
                 f'Please make sure this image exists. '

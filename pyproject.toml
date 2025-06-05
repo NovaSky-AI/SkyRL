@@ -50,6 +50,7 @@ dependencies=[
   "evaluate",
   "swebench@https://github.com/SWE-Gym/SWE-Bench-Fork.git",
   "swegym@https://github.com/SWE-Gym/SWE-Bench-Package.git",
+  "swesmith",
   "commit0",
   "func_timeout",
   "sympy",

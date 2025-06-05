@@ -55,7 +55,7 @@ def assert_and_raise(condition: bool, msg: str):
 RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
 
 def _get_swebench_workspace_dir_name(instance: pd.Series) -> str:
-    return f'{instance.repo}__{instance.version}'.replace('/', '__')
+    return f'{instance.repo}__{getattr(instance, "version", "null")}'.replace('/', '__')
 
 def get_instruction(instance: pd.Series):
     workspace_dir_name = _get_swebench_workspace_dir_name(instance)
@@ -141,7 +141,12 @@ Be thorough in your exploration, testing, and reasoning. It's fine if your think
         return MessageAction(content=instruction, image_urls=image_urls)
     return MessageAction(content=instruction)
 
-def get_instance_docker_image(instance_id: str) -> str:
+def get_instance_docker_image(instance, data_source) -> str:
+    if 'swe-smith' in data_source:
+        image_name = instance['image_name']
+        return f"jyangballin/{image_name.replace('__', '_1776_')}"
+
+    instance_id = instance['instance_id']
     image_name = 'sweb.eval.x86_64.' + instance_id
     image_name = image_name.replace(
         '__', '_s_'
@@ -162,14 +167,14 @@ def get_default_sandbox_config_for_eval():
         remote_runtime_class='sysbox',
     )
 
-def get_config(instance_id, max_iterations, agent_config):
+def get_config(instance, max_iterations, agent_config, data_source):
     # Configure sandbox
     RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
     SWE_BENCH_CONTAINER_IMAGE = 'ghcr.io/opendevin/eval-swe-bench:full-v1.2.1'
     
     if os.environ.get('USE_INSTANCE_IMAGE', 'true').lower() == 'true':
         # Use a different instance image for each instance of swe-bench eval
-        base_container_image = get_instance_docker_image(instance_id)
+        base_container_image = get_instance_docker_image(instance, data_source)
         logger.info(
             f'Using instance container image: {base_container_image}. '
             f'Please make sure this image exists. '
@@ -304,6 +309,14 @@ def initialize_runtime(
         f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}',
     )
 
+    # git fetch needed by swe-smith
+    action = CmdRunAction(command='git fetch')
+    action.set_hard_timeout(600)
+    logger.info(action, extra={'msg_type': 'ACTION'})
+    obs = runtime.run_action(action)
+    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+    assert_and_raise(obs.exit_code == 0, f'Failed to git fetch: {str(obs)}')
+
     action = CmdRunAction(command='git reset --hard')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
@@ -392,6 +405,7 @@ def remove_binary_diffs(patch_text):
         cleaned_lines.extend(block)
     return '\n'.join(cleaned_lines)
 
+# avoid depend on file cmd
 def remove_binary_files_from_git():
     """
     Generate a bash command to remove binary files from git staging.
@@ -400,8 +414,8 @@ def remove_binary_files_from_git():
         str: A bash command that removes binary files from git staging
     """
     return """
-    for file in $(git status --porcelain | grep -E "^(M| M|\\?\\?|A| A)" | cut -c4-); do
-        if [ -f "$file" ] && (file "$file" | grep -q "executable" || git check-attr binary "$file" | grep -q "binary: set"); then
+    for file in $(git status --porcelain | grep -E "^(M| M|\?\?|A| A)" | cut -c4-); do
+        if [ -f "$file" ] && (test -x "$file" || git check-attr binary "$file" | grep -q "binary: set"); then
             git rm -f "$file" 2>/dev/null || rm -f "$file"
             echo "Removed: $file"
         fi
