@@ -101,7 +101,8 @@ torl = [
     # Use flash attention with torch 2.6 since sglang 0.4.6.post1 requires torch 2.6
     "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl",
     "json5",
-    "qwen-agent[code_interpreter,python_executor]"
+    "qwen-agent[code_interpreter,python_executor]",
+    "math-verify"
 ]
 test = ['pytest', 'yapf', 'py-spy']
 

@@ -27,9 +27,65 @@ class ToRLRewardManager:
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
         self.config = config
+    
+    def verify(self, data):
+        resolved = data.non_tensor_batch['eval_score']
+        print(resolved, "resolved in line 33")
+        score = [0. for _ in range(len(resolved))]
+        for i, r in enumerate(resolved):
+            score[i] = r
 
+        print("scores:", score, "score in line 38")
+        reward_metrics = {}
+
+        data.batch['acc'] = torch.tensor(score, dtype=torch.float32, device=data.batch['responses'].device)
+        reward_metrics['all'] = data.batch['acc'].mean().item()
+        
+        return score, reward_metrics
+    
     def __call__(self, data: DataProto):
         """We will expand this function gradually based on the available datasets"""
+
+        reward_tensor_dict={}
+        reward_metrics={}
+        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+
+        verifier_reward=torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+
+        response_ids = data.batch['responses']
+        response_length = response_ids.shape[-1]
+        valid_response_length = data.batch['attention_mask'][:, -response_length:].sum(-1)
+        
+        # if the batch already contains evaluation results, the verification is skipped here.
+        if 'acc' in data.batch:
+            verifier_score = data.batch['acc'].cpu().numpy().tolist()
+        else:
+            # verifier_score, verifier_metrics = self.verify(data)
+            # Use ray based concurrency
+            verifier_score, verifier_metrics = self.verify(data)
+            reward_metrics.update(verifier_metrics)
+        for i in range(verifier_reward.shape[0]):
+            verifier_reward[i, valid_response_length[i] - 1] = verifier_score[i]
+
+        reward_tensor_dict['gt_scores'] = verifier_reward
+        
+        if 'rm_scores' in data.batch.keys():
+            reward_tensor_dict['rm_scores'] = data.batch['rm_scores']
+            reward_metrics['reward_model']=data.batch['rm_scores'].sum(dim=1).mean().item()
+            if self.config.reward_model.rm_coef!=0:
+                reward_tensor += self.config.reward_model.rm_coef * reward_tensor_dict['rm_scores']
+
+        if self.config.verifier.reward_coef!=0:
+            reward_metrics['verifier'] = reward_tensor_dict['gt_scores'].sum(dim=1).mean().item()
+            reward_tensor += self.config.verifier.reward_coef * reward_tensor_dict['gt_scores']
+
+        reward_tensor_dict['all'] = reward_tensor
+        reward_metrics['reward_all'] = reward_tensor.sum(dim=-1).mean(dim=0).item()
+
+        return reward_tensor_dict, reward_metrics
+
+    """
+    def __call__(self, data: DataProto):
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if 'rm_scores' in data.batch.keys():
@@ -80,3 +136,4 @@ class ToRLRewardManager:
                 already_print_data_sources[data_source] += 1
 
         return reward_tensor
+    """

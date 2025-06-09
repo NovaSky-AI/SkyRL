@@ -40,18 +40,20 @@ from verl.utils.model import compute_position_id_with_mask
 import requests
 from typing import Any, Union, List, Tuple
 from verl import DataProto
-# from verl.utils.torch_functional import get_eos_mask, pad_2d_list_to_length
-from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
-# from verl.third_party.vllm import vllm_version
-from .qwen_agent.tools.python_executor import PythonExecutor
+from openhands.utils.async_utils import call_sync_from_async
 from typing import Tuple
 import asyncio
 import json
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from verl.utils.reward_score.math_torl import compute_score
+from .qwen_agent.tools.python_executor import PythonExecutor
+import time
 
 
 logger = logging.getLogger(__name__)
+
+# Global counter for code execution time
+total_code_execution_time = 0.0
 
 # NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
 def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[int]:
@@ -60,13 +62,6 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[in
     non_pad_index = torch.nonzero(prompt_token_ids != pad_token_id, as_tuple=False)[0][0]
     token_ids = prompt_token_ids[non_pad_index:].tolist()
     return token_ids
-
-
-def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> Union[torch.Tensor, List[Any]]:
-    if isinstance(value, torch.Tensor):
-        return value.repeat_interleave(repeats, dim=0)
-    else:
-        return np.repeat(value, repeats, axis=0)
 
 
 OBS_START = '```output'
@@ -169,6 +164,8 @@ def pad_to_max_length_right(tokenizer, encodings, max_length, device):
                                 device=device)
     padded_attention_mask = torch.zeros((batch_size, max_length), 
                                       dtype=torch.long, 
+           
+           
                                       device=device)
     padded_assistant_mask = torch.zeros((batch_size, max_length), 
                                           dtype=torch.long, 
@@ -218,6 +215,7 @@ class OnlineToRLAgent():
         config: Any,
         max_prompt_length: int,
         max_response_length: int,
+        python_executor: Any = None,
     ) -> None:
         self.inference_engine = infer_engine  # Use the shared inference engine
         self.tokenizer = tokenizer
@@ -227,8 +225,7 @@ class OnlineToRLAgent():
         self.max_response_length = max_response_length
         
         self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-        self.executor = PythonExecutor()
-    
+        
     def _get_prompts_and_indices(self, samples_info):
         prompts, indices=[], []
         for index, info in enumerate(samples_info):
@@ -236,38 +233,6 @@ class OnlineToRLAgent():
                 prompts.append(info['sequence'])
                 indices.append(info['index'])
         return prompts, indices
-
-    def send_request(self, tool_input):
-        try:
-            url = self.config.torl.sandbox_url # Dacheng: added this
-            response = requests.post(url, json=tool_input, timeout=10)
-            return response.json()  # 返回响应的 JSON 数据
-        except:
-            print("sanbox timeout")
-
-    def code_interpreter_batch_call(self, tool_inputs, timeout=20):
-        tool_inputs=[{'code': tool_input,'language': 'python'} for tool_input in tool_inputs]
-        results = [None] * len(tool_inputs) 
-        with ThreadPoolExecutor(max_workers=max(min(len(tool_inputs), os.cpu_count(), 64), 1)) as executor:
-            future_to_index = {executor.submit(self.send_request, input): i for i, input in enumerate(tool_inputs)}
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    result = future.result(timeout=timeout)
-                    results[index] = result
-                except:
-                    results[index] = {"run_result": {"stdout": "Error", "stderr": "TimeoutError"}}
-        
-        def postproc(output):
-            try:
-                if str(output['run_result']['return_code'])=='0' or len(str(output['run_result']['stdout'])) != 0:
-                    return output['run_result']['stdout'], "Done"
-                else:
-                    return output['run_result']['stdout'], output['run_result']['stderr'].strip()
-            except Exception:
-                return "Error", "UnknownError"
-        results=[postproc(result) for result in results]
-        return results
 
     def _tokenize_and_find_mask_token_indices(self, sample_info):
         response=sample_info['response']
@@ -295,9 +260,7 @@ class OnlineToRLAgent():
 
     async def _tir_generate(self, prompts=None, sampling_params=None, prompt_token_ids=None, use_tqdm=False):
         sampling_params=copy.deepcopy(sampling_params)
-        # prompts=self.tokenizer.batch_decode(prompt_token_ids, skip_special_tokens=True)
         prompts=[self.tokenizer.decode(prompt['prompt_token_ids'], skip_special_tokens=False) for prompt in prompts]
-        print("prompts", prompts, "Line 191")
 
         system_prompt = prompts[0].split("system\n")[1].split("<|im_end|>")[0].strip()
         user_prompt = prompts[0].split("user\n")[1].split("<|im_end|>")[0].strip()
@@ -312,15 +275,12 @@ class OnlineToRLAgent():
         
         if isinstance(sampling_params, dict):
             sampling_params['n'] = 1
-            # sampling_params['detokenize'] = True
             sampling_params['stop'] = ["```output"]
         else:
             sampling_params.n = 1
-            # sampling_params.detokenize = True
             sampling_params.stop = ["```output"]
         
         samples_info=[{"prompt": prompt, "sequence": prompt, "response": "", "stop": False, "finish_reason": None,"index": index, "mask_info": [], "execution_pass": 0} for index, prompt in enumerate(prompts)]
-        program2output=[]
         num_llm_calls_available=copy.deepcopy(self.config.max_iterations)
         while num_llm_calls_available >= 0:
             if num_llm_calls_available==0: 
@@ -331,19 +291,9 @@ class OnlineToRLAgent():
             num_llm_calls_available-=1
             # llm generate response, stop at eos token or ```output
             input_prompts, indices=self._get_prompts_and_indices(samples_info)
-            # print("hiiiiii", input_prompts)
-            # input_prompts = [{
-            #    'prompt_token_ids': self.tokenizer.encode(x, add_special_tokens=False)[:self.config.prompt_length+self.config.response_length]} for x in input_prompts]
             input_prompts = [self.tokenizer.encode(x, add_special_tokens=False)[:self.config.prompt_length+self.config.response_length] for x in input_prompts]
             
-            # Change to async generation
-            # print("helooooo",input_prompts)
             outputs = await self.inference_engine.async_generate(input_ids=input_prompts, sampling_params=sampling_params)
-            # print(outputs)
-            # sorted_outputs = sorted(outputs, key=lambda output: int(output.request_id))
-            # responses=[x.outputs[0].text for x in sorted_outputs]
-            # finish_reason=[x.outputs[0].finish_reason for x in sorted_outputs]
-            # stop_reason=[x.outputs[0].stop_reason for x in sorted_outputs]
             sorted_outputs = sorted(outputs, key=lambda output: output["meta_info"]["id"])
             assert len(sorted_outputs) == 1, "Dacheng: only one output should be here."
             responses=[x["text"] for x in sorted_outputs]
@@ -404,14 +354,11 @@ class OnlineToRLAgent():
             # execute python code
 
             # observations=self.executor.batch_apply([json5.loads(x)['code'] for x in tool_inputs])
-            observations=self.code_interpreter_batch_call([json5.loads(x)['code'] for x in tool_inputs])
+            observations= await call_sync_from_async(self.code_interpreter_batch_call, [json5.loads(x)['code'] for x in tool_inputs])
             
             # construction responses from observations
             responses=[response+"\n" if not response.endswith('\n') else response for response in responses]
-            # print("responses", responses, "Line 285")
-            # print("observations", observations, "Line 286")
             responses_w_res=copy.deepcopy(responses)
-            print(f"response: {responses} in line 299")
             execution_passes=[0 for _ in range(len(responses))]
             observation_list = ["" for _ in range(len(responses))]
             for i, index in enumerate(tool_indices):
@@ -420,17 +367,12 @@ class OnlineToRLAgent():
                 observation_list[index] += processed_observation[0] #self.tokenizer.decode(processed_observation[0], skip_special_tokens=True)
                 responses_w_res[index]+=processed_observation[0]
                 execution_passes[index]=processed_observation[1]
-            print(f"observation_list: {observation_list} in line 307")
             message.append(
                 {
                     "role": "user",
                     "content": observation_list[0]
                 }
             )
-            # print("responses_w_res", responses_w_res, "Line 291")
-            # print("execution_passes", execution_passes, "Line 292")
-            # program2output.append([{"code": tool_input, "answer": postproc_observation(observations[idx])} for idx, tool_input in enumerate(tool_inputs)])
-            # update samples_info
             for i ,index in enumerate(indices):
                 mask=[ len(responses[i]) + len('```output'), len(responses_w_res[i]) ]
                 samples_info[index]['mask_info'].append(mask)
@@ -451,14 +393,9 @@ class OnlineToRLAgent():
         for idx, sample_info in enumerate(samples_info):
             # print("sample_info", sample_info, "Line 309")
             response_id, tool_output_mask = self._tokenize_and_find_mask_token_indices(sample_info)
-            # print("response_id", response_id, "Line 320")
             responses_ids.append(response_id[:self.config.response_length])
-            # print("responses_ids", responses_ids, "Line 322")
             tool_output_masks.append(tool_output_mask[:self.config.response_length])
-            # print("tool_output_masks", tool_output_masks, "Line 324")
             execution_passes.append(sample_info['execution_pass'])
-            # print("execution_passes", execution_passes, "Line 326")
-        print(f"message: {message} in line 320")
         return message
         
         # return responses_ids, tool_output_masks, torch.tensor(execution_passes, dtype=torch.long)
@@ -490,18 +427,9 @@ class OnlineToRLAgent():
 
     @torch.no_grad()
     async def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        print(prompts)
+        # print(prompts)
         # assert False
         idx = prompts.batch['input_ids']  # (bs, prompt_length)
-        print("detokenized_prompts", self.tokenizer.batch_decode(idx, skip_special_tokens=True), "Line 359")
-        # left-padded attention_mask
-        attention_mask = prompts.batch['attention_mask']
-        position_ids = prompts.batch['position_ids']
-
-        print("len(attention_mask[0])", len(attention_mask[0]), "Line 362")
-
-        # used to construct attention_mask
-        eos_token_id = prompts.meta_info['eos_token_id']
 
         batch_size = idx.size(0)
 
@@ -542,70 +470,53 @@ class OnlineToRLAgent():
                 sampling_params=self.sampling_params,
                 use_tqdm=False)
         
-        #msg = [
-        #    {"role": "user", "content": prompts[i]},
-        #]
-        #for i in range(len(response)):
-        #print("response", response, "Line 404")
-        
-        # Detokenize the response token IDs to get text
-        """
-        detokenized_responses = [self.tokenizer.decode(resp, skip_special_tokens=True) for resp in response]
-        print("detokenized_responses", detokenized_responses, "Line 407")
-        
-        assert False
-        print("response", response, len(response[0]), "Line 404")
-        print("tool_output_masks", tool_output_masks, len(tool_output_masks[0]), "Line 405")
-        # print("execution_passes", execution_passes, execution_passes.shape, "Line 406")
-        response = pad_2d_list_to_length(response, self.pad_token_id,
-                                         max_length=self.config.response_length).to(idx.device)
-        # print("response", response, "Line 410")
-        tool_output_masks = pad_2d_list_to_length(tool_output_masks, 1,
-                                         max_length=self.config.response_length).to(idx.device).int()
-        # print("tool_output_masks", tool_output_masks, "Line 412")
-        execution_passes = execution_passes.to(idx.device).int()
-
-        assert self.config.n == 1, "Dacheng: this will only be used for one trajectory"
-
-        seq = torch.cat([idx, response], dim=-1)
-
-        response_length = response.size(1)
-        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
-        if position_ids.dim() == 3:  # qwen2vl mrope
-            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
-        # print("delta_position_id", delta_position_id, "Line 425")
-        # TODO(sgm): fix position_ids on right_pad
-        # prompt: left pad + response: right pad
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-        response_position_ids = position_ids[:, -1:] + delta_position_id
-        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        print("response", response, "Line 433")
-        print("len(response[0])", len(response[0]), "Line 434")
-        response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
-        print("len(response_attention_mask[0])", len(response_attention_mask[0]), "Line 435")
-        # response_attention_mask = response_attention_mask & tool_output_masks
-        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-        print("attention_mask", attention_mask, len(attention_mask[0]), "Line 429")
-        # Dacheng: From https://github.com/GAIR-NLP/ToRL/blob/1db091d9cbd37df493d7bd836fc3cc4c6f0c9a7e/verl/workers/actor/dp_actor.py#L276C21-L277C70
-        loss_mask = attention_mask & tool_output_masks
-        # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = TensorDict(
-            {
-                'responses': response,
-                'input_ids': seq,  # here input_ids become the whole sentences
-                'attention_mask': attention_mask,
-                'loss_mask': loss_mask,
-                'position_ids': position_ids
-            },
-            batch_size=batch_size)
-        print("batch", batch, "Line 451")
-        """
         # convert to a message
-
+        # print(f"message: {message} in line 606")
         return message # DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
+    def send_request(self, tool_input):
+        try:
+            url = self.config.torl.sandbox_url # Dacheng: added this
+            response = requests.post(url, json=tool_input, timeout=10)
+            return response.json()  # 返回响应的 JSON 数据
+        except:
+            print("sanbox timeout")
+
+    # Dacheng: This function can only take batched inputs, so have to put it here.
+    def code_interpreter_batch_call(self, tool_inputs, timeout=20):
+        global total_code_execution_time
+        start_time = time.time()
+        
+        tool_inputs = [{'code': tool_input, 'language': 'python'} for tool_input in tool_inputs]
+        results = []
+        
+        for tool_input in tool_inputs:
+            try:
+                result = self.send_request(tool_input)
+                results.append(result)
+            except:
+                results.append({"run_result": {"stdout": "Error", "stderr": "TimeoutError"}})
+        
+        def postproc(output):
+            try:
+                if str(output['run_result']['return_code']) == '0' or len(str(output['run_result']['stdout'])) != 0:
+                    return output['run_result']['stdout'], "Done"
+                else:
+                    return output['run_result']['stdout'], output['run_result']['stderr'].strip()
+            except Exception:
+                return "Error", "UnknownError"
+        
+        results = [postproc(result) for result in results]
+        
+        # Update total execution time
+        execution_time = time.time() - start_time
+        total_code_execution_time += execution_time
+        
+        # Log the current total time spent in code execution
+        logger.info(f"Total time spent in code execution: {total_code_execution_time:.2f} seconds")
+        
+        return results
+    
 class ToRLActAgentGroup:
     """
     A class that manages multiple ToRLActAgent instances to generate trajectories in parallel.
@@ -656,13 +567,14 @@ class ToRLActAgentGroup:
         self.config = config
         # Calculate total length
         self.total_len = max_prompt_length + max_response_length
+        # self.tool_batch_size =
         
         # Map of instance ID to agent instance
         self.agents = {}
         
         # Map of instance ID to agent results
-        self.results = {}
-
+        self.results = []
+    
     def _convert_results_to_dataproto(self) -> DataProto:
         """
         Convert the results dictionary to a single DataProto by concatenating all individual results.
@@ -674,29 +586,35 @@ class ToRLActAgentGroup:
             DataProto containing all concatenated results
         """
         # Get batch of messages
+        #print(f"Reached line 677")
         all_messages = []
         all_prompts = []
         all_responses = []
-        all_ground_truth = []
+        eval_score = []
         for result in self.results:
             # messages = result.get('messages', [])
             messages = result['messages']
             all_messages.append(messages)
+            answer_str = ""
             # get the response: starting from the first assistant message
             starting_index = 0
             for i, msg in enumerate(messages):
                 if msg["role"] == 'assistant':
                     starting_index = i
                     break
+            for i, msg in enumerate(messages):
+                if msg["role"] == 'assistant':
+                    answer_str += msg["content"]
+            # print(f"answer_str: {answer_str} in line 695")
             if starting_index == 0:
                 # If we don't find an assistant, all messages are prompts and there are no responses
-                print(f'ERROR: Found no assistant message. len(messages) == {len(messages)} and roles are {[msg["role"] for msg in messages]}')
+                # print(f'ERROR: Found no assistant message. len(messages) == {len(messages)} and roles {[msg["role"] for msg in messages]}')
                 starting_index = len(messages)
             prompt = messages[:starting_index]
             all_prompts.append(prompt)
             response = messages[starting_index:]
             all_responses.append(response)
-            all_ground_truth.append(result['ground_truth'])
+            eval_score.append(compute_score(answer_str, result['ground_truth']))
         # Encode messages, get assitant mask and position ids
         prompt_encodings = self.tokenizer.apply_chat_template(
             all_prompts, 
@@ -741,7 +659,7 @@ class ToRLActAgentGroup:
 
         # Create non-tensor dictionary
         non_tensor_dict = {
-            'ground_truth': 
+            'eval_score': eval_score
         }
         
         # Create and return DataProto
@@ -749,7 +667,8 @@ class ToRLActAgentGroup:
             tensors=tensor_dict,
             non_tensors=non_tensor_dict
         )
-        print(f"self.results: {self.results} in line 557")
+        # print(f"self.results: {self.results} in line 557")
+        logger.info(f"result_dataproto......")
         return result_dataproto
     
     async def generate_trajectories(self) -> DataProto:
@@ -759,79 +678,24 @@ class ToRLActAgentGroup:
         """
         total_instances = len(self.batch)
         logger.info(f"Total instances: {total_instances}")
+        python_executor = PythonExecutor()
         
         # Initialize results tracking like codeact.py
         self.results = []
         
         # Create asyncio queue for running agents with maxsize
-        run_queue = asyncio.Queue(maxsize=self.max_parallel_agents)
+        # run_queue = asyncio.Queue(maxsize=self.max_parallel_agents)
+        run_queue = asyncio.Queue()
         
         # Track active tasks
         active_run_tasks = set()
         needed_run_tasks = self.num_trajectories * total_instances
-        
-        # Helper function to run one agent (following codeact.py pattern)
-        async def run_one_agent():
-            nonlocal needed_run_tasks
-            while needed_run_tasks > 0:
-                try:
-                    agent_info = await run_queue.get()
-                    
-                    agent = agent_info['agent']
-                    batch_idx = agent_info['batch_idx']
-                    trajectory_id = agent_info['trajectory_id']
-                    
-                    logger.info(f"Running agent for batch {batch_idx}, trajectory {trajectory_id}")
-                    
-                    # Get the specific batch item for this agent using DataProto's indexing
-                    agent_batch = self.batch[batch_idx:batch_idx+1]
-                    print(f"agent_batch: {agent_batch}")
-                    assert False
-                    
-                    # Call the agent's generate_sequences method
-                    messages = await agent.generate_sequences(agent_batch)
-                    
-                    # Store the result
-                    if batch_idx not in self.results:
-                        self.results[batch_idx] = {}
-                    self.results.append({
-                        'batch_idx': batch_idx,
-                        'trajectory_id': trajectory_id,
-                        'messages': messages
-                    })
-                    
-                    logger.info(f"Successfully completed batch {batch_idx}, trajectory {trajectory_id}")
-                    
-                except Exception as e:
-                    logger.error(f"Error running agent for batch {batch_idx}, trajectory {trajectory_id}: {str(e)}")
-                    # Store error result
-                    if batch_idx not in self.results:
-                        self.results[batch_idx] = {}
-                    self.results.append({
-                        'batch_idx': batch_idx,
-                        'trajectory_id': trajectory_id,
-                        'messages': [],
-                    })
-                finally:
-                    run_queue.task_done()
-                    # Start another run task if available
-                    if needed_run_tasks > 0:
-                        needed_run_tasks -= 1
-                        task = asyncio.create_task(run_one_agent())
-                        active_run_tasks.add(task)
-                        task.add_done_callback(lambda t: active_run_tasks.discard(t))
-        
-        # Start initial batch of run tasks (they'll wait on the run_queue)
-        for _ in range(self.max_parallel_agents):
-            needed_run_tasks -= 1
-            task = asyncio.create_task(run_one_agent())
-            active_run_tasks.add(task)
-            task.add_done_callback(lambda t: active_run_tasks.discard(t))
-        
+
         # Initialize and enqueue agents (producer)
         for trajectory_id in range(self.num_trajectories):
             for batch_idx in range(total_instances):
-                
+                import time
+                start_time = time.time()
                 # Create OnlineToRLAgent
                 agent = OnlineToRLAgent(
                     infer_engine=self.infer_engine,
@@ -840,29 +704,94 @@ class ToRLActAgentGroup:
                     config=self.config,
                     max_prompt_length=self.max_prompt_length,
                     max_response_length=self.max_response_length,
+                    python_executor=python_executor,
                 )
+                if batch_idx not in self.agents:
+                    self.agents[batch_idx] = {}
+                self.agents[batch_idx][trajectory_id] = agent
+                elpased_time = time.time() - start_time
+                # logger.info(f"time taken to create agent: {elpased_time} seconds")
                 
                 agent_info = {
-                    'agent': agent,
                     'trajectory_id': trajectory_id,
                     'batch_idx': batch_idx,
+                    # "tool_function": self.code_interpreter_batch_call,
                 }
+                # logger.info(f"adding to run queue: {agent_info}")
                 
                 # Add to run queue (this will block if queue is full, providing backpressure)
                 await run_queue.put(agent_info)
+        
+        # Helper function to run one agent (following codeact.py pattern)
+        async def run_one_agent():
+            # nonlocal needed_run_tasks
+            # while needed_run_tasks > 0:
+            logger.info(f"in run_one_agent.......")
+            agent_info = await run_queue.get()
                 
-                # Initialize placeholder result
+            batch_idx = agent_info['batch_idx']
+            trajectory_id = agent_info['trajectory_id']
+            agent = self.agents[batch_idx][trajectory_id]
+            
+            logger.info(f"Running agent for batch {batch_idx}, trajectory {trajectory_id}")
+            
+            # Get the specific batch item for this agent using DataProto's indexing
+            agent_batch = self.batch[batch_idx:batch_idx+1]
+            # print(f"agent_batch: {agent_batch}")
+            try:
+                # Call the agent's generate_sequences method
+                messages = await agent.generate_sequences(agent_batch)
+                
+                # print(f"{self.batch.non_tensor_batch} in line 795")
+                # print(f"{self.batch.non_tensor_batch['reward_model']} in line 796")
+                # Store the result
                 self.results.append({
                     'batch_idx': batch_idx,
                     'trajectory_id': trajectory_id,
-                    "messages": [],
+                    'messages': messages,
+                    "ground_truth": self.batch.non_tensor_batch['reward_model'][batch_idx]["ground_truth"]
                 })
+                
+                logger.info(f"Successfully completed batch {batch_idx}, trajectory {trajectory_id}")
+                
+            except Exception as e:
+                logger.error(f"Error running agent for batch {batch_idx}, trajectory {trajectory_id}: {str(e)}")
+                # Store error result
+                self.results.append({
+                    'batch_idx': batch_idx,
+                    'trajectory_id': trajectory_id,
+                    'messages': [],
+                    "ground_truth": self.batch.non_tensor_batch['reward_model'][batch_idx]["ground_truth"]
+                })
+            finally:
+                run_queue.task_done()
+                # Start another run task if available
+                nonlocal needed_run_tasks
+                if needed_run_tasks > 0:
+                    needed_run_tasks -= 1
+                    task = asyncio.create_task(run_one_agent())
+                    active_run_tasks.add(task)
+                    task.add_done_callback(lambda t: active_run_tasks.discard(t))
+        
+        # Start initial batch of run tasks (they'll wait on the run_queue)
+        for _ in range(self.max_parallel_agents):
+            needed_run_tasks -= 1
+            task = asyncio.create_task(run_one_agent())
+            active_run_tasks.add(task)
+            task.add_done_callback(lambda t: active_run_tasks.discard(t))
         
         # Wait for all run tasks to complete
         await run_queue.join()
         
         logger.info(f"Generated trajectories for {total_instances} instances")
-        return self._convert_results_to_dataproto()
+        
+        # Print total code execution time at the end
+        global total_code_execution_time
+        logger.info(f"=== Total time spent in code execution across all trajectories: {total_code_execution_time:.2f} seconds ===")
+        
+        results = self._convert_results_to_dataproto()
+        logger.info(f"Finish convert results to dataproto")
+        return results
 
     def run(self) -> DataProto:
         """

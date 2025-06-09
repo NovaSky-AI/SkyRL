@@ -18,7 +18,7 @@ import signal
 import re
 from contextlib import contextmanager
 import importlib.util
-from verl.utils.reward_score.eval import normalize_final_answer
+from verl.utils.reward_score.torl_eval import normalize_final_answer
 from math_verify import parse, verify
 class TimeoutException(Exception):
     pass
