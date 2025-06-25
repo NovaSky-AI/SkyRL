@@ -4,11 +4,11 @@ set -x
 # Uses 1 node with 8 GPUs.
 # huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/text_to_sql/run_sql_fsdp.sh
+# bash examples/text_to_sql/run_skyrl_sql.sh
 
 # change these paths to your own
-DATA_DIR="$HOME/data/sql"
-DB_PATH="~/default/sql_data/"
+DATA_DIR="$HOME/data/gsm8k"
+DB_PATH="$HOME/default/sql_data/"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
 NUM_GPUS=8
@@ -20,15 +20,15 @@ TRAIN_BATCH_SIZE=256
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
-  data.train_data="['${DATA_DIR}/train.parquet']" \
-  data.val_data="['${DATA_DIR}/validation.parquet']" \
+  data.train_data="['$DATA_DIR/train.parquet']" \
+  data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
   trainer.epochs=30 \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
-  trainer.policy.fsdp_config.max_norm=0.5 \
+  trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.sequence_parallel_size=1 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \

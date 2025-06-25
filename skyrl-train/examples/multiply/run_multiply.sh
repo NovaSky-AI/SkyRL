@@ -15,8 +15,8 @@ uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=4 \
-  generator.num_inference_engines=4 \
-  generator.inference_engine_tensor_parallel_size=1 \
+  generator.num_inference_engines=1 \
+  generator.inference_engine_tensor_parallel_size=4 \
   trainer.epochs=20 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
