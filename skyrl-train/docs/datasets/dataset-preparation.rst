@@ -93,7 +93,7 @@ Generally, only a single method (`make_map_fn`) must be implemented to convert t
         
         return process_fn
 
-Then, the mapping function is called on each sample the dataset, and the final converted dataset is saved to a parquet file:
+Then, the mapping function is called on each sample in the dataset, and the final converted dataset is saved to a parquet file:
 
 .. code-block:: python
 
