@@ -29,10 +29,13 @@
 - 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
 
-# Getting Started
+# Overview
+
+SkyRL provides the following components:
+
 - [`skyrl-agent`](./skyrl-agent): Our agent layer for training long-horizon, real-world agents. 
-- [`skyrl-train`](./skyrl-train): Our flexible training framework for RL.
-- [`skygym`](./skygym): Our library of agentic, tool-use environments.
+- (NEW!) [`skyrl-train`](./skyrl-train): Our flexible training framework for RL.
+- (NEW!) [`skygym`](./skygym): Our library of agentic, tool-use environments.
 
 # Acknowledgement
 
