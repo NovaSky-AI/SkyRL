@@ -47,8 +47,7 @@ napoleon_type_aliases = None
 
 # External links configuration
 extlinks = {
-    "example_script": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/examples/%s", "%s"),
-    "example_file": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/examples/%s", None),
+    "code_link": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/%s", "%s"),
 }
 
 
@@ -64,8 +63,4 @@ def linkcode_resolve(domain, info):
     # For example files, create direct GitHub links
     filename = info["module"].replace(".", "/")
 
-    # Check if it's an example script
-    if filename.startswith("examples/"):
-        return f"https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/{filename}"
-
-    return f"https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/{filename}.py"
+    return f"https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/{filename}"
