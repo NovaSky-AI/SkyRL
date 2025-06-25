@@ -3,7 +3,6 @@ set -x
 # NOTE (erictang000): WIP on this - this is still OOMing on 2 8xH100 on 32B model init
 # Colocated GRPO training+generation for Qwen2.5-Coder-32B-Instruct on SkyRL-SQL-653 data.
 # Uses 2 nodes with 8 GPUs each.
-# TODO (sumanthrh): Remove the `resume_mode` and `ckpt_path` arguments before release.
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/text_to_sql/run_sql_fsdp_2node.sh
 

@@ -9,15 +9,15 @@ from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skygym.envs import register
 
-# Register the multiply environment (no need to modify the skyrl package).
-register(
-    id="multiply",
-    entry_point="examples.multiply.env:MultiplyEnv",
-)
-
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
+    # Register the multiply environment inside the ray driver worker (no need to modify the skyrl package).
+    register(
+        id="multiply",
+        entry_point="examples.multiply.env:MultiplyEnv",
+    )
+
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()

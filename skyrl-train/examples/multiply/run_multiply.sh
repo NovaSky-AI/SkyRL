@@ -1,14 +1,13 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on a simple multiplication environment.
+# uv run examples/multiply/multiply_dataset.py --output_dir $HOME/data/multiply
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/multiply/run_multiply.sh
 
-# NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
-
 DATA_DIR="$HOME/data/multiply"
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   data.train_data=["$DATA_DIR/train.parquet"] \
   data.val_data=["$DATA_DIR/validation.parquet"] \
   trainer.algorithm.advantage_estimator="grpo" \

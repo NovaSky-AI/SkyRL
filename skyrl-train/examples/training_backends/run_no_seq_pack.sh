@@ -1,6 +1,7 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K without sequence packing.
+# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/training_backends/run_no_seq_pack.sh
 

@@ -4,7 +4,6 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/training_backends/deepspeed/run_deepspeed.sh
 
-# NOTE (sumanthrh): micro_train_batch_size_per_gpu and micro_forward_batch_size_per_gpu can be tuned
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$HOME/data/gsm8k/train.parquet']" \

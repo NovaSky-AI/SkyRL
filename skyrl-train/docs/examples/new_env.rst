@@ -152,14 +152,15 @@ We will create a new entrypoint for training with the ``multiply`` environment b
    :linenos:
    :caption: Environment registration
 
-   # Register the multiply environment.
-   register(
-      id="multiply",  # <-- The name of the environment.
-      entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
-   )
-
    @ray.remote(num_cpus=1)
    def skyrl_entrypoint(cfg: DictConfig):
+      # Register the multiply environment
+      # this needs to be done inside the ray driver worker
+      register(
+         id="multiply",  # <-- The name of the environment.
+         entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
+      )
+
       # make sure that the training loop is not run on the head node.
       exp = BasePPOExp(cfg)
       exp.run()

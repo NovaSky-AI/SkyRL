@@ -102,7 +102,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, default="data/sql/653_skyrl_sql.json")
     parser.add_argument("--validation_input", type=str, default="data/sql/validation_spider_dev.json")
-    parser.add_argument("--output", type=str, default="data/sql")
+    parser.add_argument("--output_dir", type=str, default="data/sql")
     args = parser.parse_args()
 
     # Load the JSON file directly as a Dataset
