@@ -44,7 +44,7 @@ Then, prepare the dataset;
 uv run -- python examples/gsm8k/gsm8k_dataset.py
 ```
 
-You should now be able to run our example script (assumes atleast 4 GPUs):
+You should now be able to run our example script (assumes at least 4 GPUs):
 
 ```bash
 export WANDB_API_KEY=<your wandb api key>
