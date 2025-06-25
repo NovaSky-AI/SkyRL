@@ -5,9 +5,10 @@ Requirements
 ------------
 - CUDA version >=12.4
 - `uv <https://docs.astral.sh/uv/>`_
-- `ray <https://docs.ray.io/en/latest/>`_ 2.44.0
 
-We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers.
+We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
+
+If you're running on an existing Ray cluster, make sure to use Ray 2.44.0 and Python 3.12.
 
 
 Docker (recommended)
