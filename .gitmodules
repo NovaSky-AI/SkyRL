@@ -1,3 +1,3 @@
 [submodule "SkyRL-OpenHands"]
-	path = skyrl-agent/SkyRL-OpenHands
+	path = skyagent/SkyRL-OpenHands
 	url = https://github.com/NovaSky-AI/SkyRL-OpenHands
