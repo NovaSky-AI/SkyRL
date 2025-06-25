@@ -57,10 +57,6 @@ To launch the server, run the following command (the full script is at :code_lin
         # worker extension class for handling weight updates
         --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
 
-.. tip:: 
-
-With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput
-
 Starting Training
 ----------------------
 
@@ -104,6 +100,10 @@ To start training, we need to set up our training script. You can find a complet
         trainer.micro_train_batch_size_per_gpu=20 \
 
         ... # Other parameters (see `examples/remote_inference_engine/run_remote.sh` for more)
+
+.. tip:: 
+
+With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput
 
 Launching Your Training Run
 ---------------------------
