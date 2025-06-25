@@ -79,7 +79,7 @@ Additionally, you can tune `FSDP specific configurations <https://pytorch.org/do
     # enable offloading of model parameters to CPU during the forward pass for the ref model
     trainer.ref.fsdp_config.cpu_offload=true \
 
-You can refer to the full set of FSDP configurations at :ref:`fsdp-configurations`.
+Note that ``cpu_offload`` is distinct from worker state offloading with model colocation. You can find details on this, as well as the full set of FSDP configurations at :ref:`fsdp-configurations`.
 
 .. note:: 
     ``cpu_offload`` cannot be enabled for the policy or critic model with FSDP1, since gradient accumulation outside ``no_sync`` mode is not supported with CPU offloading. 
