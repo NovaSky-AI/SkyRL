@@ -4,11 +4,11 @@ set -x
 # Uses 1 node with 8 GPUs.
 # huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/skyrl_sql/run_skyrl_sql.sh
+# bash examples/text_to_sql/run_skyrl_sql.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/path/to/db_files/"
+DB_PATH="$HOME/default/sql_data"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
 NUM_GPUS=8
