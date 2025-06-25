@@ -32,7 +32,7 @@ def extract_solution(solution_str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="/home/ubuntu/tgriggs/SkyRL/skyrl-train/data/gsm8k")
+    parser.add_argument("--output_dir", default="~/data/gsm8k")
 
     args = parser.parse_args()
 
