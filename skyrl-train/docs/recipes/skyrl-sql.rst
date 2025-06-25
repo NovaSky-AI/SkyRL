@@ -20,8 +20,8 @@ Data Preparation
 ----------------
 
 
-We provide the dataset we used on HuggingFace: https://huggingface.co/datasets/NovaSky-AI/SkyRL-SQL-653-data 
-Make sure to download the dataset and update the path in `DATA_PATH` in the script. 
+We provide the dataset we used on HuggingFace: https://huggingface.co/datasets/NovaSky-AI/SkyRL-SQL-653-data-newfmt 
+You can download the dataset by running the following command
 
 .. code-block:: bash
 
