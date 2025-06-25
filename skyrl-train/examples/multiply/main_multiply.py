@@ -12,7 +12,7 @@ from skyrl_gym.envs import register
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Register the multiply environment inside the ray driver worker (no need to modify the skyrl package).
+    # Register the multiply environment inside the entrypoint task (no need to modify the skyrl-gym package).
     register(
         id="multiply",
         entry_point="examples.multiply.env:MultiplyEnv",

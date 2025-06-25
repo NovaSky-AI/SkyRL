@@ -155,7 +155,7 @@ We will create a new entrypoint for training with the ``multiply`` environment b
    @ray.remote(num_cpus=1)
    def skyrl_entrypoint(cfg: DictConfig):
       # Register the multiply environment
-      # this needs to be done inside the ray driver worker
+      # this needs to be done inside the entrypoint task
       register(
          id="multiply",  # <-- The name of the environment.
          entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
