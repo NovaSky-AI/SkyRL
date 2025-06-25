@@ -33,8 +33,8 @@ As discussed in :doc:`../api/env`, SkyRL Gym includes a simple text-in/text-out 
          """
          pass
 
-      def init(self):
-         pass
+      def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
+         return prompt, {}
 
       def close(self):
          pass
