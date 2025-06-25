@@ -32,7 +32,7 @@ Each dataset entry is a dictionary with the following required (and some optiona
        },
    }
 
-We load the dataset as a `DatasetDict <https://huggingface.co/docs/datasets/en/package_reference/main_classes#datasets.DatasetDict>`_
+We load the dataset as a huggingface `DatasetDict <https://huggingface.co/docs/datasets/en/package_reference/main_classes#datasets.DatasetDict>`_.
 
 **Key Requirements:**
 
@@ -93,9 +93,18 @@ Generally, only a single method (`make_map_fn`) must be implemented to convert t
         
         return process_fn
 
-Then, the mapping function is called on each samplie the dataset, and the final converted dataset is saved to a parquet file:
+Then, the mapping function is called on each sample the dataset, and the final converted dataset is saved to a parquet file:
 
 .. code-block:: python
 
   train_dataset = input_dataset.map(function=make_map_fn("train"), with_indices=True)
   train_dataset.to_parquet(os.path.join(args.output, "train.parquet"))
+
+
+Reference Scripts
+-----------------
+
+Use the following scripts as a template to prepare your dataset:
+
+- `gsm8k_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/gsm8k/gsm8k_dataset.py>`_
+- `synsql_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/text_to_sql/sql_dataset.py>`_

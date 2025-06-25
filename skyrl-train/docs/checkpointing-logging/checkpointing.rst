@@ -51,7 +51,7 @@ DeepSpeed checkpoints follow a similar directory structure but the files under `
 Key Configuration Parameters
 ----------------------------
 
-Checkpointing behavior is controlled by several parameters in the YAML configuration (see :doc:`../configuration/config`):
+Checkpointing behavior is controlled by several parameters in the YAML configuration (see :doc:`../configuration/config` for the full training config):
 
 **Checkpoint Saving**
 

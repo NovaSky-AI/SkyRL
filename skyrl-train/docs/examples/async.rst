@@ -3,6 +3,8 @@ Async Training: One-off Pipelining
 
 This example demonstrates how to implement asynchronous training with one-off pipelining, showcasing the flexibility of the training framework to support different execution plans with minimal code changes.
 
+The completed code from this example is available at `examples/async <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async>`_.
+
 Overview
 --------
 
@@ -33,7 +35,7 @@ The original ``train()`` method performs generation and training sequentially, s
 
 The generation loop passes the training loop completed trajectories via an ``asyncio.Queue`` and coordinates weight synchronization using asyncio events.
 
-We include a minimal version here, please see ``examples/async/async_trainer.py`` for full details:
+We include a minimal version here, please see `examples/async/async_trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async/async_trainer.py>`_ for full details:
 
 .. code-block:: python
 
@@ -62,14 +64,14 @@ We include a minimal version here, please see ``examples/async/async_trainer.py`
                 self.generation_ack.clear()
 
 .. note::
-   **Flexible execution plans:** The underlying implementation of training and generation is unchanged, and only the training loop is modified to parallelize the two phases. In general, SkyRL enables flexibile modifications to the execution plan simply by modifying the high-level training loop.
+   **Flexible execution plans:** The underlying implementation of training and generation is unchanged -- only the training loop is modified to parallelize the two phases. In general, SkyRL enables flexibile modifications to the execution plan simply by modifying the high-level training loop.
 
 Step 2: Create New Training Entrypoint  
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Next we create a new training entrypoint ``main_async.py`` that uses the new trainer class.
 
-The new entrypoint (``AsyncPPOExp``) overrides a single method in the base entrypoint class (``BasePPOExp``) to use the new trainer class:
+The new entrypoint (``AsyncPPOExp``) overrides a single method (``get_trainer()``) in the base entrypoint class (``BasePPOExp``) that constructs the new trainer class:
 
 .. code-block:: python
 
@@ -89,7 +91,7 @@ That's it! The rest of the entrypoint logic for launching the training run remai
 Step 3: Update Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Finally, we modify the training configuration to use our new entrypoint anddisable model colocation:
+Finally, we modify the training configuration to use our new entrypoint and disable model colocation:
 
 .. code-block:: bash
 
@@ -105,3 +107,16 @@ Key configuration changes:
 
 * **examples.async.main_async**: Point the bash script to the new entrypoint
 * **colocate_all=false, colocate_policy_ref=true**: Disables colocation of generation and training models (but keeps the policy and reference models colocated).
+
+
+Now we can train!
+
+.. code-block:: bash
+
+   # Prepare the dataset
+   uv run -- python examples/gsm8k/gsm8k_dataset.py --output_dir data/gsm8k
+
+    # Run the training script
+   export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
+   bash examples/async/async_run_gsm8k.sh
+
