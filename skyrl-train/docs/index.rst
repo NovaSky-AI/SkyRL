@@ -52,6 +52,7 @@ SkyRL-Train is a reinforcement learning framework designed for modularity and ex
    api/trainer
    api/generator
    api/env
+   api/tools_guide
    api/tools
 
 .. toctree::
