@@ -7,11 +7,11 @@ set -x
 # bash examples/text_to_sql/run_sql_fsdp.sh
 
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/default/sql_data/"
+DB_PATH="$HOME/path/to/db_files/"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
 NUM_GPUS=8
-NUM_ENDPOINTS=2
+NUM_INFERENCE_ENGINES=2
 TP_SIZE=4
 MAX_INPUT_LENGTH=29000
 MAX_GENERATE_LENGTH=3000
@@ -64,4 +64,4 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/sql_32B_ckpt"
+  trainer.ckpt_path=$CKPT_PATH

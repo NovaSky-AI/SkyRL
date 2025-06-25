@@ -9,7 +9,7 @@ set -x
 # bash examples/text_to_sql/run_sql_fsdp_2node.sh
 
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/default/sql_data/"
+DB_PATH="$HOME/path/to/db_files/"
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
