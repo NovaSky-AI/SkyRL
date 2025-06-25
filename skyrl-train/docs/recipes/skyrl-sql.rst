@@ -51,11 +51,12 @@ Unzip `data.zip` in this folder, and set the corresponding `DB_PATH` in the trai
 Running the scripts 
 -------------------
 
-We provide a script `run_skyrl_sql.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/text_to_sql/run_skyrl_sql.sh>`_ for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
+We provide a script :example_script:`text_to_sql/run_skyrl_sql.sh` for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
 
 .. code-block:: bash
+
     export WANDB_API_KEY=<wandb-api-key>
-    bash examples/skyrl-sql/run_skyrl_sql.sh
+    bash examples/text_to_sql/run_skyrl_sql.sh
 
 
 
