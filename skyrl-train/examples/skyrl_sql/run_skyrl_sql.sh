@@ -6,7 +6,7 @@ set -x
 # bash examples/text_to_sql/run_sql_fsdp.sh
 
 # change these paths to your own
-DATA_DIR="/path/to/sql/data/"
+DATA_DIR="/path/to/sql/data"
 DB_PATH="/path/to/db/files"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
@@ -29,12 +29,12 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.strategy=fsdp2 \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
-  trainer.policy.fsdp_config.max_norm=0.5 \
+  trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.sequence_parallel_size=1 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_llm_endpoints=$NUM_ENDPOINTS \
-  generator.llm_endpoint_tensor_parallel_size=$TP_SIZE \
+  generator.num_inference_engines=$NUM_ENDPOINTS \
+  generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=8 \
   trainer.micro_train_batch_size_per_gpu=1 \
@@ -48,9 +48,8 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.hf_save_interval=30 \
   trainer.dump_data_batch=true \
   generator.backend=vllm \
-  generator.use_local_endpoints=true \
+  generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.vllm_enable_sleep=true \
   generator.async_engine=true \
   generator.batched=false \
   environment.env_class=text2sql \
@@ -59,7 +58,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_turns=6 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
-  environment.skygym.sql.db_path=$DB_PATH \
+  ++environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_repro" \

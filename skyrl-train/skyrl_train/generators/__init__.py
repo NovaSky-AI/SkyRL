@@ -1,4 +1,4 @@
 from .base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from .skygym_generator import SkyGymGenerator
+from .skyrl_gym_generator import SkyRLGymGenerator
 
-__all__ = ["GeneratorInterface", "GeneratorInput", "GeneratorOutput", "SkyGymGenerator"]
+__all__ = ["GeneratorInterface", "GeneratorInput", "GeneratorOutput", "SkyRLGymGenerator"]

@@ -9,13 +9,19 @@ SkyRL-train is **for users who want to modify anything:**
 - **Implement custom trajectory generation** specific to your use-case, such as custom sampling methods, tree search, etc.
 - … make any other flexible modifications to the RL workflow!
 
-## Installation
+## Quick Start
+
+A quick start guide is provided below.
 
 ### Requirements
 
+The only requirements are:
+
 - CUDA version >=12.4
-- `uv <https://docs.astral.sh/uv/>`
-- `ray <https://docs.ray.io/en/latest/>` 2.44.0
+- [uv](https://docs.astral.sh/uv/)
+
+If you're running on an existing Ray cluster, make sure to use Ray 2.44.0 and Python 3.12. If not, proceed with the installation instructions below.
+
 
 First, clone the repository:
 
@@ -27,17 +33,25 @@ cd SkyRL/skyrl-train
 Then, create a new virtual environment and install the dependencies:
 
 ```bash
-uv venv --python 3.12
+# creates a venv at .venv/
+uv sync --extra vllm 
 source .venv/bin/activate
-uv sync
 ```
 
-You should now be able to run our example script:
+Then, prepare the dataset; 
 
 ```bash
+uv run -- python examples/gsm8k/gsm8k_dataset.py
+```
+
+You should now be able to run our example script (assumes at least 4 GPUs):
+
+```bash
+export WANDB_API_KEY=<your wandb api key>
 bash examples/gsm8k/run_gsm8k.sh
 ```
 
+For detailed installation instructions, as well as more examples, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/)
 
 # Acknowledgement
 
