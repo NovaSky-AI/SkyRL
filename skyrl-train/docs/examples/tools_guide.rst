@@ -1,4 +1,4 @@
-Using Tools and ToolGroups in SkyRL-Gym
+Using Tools in SkyRL-Gym
 ==========================
 
 One of the key features of SkyRL-Gym is `reusable tools`. Often, a single tool (such as Python code execution) is useful in multiple environments (such as math or deep research environments). Reusable tools allow developers to implement a tool once, and use it in multiple environments. You can even build an environment from our library of implemented tools!
@@ -84,10 +84,15 @@ Search ToolGroup
 Environment Integration
 ----------------------
 
-Tools are integrated into environments through `BaseTextEnv`:
+Tools groups can be integrated into any environment in SkyGym-RL. The base environment class for text-based environments is ``BaseTextEnv``, which provides simple utilities for managing and using multiple tool groups in a single envrionment.
+
+The following sub-sections walk through integrating and using tools in an environment.
 
 Tool Initialization
 ~~~~~~~~~~~~~~~~~~~
+
+To incorporate tools into an envrionment, first build and initialize the tool groups during environment construction:
+
 
 .. code-block:: python
 
@@ -97,17 +102,17 @@ Tool Initialization
         def __init__(self, env_config, extras):
             super().__init__()
             
-            # Initialize tool groups
+            # Construct the tool groups
             python_tools = PythonCodeExecutorToolGroup(timeout=10.0)
             search_tools = SearchToolGroup()
             
-            # Register tool groups
+            # Initialize and register tool groups
             self.init_tool_groups([python_tools, search_tools])
 
 Tool Execution
 ~~~~~~~~~~~~~
 
-Environments handle tool execution:
+To use a tool and get the result, you can call the ``_execute_tool`` (provided by ``BaseTextEnv``) method with the tool group name, tool name, and the tool input. Tools are most often used in the envrionment ``step`` method.
 
 .. code-block:: python
 
@@ -128,7 +133,7 @@ Environments handle tool execution:
 Action Parsing
 ~~~~~~~~~~~~~
 
-Parse agent actions to extract tool calls:
+Users can flexibly determine how and when tools are called. The following code block shows a common case, where the model's output (``action``) is parsed to extract the intended tool call and its input.
 
 .. code-block:: python
 
@@ -143,7 +148,9 @@ Parse agent actions to extract tool calls:
         tool_content = tool_block_match.group(1).strip()
         inner_tag_match = re.search(r"<(\w+)>(.*?)</\1>", tool_content, re.DOTALL)
         
+        # Extract the tool name
         tool_name = inner_tag_match.group(1)
+        # Extract the tool input
         tool_input = inner_tag_match.group(2).strip()
         
         tool_group_name = self.tool_to_toolgroup[tool_name]
@@ -153,7 +160,7 @@ Parse agent actions to extract tool calls:
 Using Multiple ToolGroups
 -------------------------
 
-Combine multiple ToolGroups for powerful environments:
+An arbitrary number of tool groups can be integrated into an environment, creating a more powerful agent. There is no additional configuration required to use multiple tool groups in an environment, simply construct and initialize all desired tool groups.
 
 .. code-block:: python
 
@@ -170,18 +177,13 @@ Combine multiple ToolGroups for powerful environments:
             # Register all tool groups
             self.init_tool_groups([self.db_tools, self.python_tools, self.search_tools, self.custom_tools])
 
-**Benefits:**
-- Comprehensive LLM capabilities (database, code, search, custom tools)
-- Each ToolGroup manages its own resources and state
-- Modular scaling - add/remove ToolGroups as needed
-- Clean separation between different domains
 
 API Reference
 -------------
 
-For detailed API documentation, see:
+For a reference of the tool APIs, see the following links:
 
-- :doc:`tools`: Core tool classes and methods
-- :doc:`env`: Environment integration details
+- :doc:`../api/tools`
+- :doc:`../api/env`
 
 That's it! You've learned how to use tools in SkyRL-Gym environments. The same pattern works for any tool-based task you want to build. 
