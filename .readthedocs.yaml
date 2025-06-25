@@ -22,7 +22,7 @@ build:
 
 # Build documentation in the "docs/" directory with Sphinx
 sphinx:
-   configuration: docs/conf.py
+   configuration: skyrl-train/docs/conf.py
 
 # Optionally, but recommended,
 # declare the Python requirements required to build your documentation
