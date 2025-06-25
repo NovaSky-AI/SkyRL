@@ -2,7 +2,7 @@ defaults:
   - _self_
   - deepspeed_config@deepspeed_config.train: train
   - deepspeed_config@deepspeed_config.eval: eval
-  - skyrl_gym_config@skyrl_gym: default
+  - skyrl_gym_config: default
 
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
@@ -194,4 +194,3 @@ generator:
 
 environment:
   env_class: "gsm8k"
-  skyrl_gym: ${skyrl_gym}
