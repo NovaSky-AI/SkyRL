@@ -31,7 +31,7 @@ You can download the dataset by running the following command
 DB environment 
 ---------------
 
-Make sure to setup the database files needed for training. We use the database from `OmniSQL <https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/README.md>`_. 
+Make sure to setup the database files needed for training.  We use the database files from `OmniSQL <https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/README.md>`_. 
 
 You can download the datasets from:
 - `ModelScope-OmniSQL-datasets <https://modelscope.cn/datasets/seeklhy/OmniSQL-datasets/summary>`_

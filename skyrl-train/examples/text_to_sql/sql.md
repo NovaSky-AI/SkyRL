@@ -9,7 +9,7 @@ huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/
 
 ## DB environment 
 
-Make sure to setup the database files needed for training. We use the database from [OmniSQL](https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/README.md)
+Make sure to setup the database files needed for training. We use the database files from [OmniSQL](https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/README.md)
 
 You can download the datasets from:
 - [ModelScope-OmniSQL-datasets](https://modelscope.cn/datasets/seeklhy/OmniSQL-datasets/summary)
