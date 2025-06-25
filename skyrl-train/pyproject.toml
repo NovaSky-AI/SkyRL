@@ -38,7 +38,7 @@ dependencies = [
     "datasets",
     "tensordict",
     "jaxtyping",
-    "skryl-gym",
+    "skyrl-gym",
 ]
 
 [tool.uv]

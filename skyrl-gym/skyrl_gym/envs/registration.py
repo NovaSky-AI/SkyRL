@@ -261,7 +261,9 @@ def make(
 
     if not isinstance(env, Env):
         if str(env.__class__.__base__) == "<class 'skyrl_gym.core.Env'>":
-            raise TypeError("Gym is incompatible with skyrl_gym, please update the environment class to `skyrl_gym.Env`. ")
+            raise TypeError(
+                "Gym is incompatible with skyrl_gym, please update the environment class to `skyrl_gym.Env`. "
+            )
         else:
             raise TypeError(f"The environment must inherit from the skyrl_gym.Env class, actual class: {type(env)}. ")
 
