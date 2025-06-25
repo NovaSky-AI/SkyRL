@@ -5,9 +5,10 @@ Requirements
 ------------
 - CUDA version >=12.4
 - `uv <https://docs.astral.sh/uv/>`_
-- `ray <https://docs.ray.io/en/latest/>`_ 2.44.0
 
-We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers.
+We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
+
+If you're running on an existing Ray cluster, make sure to use Ray 2.44.0 and Python 3.12.
 
 
 Docker (recommended)
@@ -29,10 +30,11 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
     git clone https://github.com/novasky-ai/skyrl_train.git 
     cd skyrl-train
-    uv sync
+    uv sync --extra vllm
+    source .venv/bin/activate
 
 
-That is it! A base environment would already be setup for you.
+That is it! You should now be to able to run our :doc:`quick start example <quickstart>`.
 
 Install without Dockerfile
 --------------------------
@@ -52,11 +54,12 @@ Clone the repo and `cd` into the `skyrl` directory:
     git clone https://github.com/novasky-ai/skyrl_train.git 
     cd skyrl-train 
 
-
 Base environment
-----------------
+~~~~~~~~~~~~~~~~
 
 We recommend having a base virtual environment for the project.
+
+With ``uv``: 
 
 .. code-block:: bash
 
@@ -72,7 +75,16 @@ Then activate the virtual environment and install the dependencies.
 .. code-block:: bash
 
     source <path_to_venv>/bin/activate
-    uv sync
+    uv sync --extra vllm
+
+With ``conda``: 
+
+.. code-block:: bash
+
+    conda create -n skyrl-train python=3.12
+    conda activate skyrl-train
+
+You should now be to able to run our :doc:`quick start example <quickstart>`.
 
 
 Development 
@@ -82,4 +94,4 @@ For development, make sure to use ``--extra dev`` so that the dev dependencies a
 
 .. code-block:: bash
 
-    uv run --extra dev --isolated examples/gsm8k/run_gsm8k.sh
+    uv run --extra dev pytest -s tests/cpu
