@@ -15,7 +15,7 @@ To download and prepare the GSM8K dataset, run the following script.
 Training Configuration
 ----------------------
 
-Next, let's set up the training configuration. You can find a complete example in ``examples/ppo/run_ppo.sh`` - we highlight some key PPO specific parameters here:
+Next, let's set up the training configuration. You can find a complete example in ``examples/ppo/run_ppo.sh`` - we highlight some key parameters here:
 
 .. code-block:: bash
 
