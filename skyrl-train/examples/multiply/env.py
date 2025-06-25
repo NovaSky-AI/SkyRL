@@ -10,6 +10,7 @@ class MultiplyEnv(BaseTextEnv):
 
     def __init__(
         self,
+        env_config: Dict[str, Any] = {},
         extras: Dict[str, Any] = {},
     ):
         super().__init__()

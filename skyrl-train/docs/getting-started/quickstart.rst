@@ -61,7 +61,7 @@ Hardware Configuration
 
 Depending on your hardware setup, you may want to adjust a few parameters:
 
-1. **GPU Configuration**: Set ``trainer.placement.policy_num_gpus_per_node`` to match your available GPU count. If you need to decrease the model size, you can also set ``trainer.policy.model.path`` to ``Qwen/Qwen2.5-0.5B-Instruct`` or ``Qwen/Qwen2.5-7B-Instruct``.
+1. **GPU Configuration**: Set ``trainer.placement.policy_num_gpus_per_node`` to match your available GPU count. If you need to change the model size, you can also set ``trainer.policy.model.path`` to ``Qwen/Qwen2.5-0.5B-Instruct`` or ``Qwen/Qwen2.5-7B-Instruct``.
 
 2. **InferenceEngine Matching**: Ensure that ``num_inference_engines * inference_engine_tensor_parallel_size`` equals the total number of GPUs used for the policy model above.
 

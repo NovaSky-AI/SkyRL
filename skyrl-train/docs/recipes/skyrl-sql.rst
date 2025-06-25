@@ -20,18 +20,18 @@ Data Preparation
 ----------------
 
 
-We provide the dataset we used on HuggingFace: https://huggingface.co/datasets/NovaSky-AI/SkyRL-SQL-653-data 
-Make sure to download the dataset and update the path in `DATA_PATH` in the script. 
+We provide the dataset we used on HuggingFace: https://huggingface.co/datasets/NovaSky-AI/SkyRL-SQL-653-data-newfmt 
+You can download the dataset by running the following command
 
 .. code-block:: bash
 
-    huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data --local-dir <path_to_dir> --repo-type dataset
+    huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 
 
 DB environment 
 ---------------
 
-Make sure to setup the database files needed for training. We use the database from `OmniSQL <https://github.com/RUCKBReasoning/OmniSQL/edit/main/train_and_evaluate/README.md>`_. 
+Make sure to setup the database files needed for training.  We use the database files from `OmniSQL <https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/README.md>`_. 
 
 You can download the datasets from:
 - `ModelScope-OmniSQL-datasets <https://modelscope.cn/datasets/seeklhy/OmniSQL-datasets/summary>`_
@@ -51,11 +51,12 @@ Unzip `data.zip` in this folder, and set the corresponding `DB_PATH` in the trai
 Running the scripts 
 -------------------
 
-We provide a script `run_skyrl_sql.sh <../../skyrl/examples/skyrl-sql/run_skyrl_sql.sh>`_ for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
+We provide a script :code_link:`examples/text_to_sql/run_skyrl_sql.sh` for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
 
 .. code-block:: bash
+
     export WANDB_API_KEY=<wandb-api-key>
-    bash examples/skyrl-sql/run_skyrl_sql.sh
+    bash examples/text_to_sql/run_skyrl_sql.sh
 
 
 

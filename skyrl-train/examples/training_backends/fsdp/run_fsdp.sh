@@ -1,10 +1,10 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K with FSDP backend.
+# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/training_backends/fsdp/run_fsdp.sh
 
-# NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$HOME/data/gsm8k/train.parquet']" \
