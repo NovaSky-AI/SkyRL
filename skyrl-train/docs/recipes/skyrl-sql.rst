@@ -1,7 +1,7 @@
 SkyRL-SQL
 =========
 
-We provide scripts to reproduce the results for `SkyRL-SQL-7B <https://novasky-ai.notion.site/skyrl-sql>`_ using SkyRL-train and SkyGym.
+We provide scripts to reproduce the results for `SkyRL-SQL-7B <https://novasky-ai.notion.site/skyrl-sql>`_ using SkyRL-train and SkyRL-gym.
 
 
 Pre-requisites 

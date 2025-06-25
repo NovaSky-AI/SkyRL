@@ -164,11 +164,11 @@ class BasePPOExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        from skyrl_train.generators.skygym_generator import SkyGymGenerator
+        from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 
-        return SkyGymGenerator(
+        return SkyRLGymGenerator(
             generator_cfg=cfg.generator,
-            skygym_cfg=cfg.environment.skygym,
+            skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             model_name=cfg.trainer.policy.model.path,

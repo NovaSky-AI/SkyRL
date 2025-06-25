@@ -1,14 +1,14 @@
 """
-uv run --extra dev --isolated pytest tests/cpu/generators/test_skygym_generator.py
+uv run --extra dev --isolated pytest tests/cpu/generators/test_skyrl_gym_generator.py
 """
 
 import pytest
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from skyrl_train.generators.skygym_generator import SkyGymGenerator
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
-from skygym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
 # TODO (erictang000): clean up the mocking for tests in this file
@@ -182,7 +182,7 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
 
 
 @pytest.mark.asyncio
-@patch("skygym.make")
+@patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
 async def test_agent_loop_single_turn(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, use_conversation_multi_turn, mock_env_cfg
@@ -194,9 +194,9 @@ async def test_agent_loop_single_turn(
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
-        skygym_cfg=mock_env_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
         model_name="test_model",
@@ -215,14 +215,14 @@ async def test_agent_loop_single_turn(
 
 
 @pytest.mark.asyncio
-@patch("skygym.make")
+@patch("skyrl_gym.make")
 async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg):
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
-        skygym_cfg=mock_env_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
         model_name="test_model",
@@ -296,11 +296,11 @@ def test_get_metrics_from_generator_output():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
-@patch("skygym.make")
+@patch("skyrl_gym.make")
 async def test_generate_interface_compliance(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, batched
 ):
-    """Test that SkyGymGenerator.generate() strictly conforms to the TypedDict interface.
+    """Test that SkyRLGymGenerator.generate() strictly conforms to the TypedDict interface.
 
     Tests both batched and non-batched modes to ensure interface compliance.
     """
@@ -309,9 +309,9 @@ async def test_generate_interface_compliance(
     mock_generator_cfg.batched = batched
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
-        skygym_cfg=mock_env_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
         model_name="test_model",
@@ -375,7 +375,7 @@ async def test_generate_interface_compliance(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turns_to_exceed", [1, 3])  # Test single-turn and multi-turn scenarios
-@patch("skygym.make")
+@patch("skyrl_gym.make")
 async def test_length_limit_exceeded_during_conversation(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, turns_to_exceed
 ):
@@ -431,9 +431,9 @@ async def test_length_limit_exceeded_during_conversation(
     mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
     mock_tokenizer.encode.side_effect = mock_encode
 
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
-        skygym_cfg=mock_env_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
         model_name="test_model",
@@ -463,7 +463,7 @@ async def test_length_limit_exceeded_during_conversation(
 
 
 @pytest.mark.asyncio
-@patch("skygym.make")
+@patch("skyrl_gym.make")
 async def test_multi_turn_response_truncation(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
 ):
@@ -511,9 +511,9 @@ async def test_multi_turn_response_truncation(
     mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
     mock_tokenizer.encode.side_effect = mock_encode
 
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
-        skygym_cfg=mock_env_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
         model_name="test_model",
@@ -539,7 +539,7 @@ async def test_multi_turn_response_truncation(
 
 
 @pytest.mark.asyncio
-@patch("skygym.make")
+@patch("skyrl_gym.make")
 async def test_postprocessed_action_used(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_env_cfg, mock_generator_cfg
 ):
@@ -591,9 +591,9 @@ async def test_postprocessed_action_used(
     mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
     mock_tokenizer.encode.side_effect = mock_encode
 
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
-        skygym_cfg=mock_env_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
         model_name="test_model",

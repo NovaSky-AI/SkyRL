@@ -59,7 +59,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_turns=6 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
-  environment.skygym.sql.db_path=$DB_PATH \
+  environment.skyrl_gym.sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_repro" \

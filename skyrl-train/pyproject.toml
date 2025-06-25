@@ -38,7 +38,7 @@ dependencies = [
     "datasets",
     "tensordict",
     "jaxtyping",
-    "skygym",
+    "skryl-gym",
 ]
 
 [tool.uv]
@@ -81,7 +81,7 @@ sglang = [
 ]
 
 [tool.uv.sources]
-skygym = {path = "skygym"}
+skyrl-gym = {path = "skyrl-gym"}
 
 [tool.setuptools.packages.find]
 include = ["skyrl_train*"]

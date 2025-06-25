@@ -1,17 +1,17 @@
 """
-uv run --extra dev --isolated pytest tests/cpu/generators/test_skygym_generator_chat_templating.py
+uv run --extra dev --isolated pytest tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py
 """
 
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
-from skyrl_train.generators.skygym_generator import SkyGymGenerator
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 
-from skygym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
-from skygym.envs import register
+from skyrl_gym.envs import register
 from skyrl_train.generators.utils import get_custom_chat_template
 
 
@@ -40,7 +40,7 @@ def _register_test_env_if_needed():
     try:
         register(
             id="cpu_test_env",
-            entry_point="tests.cpu.generators.test_skygym_generator_chat_templating:CPUTestEnv",
+            entry_point="tests.cpu.generators.test_skyrl_gym_generator_chat_templating:CPUTestEnv",
         )
     except Exception:
         # Environment already registered, ignore
@@ -51,7 +51,7 @@ def _register_test_env_if_needed():
 @pytest.mark.parametrize(
     "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
 )
-async def test_skygym_generator_chat_templating_exact(model_name):
+async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     _register_test_env_if_needed()  # Register only when needed
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     mock_llm = MagicMock()
@@ -78,9 +78,9 @@ async def test_skygym_generator_chat_templating_exact(model_name):
             "env_class": "cpu_test_env",
         }
     )
-    generator = SkyGymGenerator(
+    generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,
-        skygym_cfg=env_cfg,
+        skyrl_gym_cfg=env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=tokenizer,
         model_name=model_name,

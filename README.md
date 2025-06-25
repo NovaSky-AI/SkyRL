@@ -35,7 +35,7 @@ SkyRL provides the following components:
 
 - [`skyagent`](./skyagent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
 - (NEW!) [`skyrl-train`](./skyrl-train): Our flexible training framework for RL.
-- (NEW!) [`skygym`](./skygym): Our library of math, coding, search and SQL environments implemented with the Gymnasium API.
+- (NEW!) [`skyrl-gym`](./skyrl-gym): Our library of math, coding, search and SQL environments implemented with the Gymnasium API.
 
 # Acknowledgement
 
