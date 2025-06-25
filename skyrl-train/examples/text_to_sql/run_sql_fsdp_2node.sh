@@ -19,7 +19,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.strategy=fsdp2 \
   trainer.policy.fsdp_config.cpu_offload=true \
   trainer.ref.fsdp_config.cpu_offload=true \
-  trainer.policy.fsdp_config.max_norm=0.5 \
+  trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.sequence_parallel_size=2 \
   trainer.placement.policy_num_nodes=2 \
   trainer.placement.critic_num_nodes=2 \
