@@ -8,7 +8,7 @@ set -x
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/default/sql_data"
+DB_PATH="$HOME/path/to/db_files"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
 NUM_GPUS=8
