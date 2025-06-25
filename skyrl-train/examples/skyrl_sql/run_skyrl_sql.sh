@@ -32,8 +32,8 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.sequence_parallel_size=1 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_llm_endpoints=$NUM_ENDPOINTS \
-  generator.llm_endpoint_tensor_parallel_size=$TP_SIZE \
+  generator.num_inference_engines=$NUM_ENDPOINTS \
+  generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=8 \
   trainer.micro_train_batch_size_per_gpu=1 \
@@ -47,9 +47,8 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.hf_save_interval=30 \
   trainer.dump_data_batch=true \
   generator.backend=vllm \
-  generator.use_local_endpoints=true \
+  generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.vllm_enable_sleep=true \
   generator.async_engine=true \
   generator.batched=false \
   environment.env_class=text2sql \
@@ -58,7 +57,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_turns=6 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
-  environment.skygym.sql.db_path=$DB_PATH \
+  ++environment.skygym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_repro" \
