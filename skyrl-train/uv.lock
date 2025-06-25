@@ -1274,13 +1274,13 @@ name = "mlx-lm"
 version = "0.25.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jinja2" },
-    { name = "mlx" },
-    { name = "numpy" },
-    { name = "protobuf" },
-    { name = "pyyaml" },
-    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "jinja2", marker = "sys_platform == 'darwin'" },
+    { name = "mlx", marker = "sys_platform == 'darwin'" },
+    { name = "numpy", marker = "sys_platform == 'darwin'" },
+    { name = "protobuf", marker = "sys_platform == 'darwin'" },
+    { name = "pyyaml", marker = "sys_platform == 'darwin'" },
+    { name = "transformers", version = "4.51.1", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/52/34/d2b551d4519a9bafdfd29f76987dbcaaee370b974cfa81acfba782d6063f/mlx_lm-0.25.2.tar.gz", hash = "sha256:7d01baa66916aabd5be7345786acbfaf01d4e3f646759d7232e14aebfd4420a8", size = 146815, upload-time = "2025-06-09T04:18:47.142Z" }
 wheels = [
@@ -1542,7 +1542,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.1.0.70"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/fd/713452cd72343f682b1c7b9321e23829f00b842ceaedcda96e742ea0b0b3/nvidia_cudnn_cu12-9.1.0.70-py3-none-manylinux2014_x86_64.whl", hash = "sha256:165764f44ef8c61fcdfdfdbe769d687e06374059fbb388b6c89ecb0e28793a6f", size = 664752741, upload-time = "2024-04-22T15:24:15.253Z" },
@@ -1554,7 +1554,7 @@ name = "nvidia-cufft-cu12"
 version = "11.2.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7a/8a/0e728f749baca3fbeffad762738276e5df60851958be7783af121a7221e7/nvidia_cufft_cu12-11.2.1.3-py3-none-manylinux2014_aarch64.whl", hash = "sha256:5dad8008fc7f92f5ddfa2101430917ce2ffacd86824914c82e28990ad7f00399", size = 211422548, upload-time = "2024-06-18T19:33:39.396Z" },
@@ -1577,9 +1577,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.6.1.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
-    { name = "nvidia-cusparse-cu12" },
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "nvidia-cusparse-cu12", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/6b/a5c33cf16af09166845345275c34ad2190944bcc6026797a39f8e0a282e0/nvidia_cusolver_cu12-11.6.1.9-py3-none-manylinux2014_aarch64.whl", hash = "sha256:d338f155f174f90724bbde3758b7ac375a70ce8e706d70b018dd3375545fc84e", size = 127634111, upload-time = "2024-06-18T19:35:01.793Z" },
@@ -1592,7 +1592,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.3.1.170"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/a9/c0d2f83a53d40a4a41be14cea6a0bf9e668ffcf8b004bd65633f433050c0/nvidia_cusparse_cu12-12.3.1.170-py3-none-manylinux2014_aarch64.whl", hash = "sha256:9d32f62896231ebe0480efd8a7f702e143c98cfaa0e8a76df3386c1ba2b54df3", size = 207381987, upload-time = "2024-06-18T19:35:32.989Z" },
@@ -2732,23 +2732,17 @@ wheels = [
 [[package]]
 name = "skyrl-gym"
 version = "0.1.0"
-source = { directory = "skyrl-gym" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "func-timeout" },
     { name = "omegaconf" },
     { name = "pandas" },
     { name = "requests" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "func-timeout" },
-    { name = "omegaconf" },
-    { name = "pandas" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "requests" },
+sdist = { url = "https://files.pythonhosted.org/packages/1e/6c/890c9725812d2b384a82235357f2523b9ed7259fe9df0139d0a8cbaedc41/skyrl_gym-0.1.0.tar.gz", hash = "sha256:d430c9708e8960642ee97623c625dc72ed415609c531904ce8f6d96b56e1b08d", size = 26742, upload-time = "2025-06-25T21:16:45.904Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/98/f1b8909945cb5db4c1c29e384980de81e6fac10c9290b935de2869f63ab9/skyrl_gym-0.1.0-py3-none-any.whl", hash = "sha256:e4d068e423e4e56584fcecdc65333b523339f932bb4168e76184d3ee4f888616", size = 30567, upload-time = "2025-06-25T21:16:44.722Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "skyrl-train"
@@ -2828,7 +2822,7 @@ requires-dist = [
     { name = "ray", specifier = "==2.44.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.11.9" },
     { name = "sglang", extras = ["srt", "openai"], marker = "extra == 'sglang'", specifier = "==0.4.6.post4" },
-    { name = "skyrl-gym", directory = "skyrl-gym" },
+    { name = "skyrl-gym" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=7.0.0" },
     { name = "sphinx-autobuild", marker = "extra == 'docs'", specifier = ">=2021.3.14" },
     { name = "sphinx-autodoc-typehints", marker = "extra == 'docs'", specifier = ">=1.25.0" },
@@ -3314,8 +3308,8 @@ wheels = [
 
 [package.optional-dependencies]
 sentencepiece = [
-    { name = "protobuf", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "sentencepiece", marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "protobuf", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sentencepiece", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -3349,8 +3343,8 @@ wheels = [
 
 [package.optional-dependencies]
 sentencepiece = [
-    { name = "protobuf", marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "sentencepiece", marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "protobuf", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sentencepiece", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -3673,8 +3667,8 @@ name = "xformers"
 version = "0.0.29.post2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
-    { name = "torch" },
+    { name = "numpy", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "torch", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/27/ed/04ec7ef97a7e1c836add41ef5a2aef8cbdd45c0190ca42cc08f3c21e2b7b/xformers-0.0.29.post2.tar.gz", hash = "sha256:6ca3d1a6db6f2abff25c1154adee96987f77f4dfd5141771805afa5fc13e9395", size = 8468494, upload-time = "2025-02-01T02:33:48.209Z" }
 wheels = [

@@ -14,16 +14,15 @@ license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
 
-
-[project.urls]
-Repository = "https://github.com/NovaSky-AI/SkyRL"
-
 dependencies = [
     "func_timeout",
     "pandas", 
     "requests",
     "omegaconf",
 ]
+
+[project.urls]
+Repository = "https://github.com/NovaSky-AI/SkyRL"
 
 [tool.setuptools.packages.find]
 include = ["skyrl_gym*"]
