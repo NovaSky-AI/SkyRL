@@ -57,6 +57,10 @@ To launch the server, run the following command (the full script is at :code_lin
         # worker extension class for handling weight updates
         --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
 
+.. tip:: 
+
+With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput
+
 Starting Training
 ----------------------
 
