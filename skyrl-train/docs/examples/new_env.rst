@@ -10,11 +10,11 @@ We'll walk through the complete process: implementing the environment, registeri
 Environment Interface
 ---------------------
 
-As discussed in :doc:`../api/env`, SkyGym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
+SkyGym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
 
 .. code-block:: python
    :linenos:
-   :caption: Base environment interface at ``skygym/envs/base_text_env.py``
+   :caption: Base text environment interface at `skygym/envs/base_text_env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skygym/skygym/envs/base_text_env.py>`_
 
    class BaseTextEnv(Env[str, str]):
       def step(self, action: str) -> BaseTextEnvStepOutput:
@@ -39,7 +39,9 @@ As discussed in :doc:`../api/env`, SkyGym includes a simple text-in/text-out env
       def close(self):
          pass
 
-For our multiplication environment, we only need to implement the ``step`` method because we don't have any initialization or cleanup to do.
+This class inherits from ``Env``, which is a generic environment interface (i.e., not specific to text-based tasks). An API reference for ``Env`` can be found in :doc:`../api/env`.
+
+For our multiplication environment, we only need to implement the ``step`` method above because we don't have any initialization or cleanup to do.
 
 
 Simple Single-Turn Environment
@@ -56,7 +58,7 @@ So, the environment ``step`` must simply parse the answer out of ``\\boxed{answe
 
 .. code-block:: python
    :linenos:
-   :caption: Simple multiplication environment in ``examples/multiply/env.py``
+   :caption: Simple multiplication environment
 
    class MultiplyEnv(BaseTextEnv):
       def _parse_action(self, action: str) -> str:
@@ -94,7 +96,7 @@ We will make a few simple extensions to our ``step()`` method:
 
 .. code-block:: python
    :linenos:
-   :caption: Multi-turn multiplication environment in ``examples/multiply/env.py``
+   :caption: Multi-turn multiplication environment in `examples/multiply/env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py>`_
 
    def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
@@ -139,7 +141,7 @@ We will make a few simple extensions to our ``step()`` method:
 
 The multi-turn version gives partial credit for formatting the answer correctly, even if it's wrong. This helps the model learn the expected output format.
 
-The final implementation is available in ``examples/multiply/env.py``. 
+The final implementation is available in `examples/multiply/env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py>`_.
 
 Registering Your New Environment
 --------------------------------
@@ -150,7 +152,7 @@ We will create a new entrypoint for training with the ``multiply`` environment b
 
 .. code-block:: python
    :linenos:
-   :caption: Environment registration
+   :caption: Environment registration at `examples/multiply/main_multiply.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/main_multiply.py>`_
 
    # Register the multiply environment.
    register(
@@ -178,18 +180,18 @@ We will create a new entrypoint for training with the ``multiply`` environment b
 Now, the training stack can simply build the new environment with ``skygym.make("multiply")``!
 
 .. note::
-   All code written in this document is *outside* of the ``skyrl`` package. There is no need to fork and edit ``skyrl`` code -- just import ``skyrl``, implement and register your environment, and the training stack can find the environment seamlessly!
+   All example code written in this document is *outside* of the ``skyrl-train`` and ``skyrl-gym`` packages. There is no need to fork and edit ``skyrl-train`` or ``skyrl-gym`` code -- just implement and register your environment, and the training stack can find the environment seamlessly!
 
 Preparing Training Data
 -----------------------
 
 Before we can train, we need a dataset of problems to train on.
 
-We can generate a dataset of multiplication problems using ``examples/multiply/multiply_dataset.py``. See the file for more details, but the core idea is to generate random multiplication problems of n-digit numbers, and ensure the dataset example is in the correct format:
+We can generate a dataset of multiplication problems using `examples/multiply/multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_. See the file for more details, but the core idea is to generate random multiplication problems of n-digit numbers, and ensure the dataset example is in the correct format:
 
 .. code-block:: python
    :linenos:
-   :caption: Generating a dataset of random multiplication problems
+   :caption: Generating a dataset of random multiplication problems at `examples/multiply/multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_
 
    for idx in range(num_examples):
         question, answer = generate_multiplication_problem(num_digits)
@@ -215,7 +217,7 @@ We can generate a dataset of multiplication problems using ``examples/multiply/m
         }
         examples.append(data)
 
-See :doc:`../datasets/dataset-preparation` for more details on the required dataset format and how to prepare your own dataset.
+See the doc on :doc:`../datasets/dataset-preparation` for more details on the required dataset format and how to prepare your own dataset.
 
 Now we can generate the datsaet:
 
@@ -236,7 +238,9 @@ Training Your Model
 
 Time to train! 🚀
 
-First, make sure your config matches your available GPUs. You may need to adjust the following parameters:
+We will use the ``run_multiply.sh`` script to train the model. This script is located in `examples/multiply/run_multiply.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/run_multiply.sh>`_ and primarily sets up the training configuration and calls ``main_multiply.py``.
+
+First, make sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count:
 
 - ``trainer.placement.policy_num_gpus_per_node``
 - ``generator.num_inference_engines``
@@ -247,10 +251,12 @@ Then start training:
    :linenos:
    :caption: Run training
 
-   export WANDB_API_KEY=your_wandb_api_key
+   export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
    bash examples/multiply/run_multiply.sh
 
 **Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the Tools documentation for details.
+
+.. TODO(tgriggs): Add a link to the tools doc.
 
 That's it! You've created a custom environment, prepared training data, and started training. The same pattern works for any text-based task you want to train on.
 

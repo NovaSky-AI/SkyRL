@@ -32,7 +32,9 @@ source .venv/bin/activate
 uv sync
 ```
 
-You should now be able to run our example script:
+You should now be able to run our example script (which uses 4 GPUs by default):
+
+TODO: handle number of GPUs, wandb logger, data preprocessing script.
 
 ```bash
 bash examples/gsm8k/run_gsm8k.sh
