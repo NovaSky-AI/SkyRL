@@ -12,7 +12,6 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
-    "sphinx.ext.linkcode",
     "sphinx.ext.extlinks",
     "sphinx_autodoc_typehints",
     "myst_parser",
@@ -49,18 +48,3 @@ napoleon_type_aliases = None
 extlinks = {
     "code_link": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/%s", "%s"),
 }
-
-
-def linkcode_resolve(domain, info):
-    """
-    Determine the URL corresponding to Python object
-    """
-    if domain != "py":
-        return None
-    if not info["module"]:
-        return None
-
-    # For example files, create direct GitHub links
-    filename = info["module"].replace(".", "/")
-
-    return f"https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/{filename}"
