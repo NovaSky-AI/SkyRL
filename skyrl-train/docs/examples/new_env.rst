@@ -1,7 +1,7 @@
-Creating a New Environment in SkyGym
+Creating a New Environment in SkyRL Gym
 =====================================
 
-To demonstrate how to create custom environments in SkyGym, let's build a simple multiplication environment!
+To demonstrate how to create custom environments in SkyRL Gym, let's build a simple multiplication environment!
 
 We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
 
@@ -177,7 +177,7 @@ We will create a new entrypoint for training with the ``multiply`` environment b
    if __name__ == "__main__":
       main()
 
-Now, the training stack can simply build the new environment with ``skygym.make("multiply")``!
+Now, the training stack can simply build the new environment with ``skyrl_gym.make("multiply")``!
 
 .. note::
    All example code written in this document is *outside* of the ``skyrl-train`` and ``skyrl-gym`` packages. There is no need to fork and edit ``skyrl-train`` or ``skyrl-gym`` code -- just implement and register your environment, and the training stack can find the environment seamlessly!
