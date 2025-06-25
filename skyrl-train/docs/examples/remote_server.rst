@@ -80,7 +80,7 @@ To start training, we need to set up our training script. You can find a complet
         data.train_data=["$HOME/data/gsm8k/train.parquet"] \
         data.val_data=["$HOME/data/gsm8k/test.parquet"] \
 
-        # Trainer model - make sure this is the same model used to launch the inference engine server
+        # Policy model - make sure this is the same model used to launch the inference engine server
         trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
         trainer.algorithm.advantage_estimator="grpo" \
 
