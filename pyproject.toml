@@ -1,13 +1,13 @@
 [project]
 name = "skyrl"
 version = "0.1.0"
-description = "An RL training framework for LLMs"
+description = "A Modern Post-Training Stack for LLMs"
 authors = [
     { name = "NovaSkyAI Team"}
 ]
 license = { text = "MIT" }
 readme = "README.md"
-requires-python = "==3.10.*"
+requires-python = "==3.12.*"
 
 [tool.black]
 line-length = 120
