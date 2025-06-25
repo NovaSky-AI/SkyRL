@@ -7,7 +7,7 @@ import hydra
 from omegaconf import DictConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skygym.envs import register
+from skyrl_gym.envs import register
 
 
 @ray.remote(num_cpus=1)

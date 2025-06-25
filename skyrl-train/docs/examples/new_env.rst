@@ -1,7 +1,7 @@
-Creating a New Environment in SkyGym
+Creating a New Environment in SkyRL Gym
 =====================================
 
-To demonstrate how to create custom environments in SkyGym, let's build a simple multiplication environment!
+To demonstrate how to create custom environments in SkyRL Gym, let's build a simple multiplication environment!
 
 We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
 
@@ -10,11 +10,11 @@ We'll walk through the complete process: implementing the environment, registeri
 Environment Interface
 ---------------------
 
-As discussed in :doc:`../api/env`, SkyGym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
+As discussed in :doc:`../api/env`, SkyRL Gym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
 
 .. code-block:: python
    :linenos:
-   :caption: Base environment interface at ``skygym/envs/base_text_env.py``
+   :caption: Base environment interface at ``skyrl_gym/envs/base_text_env.py``
 
    class BaseTextEnv(Env[str, str]):
       def step(self, action: str) -> BaseTextEnvStepOutput:
@@ -176,7 +176,7 @@ We will create a new entrypoint for training with the ``multiply`` environment b
    if __name__ == "__main__":
       main()
 
-Now, the training stack can simply build the new environment with ``skygym.make("multiply")``!
+Now, the training stack can simply build the new environment with ``skyrl_gym.make("multiply")``!
 
 .. note::
    All code written in this document is *outside* of the ``skyrl`` package. There is no need to fork and edit ``skyrl`` code -- just import ``skyrl``, implement and register your environment, and the training stack can find the environment seamlessly!

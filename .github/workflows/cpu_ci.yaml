@@ -62,13 +62,13 @@ jobs:
       - name: Run cpu tests
         run:  uv run --frozen pytest tests/cpu/
   
-  skygym_tests:
+  skyrl_gym_tests:
     needs: check_code_quality
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
-        working-directory: ./skygym
+        working-directory: ./skyrl-gym
 
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +83,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
-      - name: Install skygym
+      - name: Install skyrl-gym
         run:  uv sync --frozen --extra dev # installs from lock file
       - name: Run cpu tests
         run:  uv run --frozen pytest tests/
