@@ -84,11 +84,3 @@ You can refer to the full set of FSDP configurations at :ref:`fsdp-configuration
 .. note:: 
     ``cpu_offload`` cannot be enabled for the policy or critic model with FSDP1, since gradient accumulation outside ``no_sync`` mode is not supported with CPU offloading. 
     See the limitations section in `FSDP docs <https://docs.pytorch.org/docs/stable/fsdp.html>`_ for more details.
-
-
-
-
-
-
-
-
