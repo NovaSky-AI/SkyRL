@@ -1,81 +1,56 @@
 Using Tools and ToolGroups in SkyRL-Gym
 ==========================
 
-This guide shows how to use tools in SkyRL-Gym environments.
+One of the key features of SkyRL-Gym is `reusable tools`. Often, a single tool (such as Python code execution) is useful in multiple environments (such as math or deep research environments). Reusable tools allow developers to implement a tool once, and use it in multiple environments. You can even build an environment from our library of implemented tools!
 
-**What we're building:** An environment that uses tools to help agents perform tasks.
+This document describes SkyRL-gym's tool interface and how to build and use tools in SkyRL-gym environments. You can also find the source code for tools in `skyrl_gym/tools <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/skyrl_gym/tools>`_.
 
 Core Concepts
 -------------
 
-- **Tool**: A single executable function
-- **ToolGroup**: A collection of related tools that share the same context (states)
-- **Environment Integration**: Tools are integrated into environments
+**tool**: A ``tool`` is a single executable function whose inputs and outputs can be flexibly defined.
 
-Tool State Sharing and Modularity
----------------------------------
+**ToolGroup**: A ``ToolGroup`` is a collection of related tools that share the same context or states. Tool groups enable all tools within the group to access and modify the shared state, such as a shared database connection or cache.
 
-ToolGroups enable modular design with state sharing:
+**Environment**: An ``Environment`` is a class that defines the task for the agent to solve, and can integrate one ore more tool groups for the agent to use. See the following doc for more details on how to build an environment: :doc:`new_env`.
 
-**State Sharing:**
-- Tools in same ToolGroup share context (databases, caches, connections)
-- Efficient resource reuse within groups
-- Consistent state across tool executions
 
-**Modular Benefits:**
-- Use multiple ToolGroups for different LLM capabilities
-- Independent development and testing
-- Scale by adding/removing ToolGroups as needed
+ToolGroup and the `@tool` Decorator
+-----------------------------------
 
-**Examples:**
-- Database ToolGroup: Shared connection pool
-- Search ToolGroup: Shared cache and index
-- Code ToolGroup: Shared execution environment
+The ``ToolGroup`` class provides utilities for managing tools and tool execution, such as ``get_tool`` and ``get_tool_names``.  To create a new tool group, you can inherit from ``ToolGroup`` and add or modify utilities as needed. For example, you can add a shared state to the tool group, or add a custom tool execution function.
 
-Some tools need shared state, others work independently. This design enables scalable, modular environments.
-
-The `@tool` Decorator
---------------------
-
-The `@tool` decorator marks methods as executable tools:
+The `@tool` decorator marks methods as executable tools. After creating a custom tool group, you can use the `@tool` decorator to mark methods as tools, which the ``ToolGroup`` will automatically register and be able to execute. For instance, a simple Python code execution tool group might look like the following code block, where the tool group is called ``PythonCodeExecutorToolGroup`` and the tool is called ``python`` marked with the ``@tool`` decorator.
 
 .. code-block:: python
+    
+    from skyrl_gym.tools.core import tool, ToolGroup
+    import subprocess
 
-    from skyrl_gym.tools.core import tool
 
-    class MyToolGroup(ToolGroup):
+    # Create a new tool group that inherits from ToolGroup
+    class PythonCodeExecutorToolGroup(ToolGroup):
         def __init__(self):
-            super().__init__(name="MyToolGroup")
-        
+            super().__init__(name="PythonCodeExecutorToolGroup")
+
+        # Mark the python method as a tool
         @tool
-        def my_tool(self, input_param: str) -> str:
-            """Execute a specific task."""
-            return f"Processed: {input_param}"
+        def python(self, code: str) -> str:
+            result = subprocess.run(
+                ["python", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.timeout, text=True
+            )
+            return result.stdout
 
-The ToolGroup Base Class
------------------------
 
-`ToolGroup` provides tool management:
-
-.. code-block:: python
-
-    from skygym.tools.core import ToolGroup
-
-    class MyToolGroup(ToolGroup):
-        def __init__(self, name: str):
-            super().__init__(name=name)
-
-Core Methods:
-- **`get_tool(name)`**: Get a tool by name
-- **`execute_tool(name, *args, **kwargs)`**: Execute a tool
+See the base interface for tools and tool groups at `skyrl_gym/tools/core.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-gym/skyrl_gym/tools/core.py>`_.
 
 Built-in ToolGroups
-------------------
+-------------------
 
-SkyRL-Gym provides pre-built ToolGroups:
+SkyRL-Gym provides pre-built ToolGroups that can be used out of the box in any SkyRL-gym environment:
 
 Python Code Execution
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
@@ -85,7 +60,7 @@ Python Code Execution
     result = python_tools.execute_tool("python", "print('Hello, World!')")
 
 SQL Code Execution
-~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
@@ -95,7 +70,7 @@ SQL Code Execution
     result = sql_tools.execute_tool("sql", "SELECT * FROM users")
 
 Search ToolGroup
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
@@ -105,27 +80,6 @@ Search ToolGroup
         search_url="http://127.0.0.1:8000/retrieve"
     )
     result = search_tools.execute_tool("search", "Context to search")
-
-Creating Custom ToolGroups
--------------------------
-
-Basic Custom ToolGroup
-~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: python
-
-    from skygym.tools.core import tool, ToolGroup
-
-    class WeatherToolGroup(ToolGroup):
-        def __init__(self, api_key: str):
-            self.api_key = api_key
-            super().__init__(name="WeatherToolGroup")
-        
-        @tool
-        def get_weather(self, city: str) -> str:
-            """Get current weather for a city."""
-            # Implementation here
-            return f"Weather in {city}: 20°C, sunny"
 
 Environment Integration
 ----------------------
@@ -221,49 +175,6 @@ Combine multiple ToolGroups for powerful environments:
 - Each ToolGroup manages its own resources and state
 - Modular scaling - add/remove ToolGroups as needed
 - Clean separation between different domains
-
-Best Practices
---------------
-
-Tool Design
-~~~~~~~~~~
-
-1. **Single Responsibility**: Each tool should have one purpose
-2. **Error Handling**: Return meaningful error messages
-3. **Timeout Protection**: Use timeouts to prevent hanging
-4. **Input Validation**: Validate inputs before processing
-
-ToolGroup Organization
-~~~~~~~~~~~~~~~~~~~~~
-
-1. **Logical Grouping**: Group tools that share similar state or context
-2. **State Management**: Design shared state carefully - some tools need it, others don't
-3. **Resource Efficiency**: Reuse connections and resources within ToolGroups
-4. **Modular Design**: Keep ToolGroups independent and focused on specific domains
-
-Environment Integration
-~~~~~~~~~~~~~~~~~~~~~~
-
-1. **Tool Registration**: Register tools during initialization
-2. **Action Parsing**: Implement robust action parsing
-3. **Error Recovery**: Provide graceful error recovery
-
-Testing Tools
--------------
-
-Test tools and environments:
-
-.. code-block:: python
-
-    import pytest
-    from skygym.tools import PythonCodeExecutorToolGroup
-
-    def test_python_tool_execution():
-        """Test Python code execution tool."""
-        tools = PythonCodeExecutorToolGroup(timeout=5.0)
-        
-        result = tools.execute_tool("python", "print('Hello, World!')")
-        assert result == "Hello, World!"
 
 API Reference
 -------------

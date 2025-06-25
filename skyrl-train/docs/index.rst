@@ -1,5 +1,5 @@
 Welcome to SkyRL-Train's documentation!
-======================================
+=======================================
 
 SkyRL-Train is a reinforcement learning framework designed for modularity and extensibility. 
 
@@ -23,6 +23,7 @@ SkyRL-Train is a reinforcement learning framework designed for modularity and ex
 
    examples/new_env
    examples/async
+   examples/tools_guide
 
 .. toctree::
    :maxdepth: 2
@@ -52,7 +53,6 @@ SkyRL-Train is a reinforcement learning framework designed for modularity and ex
    api/trainer
    api/generator
    api/env
-   api/tools_guide
    api/tools
 
 .. toctree::
