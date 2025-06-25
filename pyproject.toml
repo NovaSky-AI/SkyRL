@@ -1,7 +1,7 @@
 [project]
 name = "skyrl"
 version = "0.1.0"
-description = "A Modern Post-Training Stack for LLMs"
+description = "A Post-Training Stack for LLMs"
 authors = [
     { name = "NovaSkyAI Team"}
 ]
