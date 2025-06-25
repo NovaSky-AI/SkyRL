@@ -25,7 +25,7 @@ Make sure to download the dataset and update the path in `DATA_PATH` in the scri
 
 .. code-block:: bash
 
-    huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data --local-dir <path_to_dir> --repo-type dataset
+    huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 
 
 DB environment 
@@ -51,7 +51,7 @@ Unzip `data.zip` in this folder, and set the corresponding `DB_PATH` in the trai
 Running the scripts 
 -------------------
 
-We provide a script `run_skyrl_sql.sh <../../skyrl/examples/skyrl-sql/run_skyrl_sql.sh>`_ for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
+We provide a script `run_skyrl_sql.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/text_to_sql/run_skyrl_sql.sh>`_ for reproducing the results for SkyRL-SQL-7B. Make sure to substitute the `DB_PATH`  and `DATA_PATH` variables with your own.
 
 .. code-block:: bash
     export WANDB_API_KEY=<wandb-api-key>

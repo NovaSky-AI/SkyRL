@@ -2,14 +2,16 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
+# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/text_to_sql/run_sql_fsdp.sh
 
-DATA_DIR="data/sql/"
-train_data="['${DATA_DIR}/train.parquet']"
-val_data="['${DATA_DIR}/validation.parquet']"
+DATA_DIR="$HOME/data/sql"
+DB_PATH="$HOME/default/sql_data/"
+CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
+
 NUM_GPUS=8
-NUM_INFERENCE_ENGINES=2
+NUM_ENDPOINTS=2
 TP_SIZE=4
 MAX_INPUT_LENGTH=29000
 MAX_GENERATE_LENGTH=3000
@@ -57,6 +59,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
   trainer.seed=1234 \
+  ++environment.skygym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_test" \
