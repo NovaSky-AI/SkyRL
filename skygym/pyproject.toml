@@ -1,13 +1,33 @@
+# basic pyproject.toml for skygym
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "skyrl"
+name = "skygym"
 version = "0.1.0"
-description = "An RL training framework for LLMs"
+description = "A gymnasium environment for RL agents to interact with the sky"
 authors = [
-    { name = "NovaSkyAI Team"}
+    { name = "NovaSkyAI AI Team"}
 ]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = "==3.10.*"
+
+dependencies = [
+    "func_timeout",
+    "pandas", 
+    "requests",
+    "omegaconf",
+]
+
+[tool.setuptools.packages.find]
+include = ["skygym*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest"
+]
 
 [tool.black]
 line-length = 120

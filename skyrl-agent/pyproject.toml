@@ -1,0 +1,236 @@
+# -------------------------------
+# build-system
+# -------------------------------
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+# -------------------------------
+# project (PEP 621 metadata)
+# -------------------------------
+[project]
+name = "verl"
+# We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
+# (PEP 621 calls this "dynamic version"). 
+# The actual version is specified in the [tool.setuptools.dynamic] section below.
+dynamic = ["version"]
+
+description = "verl: Volcano Engine Reinforcement Learning for LLM"
+license = {file = "LICENSE"}  # or "Apache-2.0", if you prefer an SPDX identifier
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = "==3.12.*"
+
+dependencies=[
+  'accelerate',
+  'codetiming',
+  'datasets',
+  'dill',
+  'hydra-core',
+  'numpy',
+  'pandas',
+  'datasets',
+  'peft',
+  'pyarrow>=15.0.0',
+  'pybind11',
+  'pylatexenc',
+  'ray[default]>=2.10',
+  'tensordict<=0.6.2',
+  'torchdata',
+  'transformers',
+  'wandb',
+  "hf_transfer",
+  "torchdata",
+  "openhands-ai",
+  "streamlit",
+  "whatthepatch",
+  "retry",
+  "evaluate",
+  "swebench@https://github.com/SWE-Gym/SWE-Bench-Fork.git",
+  "swegym@https://github.com/SWE-Gym/SWE-Bench-Package.git",
+  "commit0",
+  "func_timeout",
+  "sympy",
+  "gdown",
+  "matplotlib",
+  "seaborn",
+  "tabulate",
+  "browsergym==0.10.2",
+  "browsergym-webarena==0.10.2",
+  "browsergym-miniwob==0.10.2",
+  "browsergym-visualwebarena==0.10.2",
+  'tensordict<=0.6.2',
+  'torch-memory-saver>=0.0.5',
+  'vllm>=0.7.3',
+]
+
+[tool.uv]
+override-dependencies = ["ray==2.43.0", "xgrammar==0.1.17"]
+conflicts = [
+    [
+        { extra = "swebench" },
+        { extra = "sql" },
+    ],
+]
+
+# NOTE (sumanthrh): This is a hack pending more investigation.
+# Currently, sglang 0.4.6.post1 is needed for swebench training - this is to support Qwen3 models 
+# However, with the SQL task, we've noticed that using 0.4.6.post1 leads to a 10x slowdown in generation time compared to 0.4.4.post1. 
+# Dependency management with sglang is messy at the moment. I've not been able to track down the root cause yet. 
+[project.optional-dependencies]
+swebench = [
+    'sglang[all]==0.4.6.post1', 
+    # We explictly use a flashinfer wheel from their index because the wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime (very slow).
+    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=cbc4acb4aed7c4b00887a557dac484315327a063e25ac1ed4ee8eef54edf9ef6",
+    # Use flash attention with torch 2.6 since sglang 0.4.6.post1 requires torch 2.6
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abifalse-cp312-cp312-linux_x86_64.whl"
+]
+sql = [
+    'sglang[all]==0.4.4.post4', 
+    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.3/flashinfer_python-0.2.3+cu124torch2.5-cp38-abi3-linux_x86_64.whl#sha256=74fe5bf85068e12cf93100f47b932ed0c7a8547ec93905f62eab604dccbb68bd",
+    # Use flash attention with torch 2.5 since sglang 0.4.4.post4 requires torch 2.5
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abifalse-cp312-cp312-linux_x86_64.whl"
+]
+test = ['pytest', 'yapf', 'py-spy']
+
+[tool.uv.sources]
+openhands-ai = { path = "./SkyRL-OpenHands", editable = true }
+
+# -------------------------------
+# tool.setuptools - Additional config
+# -------------------------------
+[tool.setuptools]
+# True means `setuptools` will attempt to include all relevant files in package_data automatically.
+# This corresponds to `include_package_data=True` in setup.py.
+include-package-data = true
+
+# We read the version from a file in 'verl/version/version'
+[tool.setuptools.dynamic]
+version = {file = "verl/version/version"}
+
+# If you need to mimic `package_dir={'': '.'}`:
+[tool.setuptools.package-dir]
+"" = "."
+
+# If you need to include specific non-Python data (like YAML files or version file):
+# This is the rough equivalent of package_data={'': ['version/*'], 'verl': ['trainer/config/*.yaml']}
+[tool.setuptools.package-data]
+verl = [
+  "version/*",
+  "trainer/config/*.yaml"
+]
+
+
+[tool.pylint.message_control]
+disable = [
+    "abstract-method",
+    "anomalous-backslash-in-string",
+    "arguments-differ",
+    "arguments-renamed",
+    "assignment-from-none",
+    "attribute-defined-outside-init",
+    "bad-str-strip-call",
+    "bare-except",
+    "broad-exception-caught",
+    "broad-exception-raised",
+    "cell-var-from-loop",
+    "chained-comparison",
+    "consider-iterating-dictionary",
+    "consider-using-enumerate",
+    "consider-using-f-string",
+    "consider-using-from-import",
+    "consider-using-generator",
+    "consider-using-in",
+    "consider-using-max-builtin",
+    "consider-using-set-comprehension",
+    "consider-using-sys-exit",
+    "consider-using-with",
+    "cyclic-import",
+    "dangerous-default-value",
+    "duplicate-code",
+    "eval-used",
+    "expression-not-assigned",
+    "f-string-without-interpolation",
+    "fixme",
+    "function-redefined",
+    "global-statement",
+    "global-variable-not-assigned",
+    "import-error",
+    "import-outside-toplevel",
+    "import-self",
+    "inconsistent-return-statements",
+    "invalid-character-zero-width-space",
+    "invalid-name",
+    "line-too-long",
+    "logging-fstring-interpolation",
+    "logging-not-lazy",
+    "missing-class-docstring",
+    "missing-final-newline",
+    "missing-function-docstring",
+    "missing-module-docstring",
+    "multiple-imports",
+    "no-else-continue",
+    "no-else-raise",
+    "no-else-return",
+    "no-member",
+    "no-self-argument",
+    "no-value-for-parameter",
+    "not-an-iterable",
+    "not-callable",
+    "notimplemented-raised",
+    "pointless-exception-statement",
+    "pointless-string-statement",
+    "pointless-statement",
+    "possibly-used-before-assignment",
+    "protected-access",
+    "raise-missing-from",
+    "raising-format-tuple",
+    "redefined-argument-from-local",
+    "redefined-builtin",
+    "redefined-outer-name",
+    "redundant-u-string-prefix",
+    "reimported",
+    "simplifiable-if-expression",
+    "simplifiable-if-statement",
+    "singleton-comparison",
+    "super-init-not-called",
+    "superfluous-parens",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-boolean-expressions",
+    "too-many-branches",
+    "too-many-instance-attributes",
+    "too-many-lines",
+    "too-many-locals",
+    "too-many-positional-arguments",
+    "too-many-return-statements",
+    "too-many-statements",
+    "trailing-newlines",
+    "trailing-newlines",
+    "trailing-whitespace",
+    "unbalanced-tuple-unpacking",
+    "undefined-loop-variable",
+    "undefined-variable",
+    "ungrouped-imports",
+    "unidiomatic-typecheck",
+    "unnecessary-comprehension",
+    "unnecessary-lambda",
+    "unnecessary-lambda-assignment",
+    "unnecessary-pass",
+    "unspecified-encoding",
+    "unused-argument",
+    "unused-import",
+    "unused-variable",
+    "unused-wildcard-import",
+    "use-a-generator",
+    "use-dict-literal",
+    "used-before-assignment",
+    "useless-object-inheritance",
+    "useless-parent-delegation",
+    "useless-return",
+    "wildcard-import",
+    "wrong-import-order",
+    "wrong-import-position",
+]
