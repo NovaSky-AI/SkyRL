@@ -5,14 +5,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skyrl-gym"
-version = "0.1.0"
-description = "A gymnasium environment for RL agents to interact with the sky"
+version = "0.1.1"
+description = "RL environments for LLMs implemented with the Gymnasium API."
 authors = [
     { name = "NovaSkyAI AI Team"}
 ]
 license = { text = "MIT" }
 readme = "README.md"
-requires-python = "==3.10.*"
+requires-python = ">=3.10"
+
+
+[project.urls]
+Repository = "https://github.com/NovaSky-AI/SkyRL"
 
 dependencies = [
     "func_timeout",
