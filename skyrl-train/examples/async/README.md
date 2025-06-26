@@ -1,12 +1,11 @@
 # Async Training Example
 
-An example where training and generation can happen asynchronously with each other (off-by-one). 
-
+One-step off-policy GRPO for Qwen2.5-1.5B-Instruct on GSM8K.
 
 ## Usage
 
 ```bash 
-
+# prepare the dataset
 uv run -- python examples/gsm8k/gsm8k_dataset.py --output_dir data/gsm8k
 
 export WANDB_API_KEY=<your_key_here>
