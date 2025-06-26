@@ -36,5 +36,6 @@ docs/_spelling/
 
 # build
 /skyrl-gym/build
+/skyrl-gym/dist
 
 *.log

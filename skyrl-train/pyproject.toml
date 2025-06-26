@@ -80,8 +80,6 @@ sglang = [
     "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
 ]
 
-[tool.uv.sources]
-skyrl-gym = {path = "skyrl-gym"}
 
 [tool.setuptools.packages.find]
 include = ["skyrl_train*"]
