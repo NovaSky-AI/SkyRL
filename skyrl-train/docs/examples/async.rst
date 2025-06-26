@@ -3,7 +3,7 @@ Async Training: One-off Pipelining
 
 This example demonstrates how to implement asynchronous training with one-off pipelining, showcasing the flexibility of the training framework to support different execution plans with minimal code changes.
 
-The completed code from this example is available at `examples/async <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async>`_.
+The complete code from this example is available at `examples/async <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async>`_.
 
 Overview
 --------

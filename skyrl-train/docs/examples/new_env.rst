@@ -1,7 +1,7 @@
-Creating a New Environment in SkyRL-gym
+Creating a New Environment in SkyRL-Gym
 =====================================
 
-To demonstrate how to create custom environments in SkyRL-gym, let's build a simple multiplication environment!
+To demonstrate how to create custom environments in SkyRL-Gym, let's build a simple multiplication environment!
 
 We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
 
@@ -10,7 +10,7 @@ We'll walk through the complete process: implementing the environment, registeri
 Environment Interface
 ---------------------
 
-SkyRL-gym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
+SkyRL-Gym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
 
 .. code-block:: python
    :linenos:
