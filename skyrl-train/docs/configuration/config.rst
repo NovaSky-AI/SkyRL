@@ -8,7 +8,7 @@ Data Configuration
 
     data:
     train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
-    val_data: ["${oc.env:HOME}/data/gsm8k/test.parquet"]
+    val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
 - ``data.train_data``: A list of files for the training dataset in parquet format. 
 - ``data.val_data``: A list of files for evaluation in parquet format. 

@@ -21,8 +21,8 @@ Next, let's set up the training configuration. You can find a complete example i
 
    uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
       # Data setup
-      data.train_data=["$HOME/data/gsm8k/train.parquet"] \
-      data.val_data=["$HOME/data/gsm8k/test.parquet"] \
+      data.train_data="['$HOME/data/gsm8k/train.parquet']" \
+      data.val_data="['$HOME/data/gsm8k/validation.parquet']" \
 
       # Trainer and training algorithm
       trainer.algorithm.advantage_estimator="gae" \

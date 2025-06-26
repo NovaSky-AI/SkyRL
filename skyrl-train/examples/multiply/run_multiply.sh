@@ -8,8 +8,8 @@ set -x
 DATA_DIR="$HOME/data/multiply"
 
 uv run --isolated --extra vllm -m examples.multiply.main_multiply \
-  data.train_data=["$DATA_DIR/train.parquet"] \
-  data.val_data=["$DATA_DIR/validation.parquet"] \
+  data.train_data="['$DATA_DIR/train.parquet']" \
+  data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
