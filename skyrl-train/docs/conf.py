@@ -47,4 +47,5 @@ napoleon_type_aliases = None
 # External links configuration
 extlinks = {
     "code_link": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/%s", "%s"),
+    "skyrl_gym_link": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-gym/%s", "%s"),
 }

@@ -37,6 +37,7 @@ SkyRL-Train is a reinforcement learning framework designed for modularity and ex
    examples/ppo
    examples/remote_server
    examples/training_backends
+   examples/multi_turn_text2sql
 
 .. toctree::
    :maxdepth: 2

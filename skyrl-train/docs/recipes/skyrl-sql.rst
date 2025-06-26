@@ -3,6 +3,7 @@ SkyRL-SQL
 
 We provide scripts to reproduce the results for `SkyRL-SQL-7B <https://novasky-ai.notion.site/skyrl-sql>`_ using SkyRL-train and SkyRL-gym.
 
+You can find a WandB run for both single-turn and multi-turn Text2SQL training at `this link <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5df7pt6p>`_.
 
 Pre-requisites 
 ---------------
@@ -15,6 +16,8 @@ Start Ray
 
 Start ray in your cluster following the guide: https://docs.ray.io/en/latest/ray-core/starting-ray.html. 
 
+
+.. _skyrl-sql-data:
 
 Data Preparation
 ----------------
