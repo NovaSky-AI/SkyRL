@@ -38,10 +38,18 @@ uv sync --extra vllm
 source .venv/bin/activate
 ```
 
-Then, prepare the dataset; 
+Then, prepare the dataset:
 
 ```bash
 uv run -- python examples/gsm8k/gsm8k_dataset.py
+```
+
+Finally, before training, make sure to configure Ray to use `uv`:
+
+```bash
+export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+# or add to your .bashrc
+# echo 'export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook' >> ~/.bashrc
 ```
 
 You should now be able to run our example script (assumes at least 4 GPUs):

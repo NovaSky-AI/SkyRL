@@ -29,7 +29,7 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 .. code-block:: bash
 
     git clone https://github.com/novasky-ai/SkyRL.git
-    cd skyrl-train
+    cd SkyRL/skyrl-train
     uv sync --extra vllm
     source .venv/bin/activate
 
@@ -52,7 +52,7 @@ Clone the repo and `cd` into the `skyrl` directory:
 .. code-block:: bash
 
     git clone https://github.com/novasky-ai/SkyRL.git
-    cd skyrl-train 
+    cd SkyRL/skyrl-train 
 
 Base environment
 ~~~~~~~~~~~~~~~~
@@ -83,6 +83,14 @@ With ``conda``:
 
     conda create -n skyrl-train python=3.12
     conda activate skyrl-train
+
+Finally, make sure to configure Ray to use `uv`:
+
+.. code-block:: bash
+
+    export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+    # or add to your .bashrc
+    # echo 'export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook' >> ~/.bashrc
 
 You should now be to able to run our :doc:`quick start example <quickstart>`.
 
