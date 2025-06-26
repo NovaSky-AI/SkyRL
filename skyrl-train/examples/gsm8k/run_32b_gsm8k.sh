@@ -45,4 +45,5 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.project_name="gsm8k-32b" \
   trainer.run_name="gsm8k_test_32b" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_32B_ckpt"
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_32B_ckpt" \
+  $@

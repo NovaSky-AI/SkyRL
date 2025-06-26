@@ -28,7 +28,7 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
 .. code-block:: bash
 
-    git clone https://github.com/novasky-ai/skyrl_train.git 
+    git clone https://github.com/novasky-ai/SkyRL.git
     cd skyrl-train
     uv sync --extra vllm
     source .venv/bin/activate
@@ -51,7 +51,7 @@ Clone the repo and `cd` into the `skyrl` directory:
 
 .. code-block:: bash
 
-    git clone https://github.com/novasky-ai/skyrl_train.git 
+    git clone https://github.com/novasky-ai/SkyRL.git
     cd skyrl-train 
 
 Base environment

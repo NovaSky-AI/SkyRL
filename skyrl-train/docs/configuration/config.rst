@@ -119,7 +119,9 @@ Logging and Debugging Configuration
 Training Backends
 -----------------
 
-We support three backends: FSDP1, FSDP2 and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field 
+We support three backends: FSDP1, FSDP2 and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
+
+.. _fsdp-configurations:
 
 FSDP Configuration
 ~~~~~~~~~~~~~~~~~~
@@ -143,6 +145,8 @@ We use the same configuration group for FSDP1 and FSDP2
     In FSDP, ``cpu_offload`` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass. 
     
     In `skyrl-train`, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on :doc:`model placement and colocation <placement>`
+
+.. _deepspeed-configurations:
 
 DeepSpeed Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -2,16 +2,15 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
+# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/text_to_sql/run_sql_fsdp.sh
+# bash examples/text_to_sql/run_skyrl_sql.sh
 
 # change these paths to your own
-DATA_DIR="/path/to/sql/data"
-DB_PATH="/path/to/db/files"
+DATA_DIR="$HOME/data/sql"
+DB_PATH="$HOME/path/to/db_files"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
-train_data="['${DATA_DIR}/train.parquet']"
-val_data="['${DATA_DIR}/validation.parquet']"
 NUM_GPUS=8
 NUM_ENDPOINTS=2
 TP_SIZE=4
@@ -21,8 +20,8 @@ TRAIN_BATCH_SIZE=256
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
-  data.train_data=$train_data \
-  data.val_data=$val_data \
+  data.train_data="['$DATA_DIR/train.parquet']" \
+  data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
   trainer.epochs=30 \
   trainer.placement.colocate_all=true \
@@ -58,9 +57,10 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_turns=6 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
-  ++environment.skyrl_gym.text2sql.db_path=$DB_PATH \
+  environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_repro" \
   trainer.resume_mode=latest \
-  trainer.ckpt_path=$CKPT_PATH
+  trainer.ckpt_path=$CKPT_PATH \
+  $@

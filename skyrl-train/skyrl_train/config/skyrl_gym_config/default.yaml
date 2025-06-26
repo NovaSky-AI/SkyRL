@@ -1,2 +1,3 @@
+# @package environment.skyrl_gym
 text2sql:
   db_path: "/home/ray/default/sql_data"
