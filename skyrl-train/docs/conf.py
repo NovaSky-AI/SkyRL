@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(".."))
 
-project = "SkyRL-Train"
+project = "SkyRL"
 copyright = "2025, NovaSkyAI"
 author = "NovaSkyAI"
 
