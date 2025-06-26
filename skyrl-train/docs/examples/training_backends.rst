@@ -17,7 +17,7 @@ First, make sure you are familiar with the standard setup process for running GR
 Running the Examples
 ---------------------
 
-We provide baseline examples for GRPO training on GSM8K for each of these backends starting from the basic quickstart example.
+We provide baseline examples for GRPO training on GSM8K for each of these backends starting from the basic quickstart example. The script is available at :code_link:`skyrl_train/examples/gsm8k/run_gsm8k.sh`.
 
 .. code-block:: bash
 
@@ -34,8 +34,8 @@ The only configuration change required for DeepSpeed is to set the ``trainer.str
 
 .. code-block:: bash
 
-    # + trainer.strategy=deepspeed
-    bash examples/training_backends/deepspeed/run_deepspeed.sh
+    # bash examples/training_backends/deepspeed/run_deepspeed.sh (or just)
+    bash examples/gsm8k/run_gsm8k.sh trainer.strategy=deepspeed
 
 Additionally, you can tune `deepspeed specific configurations <https://www.deepspeed.ai/docs/config-json/>`_ as shown below:
 
@@ -64,13 +64,13 @@ To switch to FSDP or FSDP2, set the ``trainer.strategy`` parameter to ``fsdp`` o
 
 .. code-block:: bash
 
-    # + trainer.strategy=fsdp
-    bash examples/training_backends/fsdp/run_fsdp.sh
+    # bash examples/training_backends/fsdp/run_fsdp.sh (or just)
+    bash examples/gsm8k/run_gsm8k.sh trainer.strategy=fsdp
 
 .. code-block:: bash
 
-    # + trainer.strategy=fsdp2
-    bash examples/training_backends/fsdp/run_fsdp2.sh
+    # bash examples/training_backends/fsdp/run_fsdp2.sh (or just)
+    bash examples/gsm8k/run_gsm8k.sh trainer.strategy=fsdp2
 
 Additionally, you can tune `FSDP specific configurations <https://pytorch.org/docs/stable/fsdp.html>`_ as shown below:
 
