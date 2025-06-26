@@ -2,13 +2,14 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SkyRL-SQL-653 data.
 # uses deepspeed and 1 node with 8 GPUs.
+# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/text_to_sql/run_sql_deepspeed.sh
 
 DATA_DIR="$HOME/data/sql"
+DB_PATH="$HOME/path/to/db_files/"
 
 
-# NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['${DATA_DIR}/train.parquet']" \
@@ -28,7 +29,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.inference_engine_tensor_parallel_size=4 \
   trainer.train_batch_size=256 \
   trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=6000 \
   generator.max_input_length=15000 \
   generator.sampling_params.max_generate_length=3000 \
@@ -46,8 +47,10 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_turns=5 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
+  environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/sql_32B_ckpt"
+  trainer.ckpt_path="$HOME/ckpts/sql_32B_ckpt" \
+  $@

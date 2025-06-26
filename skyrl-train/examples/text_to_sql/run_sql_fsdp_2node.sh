@@ -1,14 +1,15 @@
 set -x
 
-# NOTE (erictang000): WIP on this - this is still OOMing on 2 8xH100 on 32B model init
 # Colocated GRPO training+generation for Qwen2.5-Coder-32B-Instruct on SkyRL-SQL-653 data.
 # Uses 2 nodes with 8 GPUs each.
-# TODO (sumanthrh): Remove the `resume_mode` and `ckpt_path` arguments before release.
+# NOTE: you may need to download the DB files for env interaction onto each node for multi-node training, since the driver worker 
+# will be scheduled on a worker node
+# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/text_to_sql/run_sql_fsdp_2node.sh
 
 DATA_DIR="$HOME/data/sql"
-
+DB_PATH="$HOME/path/to/db_files/"
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -50,6 +51,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_turns=5 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
+  environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_test" \
