@@ -1,6 +1,6 @@
 Switching Training Backends
 =========================================
-With SkyRL-Train, you can switch between different training backends with minimal changes to your training script.
+In SkyRL, you can switch between different training backends with minimal changes to your training script.
 
 Currently, we support the following training backends:
 
