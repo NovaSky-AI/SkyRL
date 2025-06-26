@@ -1,7 +1,7 @@
 Multi-Turn GRPO Text2SQL with Async Rollouts
 =====================================================
 
-In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL-train and SkyRL-gym using async rollouts.
+In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL using async rollouts.
 
 We provide an implementation of a multi-turn Text2SQL environment at :skyrl_gym_link:`skyrl_gym/envs/sql/env.py`.
 
