@@ -17,8 +17,11 @@ Trainer
 Performs the optimization steps based on configured RL algorithm. Updates model parameters based on generated trajectories and their assigned rewards.
 
 - `Trainer Worker interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/worker.py#L162>`_
-- `FSDP Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py>`_
-- `DeepSpeed Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/deepspeed/deepspeed_worker.py>`_
+
+  - `FSDP Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py>`_
+  - `DeepSpeed Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/deepspeed/deepspeed_worker.py>`_
+
+- `PPORayActorGroup <https://github.com/NovaSky-AI/SkyRL/blob/5a82809e218b2e0c3dd431377fb672e35ecc4a84/skyrl-train/skyrl_train/workers/worker.py#L385>`_: Our abstraction for a group of training workers (as Ray actors) that jointly execute operations for a given model (e.g., policy model, critic model, etc.).
 
 Generator
 ~~~~~~~~~
