@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # Exit on error
+set -e
 
 # Build and serve the documentation with live reload
 # Usage: ./build.sh [--build-only]
