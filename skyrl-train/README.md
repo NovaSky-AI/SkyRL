@@ -25,7 +25,7 @@ The `skyrl-train` package supports:
 - Ulysses sequence parallelism for long-context training
 - Colocated or disaggregated training and generation (including on heterogeneous hardware)
 - Synchronous RL or async one-off pipelining
-- Asynchronous rollouts, batched rollouts, multi-turn conversations
+- Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
 - Weight sync via NCCL, gloo, or checkpoint-and-load
 - Integration with `skyrl-gym` to run any environment in the gynasium
 - Sequence packing and Flash Attention 2
