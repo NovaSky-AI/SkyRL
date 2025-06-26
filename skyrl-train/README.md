@@ -84,7 +84,28 @@ export WANDB_API_KEY=<your wandb api key>
 bash examples/gsm8k/run_gsm8k.sh
 ```
 
-For detailed installation instructions, as well as more examples, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/)
+For detailed installation instructions, as well as more examples, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/).
+
+## Reproducing SkyRL-SQL
+We also provide a reproduction of our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 
+
+To get started, first prepare your dataset and download DB files needed for environment interaction:
+
+```bash
+huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+huggingface-cli download seeklhy/OmniSQL-datasets data.zip --repo-type dataset --local-dir <path_to_file.zip>
+unzip <path_to_file.zip>
+```
+
+Then you can run the example script at:
+
+```bash
+export WANDB_API_KEY=your_wandb_api_key
+bash examples/text_to_sql/run_skyrl_sql.sh
+```
+
+For a detailed walk through of the reproduction, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html).
+
 
 # Acknowledgement
 
