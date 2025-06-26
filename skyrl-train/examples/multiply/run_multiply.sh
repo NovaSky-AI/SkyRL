@@ -24,6 +24,8 @@ uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   trainer.critic_mini_batch_size=256 \
   trainer.micro_forward_batch_size_per_gpu=64 \
   trainer.micro_train_batch_size_per_gpu=64 \
+  trainer.eval_batch_size=1024 \
+  trainer.eval_before_train=true \
   trainer.eval_interval=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \

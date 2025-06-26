@@ -99,6 +99,11 @@ To start training, we need to set up our training script. You can find a complet
         trainer.micro_forward_batch_size_per_gpu=20 \
         trainer.micro_train_batch_size_per_gpu=20 \
 
+        # Evaluation
+        trainer.eval_batch_size=1024 \
+        trainer.eval_before_train=true \
+        trainer.eval_interval=5 \
+
         ... # Other parameters (see `examples/remote_inference_engine/run_remote.sh` for more)
 
 .. tip:: 

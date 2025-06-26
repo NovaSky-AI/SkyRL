@@ -40,4 +40,7 @@ uv run --isolated --extra vllm -m scripts.full_context.main_full_ctx \
   trainer.logger="wandb" \
   trainer.project_name="gsm8k_full_ctx" \
   trainer.run_name="gsm8k_full_ctx_test" \
+  trainer.eval_batch_size=1024 \
+  trainer.eval_before_train=true \
+  trainer.eval_interval=5 \
   +trainer.num_dummy_steps=5

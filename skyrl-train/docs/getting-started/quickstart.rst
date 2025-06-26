@@ -36,7 +36,9 @@ Next, let's set up the training configuration. You can find a complete example i
       trainer.placement.policy_num_gpus_per_node=4 \
 
       # Evaluation and checkpointing
-      trainer.eval_interval=2 \
+      trainer.eval_batch_size=1024 \
+      trainer.eval_before_train=true \
+      trainer.eval_interval=5 \
       trainer.ckpt_interval=10 \
 
       # Generator setup for spinning up InferenceEngines

@@ -42,7 +42,9 @@ Next, let's set up the training configuration. You can find a complete example i
       trainer.micro_train_batch_size_per_gpu=64 \
 
       # Evaluation and checkpointing
-      trainer.eval_interval=2 \
+      trainer.eval_batch_size=1024 \
+      trainer.eval_before_train=true \
+      trainer.eval_interval=5 \
       trainer.ckpt_interval=10 \
 
       # Generator setup for spinning up InferenceEngines

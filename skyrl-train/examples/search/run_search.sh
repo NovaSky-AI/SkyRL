@@ -48,5 +48,8 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.run_name="skyrlsearch_test" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt" \
+  trainer.eval_batch_size=1024 \
+  trainer.eval_before_train=true \
+  trainer.eval_interval=5 \
   $@
   
