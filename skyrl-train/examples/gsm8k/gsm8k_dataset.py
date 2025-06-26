@@ -36,6 +36,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    args.output_dir = os.path.expanduser(args.output_dir)
+
     data_source = "openai/gsm8k"
 
     dataset = datasets.load_dataset(data_source, "main")

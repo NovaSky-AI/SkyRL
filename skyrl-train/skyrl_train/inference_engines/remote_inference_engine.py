@@ -86,7 +86,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         Initialize the distributed process group for syncing weights.
         """
 
-        path = "/init_weight_update_group" if self.engine_backend == "sglang" else "/init_weight_update_communicator"
+        path = "/init_weights_update_group" if self.engine_backend == "sglang" else "/init_weight_update_communicator"
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.url}{path}",
