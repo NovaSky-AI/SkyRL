@@ -2,6 +2,13 @@
 
 A library of RL environments for LLMs implemented with the Gymnasium API.
 
+## Key Features
+
+- Simple `Environment` interface following the Gynasium API. 
+- Library of ready-built environments for math, code, search, and text-to-SQL.
+- A reusable `tool` interface. Developers can implement a tool once, and use it across any environment.
+- Supports multi-tool environments
+
 ## Installation
 
 You can install the latest release from PyPI:
@@ -20,4 +27,6 @@ pip install -e .
 
 ## Documentation
 
-Docs are available at [https://skyrl.readthedocs.io/en/latest/](https://skyrl.readthedocs.io/en/latest/).
+To build your first environment, see our [example](https://skyrl.readthedocs.io/en/latest/examples/new_env.html).
+
+All docs are available at [https://skyrl.readthedocs.io/en/latest/](https://skyrl.readthedocs.io/en/latest/).
