@@ -17,7 +17,7 @@ First, make sure you are familiar with the standard setup process for running GR
 Running the Examples
 ---------------------
 
-We provide baseline examples for GRPO training on GSM8K for each of these backends starting from the basic quickstart example. The script is available at :code_link:`skyrl_train/examples/gsm8k/run_gsm8k.sh`.
+We provide baseline examples for GRPO training on GSM8K for each of these backends starting from the basic quickstart example. The quickstart script is available at :code_link:`skyrl_train/examples/gsm8k/run_gsm8k.sh`.
 
 .. code-block:: bash
 
