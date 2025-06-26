@@ -15,7 +15,7 @@ Core Concepts
 **Environment**: An ``Environment`` is a class that defines the task for the agent to solve, and can integrate one ore more tool groups for the agent to use. See the following doc for more details on how to build an environment: :doc:`new_env`.
 
 
-ToolGroup and the `@tool` Decorator
+ToolGroup and the @tool Decorator
 -----------------------------------
 
 The ``ToolGroup`` class provides utilities for managing tools and tool execution, such as ``get_tool`` and ``get_tool_names``.  To create a new tool group, you can inherit from ``ToolGroup`` and add or modify utilities as needed. For example, you can add a shared state to the tool group, or add a custom tool execution function.
