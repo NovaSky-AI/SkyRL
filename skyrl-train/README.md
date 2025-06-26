@@ -1,17 +1,42 @@
 # SkyRL-Train: A modular, performant RL framework for post-training LLMs
+<div align="center">
 
-SkyRL-Train is a highly modular, performant RL framework for post-training LLMs. With a focus on modularity, SkyRL makes it easy to prototype new training algorithms, environments, and execution plans—without compromising usability or speed. 
+[![🌐 NovaSky](https://img.shields.io/badge/-Visit%20Website-5865F2?style=for-the-badge)](https://novasky-ai.github.io/) [![Github](https://img.shields.io/badge/SkyRL-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/NovaSky-AI/SkyRL) [![Twitter](https://img.shields.io/badge/NovaSky-white?style=for-the-badge&logo=X&logoColor=000&color=000&labelColor=white)](https://x.com/NovaSkyAI) [![Hugging Face Collection](https://img.shields.io/badge/NovaSky-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/NovaSky-AI) [![Discord](https://img.shields.io/badge/NovaSky-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RBAjeWSA)
 
-SkyRL-train is **for users who want to modify anything:**
+</div>
+
+# Overview
+
+`skyrl-train` is SkyRL's highly modular, performant RL framework for post-training LLMs. With a focus on modularity, SkyRL makes it easy to prototype new training algorithms, environments, and execution plans—without compromising usability or speed. 
+
+`skyrl-train` is **for users who want to modify anything:**
 
 - **Quickly develop new environments** without modifying or understanding the training code .
 - **Modify the training execution plan** such as model placement, colocation or disaggregation of training and generation, and async RL.
 - **Implement custom trajectory generation** specific to your use-case, such as custom sampling methods, tree search, etc.
 - … make any other flexible modifications to the RL workflow!
 
+
+## Key Features
+The `skyrl-train` package supports:
+- PPO and GRPO
+- Training Backends: FSDP, FSDP2, and DeepSpeed
+- Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
+- Ulysses sequence parallelism for long-context training
+- Colocated or disaggregated training and generation (including on heterogeneous hardware)
+- Synchronous RL or async one-off pipelining
+- Asynchronous rollouts, batched rollouts, multi-turn conversations
+- Weight sync via NCCL, gloo, or checkpoint-and-load
+- Integration with `skyrl-gym` to run any environment in the gynasium
+- Sequence packing and Flash Attention 2
+
+## Documentation
+
+Find `skyrl-train` documentation at: [skyrl.readthedocs.io/en/latest/](https://skyrl.readthedocs.io/en/latest/)
+
 ## Quick Start
 
-A quick start guide is provided below.
+A quick start guide for installation and your first training run is provided below.
 
 ### Requirements
 

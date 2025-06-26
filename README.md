@@ -19,23 +19,32 @@
 
 </div>
 
+# Overview
+
+SkyRL is a full-stack RL framework that provides the following components:
+
+- [`skyagent`](./skyagent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
+- (**NEW**) [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
+- (**NEW**) [`skyrl-gym`](./skyrl-gym): Our gynasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
+
+# Getting Started
+
+For model training, checkout [`skyrl-train`](./skyrl-train) to start using, modifying, or building on top of the SkyRL training stack. See our [quickstart docs](https://skyrl.readthedocs.io/en/latest/index.html) to ramp up!
+
+For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your task in the simple gymnasium interface.
+
+For agentic pipelines, checkout [`skyagent`](./skyagent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.
+
 
 # News
-- **[2025/06/24]** 🎉 We released SkyRL-Train: A flexible RL training framework. Modular, easy to use, and performant!
+- **[2025/06/25]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework.
+- **[2025/06/25]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API.
 - **[2025/05/20]** 🎉 We released SkyRL-SQL: a multi-turn RL training pipeline for Text-to-SQL, along with SkyRL-SQL-7B — a model trained on just 653 samples that outperforms both GPT-4o and o4-mini!
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
 - 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
-
-# Overview
-
-SkyRL provides the following components:
-
-- [`skyagent`](./skyagent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
-- (NEW!) [`skyrl-train`](./skyrl-train): Our flexible training framework for RL.
-- (NEW!) [`skyrl-gym`](./skyrl-gym): Our library of math, coding, search and SQL environments implemented with the Gymnasium API.
 
 # Acknowledgement
 
