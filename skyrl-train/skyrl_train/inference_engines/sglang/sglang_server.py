@@ -10,13 +10,17 @@ import subprocess
 
 PATCH_FILE_PATH = Path(__file__).parent / "sglang.patch"
 
+
 def apply_patch():
     try:
         sglang_path = Path(sglang.__file__).parent
-        subprocess.run(["patch", "-p1", "-d", str(sglang_path), "-i", str(PATCH_FILE_PATH), "--batch", "--forward"], check=True)
+        subprocess.run(
+            ["patch", "-p1", "-d", str(sglang_path), "-i", str(PATCH_FILE_PATH), "--batch", "--forward"], check=True
+        )
     except Exception as e:
         print(f"Failed to patch sglang: {e}", file=sys.stderr)
         sys.exit(1)
+
 
 class SGLangServer:
     def __init__(self, server_args: ServerArgs):
