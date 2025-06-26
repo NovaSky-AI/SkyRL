@@ -62,4 +62,5 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_repro" \
   trainer.resume_mode=latest \
-  trainer.ckpt_path=$CKPT_PATH
+  trainer.ckpt_path=$CKPT_PATH \
+  $@

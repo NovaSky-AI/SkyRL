@@ -52,4 +52,5 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/sql_32B_ckpt"
+  trainer.ckpt_path="$HOME/ckpts/sql_32B_ckpt" \
+  $@

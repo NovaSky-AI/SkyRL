@@ -40,4 +40,5 @@ uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="wandb" \
   trainer.project_name="multiply" \
-  trainer.run_name="multiply_test"
+  trainer.run_name="multiply_test" \
+  $@

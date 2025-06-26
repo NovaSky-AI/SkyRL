@@ -47,5 +47,6 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.project_name="skyrl" \
   trainer.run_name="skyrlsearch_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt"
+  trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt" \
+  $@
   

@@ -45,4 +45,5 @@ uv run --isolated --extra vllm -m examples.async.main_async \
   trainer.project_name="gsm8k-async" \
   trainer.run_name="gsm8k_test_async" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/async_gsm8k_ckpt"
+  trainer.ckpt_path="$HOME/ckpts/async_gsm8k_ckpt" \
+  $@

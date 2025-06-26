@@ -31,4 +31,5 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     trainer.project_name="skyrl" \
     trainer.run_name="skyrl-remote" \
     trainer.resume_mode=null \
-    trainer.ckpt_path="$HOME/ckpts/remote_ckpt"
+    trainer.ckpt_path="$HOME/ckpts/remote_ckpt" \
+    $@
