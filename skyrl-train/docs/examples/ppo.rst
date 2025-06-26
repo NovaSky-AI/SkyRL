@@ -10,7 +10,7 @@ To download and prepare the GSM8K dataset, run the following script.
 
 .. code-block:: bash
 
-   uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+   uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
 Training Configuration
 ----------------------
