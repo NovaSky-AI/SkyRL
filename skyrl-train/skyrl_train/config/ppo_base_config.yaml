@@ -110,7 +110,6 @@ trainer:
   ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
   hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.
   export_path: "${oc.env:HOME}/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
-  eval_interval: 5 # Set to -1 to disable evaluation.
   bf16: true
   epochs: 1  # Number of passes over the full dataset
   update_epochs_per_batch: 1  # Number of gradient update passes over each train batch
@@ -124,6 +123,7 @@ trainer:
   use_sample_packing: true
   eval_batch_size: 1024
   eval_before_train: true
+  eval_interval: 5 # Set to -1 to disable evaluation.
   # max prompt length in training dataset
   max_prompt_length: 512
   flash_attn: true
