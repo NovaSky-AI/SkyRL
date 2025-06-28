@@ -1,6 +1,6 @@
 """
 
-uv run --isolated --extra vllm -m skyrl.entrypoints.main_agent
+uv run --isolated --extra vllm --extra swebench -m skyrl.entrypoints.main_agent
 
 Multi-node Training:
 on master node, first run `ray start --head`
