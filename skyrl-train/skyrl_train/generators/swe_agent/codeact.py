@@ -349,6 +349,7 @@ class OnlineCodeActAgent(Agent):
             if len(input_ids) >= self.max_prompt_length:
                 return AgentFinishAction(thought="The context is too long. Exit now.")
 
+            # NOTE (sumanthrh): For some reason this is needed. Calling the async function directly here leads to hanging.
             response_str = call_async_from_sync(
                 self.generate, timeout=1000, input_ids=input_ids, sampling_params=self.sampling_params
             )
