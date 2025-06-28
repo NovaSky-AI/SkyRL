@@ -8,3 +8,6 @@ fi
 
 # pre-commit run --all-files always runs from the root directory.
 pre-commit run --all-files --config .pre-commit-config.yaml
+
+# register the pre-commit hook
+pre-commit install
