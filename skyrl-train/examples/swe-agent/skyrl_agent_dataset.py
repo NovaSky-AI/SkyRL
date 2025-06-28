@@ -41,11 +41,12 @@ if __name__ == "__main__":
 
     data_source = "NovaSky-AI/SkyRL-v0-293-data"
 
-
     dataset_path = snapshot_download(data_source, repo_type="dataset")
     # Need to do this because direct `load_dataset` willl fail due to nested dict in `instance` column
     train_dataset = datasets.load_dataset("parquet", data_files=[os.path.join(dataset_path, "train.parquet")])["train"]
-    val_dataset = datasets.load_dataset("parquet", data_files=[os.path.join(dataset_path, "validation.parquet")])["train"]
+    val_dataset = datasets.load_dataset("parquet", data_files=[os.path.join(dataset_path, "validation.parquet")])[
+        "train"
+    ]
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
