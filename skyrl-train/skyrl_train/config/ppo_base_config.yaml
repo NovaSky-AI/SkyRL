@@ -196,3 +196,10 @@ environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:
   # skyrl_gym: config/skyrl_gym_config/default.yaml
+
+swebench_config:
+  max_parallel_agents: 4
+  max_eval_parallel_agents: 4
+  log_messages_dir: null
+  remove_think_tokens: false
+  qwen3_enable_thinking: false

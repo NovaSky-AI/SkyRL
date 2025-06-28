@@ -42,7 +42,8 @@ dependencies = [
 ]
 
 [tool.uv]
-override-dependencies = ["ray==2.44.0"]
+# NOTE (sumanthrh): opentelemetry overrides are because of openhands and vllm conflicts
+override-dependencies = ["ray==2.44.0",  "opentelemetry-api>=1.26.0", "opentelemetry-sdk>=1.26.0", "opentelemetry-exporter-otlp-proto-grpc>=1.26.0"]
 conflicts = [
     [
         { extra = "vllm" },
@@ -79,7 +80,14 @@ sglang = [
     # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
     "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
 ]
+swebench = [
+   "openhands-ai",
+   "swebench@https://github.com/SWE-Gym/SWE-Bench-Fork.git",
+   "swegym@https://github.com/SWE-Gym/SWE-Bench-Package.git",
+]
 
+[tool.uv.sources]
+openhands-ai = {git = "https://github.com/NovaSky-AI/SkyRL-OpenHands"}
 
 [tool.setuptools.packages.find]
 include = ["skyrl_train*"]
