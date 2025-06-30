@@ -118,7 +118,7 @@ class RayPPOTrainer:
         return dataloader
 
     @torch.no_grad()
-    async def eval(self) -> Dict[str, float]:
+    def eval(self) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
@@ -145,7 +145,8 @@ class RayPPOTrainer:
                 self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
             )
             with Timer("generate"):
-                generator_output: GeneratorOutput = await self.generate(generator_input)
+                # generator_output: GeneratorOutput = await self.generate(generator_input)
+                generator_output: GeneratorOutput = self.generate(generator_input)
             generator_outputs.append(generator_output)
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])
@@ -220,7 +221,8 @@ class RayPPOTrainer:
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self.eval_weights_manager:
                 with Timer("eval", self.all_timings):
-                    eval_metrics = asyncio.run(self.eval())
+                    # eval_metrics = asyncio.run(self.eval())
+                    eval_metrics = self.eval()
                     self.tracker.log(eval_metrics, step=self.global_step)
             # Policy model is backloaded to GPU after eval
             if self.cfg.trainer.placement.colocate_all:
@@ -245,7 +247,8 @@ class RayPPOTrainer:
                     with self.weights_manager:
                         # 1.1 generation phase
                         with Timer("generate", self.all_timings):
-                            generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+                            # generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+                            generator_output: GeneratorOutput = self.generate(generator_input)
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -299,7 +302,8 @@ class RayPPOTrainer:
                 ):
                     with self.eval_weights_manager:
                         with Timer("eval", self.all_timings):
-                            eval_metrics = asyncio.run(self.eval())
+                            # eval_metrics = asyncio.run(self.eval())
+                            eval_metrics = self.eval()
                             self.all_metrics.update(eval_metrics)
                     # Policy model is backloaded to GPU after eval
                     if self.cfg.trainer.placement.colocate_all:
@@ -642,7 +646,7 @@ class RayPPOTrainer:
         return training_input
 
     @torch.no_grad()
-    async def generate(
+    def generate(
         self,
         input_batch: GeneratorInput,
     ) -> GeneratorOutput:
@@ -654,7 +658,8 @@ class RayPPOTrainer:
             be awake (i.e. on GPU).
         - after calling this method, the same model placement still holds.
         """
-        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+        # generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+        generator_output: GeneratorOutput = self.generator.generate(input_batch)
 
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:

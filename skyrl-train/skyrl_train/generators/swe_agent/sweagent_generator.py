@@ -55,7 +55,7 @@ class OHAgentGenerator(GeneratorInterface):
         self.agent_cfg = agent_cfg
 
     # TODO(tgriggs): `max_input_length` is currently not enforced. This will not be the responsibility of the endpoint, and will be handled by Generator or Env in a PR soon.
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
@@ -85,7 +85,8 @@ class OHAgentGenerator(GeneratorInterface):
             qwen3_enable_thinking=self.agent_cfg.qwen3_enable_thinking,
         )
         # separate thread might not be needed, just debugging hanging issue
-        all_outputs, additional_info = await asyncio.to_thread(codeact_agent_group.run)
+        all_outputs, additional_info = codeact_agent_group.run()
+        # await asyncio.to_thread(codeact_agent_group.run)
 
         rollout_metrics = self._rollout_metrics(all_outputs, additional_info)
         if self.generator_cfg.zero_reward_on_non_stop:

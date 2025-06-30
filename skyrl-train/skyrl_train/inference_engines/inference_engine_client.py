@@ -29,6 +29,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+        print("TGRIGGS: Entering generate for traj ids: ", input_batch.get("trajectory_ids"))
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         trajectory_ids = input_batch.get("trajectory_ids")
@@ -40,12 +41,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         # TODO(tgriggs): If there are no traj ids, we'd still like to load balance instead of landing on a single engine.
         if trajectory_ids is not None:
             # Route based on trajectory_ids
-            return await self._generate_with_trajectory_routing(
+            result = await self._generate_with_trajectory_routing(
                 prompts, prompt_token_ids, trajectory_ids, sampling_params
             )
         else:
             # Split evenly across engines
-            return await self._generate_batched(prompts, prompt_token_ids, sampling_params)
+            result = await self._generate_batched(prompts, prompt_token_ids, sampling_params)
+        print("TGRIGGS: Exiting generate for traj ids: ", input_batch.get("trajectory_ids"))
+        return result
 
     async def _generate_with_trajectory_routing(self, prompts, prompt_token_ids, trajectory_ids, sampling_params):
         """

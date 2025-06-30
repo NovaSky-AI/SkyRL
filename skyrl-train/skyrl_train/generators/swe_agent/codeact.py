@@ -528,6 +528,8 @@ class CodeActAgentGroup:
             for trajectory_id, result in trajectories.items():
                 instance_trajectories[instance_id].append(result)
 
+        print("TGRIGGS: instance_trajectories dict: ", instance_trajectories)
+
         # Create the final results in the same order as the batch
         matched_results = []
         instance_list = []
@@ -539,10 +541,13 @@ class CodeActAgentGroup:
                 traj_results = instance_trajectories[instance_id]
                 matched_results.extend(traj_results)
                 instance_list.extend([instance] * len(traj_results))
+            else:
+                print("TGRIGGS: instance_id not in instance_trajectories: ", instance_id)
 
+        # TODO: error here
         assert len(matched_results) == len(
             self.batch["prompts"]
-        ), f"Expected number of results {self.batch['prompts']}, got {len(matched_results)}"
+        ), f"Expected number of results {len(self.batch['prompts'])}, got {len(matched_results)}"
 
         # Group results by instance_id for message handling
         results_by_instance = {}
