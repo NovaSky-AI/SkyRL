@@ -20,8 +20,9 @@ uv run --isolated --extra vllm -m examples.async.main_async \
   generator.num_inference_engines=4 \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
+  trainer.eval_batch_size=1024 \
+  trainer.eval_before_train=true \
   trainer.eval_interval=5 \
-  trainer.eval_before_train=false \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \

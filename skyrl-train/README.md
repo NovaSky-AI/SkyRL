@@ -87,25 +87,8 @@ bash examples/gsm8k/run_gsm8k.sh
 For detailed installation instructions, as well as more examples, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/).
 
 ## Reproducing SkyRL-SQL
-We also provide a reproduction of our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 
-
-To get started, first prepare your dataset and download DB files needed for environment interaction:
-
-```bash
-huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
-huggingface-cli download seeklhy/OmniSQL-datasets data.zip --repo-type dataset --local-dir <path_to_file.zip>
-unzip <path_to_file.zip>
-```
-
-Then you can run the example script at:
-
-```bash
-export WANDB_API_KEY=your_wandb_api_key
-bash examples/text_to_sql/run_skyrl_sql.sh
-```
-
-For a detailed walk through of the reproduction, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html).
-
+We also test SkyRL by reproducing our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 
+You can find a link to the wandb report [here](https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw), and a detailed walk through of the reproduction in our [documentation](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html).
 
 # Acknowledgement
 
@@ -114,3 +97,15 @@ This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.e
 We adopt many lessons and code from several great projects such as [veRL](https://github.com/volcengine/verl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Search-R1](https://github.com/PeterGriffinJin/Search-R1), [OpenReasonerZero](https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero), and [NeMo-RL](https://github.com/NVIDIA-NeMo/RL). We appreciate each of these teams and their contributions to open-source research!
 
 
+
+# Citation
+
+If you find the work in `skyrl-train` helpful, please consider citing:
+```bibtex
+@misc{griggs2025skrylv01,
+      title={Evolving SkyRL into a Highly-Modular RL Framework},
+      author={Tyler Griggs and Sumanth Hegde and Eric Tang and Shu Liu and Shiyi Cao and Dacheng Li and Charlie Ruan and Philipp Moritz and Kourosh Hakhamaneshi and Richard Liaw and Akshay Malik and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
+      year={2025},
+      note={Notion Blog}
+}
+```

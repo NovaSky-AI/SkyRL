@@ -22,7 +22,7 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
 .. code-block:: bash
 
-    docker run -it  --runtime=nvidia --gpus all sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.4 --name skyrl-train
+    docker run -it  --runtime=nvidia --gpus all  --name skyrl-train sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.4 /bin/bash
 
 3. Inside the launched container, setup the latest version of the project:
 
@@ -30,8 +30,6 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
     git clone https://github.com/novasky-ai/SkyRL.git
     cd SkyRL/skyrl-train
-    uv sync --extra vllm
-    source .venv/bin/activate
 
 
 That is it! You should now be to able to run our :doc:`quick start example <quickstart>`.
@@ -68,14 +66,14 @@ With ``uv``:
 If ``<path_to_venv>`` is not specified, the virtual environment will be created in the current directory at ``.venv``.
 
 .. tip::
-    Because of how Ray ships content in the `working directory <https://docs.ray.io/en/latest/ray-core/handling-dependencies.html>`_, we recommend that the base environment is created *outside* the package directory.
+    Because of how Ray ships content in the `working directory <https://docs.ray.io/en/latest/ray-core/handling-dependencies.html>`_, we recommend that the base environment is created *outside* the package directory. For example, ``~/venvs/skyrl-train``.
 
 Then activate the virtual environment and install the dependencies.
 
 .. code-block:: bash
 
     source <path_to_venv>/bin/activate
-    uv sync --extra vllm
+    uv sync --active --extra vllm
 
 With ``conda``: 
 
@@ -84,13 +82,29 @@ With ``conda``:
     conda create -n skyrl-train python=3.12
     conda activate skyrl-train
 
-Finally, make sure to configure Ray to use `uv`:
+After activating the virtual environment, make sure to configure Ray to use `uv`:
 
 .. code-block:: bash
 
     export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
     # or add to your .bashrc
     # echo 'export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook' >> ~/.bashrc
+
+
+Initialize Ray cluster
+----------------------
+
+Finally, you can initialize a Ray cluster using the following command (for single-node):
+
+.. code-block:: bash
+
+    ray start --head 
+    # sanity check
+    # ray status
+
+
+.. note::
+    For multi-node clusters, please follow the `Ray documentation <https://docs.ray.io/en/latest/cluster/getting-started.html>`_.
 
 You should now be to able to run our :doc:`quick start example <quickstart>`.
 
@@ -102,4 +116,4 @@ For development, make sure to use ``--extra dev`` so that the dev dependencies a
 
 .. code-block:: bash
 
-    uv run --extra dev pytest -s tests/cpu
+    uv run --isolated --extra dev pytest -s tests/cpu

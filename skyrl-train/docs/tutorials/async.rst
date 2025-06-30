@@ -114,7 +114,7 @@ Now we can train!
 .. code-block:: bash
 
    # Prepare the dataset
-   uv run -- python examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+   uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
     # Run the training script
    export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout

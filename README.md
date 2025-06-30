@@ -37,8 +37,8 @@ For agentic pipelines, checkout [`skyagent`](./skyagent) for our work on optimiz
 
 
 # News
-- **[2025/06/25]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework.
-- **[2025/06/25]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API.
+- **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework.
+- **[2025/06/26]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API.
 - **[2025/05/20]** 🎉 We released SkyRL-SQL: a multi-turn RL training pipeline for Text-to-SQL, along with SkyRL-SQL-7B — a model trained on just 653 samples that outperforms both GPT-4o and o4-mini!
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
@@ -76,7 +76,7 @@ If you find the work in this repository helpful, please consider citing:
 ```bibtex
 @misc{griggs2025skrylv01,
       title={Evolving SkyRL into a Highly-Modular RL Framework},
-      author={Tyler Griggs and Sumanth Hegde and Eric Tang and Shu Liu and Shiyi Cao and Dacheng Li and Philipp Moritz and Kourosh Hakhamaneshi and Richard Liaw and Akshay Malik and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
+      author={Tyler Griggs and Sumanth Hegde and Eric Tang and Shu Liu and Shiyi Cao and Dacheng Li and Charlie Ruan and Philipp Moritz and Kourosh Hakhamaneshi and Richard Liaw and Akshay Malik and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
       year={2025},
       note={Notion Blog}
 }
