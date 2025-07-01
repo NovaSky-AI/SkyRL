@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch
 from torch import distributed as dist
-from typing import Optional
+from typing import Optional, Dict, Any
 import torch.optim as optim
 from jaxtyping import Float
 
@@ -14,11 +14,11 @@ class DistributedStrategy(ABC):
     def setup_distributed(self):
         pass
 
-    def all_reduce(self, data, op="mean"):
+    def all_reduce(self, data, op="mean") -> Dict[str, Any]:
         """Perform all_reduce across all processes"""
         pass
 
-    def all_gather(self, data):
+    def all_gather(self, data) -> Dict[str, Any]:
         """Perform all_gather across all processes"""
         pass
 

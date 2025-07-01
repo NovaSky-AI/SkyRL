@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
-DATA_DIR="data"
+DATA_DIR="data/gsm8k"
 
 uv run --isolated --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -10,7 +10,7 @@ uv run --isolated --extra vllm --env-file .env -m skyrl_train.entrypoints.main_b
   trainer.algorithm.advantage_estimator="gae" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp \
+  trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=8 \
   trainer.placement.ref_num_gpus_per_node=8 \
   trainer.placement.critic_num_gpus_per_node=8 \
@@ -30,13 +30,13 @@ uv run --isolated --extra vllm --env-file .env -m skyrl_train.entrypoints.main_b
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=512 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  trainer.critic.optimizer_config.lr=1.0e-5 \
+  trainer.critic.optimizer_config.lr=2.0e-5 \
   trainer.algorithm.value_clip=0.5 \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.advantage_batch_normalize=false \
   trainer.algorithm.use_kl_in_reward=false \
   trainer.algorithm.ppo_loss_type="dual_clip" \
-  trainer.algorithm.normalize_reward=false \
+  trainer.algorithm.normalize_reward=true \
   trainer.gradient_checkpointing=false \
   generator.backend=vllm \
   generator.run_engines_locally=true \
@@ -46,6 +46,7 @@ uv run --isolated --extra vllm --env-file .env -m skyrl_train.entrypoints.main_b
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=4 \
   generator.eval_n_samples_per_prompt=1 \
+  generator.eval_sampling_params.temperature=0.0 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="wandb" \
   trainer.project_name="verl_skyrl_gsm8k" \

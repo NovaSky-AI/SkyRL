@@ -4,6 +4,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
 from typing import Optional, Tuple, Union
+import warnings
 
 import deepspeed
 import torch
@@ -11,7 +12,7 @@ import torch.nn as nn
 from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig, AutoModelForTokenClassification
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
@@ -364,7 +365,13 @@ def _get_reward_model(
 
         def __init__(self, config: AutoConfig):
             super().__init__(config)
-            setattr(self, self.base_model_prefix, base_llm_model(config))
+            # NOTE (sumanthrh): We initialize base model with random weights first and then use `from_pretrained` to load the weights
+            # We ignore warnings about random init
+            # TODO (sumanthrh): For efficient initialization, we should use `from_pretrained` directly with meta device
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                base_model = base_llm_model(config)
+            setattr(self, self.base_model_prefix, base_model)
 
             self.value_head_prefix = value_head_prefix
             setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
@@ -483,8 +490,8 @@ def _get_critic_model(
             super().__init__(config)
             setattr(self, self.base_model_prefix, base_llm_model(config))
 
-            # self.value_head_prefix = value_head_prefix
-            # setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
+            self.value_head_prefix = value_head_prefix
+            setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
 
             self.sequence_parallel_size = sequence_parallel_size
             self.use_sample_packing = use_sample_packing
@@ -495,16 +502,6 @@ def _get_critic_model(
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
-
-            # mean std
-            self.normalize_reward = config.normalize_reward
-            self.register_buffer("mean", torch.zeros(1), persistent=False)
-            self.register_buffer("std", torch.ones(1), persistent=False)
-
-            # load mean/std from config.json
-            if hasattr(config, "mean"):
-                self.mean[0] = config.mean
-                self.std[0] = config.std
 
         def forward(
             self,
@@ -551,18 +548,17 @@ def _get_critic_model(
                 outputs = getattr(self, self.base_model_prefix)(
                     input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
                 )
-            # last_hidden_states_BSH = outputs["last_hidden_state"]
-            last_hidden_states_BSH = outputs["logits"].unsqueeze(-1) # (bsz, seqlen, 1)
+            last_hidden_states_BSH = outputs["last_hidden_state"]
+
             if self.sequence_parallel_size > 1:
-                # (seqlen*bsz//sp_size, 1) -> (seqlen*bsz, 1)
                 last_hidden_states_SH = last_hidden_states_BSH.squeeze(0)
+                # (seqlen*bsz//sp_size, 1) -> (seqlen*bsz, 1)
                 last_hidden_states_SH = gather_outputs_and_unpad(
                     last_hidden_states_SH, gather_dim=0, unpad_dim=0, padding_size=pad_size
                 )
                 last_hidden_states_BSH = last_hidden_states_SH.unsqueeze(0)
 
-            # values_BSH = getattr(self, self.value_head_prefix)(last_hidden_states_BSH)
-            values_BSH = last_hidden_states_BSH
+            values_BSH = getattr(self, self.value_head_prefix)(last_hidden_states_BSH)
 
             if self.use_sample_packing:
                 # add padding back - postprocess logits to be compatible with original tensors
@@ -571,14 +567,6 @@ def _get_critic_model(
                 values_BSH = pad_input(values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen)
 
             values = values_BSH.squeeze(-1)[:, :-1]
-
-            # normalize reward
-            if self.normalize_reward:
-                # if mean/std are on cpu due to model cpu offload, move them back to gpu
-                if self.mean.device != values.device:
-                    self.mean = self.mean.to(values.device)
-                    self.std = self.std.to(values.device)
-                values = (values - self.mean) / (self.std + 1e-8)
 
             if num_actions is None:
                 assert return_output
@@ -638,9 +626,9 @@ def get_llm_for_sequence_regression(
     config.normalize_reward = normalize_reward
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
-    # base_class = AutoModel._model_mapping[type(config)]
+    base_class = AutoModel._model_mapping[type(config)]
 
-    base_class = AutoModelForTokenClassification._model_mapping[type(config)]
+    # base_class = AutoModelForTokenClassification._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
     if model_type == "reward":
         cls_class = _get_reward_model(
@@ -721,14 +709,14 @@ def get_llm_for_sequence_regression(
     # NOTE: For reward model training only, intialize value_head manually
     # because deepspeed.zero.Init() will not intialize them.
     # TODO: Find a better way to clarify reward model training.
-    # if init_value_head:
-    #     value_head = getattr(model, value_head_prefix)
-    #     if dschf is not None:
-    #         logger.info("initialize value_head for ZeRO-3 reward model training.")
-    #         with deepspeed.zero.GatheredParameters([value_head.weight], modifier_rank=0):
-    #             if torch.distributed.get_rank() == 0:
-    #                 value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
-    #     else:
-    #         value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
+    if init_value_head:
+        value_head = getattr(model, value_head_prefix)
+        if dschf is not None:
+            logger.info("initialize value_head for ZeRO-3 reward model training.")
+            with deepspeed.zero.GatheredParameters([value_head.weight], modifier_rank=0):
+                if torch.distributed.get_rank() == 0:
+                    value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
+        else:
+            value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
 
     return model
