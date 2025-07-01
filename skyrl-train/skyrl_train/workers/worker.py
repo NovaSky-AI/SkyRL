@@ -10,7 +10,7 @@ from collections import defaultdict
 import ray
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import _LRScheduler
+from torch.optim.lr_scheduler import LRScheduler
 from torch.optim import Optimizer
 import torch.distributed
 from ray import ObjectRef
@@ -637,13 +637,15 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
-    model: nn.Module
-    scheduler: _LRScheduler
-    optimizer: Optimizer
-    strategy: DistributedStrategy
-    record_memory: bool
-    mesh_rank: MeshRank
-    actor_loss_fn: nn.Module
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
+        self.scheduler: LRScheduler = None
+        self.optimizer: Optimizer = None
+        self.strategy: DistributedStrategy = None
+        self.record_memory: bool = False
+        self.mesh_rank: MeshRank = None
+        self.actor_loss_fn: nn.Module = None
 
     def _normalize_mini_batch_size(self):
         """
@@ -888,13 +890,16 @@ class PolicyWorkerBase(Worker):
 
 
 class CriticWorkerBase(Worker):
-    model: nn.Module
-    scheduler: _LRScheduler
-    optimizer: Optimizer
-    strategy: DistributedStrategy
-    record_memory: bool
-    mesh_rank: MeshRank
-    critic_loss_fn: nn.Module
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
+        self.scheduler: LRScheduler = None
+        self.optimizer: Optimizer = None
+        self.strategy: DistributedStrategy = None
+        self.record_memory: bool = False
+        self.mesh_rank: MeshRank = None
+        self.critic_loss_fn: nn.Module = None
 
     def _normalize_mini_batch_size(self):
         """
@@ -1057,7 +1062,9 @@ class CriticWorkerBase(Worker):
 
 
 class RewardWorkerBase(Worker):
-    model: nn.Module
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
 
     def _forward_micro_batch(
         self,
@@ -1079,7 +1086,9 @@ class RewardWorkerBase(Worker):
 
 
 class RefWorkerBase(Worker):
-    model: nn.Module
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
