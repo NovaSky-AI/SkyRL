@@ -135,6 +135,9 @@ Now that we have our dataset and database files, let's walk through the some of 
         trainer.policy_mini_batch_size=256 \
         trainer.micro_forward_batch_size_per_gpu=8 \
         trainer.micro_train_batch_size_per_gpu=1 \
+        trainer.eval_batch_size=1024 \
+        trainer.eval_before_train=true \
+        trainer.eval_interval=5 \
         ... # Other parameters (see `examples/text_to_sql/run_skyrl_sql.sh` for the full script)
 
 - All we have to do to enable multi-turn training with async rollouts is to simply set ``generator.max_turns`` to the maximum number of turns we want the agent to take,

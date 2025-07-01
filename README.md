@@ -76,7 +76,7 @@ If you find the work in this repository helpful, please consider citing:
 ```bibtex
 @misc{griggs2025skrylv01,
       title={Evolving SkyRL into a Highly-Modular RL Framework},
-      author={Tyler Griggs and Sumanth Hegde and Eric Tang and Shu Liu and Shiyi Cao and Dacheng Li and Philipp Moritz and Kourosh Hakhamaneshi and Richard Liaw and Akshay Malik and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
+      author={Tyler Griggs and Sumanth Hegde and Eric Tang and Shu Liu and Shiyi Cao and Dacheng Li and Charlie Ruan and Philipp Moritz and Kourosh Hakhamaneshi and Richard Liaw and Akshay Malik and Matei Zaharia and Joseph E. Gonzalez and Ion Stoica},
       year={2025},
       note={Notion Blog}
 }

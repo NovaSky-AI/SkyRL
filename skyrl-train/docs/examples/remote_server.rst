@@ -77,8 +77,8 @@ To start training, we need to set up our training script. You can find a complet
         generator.sampling_params.top_p=0.95 \
 
         # Data setup
-        data.train_data=["$HOME/data/gsm8k/train.parquet"] \
-        data.val_data=["$HOME/data/gsm8k/test.parquet"] \
+        data.train_data="['$HOME/data/gsm8k/train.parquet']" \
+        data.val_data="['$HOME/data/gsm8k/validation.parquet']" \
 
         # Policy model - make sure this is the same model used to launch the inference engine server
         trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
@@ -98,6 +98,11 @@ To start training, we need to set up our training script. You can find a complet
         trainer.policy_mini_batch_size=64 \
         trainer.micro_forward_batch_size_per_gpu=20 \
         trainer.micro_train_batch_size_per_gpu=20 \
+
+        # Evaluation
+        trainer.eval_batch_size=1024 \
+        trainer.eval_before_train=true \
+        trainer.eval_interval=5 \
 
         ... # Other parameters (see `examples/remote_inference_engine/run_remote.sh` for more)
 

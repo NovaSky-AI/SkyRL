@@ -8,7 +8,7 @@ Data Configuration
 
     data:
     train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
-    val_data: ["${oc.env:HOME}/data/gsm8k/test.parquet"]
+    val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
 - ``data.train_data``: A list of files for the training dataset in parquet format. 
 - ``data.val_data``: A list of files for evaluation in parquet format. 
@@ -53,8 +53,6 @@ General Training Configuration
     update_ref_every_epoch: false
     num_warmup_steps: 0
     use_sample_packing: true
-    eval_batch_size: 1024
-    eval_before_train: true
     max_prompt_length: 512
     gradient_checkpointing: true
     seed: 42
@@ -70,8 +68,6 @@ General Training Configuration
 - ``update_ref_every_epoch``: Whether to update the reference model every epoch. 
 - ``num_warmup_steps``: Number of warmup steps for the policy and (if applicable) critic model.
 - ``use_sample_packing``: Whether to use sample packing during model forward pass (common for all models).
-- ``eval_batch_size``: Batch size for evaluation.
-- ``eval_before_train``: Whether to evaluate the model before training.
 - ``max_prompt_length``: Maximum prompt length during training. Longer prompts will be truncated.
 - ``gradient_checkpointing``: Whether to use gradient checkpointing.
 - ``seed``: Random seed for training.
@@ -79,6 +75,24 @@ General Training Configuration
 
 .. tip:: 
   If you're facing issues with tuning the right values for ``micro_train_batch_size_per_gpu``, ``policy_mini_batch_size`` and ``micro_forward_batch_size_per_gpu``, see ``utils/utils.py::validate_batch_sizes`` for details on constraints.
+
+Evaluation Configuration
+------------------------------
+.. code-block:: yaml 
+
+    eval_batch_size: 1024
+    eval_before_train: true
+    eval_interval: 5 # Set to -1 to disable evaluation.
+
+- ``eval_batch_size``: Batch size for evaluation.
+- ``eval_before_train``: Whether to evaluate the model before training.
+- ``eval_interval``: The frequency of evaluating the model with the validation dataset (in terms of number of steps). If set to ``-1``, evaluation will not be performed.
+
+.. note:: 
+  If multiple validation datasets are provided (e.g. ``data.val_data="['$DATA_DIR/validation1.parquet', '$DATA_DIR/validation2.parquet']" \``),
+  then the evaluation will be performed on all of them. The metrics for each dataset, and the aggregated metrics, will
+  all be logged in WandB. If ``dump_eval_results`` is set to ``true``, the per-dataset and aggregated results will be
+  dumped.
 
 Checkpoint Configuration
 ---------------------------------------
@@ -92,7 +106,6 @@ Checkpoint Configuration
     ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
     hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.
     export_path: "${oc.env:HOME}/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
-    eval_interval: 5 # Set to -1 to disable evaluation.
     project_name: "skyrl"
     run_name: "test_run"
     logger: "wandb"
