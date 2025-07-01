@@ -628,8 +628,6 @@ def get_llm_for_sequence_regression(
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
     base_class = AutoModel._model_mapping[type(config)]
-
-    # base_class = AutoModelForTokenClassification._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
     if model_type == "reward":
         cls_class = _get_reward_model(
