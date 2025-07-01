@@ -12,18 +12,20 @@ DATA_DIR="data/skyrl_v0_293"
 
 MAX_INPUT_LENGTH=31232
 MAX_RESPONSE_LENGTH=1536
-MAX_ITERATIONS=2
+MAX_ITERATIONS=1
+NUM_GPUS=1
+MAX_PARALLEL_AGENTS=4
 
 uv run --isolated --extra vllm --extra swebench --env-file .env -m skyrl_train.entrypoints.main_agent \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=4 \
-  trainer.placement.ref_num_gpus_per_node=4 \
-  generator.num_inference_engines=4 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_interval=-1 \
@@ -51,13 +53,13 @@ uv run --isolated --extra vllm --extra swebench --env-file .env -m skyrl_train.e
   environment.env_class=null \
   generator.n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
-  swebench_config.max_parallel_agents=4 \
-  swebench_config.max_eval_parallel_agents=4 \
-  swebench_config.log_messages_dir="/mnt/user_storage/skyrl_logs/swebench_test" \
+  swebench_config.max_parallel_agents=$MAX_PARALLEL_AGENTS \
+  swebench_config.max_eval_parallel_agents=$MAX_PARALLEL_AGENTS \
+  swebench_config.log_messages_dir="/home/ubuntu/tgriggs/skyrl_logs/swebench_test" \
   swebench_config.remove_think_tokens=false \
   swebench_config.qwen3_enable_thinking=false \
   trainer.logger="wandb" \
   trainer.project_name="sumanth-swebench-skyrl" \
   trainer.run_name="swebench_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="/mnt/local_storage/ckpts/gsm8k_1.5B_ckpt" 
+  trainer.ckpt_path="/home/ubuntu/tgriggs/ckpts/gsm8k_1.5B_ckpt" 

@@ -353,6 +353,7 @@ class OnlineCodeActAgent(Agent):
             response_str = call_async_from_sync(
                 self.generate, timeout=1000, input_ids=input_ids, sampling_params=self.sampling_params
             )
+            print("TGRIGGS: Exiting call_async_from_sync for agent id: ", self.agent_id)
 
             if not response_str:
                 # If we got an empty response (possible error), return a message action
@@ -386,10 +387,11 @@ class OnlineCodeActAgent(Agent):
             FunctionCallValidationError,
             FunctionCallNotExistsError,
         ):
+            print("TGRIGGS: Raised exception for agent id: ", self.agent_id)
             raise
 
         except Exception as e:
-            logger.error(f"Error in agent step: {str(e)}")
+            logger.error(f"TGRIGGS: Error in agent step: {str(e)}")
             # Handle errors gracefully by creating a message action
             self.pending_actions.append(
                 MessageAction(
@@ -1079,14 +1081,14 @@ class CodeActAgentGroup:
         for trajectory_id in range(self.num_trajectories):
             for batch_idx in range(total_instances):
                 await init_queue.put((batch_idx, trajectory_id))
+        
+        logger.info(f"PIPELINE_DEBUG: Initial setup - init_queue size: {init_queue.qsize()}, total_tasks: {self.num_trajectories * total_instances}")
 
         # Track active tasks
         active_init_tasks = set()
         active_run_tasks = set()
         active_eval_tasks = set()
-        need_init_tasks = self.num_trajectories * total_instances
-        needed_run_tasks = self.num_trajectories * total_instances  # Total tasks we'll eventually need
-        needed_eval_tasks = self.num_trajectories * total_instances
+
 
         # Helper function to initialize runtime
         import time
@@ -1098,18 +1100,17 @@ class CodeActAgentGroup:
             try:
                 logger.info(f"Initializing runtime for instance {instance_id}, trajectory {trajectory_id}")
                 await self._initialize_runtime_for_agent(batch_idx, trajectory_id)
+                logger.info(f"PIPELINE_DEBUG: Initialization complete, about to add to run_queue")
                 # Add to run queue after successful initialization
                 await run_queue.put((batch_idx, trajectory_id))
+                logger.info(f"PIPELINE_DEBUG: Init success - added to run_queue. run_queue size now: {run_queue.qsize()}")
                 elpased_time = time.time() - start_time
                 print(
                     f"Successfully initialized runtime for instance {instance_id}, trajectory {trajectory_id} in {elpased_time:.2f} seconds"
                 )
             except Exception as e:
-                nonlocal needed_run_tasks
-                nonlocal needed_eval_tasks
-                needed_run_tasks -= 1
-                needed_eval_tasks -= 1
-                logger.error(f"Error initializing runtime for {instance_id}, trajectory {trajectory_id}: {str(e)}")
+                logger.error(f"PIPELINE_DEBUG: Init failed for {instance_id}, trajectory {trajectory_id}: {str(e)}")
+                logger.error(f"PIPELINE_DEBUG: run_queue size: {run_queue.qsize()}, eval_queue size: {eval_queue.qsize()}")
                 # Handle initialization error
                 if instance_id not in self.results:
                     self.results[instance_id] = {}
@@ -1127,20 +1128,20 @@ class CodeActAgentGroup:
             finally:
                 init_queue.task_done()
                 # Start another initialization task if available
-                nonlocal need_init_tasks
-                if not init_queue.empty() and need_init_tasks > 0:
-                    need_init_tasks -= 1
+                if not init_queue.empty():
                     task = asyncio.create_task(initialize_one_runtime())
                     active_init_tasks.add(task)
                     task.add_done_callback(lambda t: active_init_tasks.discard(t))
 
         # Helper function to run one agent
         async def run_one_agent(pos_id: int):
+            logger.info(f"PIPELINE_DEBUG: run_one_agent {pos_id} waiting for item from run_queue (size: {run_queue.qsize()})")
             batch_idx, trajectory_id = await run_queue.get()
             instance_id = self.batch["env_extras"][batch_idx]["instance"]["instance_id"]
+            logger.info(f"PIPELINE_DEBUG: run_one_agent {pos_id} got item: {instance_id}, trajectory {trajectory_id}")
             start_time = time.time()
             try:
-                logger.info(f"Running agent for instance {instance_id}, trajectory {trajectory_id}")
+                logger.info(f"PIPELINE_DEBUG: Running agent for instance {instance_id}, trajectory {trajectory_id}")
                 result = await self._run_agent(batch_idx, trajectory_id, pos_id)
                 elapsed = time.time() - start_time
 
@@ -1150,14 +1151,14 @@ class CodeActAgentGroup:
                 self.results[instance_id][trajectory_id] = result
 
                 await eval_queue.put((batch_idx, trajectory_id))
+                logger.info(f"PIPELINE_DEBUG: Added to eval_queue. eval_queue size now: {eval_queue.qsize()}")
 
                 print(f"Successfully completed instance {instance_id}, trajectory {trajectory_id} in {elapsed:.2f}s")
             except Exception as e:
                 logger.error(
-                    f"[This line should not be reached!!] Error running agent for {instance_id}, trajectory {trajectory_id}: {str(e)}"
+                    f"PIPELINE_DEBUG: [This line should not be reached!!] Error running agent for {instance_id}, trajectory {trajectory_id}: {str(e)}"
                 )
-                nonlocal needed_eval_tasks
-                needed_eval_tasks -= 1
+                logger.error(f"PIPELINE_DEBUG: eval_queue size: {eval_queue.qsize()}")
                 # Store error result
                 if instance_id not in self.results:
                     self.results[instance_id] = {}
@@ -1174,21 +1175,21 @@ class CodeActAgentGroup:
                 }
             finally:
                 run_queue.task_done()
-                nonlocal needed_run_tasks
-                # Start another run task if available
-                if needed_run_tasks > 0:
-                    needed_run_tasks -= 1
+                # Start another run task if there are more items in the queue
+                if not run_queue.empty():
                     task = asyncio.create_task(run_one_agent(pos_id))
                     active_run_tasks.add(task)
                     task.add_done_callback(lambda t: active_run_tasks.discard(t))
 
         # Helper function to eval one trajectory
         async def eval_one_agent():
+            logger.info(f"PIPELINE_DEBUG: eval_one_agent waiting for item from eval_queue (size: {eval_queue.qsize()})")
             batch_idx, trajectory_id = await eval_queue.get()
             instance_id = self.batch["env_extras"][batch_idx]["instance"]["instance_id"]
+            logger.info(f"PIPELINE_DEBUG: eval_one_agent got item: {instance_id}, trajectory {trajectory_id}")
             start_time = time.time()
             try:
-                logger.info(f"Evaluating agent for instance {instance_id}, trajectory {trajectory_id}")
+                logger.info(f"PIPELINE_DEBUG: Evaluating agent for instance {instance_id}, trajectory {trajectory_id}")
                 await self._evaluate_agent(batch_idx, trajectory_id)
                 elapsed = time.time() - start_time
 
@@ -1196,15 +1197,13 @@ class CodeActAgentGroup:
                     f"Successfully completed evaluating instance {instance_id}, trajectory {trajectory_id} in {elapsed:.2f}s"
                 )
             except Exception as e:
-                logger.error(f"Error evaluating agent for {instance_id}, trajectory {trajectory_id}: {str(e)}")
+                logger.error(f"PIPELINE_DEBUG: Error evaluating agent for {instance_id}, trajectory {trajectory_id}: {str(e)}")
                 # Store error result
                 self.results[instance_id][trajectory_id]["resolved"] = False
             finally:
                 eval_queue.task_done()
-                nonlocal needed_eval_tasks
-                # Start another run task if available
-                if needed_eval_tasks > 0:
-                    needed_eval_tasks -= 1
+                # Start another eval task if there are more items in the queue
+                if not eval_queue.empty():
                     task = asyncio.create_task(eval_one_agent())
                     active_eval_tasks.add(task)
                     task.add_done_callback(lambda t: active_eval_tasks.discard(t))
@@ -1212,41 +1211,41 @@ class CodeActAgentGroup:
         # Start initial batch of initialization tasks
         max_parallel_init = self.max_parallel_agents  # Use some parallel initialization tasks
         for _ in range(min(max_parallel_init, init_queue.qsize())):
-            need_init_tasks -= 1
             task = asyncio.create_task(initialize_one_runtime())
             active_init_tasks.add(task)
             task.add_done_callback(lambda t: active_init_tasks.discard(t))
 
         # Start a few agent run tasks (they'll wait on the run_queue)
         for pos_id in range(self.max_parallel_agents):
-            needed_run_tasks -= 1
             task = asyncio.create_task(run_one_agent(pos_id))
             active_run_tasks.add(task)
             task.add_done_callback(lambda t: active_run_tasks.discard(t))
 
         for _ in range(self.max_eval_parallel_agents):
-            needed_eval_tasks -= 1
             task = asyncio.create_task(eval_one_agent())
             active_eval_tasks.add(task)
             task.add_done_callback(lambda t: active_eval_tasks.discard(t))
 
         # Wait for all initialization tasks to complete
+        logger.info(f"PIPELINE_DEBUG: Starting wait for init tasks. init_queue size: {init_queue.qsize()}")
         if init_queue.qsize() > 0:
-            logger.info("MAIN: Waiting for all initialization tasks to complete")
+            logger.info("PIPELINE_DEBUG: Waiting for all initialization tasks to complete")
             await init_queue.join()
-        logger.info("MAIN: All initialization tasks completed")
+        logger.info("PIPELINE_DEBUG: All initialization tasks completed")
 
         # Wait for all run tasks to complete
+        logger.info(f"PIPELINE_DEBUG: Starting wait for run tasks. run_queue size: {run_queue.qsize()}")
         if run_queue.qsize() > 0:
-            logger.info("MAIN: Waiting for all run tasks to complete")
+            logger.info("PIPELINE_DEBUG: Waiting for all run tasks to complete")
             await run_queue.join()
-        logger.info("MAIN: All run tasks completed")
+        logger.info("PIPELINE_DEBUG: All run tasks completed")
 
         # Wait for all eval tasks to complete
+        logger.info(f"PIPELINE_DEBUG: Starting wait for eval tasks. eval_queue size: {eval_queue.qsize()}")
         if eval_queue.qsize() > 0:
-            logger.info("MAIN: Waiting for all eval tasks to complete")
+            logger.info("PIPELINE_DEBUG: Waiting for all eval tasks to complete")
             await eval_queue.join()
-        logger.info("MAIN: All eval tasks completed")
+        logger.info("PIPELINE_DEBUG: All eval tasks completed")
 
         # Wait for any remaining active tasks
         all_tasks = active_init_tasks.union(active_run_tasks)
@@ -1257,6 +1256,7 @@ class CodeActAgentGroup:
             )
             await asyncio.wait(all_tasks)
 
+        logger.info("MAIN: Pipeline completed successfully")
         generator_output, additional_info = self._convert_results_to_generator_output()
         return generator_output, additional_info
 
