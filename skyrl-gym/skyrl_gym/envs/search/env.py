@@ -111,8 +111,8 @@ class SearchEnv(BaseTextEnv):
 
         return BaseTextEnvStepOutput(
             observations=[new_obs] if new_obs else [],
-            reward=reward, 
-            done=done, 
+            reward=reward,
+            done=done,
             metadata=info,
             postprocessed_action=action,
         )
