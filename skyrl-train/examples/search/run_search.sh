@@ -6,49 +6,64 @@ set -x
 
 DATA_DIR="$HOME/data/searchR1"
 
+# Configuration sections:
+# - Dataset: train/val data paths
+# - Algorithm: GRPO settings, learning rate, KL loss
+# - Model: model path, placement, FSDP settings
+# - Training: epochs, batch sizes, gradient settings
+# - Length limits: prompt and generation lengths
+# - Generator: VLLM backend, colocation, GPU settings  
+# - Multi-turn: async, batching, sampling settings
+# - Logging: wandb project and run name
+# - Checkpointing: intervals, paths, resume settings
+# - Evaluation: batch size, intervals, timing
 
-# NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
-  trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['${DATA_DIR}/train.parquet']" \
-  data.val_data="['${DATA_DIR}/validation.parquet']" \
-  trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
-  trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
-  trainer.policy.optimizer_config.max_grad_norm=0.5 \
-  trainer.placement.policy_num_gpus_per_node=4 \
-  trainer.placement.ref_num_gpus_per_node=4 \
-  generator.num_inference_engines=4 \
-  generator.inference_engine_tensor_parallel_size=1 \
-  trainer.epochs=20 \
-  trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=64 \
-  trainer.policy_mini_batch_size=16 \
-  trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=2 \
-  trainer.max_prompt_length=4096 \
-  generator.max_input_length=29000 \
-  generator.sampling_params.max_generate_length=3000 \
+  data.val_data="['${DATA_DIR}/test.parquet']" \
+  trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.ckpt_interval=100000 \
+  trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
+  trainer.placement.colocate_all=true \
+  trainer.strategy=fsdp2 \
+  trainer.policy.fsdp_config.cpu_offload=false \
+  trainer.ref.fsdp_config.cpu_offload=true \
+  trainer.policy.optimizer_config.max_grad_norm=0.5 \
+  trainer.placement.policy_num_gpus_per_node=8 \
+  trainer.placement.ref_num_gpus_per_node=8 \
+  generator.num_inference_engines=4 \
+  generator.inference_engine_tensor_parallel_size=2 \
+  trainer.epochs=1 \
+  trainer.num_warmup_steps=94 \
+  trainer.update_epochs_per_batch=1 \
+  trainer.train_batch_size=512 \
+  trainer.policy_mini_batch_size=256 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.max_prompt_length=4096 \
+  generator.max_input_length=12000 \
+  generator.sampling_params.max_generate_length=3000 \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
+  generator.gpu_memory_utilization=0.7 \
   generator.async_engine=true \
   generator.batched=false \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.7 \
-  generator.max_turns=5 \
-  generator.sampling_params.temperature=0.6 \
-  generator.sampling_params.top_p=0.95 \
+  generator.max_turns=2 \
+  generator.sampling_params.temperature=1.0 \
+  generator.sampling_params.top_p=1.0 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl" \
-  trainer.run_name="skyrlsearch_test" \
+  trainer.run_name="skyrlsearch_debugging" \
+  trainer.ckpt_interval=5 \
+  trainer.hf_save_interval=5 \
+  trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt" \
-  trainer.eval_batch_size=1024 \
+  trainer.eval_batch_size=256 \
   trainer.eval_before_train=true \
   trainer.eval_interval=5 \
   $@

@@ -11,7 +11,7 @@ class SearchEnv(BaseTextEnv):
     """
     Environment for Search execution tasks.
 
-    Reference Search-R1 implementation and VeRL + Search-R1 integration
+    References Search-R1 implementation and VeRL + Search-R1 integration
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
@@ -20,7 +20,7 @@ class SearchEnv(BaseTextEnv):
         assert "reward_spec" in extras, "reward_spec field is required"
         assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
         self.ground_truth = extras["reward_spec"]["ground_truth"]
-        self.max_turns = extras["max_turns"] if "max_turns" in extras else 5
+        self.max_turns = extras["max_turns"] if "max_turns" in extras else 2
 
         # Initialize the tools
         self.tool_group = SearchToolGroup()
@@ -51,7 +51,7 @@ class SearchEnv(BaseTextEnv):
     def _get_reward(self, action: str, done: bool) -> float:
         if done:
             # Concat all chat history into a single string and compute reward
-            chat_history_str = "\n".join([item["content"] for item in self.chat_history])
+            chat_history_str = "".join([item["content"] for item in self.chat_history])
             return compute_score(chat_history_str, self.ground_truth)
         else:
             # No reward for intermediate steps for Search tasks
@@ -62,8 +62,17 @@ class SearchEnv(BaseTextEnv):
             return True
         return "<answer>" in action and "</answer>" in action
 
+    def _postprocess_action(self, action: str) -> str:
+        if "</query>" in action:
+            return action.split("</query>")[0] + "</query>"
+        elif "</answer>" in action:
+            return action.split("</answer>")[0] + "</answer>"
+        else:
+            return action
+
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
+        action = self._postprocess_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None
@@ -71,7 +80,9 @@ class SearchEnv(BaseTextEnv):
         reward = self._get_reward(action, done)
 
         if done:
-            return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
+            return BaseTextEnvStepOutput(
+                observations=[], reward=reward, done=done, metadata={}, postprocessed_action=action
+            )
 
         try:
             tool_group_name, tool_name, tool_input = self._parse_action(action)
@@ -98,4 +109,10 @@ class SearchEnv(BaseTextEnv):
         if new_obs:
             self.chat_history.append(new_obs)
 
-        return BaseTextEnvStepOutput(observations=[new_obs] if new_obs else [], reward=reward, done=done, metadata=info)
+        return BaseTextEnvStepOutput(
+            observations=[new_obs] if new_obs else [],
+            reward=reward, 
+            done=done, 
+            metadata=info,
+            postprocessed_action=action,
+        )
