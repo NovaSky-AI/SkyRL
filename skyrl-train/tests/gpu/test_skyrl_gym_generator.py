@@ -1,5 +1,5 @@
 """
-uv run --extra dev --extra vllm --isolated pytest tests/gpu/test_generator.py
+uv run --extra dev --extra vllm --isolated pytest tests/gpu/test_skyrl_gym_generator.py
 """
 
 import pytest
@@ -40,12 +40,12 @@ class TestEnv(BaseTextEnv):
 
 register(
     id="test_env",
-    entry_point="tests.gpu.test_generator:TestEnv",
+    entry_point="tests.gpu.test_skyrl_gym_generator:TestEnv",
 )
 
 MODEL_TO_GENERATION_PROMPT = {
     "Qwen/Qwen2.5-0.5B-Instruct": "<|im_start|>assistant\n",
-    "meta-llama/Llama-3.2-1B-Instruct": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    "unsloth/Llama-3.2-1B-Instruct": "<|start_header_id|>assistant<|end_header_id|>\n\n",
     "Qwen/Qwen3-0.6B": "<|im_start|>assistant\n",
 }
 
@@ -60,11 +60,12 @@ async def run_generator_end_to_end(
     max_prompt_length=512,
     max_input_length=2048,
     max_generate_length=1024,
-    data_path="./data/gsm8k/validation.parquet",
+    data_path="/home/ray/data/gsm8k/validation.parquet",
     env_class="gsm8k",
     num_prompts=2,
     max_turns=1,
     use_conversation_multi_turn=True,
+    max_env_workers=10,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -121,6 +122,7 @@ async def run_generator_end_to_end(
     env_cfg = DictConfig(
         {
             "env_class": env_class,
+            "max_env_workers": max_env_workers,
             "text2sql": {
                 "db_path": "/home/ray/default/sql_data",
             },
@@ -226,7 +228,7 @@ async def test_generator_multi_turn_text2sql():
             max_prompt_length=6000,
             max_input_length=29048,
             max_generate_length=3000,
-            data_path="./data/sql/train.parquet",
+            data_path="/home/ray/data/sql/train.parquet",
             env_class="text2sql",
             num_prompts=2,
             max_turns=6,
@@ -238,7 +240,7 @@ async def test_generator_multi_turn_text2sql():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["meta-llama/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
 async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
@@ -296,7 +298,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["meta-llama/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
 async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
