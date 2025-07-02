@@ -48,7 +48,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.gpu_memory_utilization=0.7 \
+  generator.gpu_memory_utilization=0.6 \
   generator.async_engine=true \
   generator.batched=false \
   generator.n_samples_per_prompt=5 \
@@ -57,7 +57,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   environment.env_class="search" \
-  environment.max_env_workers=16 \
+  generator.max_env_workers=16 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
   trainer.run_name="skyrlsearch_env_workers16" \
