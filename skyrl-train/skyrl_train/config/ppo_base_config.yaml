@@ -33,6 +33,7 @@ trainer:
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
       offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
+      num_warmup_steps: 0
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
       reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
@@ -59,6 +60,7 @@ trainer:
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
       offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
+      num_warmup_steps: 0
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true
@@ -119,7 +121,6 @@ trainer:
   micro_train_batch_size_per_gpu: 1 
   micro_forward_batch_size_per_gpu: 1  
   update_ref_every_epoch: false
-  num_warmup_steps: 0
   use_sample_packing: true
   eval_batch_size: 1024
   eval_before_train: true
