@@ -21,6 +21,7 @@ def call_search_api(
     topk: int = 3,
     return_scores: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
+    log_request: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     request_id = str(uuid.uuid4())
     log_prefix = f"[Search Request ID: {request_id}] "
@@ -31,9 +32,10 @@ def call_search_api(
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            logger.info(
-                f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
-            )
+            if log_request:
+                logger.info(
+                    f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
+                )
             response = requests.post(
                 retrieval_service_url,
                 headers=headers,
@@ -55,7 +57,8 @@ def call_search_api(
             response.raise_for_status()
 
             # If successful (status code 2xx)
-            logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
+            if log_request:
+                logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
             return response.json(), None
 
         except requests.exceptions.ConnectionError as e:
@@ -99,10 +102,11 @@ def _passages2string(retrieval_result):
 
 
 class SearchToolGroup(ToolGroup):
-    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_request=False):
         self.search_url = search_url
         self.topk = topk
         self.timeout = timeout
+        self.log_request = log_request
         super().__init__(name="SearchToolGroup")
 
     @tool
@@ -117,7 +121,11 @@ class SearchToolGroup(ToolGroup):
         query_list = [query]
         try:
             api_response, error_msg = call_search_api(
-                retrieval_service_url=self.search_url, query_list=query_list, topk=self.topk, timeout=self.timeout
+                retrieval_service_url=self.search_url,
+                query_list=query_list,
+                topk=self.topk,
+                timeout=self.timeout,
+                log_request=self.log_request,
             )
         except Exception as e:
             error_msg = f"API Request Exception during batch search: {e}"
@@ -159,12 +167,14 @@ class SearchToolGroup(ToolGroup):
                     metadata["status"] = "success"
                     metadata["total_results"] = total_results
                     metadata["formatted_result"] = final_result
-                    logger.info(f"Batch search: Successful, got {total_results} total results")
+                    if self.log_request:
+                        logger.info(f"Batch search: Successful, got {total_results} total results")
                 else:
                     result_text = json.dumps({"result": "No search results found."})
                     metadata["status"] = "no_results"
                     metadata["total_results"] = 0
-                    logger.info("Batch search: No results found")
+                    if self.log_request:
+                        logger.info("Batch search: No results found")
             except Exception as e:
                 error_msg = f"Error processing search results: {e}"
                 result_text = json.dumps({"result": error_msg})

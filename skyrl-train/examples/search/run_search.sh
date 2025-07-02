@@ -36,7 +36,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.num_inference_engines=4 \
   generator.inference_engine_tensor_parallel_size=2 \
   trainer.epochs=1 \
-  trainer.num_warmup_steps=94 \
+  trainer.policy.optimizer_config.num_warmup_steps=94 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=512 \
   trainer.policy_mini_batch_size=256 \
@@ -56,16 +56,17 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.use_conversation_multi_turn=false \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
+  environment.env_class="search" \
   trainer.logger="wandb" \
-  trainer.project_name="skyrl" \
+  trainer.project_name="skyrl-search" \
   trainer.run_name="skyrlsearch_debugging" \
   trainer.ckpt_interval=5 \
   trainer.hf_save_interval=5 \
   trainer.max_ckpts_to_keep=5 \
-  trainer.resume_mode=null \
+  trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt" \
   trainer.eval_batch_size=256 \
-  trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval_before_train=false \
+  trainer.eval_interval=50 \
   $@
   

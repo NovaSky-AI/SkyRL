@@ -51,7 +51,6 @@ General Training Configuration
     micro_train_batch_size_per_gpu: 1 
     micro_forward_batch_size_per_gpu: 1  
     update_ref_every_epoch: false
-    num_warmup_steps: 0
     use_sample_packing: true
     max_prompt_length: 512
     gradient_checkpointing: true
@@ -66,7 +65,6 @@ General Training Configuration
 - ``micro_train_batch_size_per_gpu``: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches. 
 - ``micro_forward_batch_size_per_gpu``: Micro batch size during forward pass (i.e., for log probability or value computation). This is common for both policy and critic models. Each mini batch is split into micro batches of this size, model forward pass is performed over these micro batches.
 - ``update_ref_every_epoch``: Whether to update the reference model every epoch. 
-- ``num_warmup_steps``: Number of warmup steps for the policy and (if applicable) critic model.
 - ``use_sample_packing``: Whether to use sample packing during model forward pass (common for all models).
 - ``max_prompt_length``: Maximum prompt length during training. Longer prompts will be truncated.
 - ``gradient_checkpointing``: Whether to use gradient checkpointing.
@@ -188,6 +186,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.weight_decay``: L2 regularization strength for AdamW.
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
+- ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
 
 Policy Configuration
 --------------------

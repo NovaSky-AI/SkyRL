@@ -157,6 +157,7 @@ async def run_generator_end_to_end(
     ]
 
     import numpy as np
+
     print("avg reward: ", np.mean(generator_output["rewards"]))
     output_keys = [
         "prompt_token_ids",
@@ -236,6 +237,7 @@ async def test_generator_multi_turn_text2sql():
         )
     finally:
         ray.shutdown()
+
 
 @pytest.mark.asyncio
 async def test_generator_multi_turn_search():

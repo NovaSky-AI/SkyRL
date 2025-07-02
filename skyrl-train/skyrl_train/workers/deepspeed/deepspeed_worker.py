@@ -75,7 +75,9 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         )
 
         actor_scheduler = get_scheduler(
-            "constant_with_warmup", actor_optim, num_warmup_steps=self.cfg.trainer.num_warmup_steps
+            "constant_with_warmup",
+            actor_optim,
+            num_warmup_steps=self.cfg.trainer.policy.optimizer_config.num_warmup_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:
@@ -272,7 +274,7 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         critic_scheduler = get_scheduler(
             "constant_with_warmup",
             critic_optim,
-            num_warmup_steps=self.cfg.trainer.num_warmup_steps,
+            num_warmup_steps=self.cfg.trainer.critic.optimizer_config.num_warmup_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:

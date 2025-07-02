@@ -1,9 +1,11 @@
-Reproducing SearchR1 with SkyRL
+Multi-Turn RL for Search with SkyRL
 =====================================================
 
-In this example, we walk through how to reproduce results from `Search-R1: Training LLMs to Reason and Leverage Search Engines with Reinforcement Learning <https://arxiv.org/pdf/2503.09516>`_.
+In this example, we walk through an example reproducing results from `Search-R1: Training LLMs to Reason and Leverage Search Engines with Reinforcement Learning <https://arxiv.org/pdf/2503.09516>`_.
 
-Specifically, we show convergence with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts).
+Specifically, we show how to train a multi-turn search agent with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts).
+
+You can find the exact commands to reproduce our results in the :doc:`../recipes/searchr1` recipe.
 
 Task Overview
 -------------
