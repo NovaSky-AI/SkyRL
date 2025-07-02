@@ -442,9 +442,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         # TODO (erictang000): this is still synchronous RL - come back to this
         # for supporting fully async RL
         all_outputs = await asyncio.gather(*tasks)
-        # shutdown the executor
-        if self.env_executor is not None:
-            self.env_executor.shutdown(wait=True)
 
         responses = sum([[output[0]] for output in all_outputs], [])
         rewards = sum([[output[1]] for output in all_outputs], [])
