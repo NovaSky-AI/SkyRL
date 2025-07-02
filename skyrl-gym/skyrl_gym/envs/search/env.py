@@ -37,8 +37,8 @@ class SearchEnv(BaseTextEnv):
         tool_name = None
         query_match = None
 
-        if "<query>" in action and "</query>" in action:
-            match = re.search(r"<query>(.*?)</query>", action, re.DOTALL)
+        if "<search>" in action and "</search>" in action:
+            match = re.search(r"<search>(.*?)</search>", action, re.DOTALL)
             if match:
                 query_match = match.group(1)
             else:
@@ -63,12 +63,17 @@ class SearchEnv(BaseTextEnv):
         return "<answer>" in action and "</answer>" in action
 
     def _postprocess_action(self, action: str) -> str:
-        if "</query>" in action:
-            return action.split("</query>")[0] + "</query>"
+        if "</search>" in action:
+            return action.split("</search>")[0] + "</search>"
         elif "</answer>" in action:
             return action.split("</answer>")[0] + "</answer>"
         else:
             return action
+
+    def _execute_tool(self, tool_group_name: str, tool_name: str, tool_input: Any) -> str:
+        tool_output = super()._execute_tool(tool_group_name, tool_name, tool_input)
+
+        return "\n<information>" + tool_output + "</information>\n"
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1

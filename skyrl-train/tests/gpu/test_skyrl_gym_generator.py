@@ -1,5 +1,5 @@
 """
-uv run --extra dev --extra vllm --isolated pytest tests/gpu/test_generator.py
+uv run --extra dev --extra vllm --isolated pytest tests/gpu/test_skyrl_gym_generator.py
 """
 
 import pytest
@@ -92,8 +92,8 @@ async def run_generator_end_to_end(
                 "vllm",
                 DictConfig(
                     {
-                        "temperature": 0.6,
-                        "top_p": 0.95,
+                        "temperature": 1.0,
+                        "top_p": 1.0,
                         "top_k": -1,
                         "max_generate_length": max_generate_length,
                         "min_p": 0.0,
@@ -156,6 +156,8 @@ async def run_generator_end_to_end(
         for i in range(len(generator_output["response_ids"]))
     ]
 
+    import numpy as np
+    print("avg reward: ", np.mean(generator_output["rewards"]))
     output_keys = [
         "prompt_token_ids",
         "response_ids",
@@ -230,6 +232,32 @@ async def test_generator_multi_turn_text2sql():
             env_class="text2sql",
             num_prompts=2,
             max_turns=6,
+            use_conversation_multi_turn=False,
+        )
+    finally:
+        ray.shutdown()
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_search():
+    """
+    Test the generator with multiple turns of search
+    """
+    initialize_ray(DictConfig({"generator": {"backend": "vllm"}}))
+    try:
+        await run_generator_end_to_end(
+            use_async_engine=True,
+            batched=False,
+            n_samples_per_prompt=5,
+            num_inference_engines=1,
+            tensor_parallel_size=2,
+            model="Qwen/Qwen2.5-3B-Instruct",
+            max_prompt_length=4096,
+            max_input_length=7096,
+            max_generate_length=3000,
+            data_path="/home/ray/data/searchR1/train.parquet",
+            env_class="search",
+            num_prompts=512,
+            max_turns=2,
             use_conversation_multi_turn=False,
         )
     finally:

@@ -50,6 +50,9 @@ conflicts = [
     ],
 ]
 
+[tool.uv.sources]
+skyrl-gym = { path = "./skyrl-gym", editable = true }
+
 [project.optional-dependencies]
 dev = [
     "ruff==0.11.9",

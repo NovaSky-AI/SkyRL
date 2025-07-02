@@ -52,7 +52,8 @@ class SQLCodeExecutorToolGroup(ToolGroup):
                 res = str(e)
 
             return res
-
+        
+        # TODO (erictang000): move this logic up into the text2sql env, since this is more specific logic
         reminder_text = f"<reminder>You have {turns_left} turns left to complete the task.</reminder>"
         if sql is None:
             obs = "Your previous action is invalid. Follow the format of outputting thinking process and sql tool, and try again."

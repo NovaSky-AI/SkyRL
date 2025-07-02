@@ -42,9 +42,9 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy_mini_batch_size=256 \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
-  trainer.max_prompt_length=4096 \
-  generator.max_input_length=12000 \
-  generator.sampling_params.max_generate_length=3000 \
+  trainer.max_prompt_length=2048 \
+  generator.max_input_length=4096 \
+  generator.sampling_params.max_generate_length=1000 \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
@@ -53,6 +53,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.batched=false \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=2 \
+  generator.use_conversation_multi_turn=false \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   trainer.logger="wandb" \
