@@ -16,4 +16,10 @@ Then the following to your ``pyproject.toml`` file:
     [tool.uv.sources]
     skyrl-gym = { path = "./skyrl-gym", editable = true }
 
-Now you're all set! Changes made in SkyRL-Gym will be shipped with the ray working directory when you run the trainer in SkyRL-Train.
+Now make sure that your uv.lock file is up to date, and isn't resolving to the wrong version of the gym package.
+
+.. code-block:: bash
+
+    uv sync
+
+Now you're all set! Changes made in SkyRL-Gym will be shipped with the ray working directory when you run the trainer in SkyRL-Train. 
