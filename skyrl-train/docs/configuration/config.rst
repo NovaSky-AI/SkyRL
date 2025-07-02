@@ -180,6 +180,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
        weight_decay: 1e-2
        max_grad_norm: 1.0
        offload_after_step: true
+       num_warmup_steps: 0
 
 - ``optimizer_config.lr``: Learning rate for the optimizer
 - ``optimizer_config.adam_betas``: Betas for AdamW optimizer.

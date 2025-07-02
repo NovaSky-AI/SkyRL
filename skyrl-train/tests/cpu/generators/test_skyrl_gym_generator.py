@@ -80,6 +80,7 @@ def mock_generator_cfg():
 def mock_env_cfg():
     cfg = MagicMock()
     cfg.env_class = "gsm8k"
+    cfg.max_env_workers = 0
     return cfg
 
 
