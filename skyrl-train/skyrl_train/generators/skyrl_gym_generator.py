@@ -4,6 +4,7 @@ from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -40,6 +41,12 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.custom_chat_template = get_custom_chat_template(model_name)
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
+        if self.skyrl_gym_cfg.max_env_workers > 0:
+            self.env_executor = ThreadPoolExecutor(
+                max_workers=self.skyrl_gym_cfg.max_env_workers, thread_name_prefix="skyrl-gym-env-"
+            )
+        else:
+            self.env_executor = None
 
     def _update_engine_input_chat_history(
         self,
@@ -266,7 +273,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             stop_reason = engine_output["stop_reasons"][0]
-            env_step_output: BaseTextEnvStepOutput = env.step(output)
+            if self.env_executor is not None:
+                loop = asyncio.get_running_loop()
+                env_step_output: BaseTextEnvStepOutput = await loop.run_in_executor(self.env_executor, env.step, output)
+            else:
+                env_step_output: BaseTextEnvStepOutput = env.step(output)
             new_obs = env_step_output["observations"]
             reward = env_step_output["reward"]
             done = env_step_output["done"]
@@ -431,6 +442,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         # TODO (erictang000): this is still synchronous RL - come back to this
         # for supporting fully async RL
         all_outputs = await asyncio.gather(*tasks)
+        # shutdown the executor
+        if self.env_executor is not None:
+            self.env_executor.shutdown(wait=True)
 
         responses = sum([[output[0]] for output in all_outputs], [])
         rewards = sum([[output[1]] for output in all_outputs], [])

@@ -195,5 +195,6 @@ generator:
 
 environment:
   env_class: "gsm8k"
+  max_env_workers: 10
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:
   # skyrl_gym: config/skyrl_gym_config/default.yaml
