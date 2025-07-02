@@ -116,13 +116,13 @@ async def run_generator_end_to_end(
             "max_turns": max_turns,
             "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": use_conversation_multi_turn,
+            "max_env_workers": max_env_workers,
         }
     )
 
     env_cfg = DictConfig(
         {
             "env_class": env_class,
-            "max_env_workers": max_env_workers,
             "text2sql": {
                 "db_path": "/home/ray/default/sql_data",
             },

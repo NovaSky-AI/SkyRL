@@ -193,9 +193,10 @@ generator:
   # TODO (erictang000): Show clear ablations for benefits of this on GSM8K or SQL.
   zero_reward_on_non_stop: false 
 
-environment:
-  env_class: "gsm8k"
   # number of background workers for env step calls. Set to 0 to disable background workers.
   max_env_workers: 10
+
+environment:
+  env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:
   # skyrl_gym: config/skyrl_gym_config/default.yaml
