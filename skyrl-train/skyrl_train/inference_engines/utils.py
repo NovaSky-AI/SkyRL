@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 
 def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
@@ -16,6 +16,9 @@ def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
     exclude_keys = ["max_generate_length"]
     for key, value in sampling_params.items():
         if key not in vllm_sampling_params and key not in exclude_keys:
+            # Convert OmegaConf ListConfig to regular list if needed
+            if isinstance(value, ListConfig):
+                value = list(value)
             vllm_sampling_params[key] = value
     return vllm_sampling_params
 
@@ -33,6 +36,9 @@ def get_sglang_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
     exclude_keys = ["max_generate_length"]
     for key, value in sampling_params.items():
         if key not in sglang_sampling_params and key not in exclude_keys:
+            # Convert OmegaConf ListConfig to regular list if needed
+            if isinstance(value, ListConfig):
+                value = list(value)
             sglang_sampling_params[key] = value
     return sglang_sampling_params
 
