@@ -1,3 +1,7 @@
 # @package environment.skyrl_gym
 text2sql:
   db_path: "/home/ray/default/sql_data"
+
+text2sqlLLMJudge:
+  model: "gpt-4o-mini"
+  OPENAI_API_KEY: "openai_api_key"

@@ -26,3 +26,8 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+register(
+    id="text2sqlLLMJudge",
+    entry_point="skyrl_gym.envs.llm_as_judge.env:SQLLLMJudgeEnv",
+)
