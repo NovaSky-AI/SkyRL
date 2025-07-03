@@ -721,6 +721,7 @@ def get_llm_for_sequence_regression(
         if dschf is not None:
             logger.info("initialize value_head for ZeRO-3 reward model training.")
             import deepspeed
+
             with deepspeed.zero.GatheredParameters([value_head.weight], modifier_rank=0):
                 if torch.distributed.get_rank() == 0:
                     value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
