@@ -1,6 +1,5 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any
-import os
 from typing import Dict
 from omegaconf import DictConfig
 from openai import OpenAI

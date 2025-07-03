@@ -2,6 +2,6 @@
 text2sql:
   db_path: "/home/ray/default/sql_data"
 
-text2sqlLLMJudge:
+text2sql_llm_judge:
   model: "gpt-4o-mini"
   OPENAI_API_KEY: "openai_api_key"

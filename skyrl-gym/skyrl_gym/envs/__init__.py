@@ -28,6 +28,6 @@ register(
 )
 
 register(
-    id="text2sqlLLMJudge",
+    id="text2sql_llm_judge",
     entry_point="skyrl_gym.envs.llm_as_judge.env:SQLLLMJudgeEnv",
 )
