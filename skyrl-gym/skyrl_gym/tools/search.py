@@ -153,15 +153,6 @@ class SearchToolGroup(ToolGroup):
                 logger.info(f"Created shared session pool for {base_url}")
             return cls._session_pool[base_url]
 
-    @classmethod
-    def cleanup_sessions(cls):
-        """Close all shared sessions - useful for cleanup"""
-        with cls._session_lock:
-            for url, session in cls._session_pool.items():
-                session.close()
-                logger.info(f"Closed shared session for {url}")
-            cls._session_pool.clear()
-
     def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_request=True):
         self.search_url = search_url
         self.topk = topk
