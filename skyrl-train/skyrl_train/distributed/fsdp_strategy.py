@@ -274,7 +274,9 @@ class FSDPStrategy(DistributedStrategy):
             )
 
             #  TODO(csy): add other schedulers, add more to config
-            actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer, num_warmup_steps=-1)
+            actor_lr_scheduler = get_constant_schedule_with_warmup(
+                optimizer=actor_optimizer, num_warmup_steps=optim_config.num_warmup_steps
+            )
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
