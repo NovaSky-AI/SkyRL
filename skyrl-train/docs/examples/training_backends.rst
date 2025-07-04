@@ -30,11 +30,24 @@ We provide baseline examples for GRPO training on GSM8K for each of these backen
 
 DeepSpeed
 ~~~~~~~~~
-The only configuration change required for DeepSpeed is to set the ``trainer.strategy`` parameter to ``deepspeed``.
+
+DeepSpeed requires installing the optional ``deepspeed`` extra. You can either:
+
+1. Use the dedicated DeepSpeed script (which already includes the extra):
 
 .. code-block:: bash
 
-    # bash examples/training_backends/deepspeed/run_deepspeed.sh (or just)
+    bash examples/training_backends/deepspeed/run_deepspeed.sh
+
+2. Or modify the GSM8K script to include the deepspeed extra:
+
+.. code-block:: bash
+
+    # Modify the uv run command in examples/gsm8k/run_gsm8k.sh to include deepspeed extra:
+    # Change: uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+    # To:     uv run --isolated --extra vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
+
+    # Then run with DeepSpeed strategy:
     bash examples/gsm8k/run_gsm8k.sh trainer.strategy=deepspeed
 
 Additionally, you can tune `deepspeed specific configurations <https://www.deepspeed.ai/docs/config-json/>`_ as shown below:
