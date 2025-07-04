@@ -194,7 +194,7 @@ generator:
   zero_reward_on_non_stop: false 
 
   # number of background workers for env step calls. Set to 0 to disable background workers.
-  max_env_workers: 10
+  max_env_workers: 32
 
 environment:
   env_class: "gsm8k"
