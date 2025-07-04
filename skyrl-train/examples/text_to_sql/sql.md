@@ -31,10 +31,10 @@ If you modify the db_files path, update `DB_PATH` in `run_sql_fsdp.sh` according
 
 ## Training
 
-`run_sql_fsdp.sh` is the bash script to launch training. Take a look at the file, and modify any training configuration parameters as needed. The most commonly modified parameters are environment variables at the top, such as `NUM_GPUS` and `TRAIN_BATCH_SIZE`. 
+See the bash scripts in this repo to launch training. Take a look at the file of interest, and modify any training configuration parameters as needed.
 
 To start training, run:
 
 ```bash
-bash examples/text_to_sql/run_sql_fsdp.sh
+bash examples/text_to_sql/<run_XXX>.sh
 ```
