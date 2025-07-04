@@ -47,7 +47,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             # Split evenly across engines
             return await self._generate_batched(prompts, prompt_token_ids, sampling_params)
 
-    async def _generate_with_trajectory_routing(self, prompts, prompt_token_ids, trajectory_ids, sampling_params):
+    async def _generate_with_trajectory_routing(self, prompts, prompt_token_ids, trajectory_ids, sampling_params) -> InferenceEngineOutput:
         """
         Route prompts to engines based on trajectory_ids and return results in the original order of the prompts.
         """
@@ -87,7 +87,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         return InferenceEngineOutput(responses=responses, stop_reasons=stop_reasons)
 
-    async def _generate_batched(self, prompts, prompt_token_ids, sampling_params):
+    async def _generate_batched(self, prompts, prompt_token_ids, sampling_params) -> InferenceEngineOutput:
         """
         Split prompts evenly across engines and return results in the original order of the prompts.
         """

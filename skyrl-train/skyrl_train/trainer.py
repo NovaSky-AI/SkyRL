@@ -357,6 +357,13 @@ class RayPPOTrainer:
         """
         Replicate prompts if needed and generate uids.
         """
+        
+        # uids for each sample (accounting for n_samples_per_prompt) - NOTE: we assume that generate returns samples in the same order as passed in
+        uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
+        
+        # TODO(tgriggs): Don't do prompt duplication in the trainer -- we handle this in the generator. 
+        n_samples_per_prompt = 1
+        
         all_prompts = sum([[prompt["prompt"]] * n_samples_per_prompt for prompt in rand_prompts], [])
 
         all_envs = sum(
@@ -385,8 +392,6 @@ class RayPPOTrainer:
             "sampling_params": request_sampling_params,
         }
 
-        # uids for each sample - NOTE: we assume that generate returns samples in the same order as passed in
-        uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
         return generator_input, uids
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
@@ -663,7 +668,8 @@ class RayPPOTrainer:
         if len(generator_output["response_ids"]) <= 0:
             raise RuntimeError("No outputs generated")
 
-        assert len(input_batch["prompts"]) == len(
+        # TODO(tgriggs): The generator will handle prompt duplication, so we must account for it here.
+        assert len(input_batch["prompts"] * self.cfg.generator.n_samples_per_prompt) == len(
             generator_output["response_ids"]
         ), f"generate objects number must be equal to all inputs number, got {len(input_batch['prompts'])} and {len(generator_output['response_ids'])}"
 

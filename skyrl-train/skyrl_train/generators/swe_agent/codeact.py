@@ -541,8 +541,8 @@ class CodeActAgentGroup:
                 instance_list.extend([instance] * len(traj_results))
 
         assert len(matched_results) == len(
-            self.batch["prompts"]
-        ), f"Expected number of results {self.batch['prompts']}, got {len(matched_results)}"
+            self.batch["prompts"] * self.num_trajectories
+        ), f"Expected number of results {len(self.batch['prompts']) * self.num_trajectories}, got {len(matched_results)}"
 
         # Group results by instance_id for message handling
         results_by_instance = {}
@@ -1062,7 +1062,7 @@ class CodeActAgentGroup:
         """
         Generate trajectories with pipelined runtime initialization to improve efficiency.
         """
-        total_instances = len(self.batch)
+        total_instances = len(self.batch["prompts"])
         print("Total instances:", total_instances)
 
         # Create two queues: one for initialization and one for running
