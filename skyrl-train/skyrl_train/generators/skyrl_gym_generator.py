@@ -41,9 +41,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.custom_chat_template = get_custom_chat_template(model_name)
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
-        if self.skyrl_gym_cfg.generator.max_env_workers > 0:
+        if self.skyrl_gym_cfg.max_env_workers > 0:
             self.env_executor = ThreadPoolExecutor(
-                max_workers=self.skyrl_gym_cfg.generator.max_env_workers, thread_name_prefix="skyrl-gym-env-"
+                max_workers=self.skyrl_gym_cfg.max_env_workers, thread_name_prefix="skyrl-gym-env-"
             )
         else:
             self.env_executor = None

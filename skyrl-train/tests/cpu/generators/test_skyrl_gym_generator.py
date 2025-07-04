@@ -79,7 +79,7 @@ def mock_generator_cfg():
 @pytest.fixture
 def mock_env_cfg():
     cfg = MagicMock()
-    cfg.generator.max_env_workers = 0
+    cfg.max_env_workers = 0
     cfg.env_class = "gsm8k"
     return cfg
 

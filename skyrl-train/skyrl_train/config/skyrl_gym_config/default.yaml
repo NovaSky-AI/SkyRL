@@ -1,6 +1,5 @@
 # @package environment.skyrl_gym
-generator:
-  # number of background workers for env step calls. Set to 0 to disable background workers.
-  max_env_workers: 32
+# number of background workers for env step calls. Set to 0 to disable background workers.
+max_env_workers: 32
 text2sql:
   db_path: "/home/ray/default/sql_data"

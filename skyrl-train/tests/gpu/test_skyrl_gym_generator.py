@@ -122,11 +122,10 @@ async def run_generator_end_to_end(
 
     env_cfg = DictConfig(
         {
-            "env_class": env_class,
             "text2sql": {
                 "db_path": os.path.expanduser("~/default/sql_data"),
             },
-            "generator": {"max_env_workers": max_env_workers},
+            "max_env_workers": max_env_workers,
         }
     )
 
