@@ -19,11 +19,14 @@ OBS_START, OBS_END = "<observation>", "</observation>"
 
 # NOTE: bring back reward
 def verify_format_and_extract(output: str):
-    if output.count(SOLUTION_START) != 1 or output.count(SOLUTION_END) != 1:
+    if output.count(SOLUTION_START) != 1:
+        return False, None, None, None
+    pre_solution, tail = output.split(SOLUTION_START, 1)
+
+    if tail.count(SOLUTION_END) != 1:
         return False, None, None, None
 
-    pre_solution, tail = output.split(SOLUTION_START, 1)
-    solution_text, _ = tail.split(SOLUTION_END, 1)
+    solution_text = tail.split(SOLUTION_END, 1)[0]
 
     if re.search(r"</?(think|sql|observation)\b", solution_text, re.I):
         return False, None, None, None

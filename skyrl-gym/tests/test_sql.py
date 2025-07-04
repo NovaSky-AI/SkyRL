@@ -6,6 +6,7 @@ import skyrl_gym
 import pytest
 from unittest.mock import patch, MagicMock
 from omegaconf import DictConfig
+from skyrl_gym.envs.sql.utils import verify_format_and_extract
 
 # Mock data for testing
 MOCK_DB_RESULTS = {
@@ -170,3 +171,102 @@ def test_sql_execution(mock_db_file, mock_sqlite_connection):
 
     # Verify the observation contains the expected result
     assert "John Doe" in observation[0]["content"]
+
+
+@pytest.mark.parametrize(
+    "output, expected_valid, description",
+    [
+        # Valid case
+        (
+            "<think>I need to query the database</think>\n<solution>SELECT * FROM users;</solution>",
+            True,
+            "valid_format",
+        ),
+        # Missing think tag (should fail)
+        ("<solution>SELECT * FROM users;</solution>", False, "missing_think_tag"),
+        # Multiple solution start tags
+        (
+            "<think>thinking</think>\n<solution>SELECT * FROM users;<solution>more text</solution>",
+            False,
+            "multiple_solution_start_tags",
+        ),
+        # Multiple solution end tags
+        (
+            "<think>thinking</think>\n<solution>SELECT * FROM users;</solution>extra</solution>",
+            False,
+            "multiple_solution_end_tags",
+        ),
+        # Missing solution start tag
+        ("<think>thinking</think>\nSELECT * FROM users;</solution>", False, "missing_solution_start_tag"),
+        # Missing solution end tag
+        ("<think>thinking</think>\n<solution>SELECT * FROM users;", False, "missing_solution_end_tag"),
+        # Solution start at very end with no content after (edge case)
+        ("<think>thinking</think>\nsome text<solution>", False, "solution_start_at_end"),
+        # Solution contains forbidden tags
+        (
+            "<think>thinking</think>\n<solution>SELECT * FROM users; <sql>forbidden</sql></solution>",
+            False,
+            "solution_contains_forbidden_sql_tag",
+        ),
+        # Solution contains forbidden observation tag
+        (
+            "<think>thinking</think>\n<solution>SELECT * FROM users; <observation>forbidden</observation></solution>",
+            False,
+            "solution_contains_forbidden_observation_tag",
+        ),
+        # Empty solution content
+        ("<think>thinking</think>\n<solution></solution>", True, "empty_solution_content"),
+        # Multiple think tags (should still work)
+        (
+            "<think>first thought</think>\n<think>second thought</think>\n<solution>SELECT * FROM users;</solution>",
+            True,
+            "multiple_think_tags",
+        ),
+        # Observation followed by think (valid pattern)
+        (
+            "<observation>some observation</observation>\n<think>thinking</think>\n<solution>SELECT * FROM users;</solution>",
+            True,
+            "observation_then_think",
+        ),
+        # Observation NOT followed by think (should fail)
+        (
+            "<observation>some observation</observation>\nrandom text\n<think>thinking</think>\n<solution>SELECT * FROM users;</solution>",
+            False,
+            "observation_not_followed_by_think",
+        ),
+        # Edge cases that previously caused unpacking errors
+        # Solution tag at very end
+        ("some text<solution>", False, "solution_tag_at_end_no_content"),
+        # End tag before start tag
+        ("</solution><solution>content</solution>", False, "end_tag_before_start_tag"),
+        # Malformed nested tags
+        ("<solution><solution>content</solution>", False, "malformed_nested_tags"),
+        # Only end tag
+        ("some text</solution>", False, "only_end_tag"),
+        # Empty string
+        ("", False, "empty_string"),
+        # Only start tag
+        ("<solution>content without end", False, "only_start_tag"),
+    ],
+)
+def test_verify_format_and_extract(output, expected_valid, description):
+    """Test verify_format_and_extract function with various edge cases, including those that previously caused unpacking errors."""
+    # Should not raise an exception regardless of input
+    try:
+        is_valid, thoughts, solution_text, _ = verify_format_and_extract(output)
+
+        assert is_valid == expected_valid, f"Failed for case: {description}"
+
+        if expected_valid:
+            # If valid, should have thoughts and solution_text
+            assert thoughts is not None, f"Expected thoughts for valid case: {description}"
+            assert solution_text is not None, f"Expected solution_text for valid case: {description}"
+            assert len(thoughts) > 0, f"Expected non-empty thoughts for valid case: {description}"
+        else:
+            # If invalid, thoughts and solution_text should be None
+            assert thoughts is None, f"Expected None thoughts for invalid case: {description}"
+            assert solution_text is None, f"Expected None solution_text for invalid case: {description}"
+    except Exception as e:
+        pytest.fail(
+            f"verify_format_and_extract should not raise exception for case {description} with input {repr(output)}, but got: {e}"
+        )
