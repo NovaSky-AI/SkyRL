@@ -26,7 +26,7 @@ def verify_format_and_extract(output: str):
     if tail.count(SOLUTION_END) != 1:
         return False, None, None, None
 
-    solution_text = tail.split(SOLUTION_END, 1)[0]
+    solution_text, _ = tail.split(SOLUTION_END, 1)
 
     if re.search(r"</?(think|sql|observation)\b", solution_text, re.I):
         return False, None, None, None
