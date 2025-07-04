@@ -3,6 +3,7 @@ import logging
 import requests
 import uuid
 import time
+import threading
 from typing import List, Tuple, Optional, Any, Dict
 
 from skyrl_gym.tools.core import tool, ToolGroup
@@ -21,13 +22,21 @@ def call_search_api(
     topk: int = 3,
     return_scores: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
-    log_request: bool = False,
+    log_request: bool = True,
+    session: Optional[requests.Session] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     request_id = str(uuid.uuid4())
     log_prefix = f"[Search Request ID: {request_id}] "
 
     payload = {"queries": query_list, "topk": topk, "return_scores": return_scores}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    # Use provided session or create a new one for this request
+    if session is None:
+        session = requests.Session()
+        should_close_session = True
+    else:
+        should_close_session = False
 
     last_error = None
     for attempt in range(MAX_RETRIES):
@@ -36,7 +45,7 @@ def call_search_api(
                 logger.info(
                     f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
                 )
-            response = requests.post(
+            response = session.post(
                 retrieval_service_url,
                 headers=headers,
                 json=payload,
@@ -59,6 +68,11 @@ def call_search_api(
             # If successful (status code 2xx)
             if log_request:
                 logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
+
+            # Close session if we created it
+            if should_close_session:
+                session.close()
+
             return response.json(), None
 
         except requests.exceptions.ConnectionError as e:
@@ -69,6 +83,7 @@ def call_search_api(
                 logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                 time.sleep(delay)
             continue
+
         except requests.exceptions.Timeout as e:
             last_error = f"{log_prefix}Timeout Error: {e}"
             logger.warning(last_error)
@@ -77,20 +92,33 @@ def call_search_api(
                 logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                 time.sleep(delay)
             continue
-        except requests.exceptions.RequestException as e:
-            last_error = f"{log_prefix}API Request Error: {e}"
-            break  # Exit retry loop on other request errors
-        except json.JSONDecodeError as e:
-            raw_response_text = response.text if "response" in locals() else "N/A"
-            last_error = f"{log_prefix}API Response JSON Decode Error: {e}, Response: {raw_response_text[:200]}"
-            break  # Exit retry loop on JSON decode errors
+
+        except requests.exceptions.HTTPError as e:
+            last_error = f"{log_prefix}HTTP Error: {e}"
+            logger.warning(last_error)
+            if attempt < MAX_RETRIES - 1:
+                delay = INITIAL_RETRY_DELAY * (attempt + 1)
+                logger.info(f"{log_prefix}Retrying after {delay} seconds...")
+                time.sleep(delay)
+            continue
+
         except Exception as e:
             last_error = f"{log_prefix}Unexpected Error: {e}"
-            break  # Exit retry loop on other unexpected errors
+            logger.warning(last_error)
+            if attempt < MAX_RETRIES - 1:
+                delay = INITIAL_RETRY_DELAY * (attempt + 1)
+                logger.info(f"{log_prefix}Retrying after {delay} seconds...")
+                time.sleep(delay)
+            continue
 
-    # If loop finishes without returning success, return the last recorded error
-    logger.error(f"{log_prefix}Search API call failed. Last error: {last_error}")
-    return None, last_error.replace(log_prefix, "API Call Failed: ") if last_error else "API Call Failed after retries"
+    # If we reach here, all attempts failed
+    logger.error(f"{log_prefix}API Request Failed after {MAX_RETRIES} attempts: {last_error}")
+
+    # Close session if we created it
+    if should_close_session:
+        session.close()
+
+    return None, last_error
 
 
 def _passages2string(retrieval_result):
@@ -102,11 +130,53 @@ def _passages2string(retrieval_result):
 
 
 class SearchToolGroup(ToolGroup):
-    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_request=False):
+    # Class-level session pool shared across all instances
+    _session_pool = {}
+    _session_lock = threading.Lock()
+
+    @classmethod
+    def _get_shared_session(cls, base_url: str) -> requests.Session:
+        """Get or create a shared session for the given base URL"""
+        with cls._session_lock:
+            if base_url not in cls._session_pool:
+                session = requests.Session()
+                # Configure connection pooling
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=20,  # Number of connection pools
+                    pool_maxsize=20,  # Max connections per pool
+                    max_retries=0,  # We handle retries ourselves
+                    pool_block=False,  # Don't block if pool is full
+                )
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                cls._session_pool[base_url] = session
+                logger.info(f"Created shared session pool for {base_url}")
+            return cls._session_pool[base_url]
+
+    @classmethod
+    def cleanup_sessions(cls):
+        """Close all shared sessions - useful for cleanup"""
+        with cls._session_lock:
+            for url, session in cls._session_pool.items():
+                session.close()
+                logger.info(f"Closed shared session for {url}")
+            cls._session_pool.clear()
+
+    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_request=True):
         self.search_url = search_url
         self.topk = topk
         self.timeout = timeout
         self.log_request = log_request
+
+        # Extract base URL for session sharing
+        self.base_url = self.search_url.split("/retrieve")[0] if "/retrieve" in self.search_url else self.search_url
+
+        # Get shared session for this base URL
+        self.session = self._get_shared_session(self.base_url)
+
+        if self.log_request:
+            logger.info(f"SearchToolGroup initialized using shared session pool for {self.base_url}")
+
         super().__init__(name="SearchToolGroup")
 
     @tool
@@ -126,6 +196,7 @@ class SearchToolGroup(ToolGroup):
                 topk=self.topk,
                 timeout=self.timeout,
                 log_request=self.log_request,
+                session=self.session,  # Pass our shared session for connection reuse
             )
         except Exception as e:
             error_msg = f"API Request Exception during batch search: {e}"
