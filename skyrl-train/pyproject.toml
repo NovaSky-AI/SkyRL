@@ -30,7 +30,6 @@ dependencies = [
     "torchdata",
     "omegaconf",
     "ray==2.44.0",
-    "deepspeed==0.16.5",
     "peft",
     "debugpy==1.8.0",
     "hf_transfer",
@@ -51,6 +50,9 @@ conflicts = [
 ]
 
 [project.optional-dependencies]
+deepspeed = [
+    "deepspeed==0.16.5"
+]
 dev = [
     "ruff==0.11.9",
     "black==24.10.0",

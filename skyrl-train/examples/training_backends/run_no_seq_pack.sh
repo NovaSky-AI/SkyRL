@@ -5,7 +5,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/training_backends/run_no_seq_pack.sh
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$HOME/data/gsm8k/train.parquet']" \
   data.val_data="['$HOME/data/gsm8k/validation.parquet']" \

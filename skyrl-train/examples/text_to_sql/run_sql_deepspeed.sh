@@ -10,7 +10,7 @@ DATA_DIR="$HOME/data/sql"
 DB_PATH="$HOME/path/to/db_files/"
 
 
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
