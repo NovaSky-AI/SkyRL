@@ -9,13 +9,16 @@ from collections import defaultdict
 
 import ray
 import torch
+import torch.nn as nn
+from torch.optim.lr_scheduler import LRScheduler
+from torch.optim import Optimizer
 import torch.distributed
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
-from torch import nn
 
 from skyrl_train.utils import masked_mean, ray_noset_visible_devices, get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
+from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
@@ -328,16 +331,19 @@ class ValueLoss(nn.Module):
         returns: torch.Tensor,
         loss_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
         if self.clip_eps is not None:
             values_clipped = old_values + (values - old_values).clamp(-self.clip_eps, self.clip_eps)
             surr1 = (values_clipped - returns) ** 2
             surr2 = (values - returns) ** 2
             loss = torch.max(surr1, surr2)
+            clipfrac = masked_mean((surr1 > surr2).float(), loss_mask).mean().detach().item()
         else:
+            clipfrac = None
             loss = (values - returns) ** 2
 
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        return 0.5 * loss
+        return 0.5 * loss, clipfrac
 
 
 class PolicyLoss(nn.Module):
@@ -631,6 +637,16 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
+        self.scheduler: LRScheduler = None
+        self.optimizer: Optimizer = None
+        self.strategy: DistributedStrategy = None
+        self.record_memory: bool = False
+        self.mesh_rank: MeshRank = None
+        self.actor_loss_fn: nn.Module = None
+
     def _normalize_mini_batch_size(self):
         """
         Normalize mini batch sizes to per-gpu mini batch sizes..
@@ -780,7 +796,7 @@ class PolicyWorkerBase(Worker):
                 kl_loss = r - 1.0 - kl_loss
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
-            kl_loss = 0
+            kl_loss = torch.tensor(0.0)
 
         loss = actor_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
         loss = loss / accumulation_steps
@@ -874,6 +890,17 @@ class PolicyWorkerBase(Worker):
 
 
 class CriticWorkerBase(Worker):
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
+        self.scheduler: LRScheduler = None
+        self.optimizer: Optimizer = None
+        self.strategy: DistributedStrategy = None
+        self.record_memory: bool = False
+        self.mesh_rank: MeshRank = None
+        self.critic_loss_fn: nn.Module = None
+
     def _normalize_mini_batch_size(self):
         """
         Normalize batch sizes based on device mesh and generation parameters.
@@ -987,7 +1014,7 @@ class CriticWorkerBase(Worker):
                 return_output=True,
             )
             # loss function
-            loss = self.critic_loss_fn(
+            loss, clipfrac = self.critic_loss_fn(
                 values,
                 old_values,
                 returns,
@@ -1006,6 +1033,7 @@ class CriticWorkerBase(Worker):
             "critic_loss": loss.item(),
             "values_mean": masked_mean(values, loss_mask).item(),
             "critic_lr": self.scheduler.get_last_lr()[0],
+            "values_clipfrac": clipfrac,
         }
         if grad_norm is not None:
             status["raw_grad_norm"] = grad_norm
@@ -1034,6 +1062,10 @@ class CriticWorkerBase(Worker):
 
 
 class RewardWorkerBase(Worker):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
+
     def _forward_micro_batch(
         self,
         micro_batch: TrainingInputBatch,
@@ -1054,6 +1086,10 @@ class RewardWorkerBase(Worker):
 
 
 class RefWorkerBase(Worker):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model: nn.Module = None
+
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
         micro_batch.to(device)
