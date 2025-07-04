@@ -7,7 +7,7 @@ set -x
 # bash examples/text_to_sql/run_sql_deepspeed.sh
 
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/path/to/db_files/"
+DB_PATH="$HOME/data/sql/db_files/data"
 
 
 uv run --isolated --frozen --extra vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
