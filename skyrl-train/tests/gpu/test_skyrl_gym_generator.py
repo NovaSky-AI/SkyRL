@@ -117,7 +117,6 @@ async def run_generator_end_to_end(
             "max_turns": max_turns,
             "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": use_conversation_multi_turn,
-            "max_env_workers": max_env_workers,
         }
     )
 
@@ -127,6 +126,7 @@ async def run_generator_end_to_end(
             "text2sql": {
                 "db_path": os.path.expanduser("~/default/sql_data"),
             },
+            "generator": {"max_env_workers": max_env_workers},
         }
     )
 
