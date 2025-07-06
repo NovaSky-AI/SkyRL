@@ -14,7 +14,6 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-
 def load_corpus(corpus_path: str):
     corpus = datasets.load_dataset("json", data_files=corpus_path, split="train", num_proc=4)
     return corpus
@@ -107,9 +106,6 @@ class Encoder:
 
         query_emb = query_emb.detach().cpu().numpy()
         query_emb = query_emb.astype(np.float32, order="C")
-
-        del inputs, output
-        torch.cuda.empty_cache()
 
         return query_emb
 
@@ -238,25 +234,32 @@ class DenseRetriever(BaseRetriever):
 
         results = []
         scores = []
-        for start_idx in tqdm(range(0, len(query_list), self.batch_size), desc="Retrieval process: "):
+        for start_idx in range(0, len(query_list), self.batch_size):
             query_batch = query_list[start_idx : start_idx + self.batch_size]
             batch_emb = self.encoder.encode(query_batch)
             batch_scores, batch_idxs = self.index.search(batch_emb, k=num)
+
             batch_scores = batch_scores.tolist()
             batch_idxs = batch_idxs.tolist()
-
             # load_docs is not vectorized, but is a python list approach
             flat_idxs = sum(batch_idxs, [])
             batch_results = load_docs(self.corpus, flat_idxs)
             # chunk them back
             batch_results = [batch_results[i * num : (i + 1) * num] for i in range(len(batch_idxs))]
-
             results.extend(batch_results)
             scores.extend(batch_scores)
-
-            del batch_emb, batch_scores, batch_idxs, query_batch, flat_idxs, batch_results
-            torch.cuda.empty_cache()
-
+            # Only call empty_cache occasionally and only if memory usage is very high
+            if start_idx > 0 and (start_idx // self.batch_size) % 10 == 0:
+                try:
+                    # Check GPU memory usage
+                    gpu_memory_used = torch.cuda.memory_allocated()
+                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory
+                    gpu_memory_ratio = gpu_memory_used / gpu_memory_total
+                    if gpu_memory_ratio > 0.85:  # Only if >85% memory usage
+                        torch.cuda.empty_cache()
+                        print(f"GPU memory cleaned at batch {start_idx // self.batch_size} ({gpu_memory_ratio:.1%} usage)")
+                except Exception:
+                    pass  # Ignore memory check errors
         if return_score:
             return results, scores
         else:
@@ -334,14 +337,19 @@ def retrieve_endpoint(request: QueryRequest):
         request.topk = config.retrieval_topk  # fallback to default
 
     # Perform batch retrieval
-    results, scores = retriever.batch_search(
-        query_list=request.queries, num=request.topk, return_score=request.return_scores
-    )
-
+    if request.return_scores:
+        results, scores = retriever.batch_search(
+            query_list=request.queries, num=request.topk, return_score=True
+        )
+    else:
+        results = retriever.batch_search(
+            query_list=request.queries, num=request.topk, return_score=False
+        )
+        scores = None
     # Format response
     resp = []
     for i, single_result in enumerate(results):
-        if request.return_scores:
+        if request.return_scores and scores is not None:
             # If scores are returned, combine them with results
             combined = []
             for doc, score in zip(single_result, scores[i]):
