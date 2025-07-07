@@ -51,6 +51,7 @@ class GuixExecutor:
         container_env_path = "/tmp/env.sh"
         with tempfile.NamedTemporaryFile(mode="w", suffix="_script.sh", delete=False) as script_file:
             script_file.write(f"source {container_env_path}\n")
+            script_file.write(f"cd $PWD\n")
             script_file.write(f"{command}\n")
             script_file.write(f"export -p > {container_env_path}\n")
         
