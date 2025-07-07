@@ -146,7 +146,7 @@ The final implementation is available in `examples/multiply/env.py <https://gith
 Registering Your New Environment
 --------------------------------
 
-Finally, we need to ``register`` the new environment so the training stack can find it by name.
+Finally, we need to ``register`` the new environment so the training stack can find it by name (which we refer to as ``env_class``). We will name this environment ``multiply``.
 
 We will create a new entrypoint for training with the ``multiply`` environment by creating a file at ``examples/multiply/main_multiply.py`` that looks like this:
 
@@ -192,7 +192,7 @@ We can generate a dataset of multiplication problems using `examples/multiply/mu
 
 .. code-block:: python
    :linenos:
-   :caption: Generating a dataset of random multiplication problems at `examples/multiply/multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_
+   :caption: Generating a dataset of random multiplication problems.
 
    for idx in range(num_examples):
         question, answer = generate_multiplication_problem(num_digits)
@@ -217,6 +217,9 @@ We can generate a dataset of multiplication problems using `examples/multiply/mu
             },
         }
         examples.append(data)
+
+
+Note that the ``env_class`` here should match the name of the environment we registered. In this case, it is ``multiply``. You can optionally omit the ``env_class`` here and instead set it in the training configuration to apply to all training samples, but setting ``env_class`` per-sample allows for multi-environment training so it is the recommended practice.
 
 See the doc on :doc:`../datasets/dataset-preparation` for more details on the required dataset format and how to prepare your own dataset.
 
