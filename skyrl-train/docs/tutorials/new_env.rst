@@ -1,7 +1,7 @@
-Creating a New Environment in SkyRL-Gym
+Creating a New Environment or Task
 =====================================
 
-To demonstrate how to create custom environments in SkyRL-Gym, let's build a simple multiplication environment!
+To demonstrate how to create custom environments in SkyRL-Gym and train with SkyRL, let's build a simple multiplication environment!
 
 We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
 
@@ -239,14 +239,18 @@ Training Your Model
 
 Time to train! 🚀
 
-We will use the ``run_multiply.sh`` script to train the model. This script is located in `examples/multiply/run_multiply.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/run_multiply.sh>`_ and primarily sets up the training configuration and calls ``main_multiply.py``.
+We will use the ``run_multiply.sh`` script to train the model. This script is located in `examples/multiply/run_multiply.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/run_multiply.sh>`_, which sets up the training configuration and calls ``main_multiply.py``.
 
-First, make sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count:
+**Common Configuration Parameters**
+
+First, ensure sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count (which we set via an environment variable `NUM_GPUS`):
 
 - ``trainer.placement.policy_num_gpus_per_node``
 - ``generator.num_inference_engines``
 
-Then start training:
+Then, configure how the environment should be executed. For multi-turn environments, we recommend setting ``generator.batched=false`` and ``generator.async_engine=true`` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
+
+**Launch Training**
 
 .. code-block:: bash
    :linenos:
@@ -255,9 +259,7 @@ Then start training:
    export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
    bash examples/multiply/run_multiply.sh
 
-**Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the Tools documentation for details.
-
-.. TODO(tgriggs): Add a link to the tools doc.
+**Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the :doc:`tools_guide` documentation for details.
 
 That's it! You've created a custom environment, prepared training data, and started training. The same pattern works for any text-based task you want to train on.
 

@@ -28,22 +28,19 @@ from skyrl_train.generators.utils import concatenate_generator_outputs, get_metr
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
+from skyrl_train import utils
 from skyrl_train.utils import (
     Timer,
     compute_approx_kl,
-    compute_advantages_and_returns,
     masked_mean,
     normalize_advantages_dict,
+    get_ray_pg_ready_with_timeout,
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
-
-from ray.util.placement_group import placement_group
-
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.weights_manager import InferenceWeightsManager
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,
@@ -266,7 +263,7 @@ class RayPPOTrainer:
                         with Timer("apply_reward_kl_penalty", self.all_timings):
                             training_input = self.apply_reward_kl_penalty(training_input)
 
-                    # 3. calculate advantages and returns / along with tensorboard logging
+                    # 3. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
                         # remove some unwanted keys
@@ -721,7 +718,7 @@ class RayPPOTrainer:
         # TODO (erictang000): we are just supporting custom rewards for now
         token_level_rewards = data["custom_rewards"]
 
-        advantages, returns = compute_advantages_and_returns(
+        advantages, returns = utils.compute_advantages_and_returns(
             token_level_rewards=token_level_rewards,
             response_mask=data["response_mask"],
             index=data.metadata["uids"],

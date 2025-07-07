@@ -5,6 +5,7 @@ import skyrl_gym
 from typing import List, Dict, Any, Optional
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
+from tqdm.asyncio import tqdm
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -441,7 +442,12 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # TODO (erictang000): this is still synchronous RL - come back to this
         # for supporting fully async RL
-        all_outputs = await asyncio.gather(*tasks)
+        all_outputs = await tqdm.gather(
+            *tasks,
+            desc="Generating Trajectories",
+            miniters=max(1, len(tasks) // 10),
+            mininterval=5,
+        )
 
         responses = sum([[output[0]] for output in all_outputs], [])
         rewards = sum([[output[1]] for output in all_outputs], [])
