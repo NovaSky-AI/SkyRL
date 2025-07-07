@@ -69,11 +69,6 @@ class GuixExecutor:
                 timeout=timeout,
                 cwd=self.working_dir,
             )
-            return ExecutionResult(
-                output=result.stdout or "",
-                error=result.stderr if result.stderr else None,
-                return_code=result.returncode,
-            )
         except Exception as e:
             return ExecutionResult(
                 output="",
@@ -81,7 +76,18 @@ class GuixExecutor:
                 return_code=-1,
             )
 
+        with open(env_file.name, "r") as f:
+            self.current_env = f.read()
 
-# executor = GuixExecutor()
-# executor.execute("ls")
+        return ExecutionResult(
+            output=result.stdout or "",
+            error=result.stderr if result.stderr else None,
+            return_code=result.returncode,
+        )
+
+import os
+import simplecoder
+manifest = os.path.abspath("manifest.scm")
+executor = simplecoder.GuixExecutor("test-repo", manifest)
+executor.execute("ls")
 
