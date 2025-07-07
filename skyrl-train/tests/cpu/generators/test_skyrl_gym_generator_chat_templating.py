@@ -76,6 +76,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     )
     env_cfg = DictConfig(
         {
+            "max_env_workers": 0,
             "env_class": "cpu_test_env",
         }
     )

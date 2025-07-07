@@ -7,7 +7,7 @@ set -x
 # bash examples/text_to_sql/run_sql_fsdp.sh
 
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/path/to/db_files/"
+DB_PATH="$HOME/data/sql/db_files/data"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
 NUM_GPUS=8
@@ -19,8 +19,8 @@ TRAIN_BATCH_SIZE=256
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
-  data.train_data=$train_data \
-  data.val_data=$val_data \
+  data.train_data="['${DATA_DIR}/train.parquet']" \
+  data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
   trainer.epochs=50 \
   trainer.placement.colocate_all=true \
@@ -45,7 +45,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.ppo_loss_type="dual_clip" \
   trainer.ckpt_interval=5 \
   trainer.hf_save_interval=5 \
-  trainer.export_path=/mnt/cluster_storage/export/ \
+  trainer.export_path=$HOME/export/ \
   trainer.dump_data_batch=true \
   generator.backend=vllm \
   generator.run_engines_locally=true \

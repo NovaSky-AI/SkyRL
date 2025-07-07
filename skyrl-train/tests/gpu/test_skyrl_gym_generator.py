@@ -2,6 +2,7 @@
 uv run --extra dev --extra vllm --isolated pytest tests/gpu/test_skyrl_gym_generator.py
 """
 
+import os
 import pytest
 import ray
 from transformers import AutoTokenizer
@@ -60,7 +61,7 @@ async def run_generator_end_to_end(
     max_prompt_length=512,
     max_input_length=2048,
     max_generate_length=1024,
-    data_path="/home/ray/data/gsm8k/validation.parquet",
+    data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
     env_class="gsm8k",
     num_prompts=2,
     max_turns=1,
@@ -122,10 +123,10 @@ async def run_generator_end_to_end(
 
     env_cfg = DictConfig(
         {
-            "env_class": env_class,
             "text2sql": {
-                "db_path": "/home/ray/default/sql_data",
+                "db_path": os.path.expanduser("~/default/sql_data"),
             },
+            "max_env_workers": max_env_workers,
         }
     )
 
@@ -231,7 +232,7 @@ async def test_generator_multi_turn_text2sql():
             max_prompt_length=6000,
             max_input_length=29048,
             max_generate_length=3000,
-            data_path="/home/ray/data/sql/train.parquet",
+            data_path=os.path.expanduser("~/data/sql/train.parquet"),
             env_class="text2sql",
             num_prompts=2,
             max_turns=6,
