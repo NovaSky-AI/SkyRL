@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from typing import Optional, Dict, Any, List
 
-from openai import OpenAI
+# from openai import OpenAI
 
 @dataclass
 class ExecutionResult:
@@ -73,7 +73,6 @@ class GuixExecutor:
                 output=result.stdout or "",
                 error=result.stderr if result.stderr else None,
                 return_code=result.returncode,
-                timeout=False
             )
         except Exception as e:
             return ExecutionResult(
