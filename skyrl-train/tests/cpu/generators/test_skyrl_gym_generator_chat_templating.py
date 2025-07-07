@@ -71,7 +71,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "max_turns": 3,
             "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": True,
-            "max_env_workers": 0,
         }
     )
     env_cfg = DictConfig(

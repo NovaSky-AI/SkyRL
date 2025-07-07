@@ -57,7 +57,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   environment.env_class="search" \
-  generator.max_env_workers=16 \
+  environment.skyrl_gym.max_env_workers=16 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
   trainer.run_name="eval" \
