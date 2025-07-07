@@ -10,7 +10,7 @@ import uuid
 import torch
 from loguru import logger
 from omegaconf import DictConfig
-from ray.util.placement_group import PlacementGroup
+from ray.util.placement_group import PlacementGroup, placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer

@@ -6,7 +6,7 @@ set -x
 # bash examples/multiply/run_multiply.sh
 
 DATA_DIR="$HOME/data/multiply"
-NUM_GPUS=1
+NUM_GPUS=4
 
 uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   data.train_data="['$DATA_DIR/train.parquet']" \
