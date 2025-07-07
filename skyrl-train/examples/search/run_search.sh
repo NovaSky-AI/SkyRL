@@ -44,7 +44,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.micro_train_batch_size_per_gpu=4 \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
-  generator.sampling_params.max_generate_length=500 \
+  generator.sampling_params.max_generate_length=667 \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
@@ -52,7 +52,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.async_engine=true \
   generator.batched=false \
   generator.n_samples_per_prompt=5 \
-  generator.max_turns=4 \
+  generator.max_turns=2 \
   generator.use_conversation_multi_turn=false \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
@@ -60,15 +60,16 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_env_workers=16 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
-  trainer.run_name="skyrl-search_4turns_500_maxgeneratelen" \
+  trainer.run_name="eval" \
   trainer.ckpt_interval=20 \
   trainer.hf_save_interval=20 \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt_maxturns4" \
+  trainer.ckpt_path="$HOME/searchr1_3turns_667_maxgeneratelen" \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
-  generator.eval_sampling_params.temperature=1.0 \
+  generator.eval_sampling_params.temperature=0 \
+  trainer.export_path="$HOME/searchr1_3turns_667_maxgeneratelen/exports" \
   trainer.eval_interval=50 \
   $@
   
