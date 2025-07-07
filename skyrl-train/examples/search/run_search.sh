@@ -60,7 +60,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_env_workers=16 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
-  trainer.run_name="skyrl-search_4turns_500_maxgenlen" \
+  trainer.run_name="skyrl-search_4turns_500_maxgeneratelen" \
   trainer.ckpt_interval=20 \
   trainer.hf_save_interval=20 \
   trainer.max_ckpts_to_keep=5 \
@@ -68,6 +68,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.ckpt_path="$HOME/ckpts/searchR1_3B_ckpt_maxturns4" \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
+  generator.eval_sampling_params.temperature=1.0 \
   trainer.eval_interval=50 \
   $@
   

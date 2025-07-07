@@ -142,7 +142,6 @@ class RayPPOTrainer:
         pbar = tqdm(total=len(self.eval_dataloader), initial=0, desc="Evaluation Progress")
         for _, prompts in enumerate(self.eval_dataloader):
             pbar.update(1)
-            prompts = self._remove_tail_data(prompts)
             generator_input, uids = self._prepare_generator_input(
                 self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
             )
@@ -202,7 +201,7 @@ class RayPPOTrainer:
             self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all
         )
         self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=True
+            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=False
         )
 
         # Load checkpoint state if resumption is enabled
@@ -296,7 +295,7 @@ class RayPPOTrainer:
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
+                    or self.global_step == self.total_training_steps - 1
                 ):
                     with self.eval_weights_manager:
                         with Timer("eval", self.all_timings):
