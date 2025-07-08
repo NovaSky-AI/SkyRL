@@ -3,6 +3,7 @@ from typing import List, Optional
 import ray
 import multiprocessing as mp
 
+import sglang.srt.entrypoints.engine
 from sglang.srt.entrypoints.engine import Engine
 from sglang.srt.utils import (
     assert_pkg_version,
@@ -24,6 +25,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightUpdateRequest,
 )
 
+
 # Patch SGLang's _set_envs_and_config to avoid signal handler issues in Ray actors
 # Based on VERL's solution: https://github.com/sgl-project/sglang/issues/6723
 # https://github.com/volcengine/verl/blob/v0.4.1/verl/workers/rollout/sglang_rollout/sglang_rollout.py#L85
@@ -32,7 +34,7 @@ def _patched_set_envs_and_config(server_args):
     # Set global environments
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = str(int(getattr(server_args, 'enable_nccl_nvls', False)))
+    os.environ["NCCL_NVLS_ENABLE"] = str(int(getattr(server_args, "enable_nccl_nvls", False)))
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "4"
     os.environ["CUDA_MODULE_LOADING"] = "AUTO"
@@ -65,14 +67,13 @@ def _patched_set_envs_and_config(server_args):
 
     # Set mp start method
     mp.set_start_method("spawn", force=True)
-    
+
     # We do NOT register signal handlers here to avoid Ray actor issues
     # Original SGLang code had: signal.signal(signal.SIGCHLD, sigchld_handler)
     # But this fails in Ray actors since signal handlers only work in main thread
 
 
 # Apply the patch
-import sglang.srt.entrypoints.engine
 sglang.srt.entrypoints.engine._set_envs_and_config = _patched_set_envs_and_config
 
 
@@ -104,8 +105,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Store common attributes
         self._tp_size = kwargs.get("tp_size", 1)
         if self._tp_size > 1:
-            raise ValueError("As of now, we don't support tensor parallel inference engine with SGLang. "
-                             "Please set `inference_engine_tensor_parallel_size` to 1.")
+            raise ValueError(
+                "As of now, we don't support tensor parallel inference engine with SGLang. "
+                "Please set `inference_engine_tensor_parallel_size` to 1."
+            )
         self.tokenizer = kwargs.pop("tokenizer", None)
 
         # Extract sampling params
@@ -166,15 +169,12 @@ class SGLangInferenceEngine(InferenceEngineInterface):
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using SGLang engine."""
         token_ids_prompts, sampling_params = self._preprocess_prompts(input_batch)
-        
+
         # Generate using SGLang's async method
         # Otherwise using `await asyncio.to_thread(self.engine.generate)` will cause issues
         # as SGLang's `generate()` method calls `loop = asyncio.get_event_loop()`, raising error
         # `RuntimeError: There is no current event loop in thread 'ThreadPoolExecutor-0_0'.`
-        outputs = await self.engine.async_generate(
-            input_ids=token_ids_prompts,
-            sampling_params=sampling_params
-        )
+        outputs = await self.engine.async_generate(input_ids=token_ids_prompts, sampling_params=sampling_params)
 
         return self._postprocess_outputs(outputs)
 
@@ -188,9 +188,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             rank_offset=rank_offset,
             world_size=world_size,
             group_name=group_name,
-            backend=backend
+            backend=backend,
         )
-        
+
         # NOTE(charlie): Call the async method on tokenizer_manager directly to avoid event loop
         # conflicts since `sgl.Engine.init_weights_update_group` is sync, yet uses
         # `asyncio.get_event_loop()` which prevents us from using `asyncio.to_thread`. We cannot
@@ -204,14 +204,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """Update named weights in SGLang engine."""
         if request.get("extras") and "ipc_handles" in request["extras"]:
             raise ValueError(
-                "SGLang local engines do not support CUDA IPC weight updates yet. " +
-                "Only vLLM does at the moment."
+                "SGLang local engines do not support CUDA IPC weight updates yet. " + "Only vLLM does at the moment."
             )
-        obj = UpdateWeightsFromDistributedReqInput(
-            name=request["name"],
-            dtype=request["dtype"],
-            shape=request["shape"]
-        )
+        obj = UpdateWeightsFromDistributedReqInput(name=request["name"], dtype=request["dtype"], shape=request["shape"])
 
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         success, message = await self.engine.tokenizer_manager.update_weights_from_distributed(obj, None)
@@ -243,5 +238,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """Reset prefix cache in SGLang engine."""
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         return await self.engine.tokenizer_manager.flush_cache()
+
 
 SGLangRayActor = ray.remote(SGLangInferenceEngine)
