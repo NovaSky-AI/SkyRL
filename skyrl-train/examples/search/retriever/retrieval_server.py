@@ -221,15 +221,6 @@ class DenseRetriever(BaseRetriever):
         idxs = idxs[0]
         scores = scores[0]
         results = load_docs(self.corpus, idxs)
-        try:
-            # Check GPU memory usage
-            gpu_memory_used = torch.cuda.memory_allocated()
-            gpu_memory_total = torch.cuda.get_device_properties(0).total_memory
-            gpu_memory_ratio = gpu_memory_used / gpu_memory_total
-            if gpu_memory_ratio > 0.85:  # Only if >85% memory usage
-                torch.cuda.empty_cache()
-        except Exception:
-            pass  # Ignore memory check errors
         if return_score:
             return results, scores
         else:
