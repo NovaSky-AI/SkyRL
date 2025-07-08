@@ -54,7 +54,7 @@ class SQLEnv(BaseTextEnv):
 
         # Initialize the tools
         self.tool_group = SQLCodeExecutorToolGroup(db_file_path=self.db_path)
-        self.init_tool_groups([self.tool_group])
+        self._init_tool_groups([self.tool_group])
 
         # Chat history
         # Dict[str, str]: role (user, assistant), content (tool observation or LLM response)

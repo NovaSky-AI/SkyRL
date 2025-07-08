@@ -107,7 +107,7 @@ To incorporate tools into an envrionment, first build and initialize the tool gr
             search_tools = SearchToolGroup()
             
             # Initialize and register tool groups
-            self.init_tool_groups([python_tools, search_tools])
+            self._init_tool_groups([python_tools, search_tools])
 
 Tool Execution
 ~~~~~~~~~~~~~
@@ -175,7 +175,7 @@ An arbitrary number of tool groups can be integrated into an environment, creati
             self.custom_tools = MyCustomToolGroup(shared_config=extras.get("config"))
             
             # Register all tool groups
-            self.init_tool_groups([self.db_tools, self.python_tools, self.search_tools, self.custom_tools])
+            self._init_tool_groups([self.db_tools, self.python_tools, self.search_tools, self.custom_tools])
 
 
 API Reference
