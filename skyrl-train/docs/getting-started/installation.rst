@@ -90,6 +90,12 @@ After activating the virtual environment, make sure to configure Ray to use `uv`
     # or add to your .bashrc
     # echo 'export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook' >> ~/.bashrc
 
+Also export the ``CUDA_HOME`` environment variable which may be needed by some dependencies like
+flash-infer's JIT kernel compilation. Otherwise, you may encounter errors like
+``"fatal error: math.h: No such file or directory"``.
+
+.. code-block:: bash
+    export CUDA_HOME=/path/to/cuda # e.g. /usr/local/cuda
 
 Initialize Ray cluster
 ----------------------
