@@ -5,12 +5,15 @@ from jaxtyping import Float
 
 
 def _verify_inputs(
-    prompts: List[str], outputs: List[str], custom_rewards: Optional[List[torch.Tensor]], loss_masks: List[List[int]]
+    prompts: List[List[int]],
+    responses: List[List[int]],
+    custom_rewards: Optional[List[torch.Tensor]],
+    loss_masks: List[List[int]],
 ):
     assert (
-        len(prompts) == len(outputs) and len(prompts) > 0
-    ), "prompts and outputs must have the same length and length must be greater than 0, got {} and {}".format(
-        len(prompts), len(outputs)
+        len(prompts) == len(responses) and len(prompts) > 0
+    ), "prompts and responses must have the same length and length must be greater than 0, got {} and {}".format(
+        len(prompts), len(responses)
     )
 
     if custom_rewards is not None:
@@ -28,7 +31,7 @@ def convert_prompts_responses_to_batch_tensors(
     tokenizer: AutoTokenizer,
     prompts: List[List[int]],
     responses: List[List[int]],
-    custom_rewards: List[torch.Tensor],
+    custom_rewards: List[List[float]],
     loss_masks: List[List[int]],
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
@@ -38,27 +41,26 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
 ]:
     """
-    Convert prompts and outputs to batch tensors for training
+    Convert prompts and responses to batch tensors for training.
 
-
-    This function concatenates all outputs to following format:
+    This function concatenates all prompts and responses to the following format:
 
     | [PAD] [PAD] token token token | token token [PAD] [PAD] |
     | token token token token token | token token [PAD] [PAD] |
     | [PAD] [PAD] [PAD] token token | token token token [PAD] |
     |<---------- prompt ----------->|<-------- answer ------->|
 
-    Assumes that the repsonses already contain an eos token at index -1.
+    Assumes that the responses already contain an eos token at index -1.
 
     Args:
         tokenizer: Model tokenizer
-        prompts: List of prompts in the batch
-        responses: List of responses for each prompt
-        custom_rewards: List of custom rewards for each output
-        loss_masks: List of loss masks for each output
+        prompts: List of tokenized prompts
+        responses: List of tokenized responses
+        custom_rewards: List of custom rewards for each response
+        loss_masks: List of loss masks for each response
 
     Returns:
-        sequences: Full input ids for the model. Size: (batch, seq_len)
+        sequences: Full trajectories (padded and concatenated prompts and responses). Size: (batch, seq_len).
         attention_mask: Attention mask for the model. Size: (batch, seq_len)
         action_mask: Response mask for the model. Size: (batch, response_len)
         custom_rewards: Custom rewards for each output. Size: (batch, response_len)

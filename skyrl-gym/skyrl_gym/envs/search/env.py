@@ -29,7 +29,7 @@ class SearchEnv(BaseTextEnv):
             timeout=env_config.timeout,
             log_requests=env_config.log_requests,
         )
-        self.init_tool_groups([self.tool_group])
+        self._init_tool_groups([self.tool_group])
 
         # Chat history
         # role (user, assistant), content (tool observation or LLM response)

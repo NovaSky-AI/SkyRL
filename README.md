@@ -37,12 +37,13 @@ For agentic pipelines, checkout [`skyagent`](./skyagent) for our work on optimiz
 
 
 # News
-- **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework.
-- **[2025/06/26]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API.
+- **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
+- **[2025/06/26]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
 - **[2025/05/20]** 🎉 We released SkyRL-SQL: a multi-turn RL training pipeline for Text-to-SQL, along with SkyRL-SQL-7B — a model trained on just 653 samples that outperforms both GPT-4o and o4-mini!
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [SkyRL-v0.1 Blog Post](https://novasky-ai.notion.site/skyrl-v01)
 - 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
 
