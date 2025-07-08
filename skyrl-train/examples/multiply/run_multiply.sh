@@ -6,6 +6,7 @@ set -x
 # bash examples/multiply/run_multiply.sh
 
 DATA_DIR="$HOME/data/multiply"
+NUM_GPUS=4
 
 uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -14,8 +15,9 @@ uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=4 \
-  generator.num_inference_engines=4 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.update_epochs_per_batch=1 \
@@ -26,7 +28,7 @@ uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   trainer.micro_train_batch_size_per_gpu=64 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
-  trainer.eval_interval=2 \
+  trainer.eval_interval=5 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -36,7 +38,7 @@ uv run --isolated --extra vllm -m examples.multiply.main_multiply \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=true \
+  generator.batched=false \
   environment.env_class=multiply \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \

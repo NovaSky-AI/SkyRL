@@ -178,7 +178,7 @@ def compute_grpo_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: str = True,
+    norm_adv_by_std_in_grpo: bool = True,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).

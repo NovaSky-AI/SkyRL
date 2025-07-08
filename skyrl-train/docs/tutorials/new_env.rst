@@ -1,7 +1,7 @@
-Creating a New Environment in SkyRL-Gym
+Creating a New Environment or Task
 =====================================
 
-To demonstrate how to create custom environments in SkyRL-Gym, let's build a simple multiplication environment!
+To demonstrate how to create custom environments in SkyRL-Gym and train with SkyRL, let's build a simple multiplication environment!
 
 We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
 
@@ -146,7 +146,7 @@ The final implementation is available in `examples/multiply/env.py <https://gith
 Registering Your New Environment
 --------------------------------
 
-Finally, we need to ``register`` the new environment so the training stack can find it by name.
+Finally, we need to ``register`` the new environment so the training stack can find it by name (which we refer to as ``env_class``). We will name this environment ``multiply``.
 
 We will create a new entrypoint for training with the ``multiply`` environment by creating a file at ``examples/multiply/main_multiply.py`` that looks like this:
 
@@ -192,7 +192,7 @@ We can generate a dataset of multiplication problems using `examples/multiply/mu
 
 .. code-block:: python
    :linenos:
-   :caption: Generating a dataset of random multiplication problems at `examples/multiply/multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_
+   :caption: Generating a dataset of random multiplication problems.
 
    for idx in range(num_examples):
         question, answer = generate_multiplication_problem(num_digits)
@@ -218,6 +218,9 @@ We can generate a dataset of multiplication problems using `examples/multiply/mu
         }
         examples.append(data)
 
+
+Note that the ``env_class`` here should match the name of the environment we registered. In this case, it is ``multiply``. You can optionally omit the ``env_class`` here and instead set it in the training configuration to apply to all training samples, but setting ``env_class`` per-sample allows for multi-environment training so it is the recommended practice.
+
 See the doc on :doc:`../datasets/dataset-preparation` for more details on the required dataset format and how to prepare your own dataset.
 
 Now we can generate the datsaet:
@@ -239,14 +242,18 @@ Training Your Model
 
 Time to train! 🚀
 
-We will use the ``run_multiply.sh`` script to train the model. This script is located in `examples/multiply/run_multiply.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/run_multiply.sh>`_ and primarily sets up the training configuration and calls ``main_multiply.py``.
+We will use the ``run_multiply.sh`` script to train the model. This script is located in `examples/multiply/run_multiply.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/run_multiply.sh>`_, which sets up the training configuration and calls ``main_multiply.py``.
 
-First, make sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count:
+**Common Configuration Parameters**
+
+First, ensure sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count (which we set via an environment variable `NUM_GPUS`):
 
 - ``trainer.placement.policy_num_gpus_per_node``
 - ``generator.num_inference_engines``
 
-Then start training:
+Then, configure how the environment should be executed. For multi-turn environments, we recommend setting ``generator.batched=false`` and ``generator.async_engine=true`` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
+
+**Launch Training**
 
 .. code-block:: bash
    :linenos:
@@ -255,9 +262,7 @@ Then start training:
    export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
    bash examples/multiply/run_multiply.sh
 
-**Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the Tools documentation for details.
-
-.. TODO(tgriggs): Add a link to the tools doc.
+**Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the :doc:`tools_guide` documentation for details.
 
 That's it! You've created a custom environment, prepared training data, and started training. The same pattern works for any text-based task you want to train on.
 

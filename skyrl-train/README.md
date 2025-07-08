@@ -86,13 +86,19 @@ bash examples/gsm8k/run_gsm8k.sh
 
 For detailed installation instructions, as well as more examples, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/).
 
+## Training on a new task or environment
+
+To implement a new task or environment using the SkyRL-Gym interface, please see our see our [Walkthrough Docs](https://skyrl.readthedocs.io/en/latest/tutorials/new_env.html).
+
+If you don't want to use the SkyRL-Gym interface, or you have an existing task or agentic pipeline implementation and just want to train with it on top of SkyRL, we recommend you create a simple custom [`Generator`](skyrl_train/generators/base.py), which requires implementing a single method, `generate()`. We have one example of a custom Generator at [`SkyRLGymGenerator`](skyrl_train/generators/skyrl_gym_generator.py) which executes environments written in the SkyRL-Gym interface. We are working to provide more example integrations of agent harnesses -- please reach out if you'd like yours to be one of them!
+
 ## Reproducing SkyRL-SQL
 We also test SkyRL by reproducing our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 
 You can find a link to the wandb report [here](https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw), and a detailed walk through of the reproduction in our [documentation](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html).
 
 # Acknowledgement
 
-This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), and [**AMD**](https://www.amd.com/en.html).
+This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambda.ai/), and [**AMD**](https://www.amd.com/en.html).
 
 We adopt many lessons and code from several great projects such as [veRL](https://github.com/volcengine/verl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Search-R1](https://github.com/PeterGriffinJin/Search-R1), [OpenReasonerZero](https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero), and [NeMo-RL](https://github.com/NVIDIA-NeMo/RL). We appreciate each of these teams and their contributions to open-source research!
 
