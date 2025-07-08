@@ -11,7 +11,7 @@ class SearchEnv(BaseTextEnv):
     """
     Environment for Search execution tasks.
 
-    References Search-R1 implementation and VeRL + Search-R1 integration
+    Based on Verl + Search-R1 integration
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
@@ -23,7 +23,12 @@ class SearchEnv(BaseTextEnv):
         self.max_turns = extras["max_turns"] if "max_turns" in extras else 2
 
         # Initialize the tools
-        self.tool_group = SearchToolGroup()
+        self.tool_group = SearchToolGroup(
+            search_url=env_config.search_url,
+            topk=env_config.topk,
+            timeout=env_config.timeout,
+            log_requests=env_config.log_requests,
+        )
         self.init_tool_groups([self.tool_group])
 
         # Chat history

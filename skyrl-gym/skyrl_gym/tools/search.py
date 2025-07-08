@@ -4,7 +4,7 @@ import requests
 import uuid
 import time
 import threading
-from typing import List, Tuple, Optional, Any, Dict
+from typing import Tuple, Optional, Any, Dict
 
 from skyrl_gym.tools.core import tool, ToolGroup
 
@@ -18,17 +18,17 @@ INITIAL_RETRY_DELAY = 1
 
 def call_search_api(
     retrieval_service_url: str,
-    query_list: List[str],
+    query: str,
     topk: int = 3,
     return_scores: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
-    log_request: bool = True,
+    log_requests: bool = True,
     session: Optional[requests.Session] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     request_id = str(uuid.uuid4())
     log_prefix = f"[Search Request ID: {request_id}] "
 
-    payload = {"queries": query_list, "topk": topk, "return_scores": return_scores}
+    payload = {"query": query, "topk": topk, "return_scores": return_scores}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
     # Use provided session or create a new one for this request
@@ -41,7 +41,7 @@ def call_search_api(
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            if log_request:
+            if log_requests:
                 logger.info(
                     f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
                 )
@@ -66,7 +66,7 @@ def call_search_api(
             response.raise_for_status()
 
             # If successful (status code 2xx)
-            if log_request:
+            if log_requests:
                 logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
 
             # Close session if we created it
@@ -83,7 +83,6 @@ def call_search_api(
                 logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                 time.sleep(delay)
             continue
-
         except requests.exceptions.Timeout as e:
             last_error = f"{log_prefix}Timeout Error: {e}"
             logger.warning(last_error)
@@ -92,24 +91,16 @@ def call_search_api(
                 logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                 time.sleep(delay)
             continue
-
-        except requests.exceptions.HTTPError as e:
-            last_error = f"{log_prefix}HTTP Error: {e}"
-            logger.warning(last_error)
-            if attempt < MAX_RETRIES - 1:
-                delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                logger.info(f"{log_prefix}Retrying after {delay} seconds...")
-                time.sleep(delay)
-            continue
-
+        except requests.exceptions.RequestException as e:
+            last_error = f"{log_prefix}API Request Error: {e}"
+            break  # Exit retry loop on other request errors
+        except json.JSONDecodeError as e:
+            raw_response_text = response.text if "response" in locals() else "N/A"
+            last_error = f"{log_prefix}API Response JSON Decode Error: {e}, Response: {raw_response_text[:200]}"
+            break  # Exit retry loop on JSON decode errors
         except Exception as e:
             last_error = f"{log_prefix}Unexpected Error: {e}"
-            logger.warning(last_error)
-            if attempt < MAX_RETRIES - 1:
-                delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                logger.info(f"{log_prefix}Retrying after {delay} seconds...")
-                time.sleep(delay)
-            continue
+            break  # Exit retry loop on other unexpected errors
 
     # If we reach here, all attempts failed
     logger.error(f"{log_prefix}API Request Failed after {MAX_RETRIES} attempts: {last_error}")
@@ -153,19 +144,18 @@ class SearchToolGroup(ToolGroup):
                 logger.info(f"Created shared session pool for {base_url}")
             return cls._session_pool[base_url]
 
-    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_request=True):
+    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_requests=True):
         self.search_url = search_url
         self.topk = topk
         self.timeout = timeout
-        self.log_request = log_request
+        self.log_requests = log_requests
 
         # Extract base URL for session sharing
         self.base_url = self.search_url.split("/retrieve")[0] if "/retrieve" in self.search_url else self.search_url
 
         # Get shared session for this base URL
         self.session = self._get_shared_session(self.base_url)
-
-        if self.log_request:
+        if self.log_requests:
             logger.info(f"SearchToolGroup initialized using shared session pool for {self.base_url}")
 
         super().__init__(name="SearchToolGroup")
@@ -178,15 +168,13 @@ class SearchToolGroup(ToolGroup):
 
         query = query.strip()
 
-        # NOTE(shu): send single request for now for now
-        query_list = [query]
         try:
             api_response, error_msg = call_search_api(
                 retrieval_service_url=self.search_url,
-                query_list=query_list,
+                query=query,
                 topk=self.topk,
                 timeout=self.timeout,
-                log_request=self.log_request,
+                log_requests=self.log_requests,
                 session=self.session,  # Pass our shared session for connection reuse
             )
         except Exception as e:
@@ -194,8 +182,7 @@ class SearchToolGroup(ToolGroup):
             logger.error(f"Batch search: {error_msg}")
 
         metadata = {
-            "query_count": len(query_list),
-            "queries": query_list,
+            "query": query,
             "api_request_error": error_msg,
             "api_response": None,
             "status": "unknown",
@@ -218,7 +205,6 @@ class SearchToolGroup(ToolGroup):
                 if raw_results:
                     pretty_results = []
                     total_results = 0
-
                     for retrieval in raw_results:
                         formatted = _passages2string(retrieval)
                         pretty_results.append(formatted)
@@ -229,13 +215,13 @@ class SearchToolGroup(ToolGroup):
                     metadata["status"] = "success"
                     metadata["total_results"] = total_results
                     metadata["formatted_result"] = final_result
-                    if self.log_request:
+                    if self.log_requests:
                         logger.info(f"Batch search: Successful, got {total_results} total results")
                 else:
                     result_text = json.dumps({"result": "No search results found."})
                     metadata["status"] = "no_results"
                     metadata["total_results"] = 0
-                    if self.log_request:
+                    if self.log_requests:
                         logger.info("Batch search: No results found")
             except Exception as e:
                 error_msg = f"Error processing search results: {e}"

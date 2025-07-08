@@ -201,7 +201,7 @@ class RayPPOTrainer:
             self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all
         )
         self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=False
+            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=True
         )
 
         # Load checkpoint state if resumption is enabled

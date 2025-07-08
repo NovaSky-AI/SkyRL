@@ -15,7 +15,6 @@
 # limitations under the License.
 # Adapted from https://github.com/PeterGriffinJin/Search-R1/blob/main/verl/utils/reward_score/qa_em.py
 
-import random
 import re
 import string
 
@@ -120,13 +119,6 @@ def compute_score_subem(solution_str, ground_truth, method="strict", format_scor
         score: the score for the correct answer
     """
     answer = extract_solution(solution_str=solution_str)
-    do_print = random.randint(1, 256) == 1
-
-    if do_print:
-        print("--------------------------------")
-        print(f"Golden answers: {ground_truth['target']}")
-        print(f"Extracted answer: {answer}")
-        print(f"Solution string: {solution_str}")
 
     if answer is None:
         return 0

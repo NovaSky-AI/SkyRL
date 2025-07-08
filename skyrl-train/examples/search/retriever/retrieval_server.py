@@ -7,12 +7,12 @@ import faiss
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModel
-from tqdm import tqdm
 import datasets
 
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
+
 
 def load_corpus(corpus_path: str):
     corpus = datasets.load_dataset("json", data_files=corpus_path, split="train", num_proc=4)
@@ -221,8 +221,17 @@ class DenseRetriever(BaseRetriever):
         idxs = idxs[0]
         scores = scores[0]
         results = load_docs(self.corpus, idxs)
+        try:
+            # Check GPU memory usage
+            gpu_memory_used = torch.cuda.memory_allocated()
+            gpu_memory_total = torch.cuda.get_device_properties(0).total_memory
+            gpu_memory_ratio = gpu_memory_used / gpu_memory_total
+            if gpu_memory_ratio > 0.85:  # Only if >85% memory usage
+                torch.cuda.empty_cache()
+        except Exception:
+            pass  # Ignore memory check errors
         if return_score:
-            return results, scores.tolist()
+            return results, scores
         else:
             return results
 
@@ -248,18 +257,6 @@ class DenseRetriever(BaseRetriever):
             batch_results = [batch_results[i * num : (i + 1) * num] for i in range(len(batch_idxs))]
             results.extend(batch_results)
             scores.extend(batch_scores)
-            # Only call empty_cache occasionally and only if memory usage is very high
-            if start_idx > 0 and (start_idx // self.batch_size) % 10 == 0:
-                try:
-                    # Check GPU memory usage
-                    gpu_memory_used = torch.cuda.memory_allocated()
-                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory
-                    gpu_memory_ratio = gpu_memory_used / gpu_memory_total
-                    if gpu_memory_ratio > 0.85:  # Only if >85% memory usage
-                        torch.cuda.empty_cache()
-                        print(f"GPU memory cleaned at batch {start_idx // self.batch_size} ({gpu_memory_ratio:.1%} usage)")
-                except Exception:
-                    pass  # Ignore memory check errors
         if return_score:
             return results, scores
         else:
@@ -314,7 +311,7 @@ class Config:
 
 
 class QueryRequest(BaseModel):
-    queries: List[str]
+    query: str
     topk: Optional[int] = None
     return_scores: bool = False
 
@@ -325,10 +322,10 @@ app = FastAPI()
 @app.post("/retrieve")
 def retrieve_endpoint(request: QueryRequest):
     """
-    Endpoint that accepts queries and performs retrieval.
+    Endpoint that accepts a single query and performs retrieval.
     Input format:
     {
-      "queries": ["What is Python?", "Tell me about neural networks."],
+      "query": "What is Python?",
       "topk": 3,
       "return_scores": true
     }
@@ -336,27 +333,24 @@ def retrieve_endpoint(request: QueryRequest):
     if not request.topk:
         request.topk = config.retrieval_topk  # fallback to default
 
-    # Perform batch retrieval
+    # Perform retrieval
     if request.return_scores:
-        results, scores = retriever.batch_search(
-            query_list=request.queries, num=request.topk, return_score=True
-        )
+        results, scores = retriever.search(query=request.query, num=request.topk, return_score=True)
     else:
-        results = retriever.batch_search(
-            query_list=request.queries, num=request.topk, return_score=False
-        )
+        results = retriever.search(query=request.query, num=request.topk, return_score=False)
         scores = None
+
     # Format response
     resp = []
-    for i, single_result in enumerate(results):
-        if request.return_scores and scores is not None:
-            # If scores are returned, combine them with results
-            combined = []
-            for doc, score in zip(single_result, scores[i]):
-                combined.append({"document": doc, "score": score})
-            resp.append(combined)
-        else:
-            resp.append(single_result)
+    if request.return_scores and scores is not None:
+        # If scores are returned, combine them with results
+        combined = []
+        for doc, score in zip(results, scores):
+            # Convert numpy float32 to regular Python float for JSON serialization
+            combined.append({"document": doc, "score": float(score)})
+        resp.append(combined)
+    else:
+        resp.append(results)
     return {"result": resp}
 
 
@@ -393,7 +387,7 @@ if __name__ == "__main__":
         retrieval_pooling_method="mean",
         retrieval_query_max_length=256,
         retrieval_use_fp16=True,
-        retrieval_batch_size=512,
+        retrieval_batch_size=512,  # this is unused in the current retrieval implementation, which only supports single query
     )
 
     # 2) Instantiate a global retriever so it is loaded once and reused.
