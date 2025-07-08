@@ -81,6 +81,7 @@ def create_ray_wrapped_inference_engines(
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+
         assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
     elif backend == "sglang":
         # We import SGLang later to avoid importing vllm. See `get_sglang_engine` for more.
@@ -158,9 +159,11 @@ def create_ray_wrapped_inference_engines(
             def get_sglang_engine():
                 # A workaround to avoid importing vllm is to give this task a GPU.
                 import os
+
                 before_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
                 from skyrl_train.inference_engines.sglang.sglang_engine import SGLangRayActor
+
                 os.environ["CUDA_VISIBLE_DEVICES"] = before_cuda_visible_devices
 
                 actor_class = SGLangRayActor
@@ -192,6 +195,7 @@ def create_ray_wrapped_inference_engines(
                     tokenizer=tokenizer,
                 )
                 return engine
+
             engine = ray.get(get_sglang_engine.remote())
 
         inference_engine_actors.append(engine)
