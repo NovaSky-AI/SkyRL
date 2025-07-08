@@ -21,7 +21,7 @@ class SearchCodeEnv(BaseTextEnv):
         self.max_turns = extras["max_turns"] if "max_turns" in extras else 2
 
         # Initialize the tools
-        self._init_tool_groups([SearchToolGroup(), PythonCodeExecutorToolGroup()])
+        self.init_tool_groups([SearchToolGroup(), PythonCodeExecutorToolGroup()])
 
         # Chat history
         # role (user, assistant), content (tool observation or LLM response)

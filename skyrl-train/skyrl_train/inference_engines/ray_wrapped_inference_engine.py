@@ -1,6 +1,6 @@
 import ray
 from ray.actor import ActorHandle
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.inference_engines.base import (
@@ -68,7 +68,7 @@ def create_ray_wrapped_inference_engines(
     max_num_seqs=1024,
     sampling_params: Optional[Dict[str, Any]] = None,
     tokenizer=None,
-) -> List[InferenceEngineInterface]:
+):
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
     """
