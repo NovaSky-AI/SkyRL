@@ -187,8 +187,8 @@ async def run_generator_end_to_end(
 @pytest.mark.parametrize(
     ("use_async_engine", "batched", "n_samples_per_prompt", "num_inference_engines", "tensor_parallel_size"),
     [
-        (False, True, 5, 1, 1),
-        (True, False, 5, 1, 1),
+        (False, True, 5, 2, 1),
+        (True, False, 5, 1, 2),
         # Add more combinations as needed
     ],
 )
@@ -211,31 +211,31 @@ async def test_generator_single_turn_gsm8k(
         ray.shutdown()
 
 
-# @pytest.mark.asyncio
-# async def test_generator_multi_turn_text2sql():
-#     """
-#     Test the generator with multiple turns of text2sql
-#     """
-#     initialize_ray(DictConfig({"generator": {"backend": "vllm"}}))
-#     try:
-#         await run_generator_end_to_end(
-#             use_async_engine=True,
-#             batched=False,
-#             n_samples_per_prompt=5,
-#             num_inference_engines=1,
-#             tensor_parallel_size=1,
-#             model="Qwen/Qwen2.5-Coder-7B-Instruct",
-#             max_prompt_length=6000,
-#             max_input_length=29048,
-#             max_generate_length=3000,
-#             data_path=os.path.expanduser("~/data/sql/train.parquet"),
-#             env_class="text2sql",
-#             num_prompts=2,
-#             max_turns=6,
-#             use_conversation_multi_turn=False,
-#         )
-#     finally:
-#         ray.shutdown()
+@pytest.mark.asyncio
+async def test_generator_multi_turn_text2sql():
+    """
+    Test the generator with multiple turns of text2sql
+    """
+    initialize_ray(DictConfig({"generator": {"backend": "vllm"}}))
+    try:
+        await run_generator_end_to_end(
+            use_async_engine=True,
+            batched=False,
+            n_samples_per_prompt=5,
+            num_inference_engines=1,
+            tensor_parallel_size=1,
+            model="Qwen/Qwen2.5-Coder-7B-Instruct",
+            max_prompt_length=6000,
+            max_input_length=29048,
+            max_generate_length=3000,
+            data_path=os.path.expanduser("~/data/sql/train.parquet"),
+            env_class="text2sql",
+            num_prompts=2,
+            max_turns=6,
+            use_conversation_multi_turn=False,
+        )
+    finally:
+        ray.shutdown()
 
 
 @pytest.mark.asyncio

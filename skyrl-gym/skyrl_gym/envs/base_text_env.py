@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional, TypedDict
 from skyrl_gym import Env
 from typing import Tuple
-from omegaconf import DictConfig
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
