@@ -164,9 +164,6 @@ async def run_generator_end_to_end(
         for i in range(len(generator_output["response_ids"]))
     ]
 
-    import numpy as np
-
-    print("avg reward: ", np.mean(generator_output["rewards"]))
     output_keys = [
         "prompt_token_ids",
         "response_ids",

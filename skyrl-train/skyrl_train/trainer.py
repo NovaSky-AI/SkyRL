@@ -198,7 +198,7 @@ class RayPPOTrainer:
             self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all
         )
         self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=False
+            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=True
         )
 
         # Load checkpoint state if resumption is enabled
@@ -292,7 +292,7 @@ class RayPPOTrainer:
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps - 1
+                    or self.global_step == self.total_training_steps
                 ):
                     with self.eval_weights_manager:
                         with Timer("eval", self.all_timings):
