@@ -38,7 +38,7 @@ We load the dataset as a huggingface `DatasetDict <https://huggingface.co/docs/d
 
 - **data_source**: String identifier for the dataset origin (e.g., "gsm8k", "AIME24", etc.)
 - **prompt**: List of dictionaries following standard OpenAI chat format
-- **env_class**: Environment class name for processing this data type 
+- **env_class**: Name of environment that the data sample corresponds to. This is used to tell the Generator which environment to instantiate for this prompt.
 
   - Note: **env_class** can also be specified in the training configuration to apply to all dataset entries.
 - **reward_spec**: Dictionary containing the reward specification for the dataset entry (ie, how to get rewards).

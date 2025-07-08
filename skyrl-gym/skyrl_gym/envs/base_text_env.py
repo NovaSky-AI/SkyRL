@@ -22,8 +22,8 @@ class BaseTextEnv(Env[str, str]):
     Exposes only `step`, `init` and `close`.
 
     Input Types:
-        - ActType: str (LLM output)
         - ObsType: str (tool output, LLM input)
+        - ActType: str (LLM output)
     """
 
     def __init__(self):
@@ -37,7 +37,7 @@ class BaseTextEnv(Env[str, str]):
         self.tool_groups = []
         self.tool_to_toolgroup = {}
 
-    def init_tool_groups(self, tool_groups: List = []) -> None:
+    def _init_tool_groups(self, tool_groups: List = []) -> None:
         """
         Initialize the tool groups for the environment.
         """
