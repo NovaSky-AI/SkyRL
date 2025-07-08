@@ -615,15 +615,15 @@ class RayPPOTrainer:
         """Converts lists to a padded batch of tensors for training"""
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
-        custom_rewards: List[List[float]] = generator_output["rewards"]
+        custom_rewards: List[List[int]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         (
-            sequences_tensor,
-            attention_masks_tensor,
-            response_masks_tensor,
-            custom_rewards_tensor,
-            loss_masks_tensor,
+            ret_sequences,
+            ret_attention_masks,
+            response_masks,
+            ret_custom_rewards,
+            ret_loss_masks,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -633,18 +633,18 @@ class RayPPOTrainer:
         )
         training_input = TrainingInputBatch(
             {
-                "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
-                "attention_mask": attention_masks_tensor,
-                "response_mask": response_masks_tensor,
-                "custom_rewards": custom_rewards_tensor,
-                "loss_mask": loss_masks_tensor,
+                "sequences": ret_sequences,
+                "attention_mask": ret_attention_masks,
+                "response_mask": response_masks,
+                "custom_rewards": ret_custom_rewards,
+                "loss_mask": ret_loss_masks,
             },
         )
         training_input.metadata = {
             "uids": uids,
         }
         # padded response length
-        training_input.metadata["response_length"] = response_masks_tensor.shape[1]
+        training_input.metadata["response_length"] = response_masks.shape[1]
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
