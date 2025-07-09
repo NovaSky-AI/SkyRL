@@ -243,7 +243,8 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
             critic = get_llm_for_sequence_regression(
                 model_path,
                 "critic",
-                normalize_reward=self.cfg.trainer.algorithm.normalize_reward,
+                # only for reward model
+                normalize_reward=False,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
                 # NOTE (sumanthrh): Model initialization should always be in fp32
                 # during training

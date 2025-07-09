@@ -4,9 +4,12 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch
 from torch import distributed as dist
-from typing import Optional
+from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
+
+
+DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 
 
 class DistributedStrategy(ABC):
@@ -14,18 +17,22 @@ class DistributedStrategy(ABC):
     def setup_distributed(self):
         pass
 
-    def all_reduce(self, data, op="mean"):
+    @abstractmethod
+    def all_reduce(self, data: DataT, op="mean") -> DataT:
         """Perform all_reduce across all processes"""
         pass
 
-    def all_gather(self, data):
+    @abstractmethod
+    def all_gather(self, data: DataT) -> DataT:
         """Perform all_gather across all processes"""
         pass
 
+    @abstractmethod
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs):
         """Perform backward pass"""
         pass
 
+    @abstractmethod
     def optimizer_step(
         self,
         optimizer: optim.Optimizer,
@@ -37,14 +44,17 @@ class DistributedStrategy(ABC):
         """Perform optimizer step"""
         pass
 
+    @abstractmethod
     def save_ckpt(self, model, optimizer, scheduler, ckpt_dir, global_step, node_local_rank):
         """Save checkpoint"""
         pass
 
+    @abstractmethod
     def load_ckpt(self, model, optimizer, scheduler, ckpt_dir, global_step, node_local_rank):
         """Load checkpoint"""
         pass
 
+    @abstractmethod
     def save_hf_model(self, model, output_dir: str, tokenizer=None, **kwargs):
         """Save model in HuggingFace safetensors format"""
         pass

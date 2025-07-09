@@ -24,7 +24,7 @@ class SearchEnv(BaseTextEnv):
 
         # Initialize the tools
         self.tool_group = SearchToolGroup()
-        self._init_tool_groups([self.tool_group])
+        self.init_tool_groups([self.tool_group])
 
         # Chat history
         # role (user, assistant), content (tool observation or LLM response)

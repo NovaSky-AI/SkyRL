@@ -31,7 +31,7 @@ def convert_prompts_responses_to_batch_tensors(
     tokenizer: AutoTokenizer,
     prompts: List[List[int]],
     responses: List[List[int]],
-    custom_rewards: List[List[float]],
+    custom_rewards: List[torch.Tensor],
     loss_masks: List[List[int]],
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
