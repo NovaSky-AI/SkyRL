@@ -42,7 +42,8 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :caption: Recipes
 
    recipes/skyrl-sql
-
+   recipes/search
+   
 .. toctree::
    :maxdepth: 2
    :caption: Configuration

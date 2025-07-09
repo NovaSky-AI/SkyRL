@@ -166,4 +166,5 @@ What's Next?
 
 Now that you've seen what's possible with multi-turn training with async rollouts, you might want to start building your own multi-turn environments!
 
-- :doc:`new_env`: Learn how to build your own multi-turn environments!
+- :doc:`../tutorials/new_env`: Learn how to build your own multi-turn environments!
+- :doc:`search`: Learn how to train a multi-turn search agent with SkyRL!

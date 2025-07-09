@@ -1,6 +1,13 @@
 # SearchR1 Replication Setup Instructions 
 
-Reference: [SearchR1](https://raw.githubusercontent.com/PeterGriffinJin/Search-R1/refs/heads/main/docs/retriever.md) and [Verl+Sglang Instructions](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/tool_examples/verl-multiturn-searchR1-like.md). 
+We provide scripts to reproduce our results for training a multi-turn search agent using the dataset and recipe from [SearchR1](https://raw.githubusercontent.com/PeterGriffinJin/Search-R1/refs/heads/main/docs/retriever.md).
+
+Additional Reference: [Verl+Sglang Instructions](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/tool_examples/verl-multiturn-searchR1-like.md). 
+
+## Prepare Datasets 
+```bash
+uv run --isolated examples/search/searchr1_dataset.py --local_dir $local_dir
+```
 
 ## Retriever environments 
 ```bash
@@ -32,16 +39,21 @@ cat $local_dir/part_* > $local_dir/e5_Flat.index
 gzip -d $local_dir/wiki-18.jsonl.gz
 ```
 
-## Prepare Datasets 
-```bash
-uv run --isolated examples/search/searchr1_dataset.py --local_dir $local_dir
-```
-
 ## Start the Local Flat e5 Retrieval Server 
 
 GPU version 
 ```bash
 conda activate retriever
 
-bash examples/search/retriever/retrieval_launch.sh 
+# redirect the output to a file to avoid cluttering the terminal
+# we have observed this causing spikes in server response times
+bash examples/search/retriever/retrieval_launch.sh > ~/logs/retrieval_server.log 
+```
+
+## Launch your Training Job
+Now from your base environment, you can launch your training run (which will use uv to package dependencies, separately from the retriever environment).
+
+```bash
+    export WANDB_API_KEY=your_wandb_api_key
+    bash examples/search/run_search.sh
 ```
