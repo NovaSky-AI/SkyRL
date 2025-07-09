@@ -146,7 +146,7 @@ Now that we have our dataset and database files, let's walk through the some of 
 - Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymGenerator`` class.
 
   - In the above example, we set ``use_conversation_multi_turn=false`` to enforce that the multi-turn conversation is formatted as a single assistant response.
-  - If you want to use a conversation-based format, you can set ``use_conversation_multi_turn=true`` and the model will generate a separate assistant response for each turn.
+  - If you want to use a conversation-based format, you can set ``use_conversation_multi_turn=true`` and the model will generate a separate assistant response for each turn. This is supported only with ``backend="vllm"`` as of now.
   - See :code_link:`skyrl_train/generators/skyrl_gym_generator.py` for more details on both options!
 
 Launching Your Training Run
