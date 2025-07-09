@@ -13,10 +13,7 @@ NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
 BACKEND="vllm"
-WEIGHT_SYNC_BACKEND="nccl"
-
 # BACKEND="sglang"
-# WEIGHT_SYNC_BACKEND="gloo"  # Currently NCCL is not supported with SGLang.
 
 uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -45,7 +42,7 @@ uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.use_kl_loss=true \
   generator.backend=$BACKEND \
   generator.run_engines_locally=true \
-  generator.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
+  generator.weight_sync_backend=nccl \
   generator.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
