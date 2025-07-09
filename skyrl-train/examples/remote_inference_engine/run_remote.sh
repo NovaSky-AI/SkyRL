@@ -37,6 +37,6 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     trainer.resume_mode=null \
     trainer.ckpt_path="$HOME/ckpts/remote_ckpt" \
     trainer.eval_batch_size=1024 \
-    trainer.eval_before_train=false \
+    trainer.eval_before_train=true \
     trainer.eval_interval=5 \
     $@
