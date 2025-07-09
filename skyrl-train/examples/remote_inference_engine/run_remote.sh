@@ -9,10 +9,10 @@ set -x
 
 DATA_DIR="$HOME/data/gsm8k"
 
-BACKEND="sglang" # or "sglang"
+BACKEND="vllm" # or "sglang"
 TP=4
 
-uv run --isolated --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
