@@ -157,6 +157,8 @@ class RayPPOTrainer:
 
         # Extract data_sources from env_extras
         concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
+        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+        print("example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
         eval_metrics = calculate_per_dataset_metrics(
