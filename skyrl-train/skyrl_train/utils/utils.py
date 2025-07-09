@@ -192,10 +192,6 @@ def validate_cfg(cfg: DictConfig):
 
     # TODO: fix once we support these features with SGLang
     if cfg.generator.backend == "sglang":
-        assert cfg.generator.weight_sync_backend != "nccl", (
-            "As of now, NCCL weight sync backend is not supported with SGLang generator backend. "
-            "Please use 'gloo' as the weight sync backend instead."
-        )
         assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
             "As of now, We do not support tensor parallel inference engine with SGLang. "
             "Please set `inference_engine_tensor_parallel_size` to 1."
