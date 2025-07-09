@@ -14,7 +14,7 @@ Modifying the code
 
 - Are you modifying the training code (ex: adding a new algorithm, changing the training loop etc)? You would modify the code in :code_link:`skyrl_train`. 
 
-- Are you modifying the base environment code (ex: adding a custom method for all `Env` classes)? You would modify the code in  `skyrl-gym <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/>`_. Note that for adding a new environment or task, you do not have to modify the ``skyrl-gym`` package. 
+- Are you modifying the existing environment code (ex: adding a custom method for all ``Env`` classes, improving the ``SearchEnv`` implementation)? You would modify the code in  `skyrl-gym <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/>`_. Note that for adding a new environment or task, you do not have to modify the ``skyrl-gym`` package. 
 
 
 Running tests
