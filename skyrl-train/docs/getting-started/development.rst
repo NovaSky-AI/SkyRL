@@ -74,6 +74,22 @@ You can run the tests for the ``skyrl-gym`` package by running the following com
 
 
 
+Linting and Formatting 
+----------------------
+
+We use pre-commit hooks to automatically lint and format the code. You can install the pre-commit hooks by running the following command:
+
+.. code-block:: bash
+
+    uv pip install pre-commit
+    pre-commit install
+
+If you wish to manually run linting and formatting:
+
+.. code-block:: bash
+
+    bash format.sh # run from the root directory
+
 Documentation
 -------------
 
