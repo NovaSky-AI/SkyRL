@@ -43,7 +43,7 @@ After following the steps in the :doc:`../recipes/searchr1` recipe to download t
     uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
         # - Dataset: train/val data paths
         data.train_data="['${DATA_DIR}/train.parquet']" \
-        data.val_data="['${DATA_DIR}/test.parquet']" \
+        data.val_data="['${DATA_DIR}/validation.parquet']" \
 
         # - Algorithm: GRPO settings, learning rate, KL loss
         trainer.algorithm.advantage_estimator="grpo" \
