@@ -42,7 +42,7 @@ A quick start guide for installation and your first training run is provided bel
 
 The only requirements are:
 
-- CUDA version >=12.4
+- CUDA version 12.8
 - [uv](https://docs.astral.sh/uv/)
 
 If you're running on an existing Ray cluster, make sure to use Ray 2.44.0 and Python 3.12. If not, proceed with the installation instructions below.

@@ -3,7 +3,7 @@ Installation
 
 Requirements
 ------------
-- CUDA version >=12.4 (Recommended: 12.8)
+- CUDA version 12.8
 - `uv <https://docs.astral.sh/uv/>`_
 
 We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
@@ -39,7 +39,7 @@ Install without Dockerfile
 
 For installation without the Dockerfile, make sure you meet the pre-requisities: 
 
-- CUDA 12.4 (Recommended: 12.8)
+- CUDA 12.8
 - `uv <https://docs.astral.sh/uv/>`_
 - `ray <https://docs.ray.io/en/latest/>`_ 2.44.0
 
