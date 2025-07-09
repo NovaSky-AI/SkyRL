@@ -14,7 +14,7 @@ Modifying the code
 
 - Are you adding a new environment or task? Follow the :doc:`new task tutorial <../tutorials/new_env>`. Your custom code can be placed anywhere - building on top of ``skyrl_train`` as a package - but we recommend structuring it as a folder similar to `skyrl-train/examples/multiply <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply>`_. 
 
-- Are you creating a custom Generator (ex: porting an agent harness, custom trajectory generation logic, etc.)? Same as the above: your custom code can be placed anywhere and we typically use ``skyrl-train/examples/`` for this.
+- Are you creating a custom ``Generator`` (ex: porting an agent harness, implementing custom trajectory generation logic, etc.)? Same as the above: your custom code can be placed anywhere and we typically use ``skyrl-train/examples/`` for this.
 
 - Are you modifying the training code (ex: adding a new algorithm, changing the training loop etc)? You would modify the code in :code_link:`skyrl_train`. 
 
