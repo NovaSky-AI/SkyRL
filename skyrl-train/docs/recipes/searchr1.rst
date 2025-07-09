@@ -6,7 +6,7 @@ We provide scripts to reproduce our results for training a multi-turn search age
 Pre-requisites
 --------------
 
-Make sure to have followed the installation commands in :doc:`installation <../getting-started/installation>`.
+Make sure to have followed the installation commands in :doc:`../getting-started/installation`.
 
 Data Preparation
 ----------------

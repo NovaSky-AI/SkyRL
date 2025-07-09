@@ -4,14 +4,14 @@ Multi-Turn RL for Search with SkyRL
 In this example, we walk through an example for training a multi-turn search agent with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts), using the dataset and recipe
 from `Search-R1 <https://arxiv.org/pdf/2503.09516>`_.
 
-We provide an implementation of a search environment in :skyrl_gym_link:`skyrl_gym/envs/search/env.py`, and a full line by line explanation of the implementation our `blog post <PLACEHOLDER>`_.
+We provide an implementation of a search environment in :skyrl_gym_link:`skyrl_gym/envs/search/env.py`, and a full line by line explanation of the implementation in our `blog post <PLACEHOLDER>`_.
 
-You can find the exact step by step commands to reproduce our results in the :doc:`../recipes/search` recipe.
+You can find the exact step by step commands to reproduce our results in the :doc:`../recipes/searchr1` recipe.
 
 Task Overview
 -------------
 
-In this task, the agent is given a natural language question and the ability to query a search engine. The agent must use the search engine to answer the question.
+In this task, the agent is given a natural language question and the ability to query a search engine. The agent can use the search engine to help answer the question.
 An example prompt is shown below:
 
 .. code-block:: text
@@ -32,7 +32,7 @@ A reward of 0 is given for incorrect responses, and a reward of 1 is given for c
 
 Training Configuration
 ----------------------
-After following the steps in the :doc:`../recipes/search` recipe to download the dataset and start the retrieval server, let's walk through the training configuration.
+After following the steps in the :doc:`../recipes/searchr1` recipe to download the dataset and start the retrieval server, let's walk through the training configuration.
 
 .. code-block:: bash
     :caption: Training configuration at ``skyrl_train/examples/search/run_search.sh``
@@ -119,7 +119,7 @@ For more details on environment implementation, see :skyrl_gym_link:`skyrl_gym/e
 Launching Your Training Run
 ---------------------------
 
-Let's get our training run started! Make sure your WandB API key is set, your dataset paths are correctly set, and that you have launched the local retrieval server, following the :doc:`../recipes/search` recipe instructions.
+Let's get our training run started! Make sure your WandB API key is set, your dataset paths are correctly set, and that you have launched the local retrieval server, following the :doc:`../recipes/searchr1` recipe instructions.
 
 .. code-block:: bash
 
