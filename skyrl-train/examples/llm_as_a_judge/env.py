@@ -9,7 +9,7 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
     """
     Example implementtion of GSM8k environment with LLM as judge.
 
-    Use LLM as judge to evaluate the math problem solving query similarity with the gold math problem solving query.
+    Use LLM as judge to evaluate the answer similarity with the ground truth.
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
@@ -25,7 +25,6 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
         self.model = env_config.model
 
     def _get_reward(self, action: str) -> float:
-        # Use LLM as judge to evaluate the math problem solving query similarity with the gold math problem solving query.
         prompt = f"""
             You are a strict math evaluation assistant.
 
@@ -59,8 +58,7 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
             return 0.0
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        done = True  # always done after one step
+        done = True
         reward = self._get_reward(action)
 
-        # No observation in gsm8k, and no tool call
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
