@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
     "loguru",
     "tqdm",
     "tensorboard",
@@ -51,6 +51,7 @@ conflicts = [
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
+torch = { index = "pytorch-cu128" }
 
 [project.optional-dependencies]
 deepspeed = [
@@ -72,19 +73,25 @@ docs = [
     "sphinx-autobuild>=2021.3.14"
 ]
 vllm = [
-    "vllm==0.8.5",
+    "vllm==0.9.2",
     # NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
     # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime (terribly slow).
-    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
+    "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
 ]
 sglang = [
-    "sglang[srt,openai]==0.4.6.post4",
+    "sglang[srt,openai]==0.4.8.post1",
     "torch-memory-saver>=0.0.5",
     # The version is pinned to 0.2.5 because sglang requires this
     # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
-    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
+    "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
+    "torch==2.7.1",
 ]
 
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.setuptools.packages.find]
 include = ["skyrl_train*"]

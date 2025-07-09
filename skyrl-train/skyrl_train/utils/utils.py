@@ -246,12 +246,17 @@ def initialize_ray(cfg: DictConfig):
         "NCCL_P2P_DISABLE": "0",
         "CUDA_LAUNCH_BLOCKING": "1",
     }
-    if cfg.generator.backend == "vllm" and not os.environ.get("VLLM_USE_V1", False):
-        logger.info(
-            "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
-        )
-        env_vars["VLLM_USE_V1"] = "1"
-        env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    if cfg.generator.backend == "vllm":
+        # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
+        # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
+        env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+        if not os.environ.get("VLLM_USE_V1", False):
+            logger.info(
+                "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
+            )
+            env_vars["VLLM_USE_V1"] = "1"
+            env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart

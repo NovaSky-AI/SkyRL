@@ -16,8 +16,7 @@ except ImportError:
 
 from skyrl_train.models import Actor, get_llm_for_sequence_regression
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.utils import get_physical_gpu_id
-from skyrl_train.utils.utils import str_to_torch_dtype
+from skyrl_train.utils import get_physical_gpu_id, torch_dtype_to_str, str_to_torch_dtype
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.workers.worker import (
@@ -127,7 +126,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                         inference_engine_client.update_named_weight(
                             {
                                 "name": name,
-                                "dtype": generator_dtype,
+                                "dtype": torch_dtype_to_str(generator_dtype),
                                 "shape": shape,
                             }
                         )
@@ -157,6 +156,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                 ipc_handle = reduce_tensor(weight)
 
                 ipc_handle = {get_physical_gpu_id(): ipc_handle}
+
                 ipc_handle_list = [None] * torch.distributed.get_world_size()
                 torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
@@ -171,7 +171,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                         inference_engine_client.update_named_weight(
                             {
                                 "name": name,
-                                "dtype": generator_dtype,
+                                "dtype": torch_dtype_to_str(generator_dtype),
                                 "shape": shape,
                                 "extras": {
                                     "ipc_handles": ipc_handles,
