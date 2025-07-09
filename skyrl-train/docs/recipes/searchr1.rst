@@ -88,4 +88,4 @@ Now from your base environment, you can launch your training run (which will use
     export WANDB_API_KEY=your_wandb_api_key
     bash examples/search/run_search.sh
 
-You can find a link to our training runs with 2, 3, and 4 turns for comparison on WandB `here <PLACEHOLDER>`.
+You can find a link to our training runs with 2, 3, and 4 turns for comparison at our `WandB report <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr>`_.

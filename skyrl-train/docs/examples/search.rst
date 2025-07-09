@@ -4,9 +4,11 @@ Multi-Turn RL for Search with SkyRL
 In this example, we walk through an example for training a multi-turn search agent with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts), using the dataset and recipe
 from `Search-R1 <https://arxiv.org/pdf/2503.09516>`_.
 
-We provide an implementation of a search environment in :skyrl_gym_link:`skyrl_gym/envs/search/env.py`, and a full line by line explanation of the implementation in our `blog post <PLACEHOLDER>`_.
+The full implementation of the search environment can be found in :skyrl_gym_link:`skyrl_gym/envs/search/env.py`.
 
-You can find the exact step by step commands to reproduce our results in the :doc:`../recipes/searchr1` recipe.
+You can find the exact step by step commands to reproduce our results in the :doc:`../recipes/searchr1` recipe, and you can find a link to our training runs 
+with 2, 3, and 4 turns for comparison at our `WandB report <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr>`_.
+
 
 Task Overview
 -------------
@@ -125,8 +127,6 @@ Let's get our training run started! Make sure your WandB API key is set, your da
 
     export WANDB_API_KEY=your_wandb_api_key
     bash examples/search/run_search.sh
-
-You can find a link to our training runs with 2, 3, and 4 turns for comparison on WandB `here <PLACEHOLDER>`.
 
 Attribution
 -------------
