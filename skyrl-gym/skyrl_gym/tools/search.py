@@ -5,6 +5,7 @@ import uuid
 import time
 import threading
 from typing import Tuple, Optional, Any, Dict
+from urllib.parse import urlparse
 
 from skyrl_gym.tools.core import tool, ToolGroup
 
@@ -25,6 +26,21 @@ def call_search_api(
     log_requests: bool = True,
     session: Optional[requests.Session] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Calls the search API with a single query.
+
+    Args:
+        retrieval_service_url: The URL of the search API.
+        query: The query to search for.
+        topk: The number of results to return.
+        return_scores: Whether to return scores for the results.
+        timeout: The timeout for the request.
+        log_requests: Whether to log requests.
+
+    Returns:
+        response: The response from the search API (json if successful, None otherwise)
+        error_msg: The error message if the request failed.
+    """
     request_id = str(uuid.uuid4())
     log_prefix = f"[Search Request ID: {request_id}] "
 
@@ -151,7 +167,8 @@ class SearchToolGroup(ToolGroup):
         self.log_requests = log_requests
 
         # Extract base URL for session sharing
-        self.base_url = self.search_url.split("/retrieve")[0] if "/retrieve" in self.search_url else self.search_url
+        parsed_url = urlparse(self.search_url)
+        self.base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
         # Get shared session for this base URL
         self.session = self._get_shared_session(self.base_url)
