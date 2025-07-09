@@ -6,16 +6,16 @@ from openai import OpenAI
 import os
 
 PROMPT = """
-            You are a strict math evaluation assistant.
+    You are a strict math evaluation assistant.
 
-            Compare the following **gold** and **predicted** math solutions. 
-            Determine if the predicted solution follows valid reasoning and reaches the correct final answer, even if the explanation differs in wording.
+    Compare the following **gold** and **predicted** math solutions. 
+    Determine if the predicted solution follows valid reasoning and reaches the correct final answer, even if the explanation differs in wording.
 
-            Rules:
-            - Only answer "1" if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
-            - Otherwise, answer "0".
-            - Do not include any explanation or extra text—output only a single character: "1" or "0".
-        """
+    Rules:
+    - Only answer "1" if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
+    - Otherwise, answer "0".
+    - Do not include any explanation or extra text—output only a single character: "1" or "0".
+"""
 
 
 class GSM8kLLMJudgeEnv(BaseTextEnv):
@@ -36,21 +36,6 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
         openai_api_key = os.getenv("OPENAI_API_KEY")
         self.llm_judge_client = OpenAI(api_key=openai_api_key)
         self.model = env_config.model
-
-    def _get_reward(self, action: str) -> float:
-        message = PROMPT + f"\n\nGOLD SOLUTION: {self.ground_truth}\n\nPREDICTED SOLUTION: {action}\n\nAnswer:"
-
-        try:
-            response = self.llm_judge_client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": message}],
-                max_tokens=1,
-            )
-            reply = response.choices[0].message.content.strip()
-            return 1.0 if reply == "1" else 0.0
-        except Exception as e:
-            print(f"LLM Judge error: {type(e).__name__}: {e}")
-            return 0.0
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True
