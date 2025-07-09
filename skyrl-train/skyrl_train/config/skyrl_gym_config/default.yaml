@@ -6,4 +6,3 @@ text2sql:
 
 llm_as_a_judge:
   model: "gpt-4o-mini"
-  OPENAI_API_KEY: "openai_api_key"

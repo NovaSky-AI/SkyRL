@@ -3,6 +3,7 @@ from typing import Any
 from typing import Dict
 from omegaconf import DictConfig
 from openai import OpenAI
+import os
 
 
 class GSM8kLLMJudgeEnv(BaseTextEnv):
@@ -20,7 +21,7 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
         self.ground_truth = extras["reward_spec"]["ground_truth"]
 
         # Set up OpenAI client
-        openai_api_key = env_config.OPENAI_API_KEY
+        openai_api_key = os.getenv("OPENAI_API_KEY")
         self.llm_judge_client = OpenAI(api_key=openai_api_key)
         self.model = env_config.model
 

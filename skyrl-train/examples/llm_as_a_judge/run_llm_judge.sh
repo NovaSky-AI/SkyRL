@@ -53,7 +53,6 @@ uv run --isolated --extra vllm -m examples.llm_as_a_judge.main_llm_judge \
   generator.batched=false \
   environment.env_class=llm_as_a_judge \
   environment.skyrl_gym.llm_as_a_judge.model="gpt-4o-mini" \
-  environment.skyrl_gym.llm_as_a_judge.OPENAI_API_KEY="your_openai_api_key" \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=6 \
