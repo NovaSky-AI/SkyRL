@@ -198,6 +198,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         # just update raw tokens and loss mask
         new_resp_tokens = self.tokenizer.encode(output, add_special_tokens=False)
+        print(f"output: {output}, new_resp_tokens: {new_resp_tokens}")
         if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
             # remove the eos token since we are continuing the current assistant message
             new_resp_tokens = new_resp_tokens[:-1]

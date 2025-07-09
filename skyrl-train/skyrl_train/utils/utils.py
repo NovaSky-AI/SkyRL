@@ -200,6 +200,9 @@ def validate_cfg(cfg: DictConfig):
             "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
         )
 
+    if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
+        raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
+
 
 @ray.remote
 def get_all_env_variables():

@@ -2,7 +2,7 @@
 # bash examples/remote_inference_engine/run_vllm_server.sh
 set -x
 
-uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --tensor-parallel-size 4 \
     --host 127.0.0.1 \

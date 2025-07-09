@@ -9,7 +9,7 @@ set -x
 
 DATA_DIR="$HOME/data/gsm8k"
 
-BACKEND="vllm" # or "sglang"
+BACKEND="sglang" # or "sglang"
 TP=4
 
 uv run --isolated --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
