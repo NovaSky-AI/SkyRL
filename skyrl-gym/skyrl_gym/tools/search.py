@@ -36,6 +36,7 @@ def call_search_api(
         return_scores: Whether to return scores for the results.
         timeout: The timeout for the request.
         log_requests: Whether to log requests.
+        session: The session to use for the request. If none is provided, a new session will be created.
 
     Returns:
         response: The response from the search API (json if successful, None otherwise)

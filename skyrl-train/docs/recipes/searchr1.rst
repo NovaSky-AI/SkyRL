@@ -2,6 +2,7 @@ SearchR1
 =========
 
 We provide scripts to reproduce our results for training a multi-turn search agent using the dataset and recipe from `Search-R1 <https://arxiv.org/pdf/2503.09516>`_.
+For a more detailed explanation of the task and training configuration, see :doc:`../examples/search`.
 
 Pre-requisites
 --------------

@@ -103,7 +103,7 @@ Now that we have our dataset and database files, let's walk through the some of 
         generator.sampling_params.max_generate_length=3000 \
 
         #### multi-turn generation format - see `skyrl_train/generators/skyrl_gym_generator.py` for more details
-        use_conversation_multi_turn=false
+        generator.use_conversation_multi_turn=false \
         
         #### data configuration
         data.train_data="['$DATA_DIR/train.parquet']" \

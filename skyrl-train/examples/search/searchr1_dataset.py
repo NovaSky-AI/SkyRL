@@ -270,7 +270,11 @@ def main():
                 df_processed = df_raw.apply(apply_process_row, axis=1)
 
                 # Save processed DataFrame
-                output_file_path = os.path.join(local_save_dir, f"{split}.parquet")
+                if split == "test":
+                    logger.info("Saving `test.parquet` from HF as `validation.parquet` locally")
+                    output_file_path = os.path.join(local_save_dir, f"validation.parquet")
+                else:
+                    output_file_path = os.path.join(local_save_dir, f"{split}.parquet")
                 df_processed.to_parquet(output_file_path, index=False)
                 logger.info(f"Saved {len(df_processed)} processed rows to {output_file_path}")
                 processed_files.append(output_file_path)
