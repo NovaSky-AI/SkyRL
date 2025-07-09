@@ -272,7 +272,7 @@ def main():
                 # Save processed DataFrame
                 if split == "test":
                     logger.info("Saving `test.parquet` from HF as `validation.parquet` locally")
-                    output_file_path = os.path.join(local_save_dir, f"validation.parquet")
+                    output_file_path = os.path.join(local_save_dir, "validation.parquet")
                 else:
                     output_file_path = os.path.join(local_save_dir, f"{split}.parquet")
                 df_processed.to_parquet(output_file_path, index=False)
