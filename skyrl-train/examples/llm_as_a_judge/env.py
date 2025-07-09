@@ -5,6 +5,18 @@ from omegaconf import DictConfig
 from openai import OpenAI
 import os
 
+PROMPT = """
+            You are a strict math evaluation assistant.
+
+            Compare the following **gold** and **predicted** math solutions. 
+            Determine if the predicted solution follows valid reasoning and reaches the correct final answer, even if the explanation differs in wording.
+
+            Rules:
+            - Only answer "1" if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
+            - Otherwise, answer "0".
+            - Do not include any explanation or extra text—output only a single character: "1" or "0".
+        """
+
 
 class GSM8kLLMJudgeEnv(BaseTextEnv):
     """
@@ -26,30 +38,12 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
         self.model = env_config.model
 
     def _get_reward(self, action: str) -> float:
-        prompt = f"""
-            You are a strict math evaluation assistant.
-
-            Compare the following **gold** and **predicted** math solutions. 
-            Determine if the predicted solution follows valid reasoning and reaches the correct final answer, even if the explanation differs in wording.
-
-            Rules:
-            - Only answer "1" if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
-            - Otherwise, answer "0".
-            - Do not include any explanation or extra text—output only a single character: "1" or "0".
-
-            GOLD SOLUTION:
-            {self.ground_truth}
-
-            PREDICTED SOLUTION:
-            {action}
-
-            Answer:
-        """
+        message = PROMPT + f"\n\nGOLD SOLUTION: {self.ground_truth}\n\nPREDICTED SOLUTION: {action}\n\nAnswer:"
 
         try:
             response = self.llm_judge_client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": message}],
                 max_tokens=1,
             )
             reply = response.choices[0].message.content.strip()
