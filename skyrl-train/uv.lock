@@ -2754,7 +2754,6 @@ dependencies = [
     { name = "accelerate" },
     { name = "datasets" },
     { name = "debugpy" },
-    { name = "deepspeed" },
     { name = "flash-attn" },
     { name = "func-timeout" },
     { name = "hf-transfer" },
@@ -2775,6 +2774,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+deepspeed = [
+    { name = "deepspeed" },
+]
 dev = [
     { name = "black" },
     { name = "pre-commit" },
@@ -2806,7 +2808,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = "==24.10.0" },
     { name = "datasets" },
     { name = "debugpy", specifier = "==1.8.0" },
-    { name = "deepspeed", specifier = "==0.16.5" },
+    { name = "deepspeed", marker = "extra == 'deepspeed'", specifier = "==0.16.5" },
     { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'sglang'", url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl" },
@@ -2839,7 +2841,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.8.5" },
     { name = "wandb" },
 ]
-provides-extras = ["dev", "docs", "vllm", "sglang"]
+provides-extras = ["deepspeed", "dev", "docs", "vllm", "sglang"]
 
 [[package]]
 name = "smmap"

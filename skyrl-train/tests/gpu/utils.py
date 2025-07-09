@@ -20,6 +20,8 @@ from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
 
+TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
+
 
 def get_test_actor_config() -> DictConfig:
     """Get base config with test-specific overrides."""
@@ -248,7 +250,7 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = PromptDataset(
-        ["./data/gsm8k/test.parquet"],
+        [TEST_DATA_PATH],
         tokenizer,
         max_prompt_length=512,
     )
@@ -267,7 +269,7 @@ def get_test_generator_input(
     num_prompts: int = 20,
     n_samples_per_prompt: int = 1,
     max_prompt_length: int = 512,
-    data_path: str = "./data/gsm8k/test.parquet",
+    data_path: str = TEST_DATA_PATH,
     env_class: str = "gsm8k",
 ):
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
