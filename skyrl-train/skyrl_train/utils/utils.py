@@ -292,6 +292,9 @@ def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
         )
 
 
+# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
+# This is because we do not control the update weight implementation with SGLang backend.
+# With VLLM, we use a custom Worker extension to have a custom update weight implementation.
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
     if dtype == torch.bfloat16:
         return "bfloat16"

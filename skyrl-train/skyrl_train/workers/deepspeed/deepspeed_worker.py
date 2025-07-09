@@ -142,7 +142,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                         inference_engine_client.update_named_weight(
                             {
                                 "name": name,
-                                "dtype": generator_dtype,
+                                "dtype": self.cfg.generator.model_dtype,
                                 "shape": shape,
                             }
                         )
@@ -184,7 +184,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                             inference_engine_client.update_named_weight(
                                 {
                                     "name": name,
-                                    "dtype": generator_dtype,
+                                    "dtype": self.cfg.generator.model_dtype,
                                     "shape": shape,
                                     "extras": {
                                         "ipc_handles": ipc_handles,

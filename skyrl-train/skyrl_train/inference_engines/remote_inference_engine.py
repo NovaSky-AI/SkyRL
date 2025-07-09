@@ -8,7 +8,6 @@ from skyrl_train.inference_engines.base import (
 from typing import List, Optional, Dict, Any
 import json
 import asyncio
-from skyrl_train.utils import torch_dtype_to_str
 
 
 class RemoteInferenceEngine(InferenceEngineInterface):
@@ -107,12 +106,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             raise ValueError(
                 "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
             )
-        dtype = request["dtype"]
         if self.engine_backend == "vllm":
             weight_update_method = "update_weight"
         elif self.engine_backend == "sglang":
             weight_update_method = "update_weights_from_distributed"
-            dtype = torch_dtype_to_str(request["dtype"])
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
@@ -121,7 +118,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 f"{self.url}/{weight_update_method}",
                 json={
                     "name": request["name"],
-                    "dtype": dtype,
+                    "dtype": request["dtype"],
                     "shape": request["shape"],
                 },
             )
