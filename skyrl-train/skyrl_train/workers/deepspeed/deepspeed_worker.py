@@ -21,7 +21,6 @@ from skyrl_train.workers.worker import (
     PolicyLoss,
     ValueLoss,
 )
-from skyrl_train.utils import torch_dtype_to_str
 
 
 class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
@@ -143,7 +142,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                         inference_engine_client.update_named_weight(
                             {
                                 "name": name,
-                                "dtype": torch_dtype_to_str(generator_dtype),
+                                "dtype": generator_dtype,
                                 "shape": shape,
                             }
                         )
@@ -185,7 +184,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                             inference_engine_client.update_named_weight(
                                 {
                                     "name": name,
-                                    "dtype": torch_dtype_to_str(generator_dtype),
+                                    "dtype": generator_dtype,
                                     "shape": shape,
                                     "extras": {
                                         "ipc_handles": ipc_handles,

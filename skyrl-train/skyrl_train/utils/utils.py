@@ -180,12 +180,12 @@ def validate_cfg(cfg: DictConfig):
 
     # resolve override_existing_update_group
     if cfg.generator.override_existing_update_group == "auto":
-        if cfg.generator.run_engines_locally:
-            # local engines are launched in the same ray session, so this is safe to disable
-            cfg.generator.override_existing_update_group = "disable"
-        else:
+        if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
             # remote engines can be launched separately so we `enable` by default
             cfg.generator.override_existing_update_group = "enable"
+        else:
+            # for local engines or sglang, we disable
+            cfg.generator.override_existing_update_group = "disable"
 
     assert cfg.trainer.algorithm.ppo_loss_type in (
         "regular",

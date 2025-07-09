@@ -5,7 +5,6 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightUpdateRequest,
 )
-from skyrl_train.utils import torch_dtype_to_str
 from typing import List, Optional, Dict, Any
 import json
 import asyncio
@@ -120,7 +119,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 f"{self.url}/{weight_update_method}",
                 json={
                     "name": request["name"],
-                    "dtype": torch_dtype_to_str(request["dtype"]),
+                    "dtype": request["dtype"],
                     "shape": request["shape"],
                 },
             )

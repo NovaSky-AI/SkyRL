@@ -2654,6 +2654,9 @@ srt = [
     { name = "uvloop" },
     { name = "xgrammar" },
 ]
+torch-memory-saver = [
+    { name = "torch-memory-saver" },
+]
 
 [[package]]
 name = "shellingham"
@@ -2742,9 +2745,8 @@ docs = [
 ]
 sglang = [
     { name = "flashinfer-python" },
-    { name = "sglang", extra = ["openai", "srt"], marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "sglang", extra = ["openai", "srt", "torch-memory-saver"], marker = "extra == 'extra-11-skyrl-train-sglang'" },
     { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
-    { name = "torch-memory-saver" },
 ]
 vllm = [
     { name = "flashinfer-python" },
@@ -2774,7 +2776,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "ray", specifier = "==2.44.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.11.9" },
-    { name = "sglang", extras = ["srt", "openai"], marker = "extra == 'sglang'", specifier = "==0.4.8.post1" },
+    { name = "sglang", extras = ["srt", "openai", "torch-memory-saver"], marker = "extra == 'sglang'", specifier = "==0.4.8.post1" },
     { name = "skyrl-gym", editable = "skyrl-gym" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=7.0.0" },
     { name = "sphinx-autobuild", marker = "extra == 'docs'", specifier = ">=2021.3.14" },
@@ -2784,7 +2786,6 @@ requires-dist = [
     { name = "tensorboard" },
     { name = "tensordict" },
     { name = "torch", marker = "extra == 'sglang'", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "torch-memory-saver", marker = "extra == 'sglang'", specifier = ">=0.0.5" },
     { name = "torchdata" },
     { name = "tqdm" },
     { name = "transformers", specifier = ">=4.51.0" },
