@@ -10,7 +10,7 @@ Follow the :doc:`installation guide <installation>`. Make sure that the installa
 Modifying the code
 -------------------
 
-- Are you adding a new environment or task? Follow the :doc:`new task tutorial <../tutorials/new_env>`. Add your custom code to a folder in `examples/` similar to `examples/multiply <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply>`_. 
+- Are you adding a new environment or task? Follow the :doc:`new task tutorial <../tutorials/new_env>`. Add your custom code to a folder in ``examples/`` similar to `examples/multiply <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply>`_. 
 
 - Are you modifying the training code (ex: adding a new algorithm, changing the training loop etc)? You would modify the code in :code_link:`skyrl_train`. 
 
@@ -32,7 +32,7 @@ CPU tests
 .. code-block:: bash
 
     cd skyrl-train # make sure you are in the correct directory
-    uv run --isolated --extra dev --extra vllm pytest tests/cpu
+    uv run --isolated --extra dev pytest tests/cpu
 
 GPU tests
 ~~~~~~~~~
