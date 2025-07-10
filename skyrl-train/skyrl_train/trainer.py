@@ -91,18 +91,18 @@ class RayPPOTrainer:
 
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
-        
+
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
         Build the dataloader for the training or evaluation dataset
         """
         # prepare dataloader
         batch_size = self.cfg.trainer.train_batch_size if is_train else self.cfg.trainer.eval_batch_size
-        
+
         # Seed the dataloader for reproducibility.
-        g = torch.Generator()
-        g.manual_seed(self.cfg.trainer.seed)
-        
+        seeded_generator = torch.Generator()
+        seeded_generator.manual_seed(self.cfg.trainer.seed)
+
         dataloader = StatefulDataLoader(
             dataset,
             batch_size=batch_size,
@@ -110,7 +110,7 @@ class RayPPOTrainer:
             collate_fn=dataset.collate_fn,
             num_workers=8,
             drop_last=True if is_train else False,
-            generator=g,
+            generator=seeded_generator,
         )
         if is_train:
             self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs

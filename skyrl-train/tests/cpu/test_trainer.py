@@ -69,6 +69,7 @@ def dummy_config():
                 "gamma": 0.99,
                 "lambd": 0.95,
                 "use_sample_packing": False,
+                "seed": 42,
                 "algorithm": {
                     "advantage_estimator": "grpo",
                     "use_kl_estimator_k3": False,
@@ -715,3 +716,90 @@ def test_ppo_train_batch_calculations():
     train_status = result.metadata["train_status"]
     assert "critic_update_steps" in train_status
     assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
+
+
+def test_build_dataloader_seeding(dummy_config):
+    """Test that build_dataloader correctly seeds the dataloader for reproducible shuffling."""
+
+    # Create a dataset with multiple distinct items to test shuffling
+    class MultiItemDataset:
+        def __init__(self, size=10):
+            self.data = [f"item_{i}" for i in range(size)]
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            return self.data[idx]
+
+        def collate_fn(self, batch):
+            return batch
+
+    dataset = MultiItemDataset(size=20)
+
+    # Test 1: Same seed should produce same shuffling
+    config1 = dummy_config.copy()
+    config1.trainer.seed = 42
+    config1.trainer.train_batch_size = 5
+
+    config2 = dummy_config.copy()
+    config2.trainer.seed = 42  # Same seed
+    config2.trainer.train_batch_size = 5
+
+    # Create trainers with same seed
+    trainer1 = RayPPOTrainer(
+        cfg=config1,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=dataset,
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=None,
+    )
+
+    trainer2 = RayPPOTrainer(
+        cfg=config2,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=dataset,
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=None,
+    )
+
+    # Build dataloaders
+    dataloader1 = trainer1.build_dataloader(dataset, is_train=True)
+    dataloader2 = trainer2.build_dataloader(dataset, is_train=True)
+
+    # Get first batch from each dataloader
+    first_batch1 = next(iter(dataloader1))
+    first_batch2 = next(iter(dataloader2))
+
+    # With same seed, first batches should be identical
+    assert (
+        first_batch1 == first_batch2
+    ), f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
+
+    # Test 2: Different seeds should produce different shuffling
+    config3 = dummy_config.copy()
+    config3.trainer.seed = 123  # Different seed
+    config3.trainer.train_batch_size = 5
+
+    trainer3 = RayPPOTrainer(
+        cfg=config3,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=dataset,
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=None,
+    )
+
+    dataloader3 = trainer3.build_dataloader(dataset, is_train=True)
+    first_batch3 = next(iter(dataloader3))
+
+    # With different seed, first batch should be different
+    # Note: There's a tiny chance they could be the same by random chance, but very unlikely with 20 items
+    assert (
+        first_batch1 != first_batch3
+    ), f"Different seeds should produce different first batches, but both gave {first_batch1}"
