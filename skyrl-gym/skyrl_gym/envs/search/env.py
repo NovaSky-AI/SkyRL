@@ -1,9 +1,9 @@
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from typing import Tuple, Any
+from typing import Any
 from skyrl_gym.envs.search.utils import compute_score
 from skyrl_gym.tools import SearchToolGroup
 import re
-from typing import Dict
+from typing import Dict, Optional, List
 from omegaconf import DictConfig
 
 
@@ -35,23 +35,11 @@ class SearchEnv(BaseTextEnv):
         # role (user, assistant), content (tool observation or LLM response)
         self.chat_history: ConversationType = []
 
-    def _parse_action(self, action: str) -> Tuple[str, str, Any]:
-        """
-        Return tool group name, tool name, and input arguments to tool function
-        """
-        tool_name = None
-        query_match = None
-
+    def _parse_action(self, action: str) -> List[Optional[str]]:
+        match = None
         if "<search>" in action and "</search>" in action:
             match = re.search(r"<search>(.*?)</search>", action, re.DOTALL)
-            if match:
-                query_match = match.group(1)
-            else:
-                query_match = None
-
-        tool_group_name = self.tool_group.get_name()
-        tool_name = self.tool_group.get_tool_names()[0]
-        return tool_group_name, tool_name, [query_match]
+        return [match.group(1)] if match else [None]
 
     def _get_reward(self, action: str, done: bool) -> float:
         if done:
@@ -95,14 +83,11 @@ class SearchEnv(BaseTextEnv):
             )
 
         try:
-            tool_group_name, tool_name, tool_input = self._parse_action(action)
-            observation = self._execute_tool(tool_group_name, tool_name, tool_input)
+            query = self._parse_action(action)
+            observation = self._execute_tool(self.tool_group.get_name(), self.tool_group.get_tool_names()[0], query)
         except Exception as e:
             error = str(e)
             observation = None
-            tool_group_name = None
-            tool_name = None
-            tool_input = ""
 
         # Wrap the observation properly as a message
         if observation:
@@ -113,7 +98,11 @@ class SearchEnv(BaseTextEnv):
         else:
             new_obs = None
 
-        info = {"tool_group": tool_group_name, "tool_name": tool_name, "tool_input": tool_input}
+        info = {
+            "tool_group": self.tool_group.get_name(),
+            "tool_name": self.tool_group.get_tool_names()[0],
+            "tool_input": query,
+        }
 
         # Update chat history
         if new_obs:

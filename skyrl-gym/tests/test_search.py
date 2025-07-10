@@ -97,48 +97,39 @@ def test_env_with_custom_config():
 
 
 @pytest.mark.parametrize(
-    "action, expected_tool_group, expected_tool_name, expected_input",
+    "action, expected_input",
     [
         # Valid search query
         (
             "<search>Who is the president of France?</search>",
-            "SearchToolGroup",
-            "search",
             ["Who is the president of France?"],
         ),
         # Search with extra whitespace
         (
             "<search>  Who is the president of France?  </search>",
-            "SearchToolGroup",
-            "search",
             ["  Who is the president of France?  "],
         ),
         # Search with multiline content
         (
             "<search>Who is the president\nof France?</search>",
-            "SearchToolGroup",
-            "search",
             ["Who is the president\nof France?"],
         ),
         # No search tags
-        ("Just plain text", "SearchToolGroup", "search", [None]),
+        ("Just plain text", [None]),
         # Malformed search tag (no closing tag)
-        ("<search>Who is the president of France?", "SearchToolGroup", "search", [None]),
+        ("<search>Who is the president of France?", [None]),
         # Empty search tag
-        ("<search></search>", "SearchToolGroup", "search", [""]),
+        ("<search></search>", [""]),
         # Multiple search tags (should match first)
-        ("<search>Query 1</search> <search>Query 2</search>", "SearchToolGroup", "search", ["Query 1"]),
+        ("<search>Query 1</search> <search>Query 2</search>", ["Query 1"]),
         # Search with answer tag (should still parse search)
-        ("<search>Query</search> <answer>Answer</answer>", "SearchToolGroup", "search", ["Query"]),
+        ("<search>Query</search> <answer>Answer</answer>", ["Query"]),
     ],
 )
-def test_parse_action(search_env, action, expected_tool_group, expected_tool_name, expected_input):
+def test_parse_action(search_env, action, expected_input):
     """Test action parsing with various input formats."""
-    tool_group_name, tool_name, tool_input = search_env._parse_action(action)
-
-    assert tool_group_name == expected_tool_group
-    assert tool_name == expected_tool_name
-    assert tool_input == expected_input
+    query = search_env._parse_action(action)
+    assert query == expected_input
 
 
 # =============================================================================
@@ -515,6 +506,3 @@ def test_tool_execution_exception(search_env):
         assert result["reward"] == 0.0
         assert len(result["observations"]) == 1
         assert "Tool execution failed" in result["observations"][0]["content"]
-        assert result["metadata"]["tool_group"] is None
-        assert result["metadata"]["tool_name"] is None
-        assert result["metadata"]["tool_input"] == ""
