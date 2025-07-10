@@ -1,5 +1,5 @@
 import os
-from typing import List, Any
+from typing import List, Any, Dict
 import ray
 import torch
 import asyncio
@@ -16,6 +16,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightUpdateRequest,
 )
+from skyrl_train.utils import str_to_torch_dtype
 
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
@@ -86,10 +87,9 @@ class WorkerWrap:
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
 
-    def update_weight(self, name, dtype, shape):
-        import torch
-
+    def update_weight(self, name: str, dtype: str, shape: List[int]):
         """Broadcast weight to all vllm workers from source rank 0 (actor model)"""
+        dtype = str_to_torch_dtype(dtype)
         assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         torch.distributed.broadcast(weight, 0, group=self._model_update_group)
@@ -98,9 +98,9 @@ class WorkerWrap:
 
         del weight
 
-    def update_weight_cuda_ipc(self, name, dtype, shape, ipc_handles=None):
-        import torch
+    def update_weight_cuda_ipc(self, name: str, dtype: str, shape: List[int], ipc_handles: Dict[str, Any]):
 
+        dtype = str_to_torch_dtype(dtype)
         device = torch.cuda.current_device()
         props = torch.cuda.get_device_properties(device)
         physical_gpu_id = str(props.uuid)

@@ -52,6 +52,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.async_engine=true \
   generator.batched=false \
   environment.env_class=text2sql \
+  generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=6 \

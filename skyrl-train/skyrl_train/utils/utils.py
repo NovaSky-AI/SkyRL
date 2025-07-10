@@ -180,12 +180,12 @@ def validate_cfg(cfg: DictConfig):
 
     # resolve override_existing_update_group
     if cfg.generator.override_existing_update_group == "auto":
-        if cfg.generator.run_engines_locally:
-            # local engines are launched in the same ray session, so this is safe to disable
-            cfg.generator.override_existing_update_group = "disable"
-        else:
+        if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
             # remote engines can be launched separately so we `enable` by default
             cfg.generator.override_existing_update_group = "enable"
+        else:
+            # for local engines or sglang, we disable
+            cfg.generator.override_existing_update_group = "disable"
 
     assert cfg.trainer.algorithm.ppo_loss_type in (
         "regular",
@@ -199,6 +199,9 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
         )
+
+    if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
+        raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
 
 @ray.remote
@@ -246,12 +249,17 @@ def initialize_ray(cfg: DictConfig):
         "NCCL_P2P_DISABLE": "0",
         "CUDA_LAUNCH_BLOCKING": "1",
     }
-    if cfg.generator.backend == "vllm" and not os.environ.get("VLLM_USE_V1", False):
-        logger.info(
-            "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
-        )
-        env_vars["VLLM_USE_V1"] = "1"
-        env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    if cfg.generator.backend == "vllm":
+        # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
+        # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
+        env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+        if not os.environ.get("VLLM_USE_V1", False):
+            logger.info(
+                "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
+            )
+            env_vars["VLLM_USE_V1"] = "1"
+            env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
@@ -284,6 +292,9 @@ def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
         )
 
 
+# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
+# This is because we do not control the update weight implementation with SGLang backend.
+# With VLLM, we use a custom Worker extension to have a custom update weight implementation.
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
     if dtype == torch.bfloat16:
         return "bfloat16"

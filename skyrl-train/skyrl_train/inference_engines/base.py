@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable
-import torch
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -21,7 +20,7 @@ class InferenceEngineOutput(TypedDict):
 
 class NamedWeightUpdateRequest(TypedDict):
     name: str
-    dtype: torch.dtype
+    dtype: str
     shape: List[int]
     extras: Optional[Dict[str, Any]]
 

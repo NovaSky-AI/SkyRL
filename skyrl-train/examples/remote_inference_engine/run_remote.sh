@@ -9,13 +9,17 @@ set -x
 
 DATA_DIR="$HOME/data/gsm8k"
 
+BACKEND="vllm" # or "sglang"
+TP=4
+
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
     generator.run_engines_locally=False \
     generator.remote_inference_engine_urls="['127.0.0.1:8001']" \
-    generator.override_existing_update_group=True \
+    generator.inference_engine_tensor_parallel_size="$TP" \
+    generator.backend="$BACKEND" \
     generator.sampling_params.temperature=0.6 \
     generator.sampling_params.top_p=0.95 \
     trainer.algorithm.advantage_estimator="grpo" \

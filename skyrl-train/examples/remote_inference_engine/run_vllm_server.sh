@@ -2,7 +2,9 @@
 # bash examples/remote_inference_engine/run_vllm_server.sh
 set -x
 
-uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
+# NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
+# For standalone server, we use mp for now. 
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --tensor-parallel-size 4 \
     --host 127.0.0.1 \
@@ -17,5 +19,5 @@ uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server
     --max-num_batched_tokens 8192 \
     --max-num-seqs 1024 \
     --trust-remote-code \
-    --distributed-executor-backend ray \
+    --distributed-executor-backend mp \
     --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
