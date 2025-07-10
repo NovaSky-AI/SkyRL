@@ -34,7 +34,7 @@ A reward of 0 is given for incorrect responses, and a reward of 1 is given for c
 
 Training Configuration
 ----------------------
-After following the steps in the :doc:`../recipes/searchr1` recipe to download the dataset and start the retrieval server, let's walk through the training configuration.
+Let's walk through configuration for running GRPO to train a 4-turn search agent on the SearchR1 dataset
 
 .. code-block:: bash
     :caption: Training configuration at ``skyrl_train/examples/search/run_search.sh``
@@ -127,6 +127,8 @@ Let's get our training run started! Make sure your WandB API key is set, your da
 
     export WANDB_API_KEY=your_wandb_api_key
     bash examples/search/run_search.sh
+
+Now just sit back and watch your model learn to search! You can find a link to our training runs with 2, 3, and 4 turns for comparison at our `WandB report <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr>`_.
 
 Attribution
 -------------
