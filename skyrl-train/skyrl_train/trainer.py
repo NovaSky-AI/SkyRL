@@ -241,7 +241,6 @@ class RayPPOTrainer:
                     generator_input, uids = self._prepare_generator_input(
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
-                    print("first prompt: ", generator_input["prompts"][0])
 
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
