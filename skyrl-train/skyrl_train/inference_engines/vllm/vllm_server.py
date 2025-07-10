@@ -145,7 +145,6 @@ class VllmServer:
 
 
 if __name__ == "__main__":
-    breakpoint()
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
