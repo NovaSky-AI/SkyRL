@@ -92,9 +92,6 @@ class RayPPOTrainer:
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
         
-        torch.manual_seed(cfg.trainer.seed)
-        torch.cuda.manual_seed_all(cfg.trainer.seed)
-
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
         Build the dataloader for the training or evaluation dataset
@@ -114,7 +111,6 @@ class RayPPOTrainer:
             num_workers=8,
             drop_last=True if is_train else False,
             generator=g,
-            # worker_init_fn=seed_worker
         )
         if is_train:
             self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
@@ -261,8 +257,7 @@ class RayPPOTrainer:
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                    print("prompt example: ", generator_input["prompts"][0])
-                    print("response example: ", vis)
+                    print("Decoded response example: ", vis)
 
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
