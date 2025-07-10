@@ -78,7 +78,8 @@ vllm = [
     # NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
     # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime (terribly slow).
     "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
-    "torchvision",
+    "torch==2.7.0",
+    "torchvision"
 ]
 sglang = [
     "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",
@@ -86,6 +87,7 @@ sglang = [
     # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
     "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
     "torch==2.7.1",
+    "torchvision",
 ]
 
 
