@@ -319,6 +319,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             obj = ResumeMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
+        print(
+            f"Free GPU memory after wake up with tags {tags if tags is not None else 'None'}: "
+            + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
+        )
 
     async def sleep(self, tags: Optional[List[str]] = None):
         """Put engine to sleep."""
@@ -328,6 +332,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
+        print(
+            f"Free GPU memory after sleep with tags {tags if tags is not None else 'None'}: "
+            + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
+        )
 
     async def teardown(self):
         """Shutdown the SGLang engine."""
