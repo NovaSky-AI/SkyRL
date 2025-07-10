@@ -4,6 +4,7 @@ from typing import Dict
 from omegaconf import DictConfig
 from openai import OpenAI
 import os
+import re
 
 PROMPT = """
     You are a strict math evaluation assistant.
@@ -36,6 +37,31 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
         openai_api_key = os.getenv("OPENAI_API_KEY")
         self.llm_judge_client = OpenAI(api_key=openai_api_key)
         self.model = env_config.model
+
+    def _get_reward(self, action: str) -> float:
+        message = PROMPT + f"\n\nGOLD SOLUTION:\n{self.ground_truth}\n\nPREDICTED SOLUTION:\n{action}\n\nAnswer:"
+
+        try:
+            response = self.llm_judge_client.chat.completions.create(
+                model=self.model, messages=[{"role": "user", "content": message}]
+            )
+            reply = response.choices[0].message.content.strip()
+
+            # Try to parse score from "### Final Score: x"
+            match = re.search(r"### Final Score:\s*([01](?:\.0)?)", reply)
+            if match:
+                return float(match.group(1))
+
+            # Fallback: raw "1" or "0"
+            if reply.strip() in {"1", "0"}:
+                return float(reply.strip())
+
+            print(f"Unrecognized reward output: {reply}")
+            return 0.0
+
+        except Exception as e:
+            print(f"LLM Judge error: {type(e).__name__}: {e}")
+            return 0.0
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True
