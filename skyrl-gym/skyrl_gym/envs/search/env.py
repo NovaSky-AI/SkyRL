@@ -23,6 +23,7 @@ class SearchEnv(BaseTextEnv):
         self.max_turns = extras["max_turns"] if "max_turns" in extras else 2
 
         # Initialize the tools
+        # name is hardcoded to "SearchToolGroup", with tool name "search"
         self.tool_group = SearchToolGroup(
             search_url=env_config.search_url,
             topk=env_config.topk,
@@ -84,7 +85,7 @@ class SearchEnv(BaseTextEnv):
 
         try:
             query = self._parse_action(action)
-            observation = self._execute_tool(self.tool_group.get_name(), self.tool_group.get_tool_names()[0], query)
+            observation = self._execute_tool("SearchToolGroup", "search", query)
         except Exception as e:
             error = str(e)
             observation = None
@@ -99,8 +100,8 @@ class SearchEnv(BaseTextEnv):
             new_obs = None
 
         info = {
-            "tool_group": self.tool_group.get_name(),
-            "tool_name": self.tool_group.get_tool_names()[0],
+            "tool_group": "SearchToolGroup",
+            "tool_name": "search",
             "tool_input": query,
         }
 
