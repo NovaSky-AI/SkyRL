@@ -91,6 +91,9 @@ class RayPPOTrainer:
 
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
+        
+        torch.manual_seed(cfg.trainer.seed)
+        torch.cuda.manual_seed_all(cfg.trainer.seed)
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -98,6 +101,17 @@ class RayPPOTrainer:
         """
         # prepare dataloader
         batch_size = self.cfg.trainer.train_batch_size if is_train else self.cfg.trainer.eval_batch_size
+        g = torch.Generator()
+        g.manual_seed(self.cfg.trainer.seed)
+        
+        # def seed_worker(worker_id):
+        #     import random
+        #     import numpy as np
+        #     worker_seed = self.cfg.trainer.seed + worker_id
+        #     torch.manual_seed(worker_seed)
+        #     random.seed(worker_seed)
+        #     np.random.seed(worker_seed)
+
         dataloader = StatefulDataLoader(
             dataset,
             batch_size=batch_size,
@@ -105,6 +119,8 @@ class RayPPOTrainer:
             collate_fn=dataset.collate_fn,
             num_workers=8,
             drop_last=True if is_train else False,
+            generator=g,
+            # worker_init_fn=seed_worker
         )
         if is_train:
             self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
@@ -235,6 +251,7 @@ class RayPPOTrainer:
                     generator_input, uids = self._prepare_generator_input(
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
+                    print("first prompt: ", generator_input["prompts"][0])
 
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
@@ -250,7 +267,8 @@ class RayPPOTrainer:
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                    print("example: ", vis)
+                    print("prompt example: ", generator_input["prompts"][0])
+                    print("response example: ", vis)
 
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
