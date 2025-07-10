@@ -49,6 +49,9 @@ conflicts = [
     ],
 ]
 
+[tool.uv.sources]
+skyrl-gym = { path = "./skyrl-gym" , editable = true }
+
 [project.optional-dependencies]
 deepspeed = [
     "deepspeed==0.16.5"

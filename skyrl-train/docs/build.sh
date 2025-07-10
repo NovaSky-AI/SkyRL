@@ -2,6 +2,8 @@
 set -e
 
 # Build and serve the documentation with live reload
+# Run this if you get "locale.Error: unsupported locale setting" error
+#  export LC_ALL=C.UTF-8
 # Usage: ./build.sh [--build-only]
 #   --build-only: Build docs without starting the live server
 

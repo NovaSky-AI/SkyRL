@@ -103,7 +103,7 @@ Now that we have our dataset and database files, let's walk through the some of 
         generator.sampling_params.max_generate_length=3000 \
 
         #### multi-turn generation format - see `skyrl_train/generators/skyrl_gym_generator.py` for more details
-        use_conversation_multi_turn=false
+        generator.use_conversation_multi_turn=false \
         
         #### data configuration
         data.train_data="['$DATA_DIR/train.parquet']" \
@@ -166,4 +166,5 @@ What's Next?
 
 Now that you've seen what's possible with multi-turn training with async rollouts, you might want to start building your own multi-turn environments!
 
-- :doc:`new_env`: Learn how to build your own multi-turn environments!
+- :doc:`../tutorials/new_env`: Learn how to build your own multi-turn environments!
+- :doc:`search`: Learn how to train a multi-turn search agent with SkyRL!

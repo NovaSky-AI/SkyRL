@@ -136,7 +136,9 @@ class RayPPOTrainer:
         concat_env_extras: List[Dict[str, Any]] = []
         concat_uids: List[str] = []
         sampling_params = self.cfg.generator.eval_sampling_params
+        pbar = tqdm(total=len(self.eval_dataloader), initial=0, desc="Evaluation Progress")
         for _, prompts in enumerate(self.eval_dataloader):
+            pbar.update(1)
             generator_input, uids = self._prepare_generator_input(
                 self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
             )

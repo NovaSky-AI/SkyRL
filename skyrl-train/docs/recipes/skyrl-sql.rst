@@ -8,7 +8,7 @@ You can find a WandB run for both single-turn and multi-turn Text2SQL training a
 Pre-requisites 
 ---------------
 
-Make sure to have followed the installation commands in :ref:`installation <installation>`. 
+Make sure to have followed the installation commands in :doc:`../getting-started/installation`. 
 
 
 Start Ray

@@ -3,7 +3,9 @@ import logging
 import requests
 import uuid
 import time
-from typing import List, Tuple, Optional, Any, Dict
+import threading
+from typing import Tuple, Optional, Any, Dict
+from urllib.parse import urlparse
 
 from skyrl_gym.tools.core import tool, ToolGroup
 
@@ -17,24 +19,50 @@ INITIAL_RETRY_DELAY = 1
 
 def call_search_api(
     retrieval_service_url: str,
-    query_list: List[str],
+    query: str,
     topk: int = 3,
     return_scores: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
+    log_requests: bool = True,
+    session: Optional[requests.Session] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Calls the search API with a single query.
+
+    Args:
+        retrieval_service_url: The URL of the search API.
+        query: The query to search for.
+        topk: The number of results to return.
+        return_scores: Whether to return scores for the results.
+        timeout: The timeout for the request.
+        log_requests: Whether to log requests.
+        session: The session to use for the request. If none is provided, a new session will be created.
+
+    Returns:
+        response: The response from the search API (json if successful, None otherwise)
+        error_msg: The error message if the request failed.
+    """
     request_id = str(uuid.uuid4())
     log_prefix = f"[Search Request ID: {request_id}] "
 
-    payload = {"queries": query_list, "topk": topk, "return_scores": return_scores}
+    payload = {"query": query, "topk": topk, "return_scores": return_scores}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    # Use provided session or create a new one for this request
+    if session is None:
+        session = requests.Session()
+        should_close_session = True
+    else:
+        should_close_session = False
 
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            logger.info(
-                f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
-            )
-            response = requests.post(
+            if log_requests:
+                logger.info(
+                    f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
+                )
+            response = session.post(
                 retrieval_service_url,
                 headers=headers,
                 json=payload,
@@ -55,7 +83,13 @@ def call_search_api(
             response.raise_for_status()
 
             # If successful (status code 2xx)
-            logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
+            if log_requests:
+                logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
+
+            # Close session if we created it
+            if should_close_session:
+                session.close()
+
             return response.json(), None
 
         except requests.exceptions.ConnectionError as e:
@@ -85,9 +119,14 @@ def call_search_api(
             last_error = f"{log_prefix}Unexpected Error: {e}"
             break  # Exit retry loop on other unexpected errors
 
-    # If loop finishes without returning success, return the last recorded error
-    logger.error(f"{log_prefix}Search API call failed. Last error: {last_error}")
-    return None, last_error.replace(log_prefix, "API Call Failed: ") if last_error else "API Call Failed after retries"
+    # If we reach here, all attempts failed
+    logger.error(f"{log_prefix}API Request Failed after {MAX_RETRIES} attempts: {last_error}")
+
+    # Close session if we created it
+    if should_close_session:
+        session.close()
+
+    return None, last_error
 
 
 def _passages2string(retrieval_result):
@@ -99,10 +138,44 @@ def _passages2string(retrieval_result):
 
 
 class SearchToolGroup(ToolGroup):
-    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT):
+    # Class-level session pool shared across all instances
+    _session_pool = {}
+    _session_lock = threading.Lock()
+
+    @classmethod
+    def _get_shared_session(cls, base_url: str) -> requests.Session:
+        """Get or create a shared session for the given base URL"""
+        with cls._session_lock:
+            if base_url not in cls._session_pool:
+                session = requests.Session()
+                # Configure connection pooling
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=20,  # Number of connection pools
+                    pool_maxsize=20,  # Max connections per pool
+                    max_retries=0,  # We handle retries ourselves
+                    pool_block=False,  # Don't block if pool is full
+                )
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                cls._session_pool[base_url] = session
+                logger.info(f"Created shared session pool for {base_url}")
+            return cls._session_pool[base_url]
+
+    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_requests=True):
         self.search_url = search_url
         self.topk = topk
         self.timeout = timeout
+        self.log_requests = log_requests
+
+        # Extract base URL for session sharing
+        parsed_url = urlparse(self.search_url)
+        self.base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+        # Get shared session for this base URL
+        self.session = self._get_shared_session(self.base_url)
+        if self.log_requests:
+            logger.info(f"SearchToolGroup initialized using shared session pool for {self.base_url}")
+
         super().__init__(name="SearchToolGroup")
 
     @tool
@@ -113,19 +186,21 @@ class SearchToolGroup(ToolGroup):
 
         query = query.strip()
 
-        # NOTE(shu): send single request for now for now
-        query_list = [query]
         try:
             api_response, error_msg = call_search_api(
-                retrieval_service_url=self.search_url, query_list=query_list, topk=self.topk, timeout=self.timeout
+                retrieval_service_url=self.search_url,
+                query=query,
+                topk=self.topk,
+                timeout=self.timeout,
+                log_requests=self.log_requests,
+                session=self.session,  # Pass our shared session for connection reuse
             )
         except Exception as e:
             error_msg = f"API Request Exception during batch search: {e}"
             logger.error(f"Batch search: {error_msg}")
 
         metadata = {
-            "query_count": len(query_list),
-            "queries": query_list,
+            "query": query,
             "api_request_error": error_msg,
             "api_response": None,
             "status": "unknown",
@@ -148,7 +223,6 @@ class SearchToolGroup(ToolGroup):
                 if raw_results:
                     pretty_results = []
                     total_results = 0
-
                     for retrieval in raw_results:
                         formatted = _passages2string(retrieval)
                         pretty_results.append(formatted)
@@ -159,12 +233,14 @@ class SearchToolGroup(ToolGroup):
                     metadata["status"] = "success"
                     metadata["total_results"] = total_results
                     metadata["formatted_result"] = final_result
-                    logger.info(f"Batch search: Successful, got {total_results} total results")
+                    if self.log_requests:
+                        logger.info(f"Batch search: Successful, got {total_results} total results")
                 else:
                     result_text = json.dumps({"result": "No search results found."})
                     metadata["status"] = "no_results"
                     metadata["total_results"] = 0
-                    logger.info("Batch search: No results found")
+                    if self.log_requests:
+                        logger.info("Batch search: No results found")
             except Exception as e:
                 error_msg = f"Error processing search results: {e}"
                 result_text = json.dumps({"result": error_msg})

@@ -112,8 +112,4 @@ You should now be to able to run our :doc:`quick start example <quickstart>`.
 Development 
 -----------
 
-For development, make sure to use ``--extra dev`` so that the dev dependencies are included.
-
-.. code-block:: bash
-
-    uv run --isolated --extra dev pytest -s tests/cpu
+For development, refer to the :doc:`development guide <development>`.
