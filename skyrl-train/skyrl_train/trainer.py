@@ -101,17 +101,11 @@ class RayPPOTrainer:
         """
         # prepare dataloader
         batch_size = self.cfg.trainer.train_batch_size if is_train else self.cfg.trainer.eval_batch_size
+        
+        # Seed the dataloader for reproducibility.
         g = torch.Generator()
         g.manual_seed(self.cfg.trainer.seed)
         
-        # def seed_worker(worker_id):
-        #     import random
-        #     import numpy as np
-        #     worker_seed = self.cfg.trainer.seed + worker_id
-        #     torch.manual_seed(worker_seed)
-        #     random.seed(worker_seed)
-        #     np.random.seed(worker_seed)
-
         dataloader = StatefulDataLoader(
             dataset,
             batch_size=batch_size,
