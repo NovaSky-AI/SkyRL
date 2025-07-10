@@ -17,5 +17,5 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.infer
     --max-num_batched_tokens 8192 \
     --max-num-seqs 1024 \
     --trust-remote-code \
-    --distributed-executor-backend ray \
+    --distributed-executor-backend mp \
     --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap

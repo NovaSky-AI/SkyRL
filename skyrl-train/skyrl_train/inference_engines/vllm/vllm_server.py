@@ -12,13 +12,11 @@ from vllm.entrypoints.openai.api_server import (
     create_server_socket,
     build_app,
     init_app_state,
-    TIMEOUT_KEEP_ALIVE,
 )
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
 from fastapi import Request
-
-from skyrl_train.utils import str_to_torch_dtype
 
 
 # TODO(tgriggs): Handle errors and use best practices for vLLM server
@@ -106,7 +104,6 @@ class VllmServer:
             name = data.get("name")
             dtype = data.get("dtype")
             shape = data.get("shape")
-            dtype = str_to_torch_dtype(dtype)
             await engine.collective_rpc(
                 "update_weight",
                 args=(name, dtype, shape),
@@ -131,7 +128,7 @@ class VllmServer:
             host=self.server_args.host,
             port=self.server_args.port,
             log_level=self.server_args.uvicorn_log_level,
-            timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=self.server_args.ssl_keyfile,
             ssl_certfile=self.server_args.ssl_certfile,
             ssl_ca_certs=self.server_args.ssl_ca_certs,
@@ -148,6 +145,7 @@ class VllmServer:
 
 
 if __name__ == "__main__":
+    breakpoint()
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
