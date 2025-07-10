@@ -37,7 +37,7 @@ class BaseTextEnv(Env[str, str]):
         self.tool_groups = []
         self.tool_to_toolgroup = {}
 
-    def _init_tool_groups(self, tool_groups: List = []) -> None:
+    def init_tool_groups(self, tool_groups: List = []) -> None:
         """
         Initialize the tool groups for the environment.
         """
