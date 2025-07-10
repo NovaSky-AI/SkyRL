@@ -388,7 +388,7 @@ Generator Configuration
       min_p: 0.0
       top_k: -1
 
-    use_conversation_multi_turn: false
+    use_conversation_multi_turn: true
 
     # sampling params for evaluation
     eval_sampling_params:
