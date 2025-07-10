@@ -42,8 +42,8 @@ uv run --isolated --extra vllm -m examples.llm_as_a_judge.main_llm_judge \
   trainer.policy_mini_batch_size=256 \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.ppo_loss_type="dual_clip" \
-  trainer.ckpt_interval=10000 \
-  trainer.hf_save_interval=10000 \
+  trainer.ckpt_interval=5 \
+  trainer.hf_save_interval=5 \
   trainer.export_path=/mnt/cluster_storage/export/ \
   trainer.dump_data_batch=true \
   generator.backend=vllm \
