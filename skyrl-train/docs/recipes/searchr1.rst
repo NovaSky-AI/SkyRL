@@ -68,15 +68,12 @@ Prepare Datasets
 
 Start the Local Flat e5 Retrieval Server 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-GPU version 
-
 .. code-block:: bash
 
     conda activate retriever
 
     # redirect the output to a file to avoid cluttering the terminal
-    # we have observed this causing spikes in server response times
+    # we have observed outputting to the terminal causing spikes in server response times
     bash examples/search/retriever/retrieval_launch.sh > retrieval_server.log 
 
 Start your Training Run

@@ -1,6 +1,8 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SearchR1 data.
+# follow the instructions in examples/search/search.md for setting up the dataset
+# and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/search/run_search.sh
 

@@ -44,14 +44,12 @@ gzip -d $local_dir/wiki-18.jsonl.gz
 ```
 
 ## Start the Local Flat e5 Retrieval Server 
-
-GPU version 
 ```bash
 conda activate retriever
 
 # redirect the output to a file to avoid cluttering the terminal
-# we have observed this causing spikes in server response times
-bash examples/search/retriever/retrieval_launch.sh > ~/logs/retrieval_server.log 
+# we have observed outputting to the terminal causing spikes in server response times
+bash examples/search/retriever/retrieval_launch.sh > retrieval_server.log 
 ```
 
 ## Launch your Training Job

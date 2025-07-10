@@ -105,7 +105,6 @@ We recommend building the documentation locally to preview your changes.
 .. code-block:: bash
 
     cd skyrl-train # make sure you are in the correct directory
-    export LC_ALL=C.UTF-8
     bash docs/build.sh
 
 This will build the documentation and serve it at `http://127.0.0.1:8000 <http://127.0.0.1:8000>`_.
