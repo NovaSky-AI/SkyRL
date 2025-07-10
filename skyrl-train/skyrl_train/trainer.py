@@ -98,6 +98,11 @@ class RayPPOTrainer:
         """
         # prepare dataloader
         batch_size = self.cfg.trainer.train_batch_size if is_train else self.cfg.trainer.eval_batch_size
+
+        # Seed the dataloader for reproducibility.
+        seeded_generator = torch.Generator()
+        seeded_generator.manual_seed(self.cfg.trainer.seed)
+
         dataloader = StatefulDataLoader(
             dataset,
             batch_size=batch_size,
@@ -105,6 +110,7 @@ class RayPPOTrainer:
             collate_fn=dataset.collate_fn,
             num_workers=8,
             drop_last=True if is_train else False,
+            generator=seeded_generator,
         )
         if is_train:
             self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
@@ -136,7 +142,9 @@ class RayPPOTrainer:
         concat_env_extras: List[Dict[str, Any]] = []
         concat_uids: List[str] = []
         sampling_params = self.cfg.generator.eval_sampling_params
+        pbar = tqdm(total=len(self.eval_dataloader), initial=0, desc="Evaluation Progress")
         for _, prompts in enumerate(self.eval_dataloader):
+            pbar.update(1)
             generator_input, uids = self._prepare_generator_input(
                 self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
             )

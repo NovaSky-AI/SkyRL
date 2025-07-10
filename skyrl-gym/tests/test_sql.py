@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev pytest tests/cpu/skyrl_gym/test_sql.py
+uv run --isolated --extra dev pytest tests/test_sql.py
 """
 
 import skyrl_gym
