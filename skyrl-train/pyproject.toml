@@ -82,7 +82,7 @@ vllm = [
     "torchvision"
 ]
 sglang = [
-    "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",
+    "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
     # The version is pinned to 0.2.5 because sglang requires this
     # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
     "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",

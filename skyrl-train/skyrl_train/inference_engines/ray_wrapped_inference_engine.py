@@ -72,7 +72,7 @@ def create_ray_wrapped_inference_engines(
     sampling_params: Optional[Dict[str, Any]] = None,
     tokenizer=None,
     backend="vllm",
-):
+) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
     """

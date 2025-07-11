@@ -209,7 +209,10 @@ class RayPPOTrainer:
         # Change it to True after sglang fixes the issue.
         eval_need_sync = self.cfg.trainer.placement.colocate_all and self.cfg.generator.backend == "sglang"
         self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=not eval_need_sync
+            self.policy_model,
+            self.inference_engine_client,
+            self.cfg.trainer.placement.colocate_all,
+            no_sync=not eval_need_sync,
         )
 
         # Load checkpoint state if resumption is enabled
