@@ -7,7 +7,7 @@ text2sql:
 
 llm_as_a_judge:
   model: "gpt-4o-mini"
-  base_url: "http://localhost:8000/v1"  # local endpoint 
+  base_url: null  # or a local endpoint: http://localhost:8000/v1
 
 search:
   log_requests: false
