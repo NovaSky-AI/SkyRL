@@ -20,7 +20,7 @@ from transformers import AutoTokenizer
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
-from typing import List, Dict, Tuple
+from typing import Tuple
 
 model = "Qwen/Qwen2.5-1.5B-Instruct"
 TP_SIZE = 2
@@ -116,11 +116,13 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
         engine_backend=backend,
         tensor_parallel_size=tp_size,
         sampling_params=get_sampling_params_for_backend(
-            backend, DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0})
+            backend,
+            DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0}),
         ),
     )
 
     return InferenceEngineClient(engines), server_process
+
 
 def init_ray_inference_engines(backend: str) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
@@ -145,7 +147,8 @@ def init_ray_inference_engines(backend: str) -> InferenceEngineClient:
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         sampling_params=get_sampling_params_for_backend(
-            backend, DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0})
+            backend,
+            DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0}),
         ),
         tokenizer=AutoTokenizer.from_pretrained(model),
         backend=backend,
@@ -253,7 +256,7 @@ def test_inference_engines_generation(backend: str):
 
         # Get responses from Ray engine
         llm_client = init_ray_inference_engines(backend)
-        
+
         # Batched generation
         local_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
         assert len(local_batch_responses) == len(
@@ -326,7 +329,9 @@ def test_token_based_generation(backend: str):
         # Outputs should be similar since we're using the same inputs
         for i in range(len(prompts)):
             if not are_responses_similar([token_batch_responses[i]], [prompt_responses[i]], tolerance=0.01):
-                print(f"Token and prompt responses differ: token={token_batch_responses[i]}, prompt={prompt_responses[i]}")
+                print(
+                    f"Token and prompt responses differ: token={token_batch_responses[i]}, prompt={prompt_responses[i]}"
+                )
 
     finally:
         ray.shutdown()
