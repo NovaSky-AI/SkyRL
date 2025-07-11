@@ -16,7 +16,7 @@ MAX_INPUT_LENGTH=29000
 MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 
-uv run --isolated --extra vllm -m examples.llm_as_a_judge.main_llm_judge \
+uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

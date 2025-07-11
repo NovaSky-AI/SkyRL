@@ -35,6 +35,8 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
 
         # Set up OpenAI client
         openai_api_key = os.getenv("OPENAI_API_KEY")
+        if openai_api_key is None:
+            raise ValueError("`OPENAI_API_KEY` must be set for Llm as a judge env")
         self.llm_judge_client = OpenAI(base_url=env_config.base_url, api_key=openai_api_key)
         self.model = env_config.model
 
