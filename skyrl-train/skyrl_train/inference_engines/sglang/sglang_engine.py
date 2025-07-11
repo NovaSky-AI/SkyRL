@@ -156,6 +156,8 @@ def update_weight_cuda_ipc(model, named_tensors):
     weight = func(*list_args)
     model.load_weights([(weight_name, weight)])
 
+    # TODO(charlie): vllm has a torch.cuda.synchronize() call here, do we need it here?
+
 
 CUSTOM_WEIGHT_LOADER_PATH = "skyrl_train.inference_engines.sglang.sglang_engine.update_weight_cuda_ipc"
 
@@ -273,6 +275,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         if extras is not None and "ipc_handles" in extras:
             # CUDA IPC -- Here we reuse SGLang's update_weights_from_tensor, but actually load the
             # weight from our request data. This will use the update_weight_cuda_ipc defined above.
+            # This is a bit hacky, but the only way as of now, since there is no other way to
+            # write per-TP worker code besides using `custom_weight_loader`, unlike in vLLM we can
+            # use `WorkerWrap`.
 
             # Serialize the request data
             request_data = pickle.dumps(request)
