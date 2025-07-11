@@ -35,7 +35,7 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
 
         # Set up OpenAI client
         openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.llm_judge_client = OpenAI(api_key=openai_api_key)
+        self.llm_judge_client = OpenAI(base_url=env_config.base_url, api_key=openai_api_key)
         self.model = env_config.model
 
     def _get_reward(self, action: str) -> float:
