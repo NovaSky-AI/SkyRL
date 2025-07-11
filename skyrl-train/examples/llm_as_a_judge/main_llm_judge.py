@@ -15,7 +15,7 @@ def skyrl_entrypoint(cfg: DictConfig):
     # Register the multiply environment inside the entrypoint task (no need to modify the skyrl-gym package).
     register(
         id="llm_as_a_judge",
-        entry_point="examples.llm_as_a_judge.env:GSM8kLLMJudgeEnv",
+        entry_point="examples.llm_as_a_judge.llm_judge_env:GSM8kLLMJudgeEnv",
     )
 
     # make sure that the training loop is not run on the head node.

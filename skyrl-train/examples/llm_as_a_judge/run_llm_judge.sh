@@ -2,11 +2,11 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/llm_as_a_judge/gsm8k_dataset_judge_env.py --output_dir $HOME/data/gsm8k_llm_judge
 # add OPENAI_API_KEY and WANDB_API_KEY to .env.llm_judge
 # bash examples/llm_as_a_judge/run_llm_judge.sh
 
-DATA_DIR="$HOME/data/gsm8k"
+DATA_DIR="$HOME/data/gsm8k_llm_judge"
 CKPT_PATH="$HOME/ckpts/llm_judge"
 
 NUM_GPUS=4
@@ -14,6 +14,7 @@ NUM_INFERENCE_ENGINES=4
 TP_SIZE=1
 LOGGER=wandb
 
+# We use a smaller batch size here for demonstration
 uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -26,14 +27,14 @@ uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_ju
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
+  trainer.eval_batch_size=32 \
+  trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=1024 \
-  trainer.policy_mini_batch_size=256 \
-  trainer.micro_forward_batch_size_per_gpu=64 \
-  trainer.micro_train_batch_size_per_gpu=64 \
+  trainer.train_batch_size=32 \
+  trainer.policy_mini_batch_size=32 \
+  trainer.micro_forward_batch_size_per_gpu=40 \
+  trainer.micro_train_batch_size_per_gpu=40 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
