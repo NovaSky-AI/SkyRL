@@ -191,9 +191,9 @@ def validate_cfg(cfg: DictConfig):
     ), f"invalid loss type: {cfg.trainer.algorithm.ppo_loss_type}. Must be one of `['regular', 'dual_clip']`"
 
     # TODO: fix once we support these features with SGLang
-    if cfg.generator.backend == "sglang":
+    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
         assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
-            "As of now, We do not support tensor parallel inference engine with SGLang. "
+            "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
             "Please set `inference_engine_tensor_parallel_size` to 1."
         )
 
