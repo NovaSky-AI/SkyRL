@@ -164,10 +164,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             max_response_tokens = max_tokens
 
-        response_ids = response_ids[:max_response_tokens]
-        loss_mask = loss_mask[:max_response_tokens]
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
+        response_ids = response_ids[:max_response_tokens]
+        loss_mask = loss_mask[:max_response_tokens]
 
         return response_ids, reward, stop_reason, loss_mask, prompt_ids
 
