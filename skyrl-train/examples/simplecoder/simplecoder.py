@@ -62,7 +62,7 @@ class GuixExecutor(Executor):
 
         with tempfile.NamedTemporaryFile(mode="w", suffix="_script.sh", delete=False) as script_file:
             script_file.write(f"source {env_file.name}\n")
-            script_file.write(f"cd $PWD\n")
+            script_file.write("cd $PWD\n")
             script_file.write(f"{command}\n")
             script_file.write(f"export -p > {env_file.name}\n")
 
