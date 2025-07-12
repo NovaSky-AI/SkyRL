@@ -57,27 +57,34 @@ class GuixExecutor(Executor):
         if self.manifest_file:
             guix_cmd.extend(["-m", self.manifest_file])
 
-        # Add container options for sandboxing
-        guix_cmd.extend([
-            "--container",          # Run in container for isolation
-            "--network",            # Allow network access
-        ])
-
         with tempfile.NamedTemporaryFile(mode="w", suffix="_env.sh", delete=False) as env_file:
             env_file.write(self.current_env)
 
-        container_env_path = "/tmp/env.sh"
         with tempfile.NamedTemporaryFile(mode="w", suffix="_script.sh", delete=False) as script_file:
-            script_file.write(f"source {container_env_path}\n")
+            script_file.write(f"source {env_file.name}\n")
             script_file.write(f"cd $PWD\n")
             script_file.write(f"{command}\n")
-            script_file.write(f"export -p > {container_env_path}\n")
-        
-        container_script_path = "/tmp/script.sh"
-        guix_cmd.extend([f"--share={script_file.name}={container_script_path}"])
-        guix_cmd.extend([f"--share={env_file.name}={container_env_path}"])
+            script_file.write(f"export -p > {env_file.name}\n")
 
-        guix_cmd.extend(["--", "sh", container_script_path])
+        # Add a very lightweight sandbox using https://github.com/containers/bubblewrap.
+        # Originally we were using the guix shell --container sandbox for this, but there
+        # are environments where that does not work (e.g. mounting the /proc filesystem
+        # can fail in a GPU container). We might want to revisit this.
+        guix_cmd.extend([
+            "--", "bwrap",
+            "--ro-bind", "/bin", "/bin",
+            "--ro-bind", "/gnu", "/gnu",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--new-session",
+            "--ro-bind", script_file.name, script_file.name,
+            "--bind", env_file.name, env_file.name,
+            "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+            "--bind", "/home/ray/default/SkyRL/skyrl-train/examples/simplecoder/test-repo", "/home/skyrl",
+            "--setenv", "HOME", "/home/skyrl/",
+            "sh", script_file.name
+        ])
 
         try:
             result = subprocess.run(

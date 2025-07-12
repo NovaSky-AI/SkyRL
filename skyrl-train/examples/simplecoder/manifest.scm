@@ -2,6 +2,7 @@
 	     (guix gexp)
 	     (gnu packages bash)
 	     (gnu packages version-control)
+	     (gnu packages virtualization)
 	     (gnu packages certs)
 	     (gnu packages check)
 	     (gnu packages python))
