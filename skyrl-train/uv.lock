@@ -13,6 +13,7 @@ resolution-markers = [
     "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
 ]
 conflicts = [[
+    { package = "skyrl-train", extra = "cpu-ci-test" },
     { package = "skyrl-train", extra = "sglang" },
     { package = "skyrl-train", extra = "vllm" },
 ]]
@@ -563,11 +564,11 @@ wheels = [
 [package.optional-dependencies]
 standard = [
     { name = "email-validator" },
-    { name = "fastapi-cli", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "fastapi-cli", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "httpx" },
     { name = "jinja2" },
     { name = "python-multipart" },
-    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "uvicorn", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -577,7 +578,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "rich-toolkit" },
     { name = "typer" },
-    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "uvicorn", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fe/73/82a5831fbbf8ed75905bacf5b2d9d3dfd6f04d6968b29fe6f72a5ae9ceb1/fastapi_cli-0.0.7.tar.gz", hash = "sha256:02b3b65956f526412515907a0793c9094abd4bfb5457b389f645b0ea6ba3605e", size = 16753, upload-time = "2024-12-15T14:28:10.028Z" }
 wheels = [
@@ -586,7 +587,7 @@ wheels = [
 
 [package.optional-dependencies]
 standard = [
-    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "uvicorn", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -1108,8 +1109,8 @@ name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
 wheels = [
@@ -1593,7 +1594,7 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/a2/313db0453087f5324a5900380ca2e57e050c8de76f407b5e11383dc762ae/nvidia_cusparse_cu12-12.5.7.53-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d869c6146ca80f4305b62e02d924b4aaced936f8173e3cef536a67eed2a91af1", size = 291963692, upload-time = "2025-01-23T17:59:40.325Z" },
@@ -2217,7 +2218,7 @@ name = "pytest"
 version = "8.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2756,6 +2757,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+cpu-ci-test = [
+    { name = "flash-attn", version = "2.7.4.post1", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" } },
+]
 deepspeed = [
     { name = "deepspeed" },
 ]
@@ -2831,7 +2835,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.9.2" },
     { name = "wandb" },
 ]
-provides-extras = ["deepspeed", "dev", "docs", "vllm", "sglang"]
+provides-extras = ["deepspeed", "cpu-ci-test", "dev", "docs", "vllm", "sglang"]
 
 [[package]]
 name = "smmap"
@@ -2886,7 +2890,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alabaster" },
     { name = "babel" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "docutils" },
     { name = "imagesize" },
     { name = "jinja2" },
@@ -3065,7 +3069,7 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "mpmath", marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "mpmath", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
@@ -3418,16 +3422,16 @@ resolution-markers = [
     "sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "regex", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "requests", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "regex", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "requests", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/07/42/271bcf364788337ac24e7f200005ac7142aaf022206bd6119d2daca22c04/transformers-4.52.3.tar.gz", hash = "sha256:2e1de29374f27920aaf6d589d4e6339f33def2fb08809e1a1d792e040e9fbce7", size = 8951324, upload-time = "2025-05-22T14:40:52.888Z" }
 wheels = [
@@ -3436,8 +3440,8 @@ wheels = [
 
 [package.optional-dependencies]
 sentencepiece = [
-    { name = "protobuf", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "sentencepiece", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "protobuf", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sentencepiece", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -3445,24 +3449,26 @@ name = "transformers"
 version = "4.53.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "regex", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "requests", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
+    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "regex", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "requests", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e8/40/f2d2c3bcf5c6135027cab0fd7db52f6149a1c23acc4e45f914c43d362386/transformers-4.53.0.tar.gz", hash = "sha256:f89520011b4a73066fdc7aabfa158317c3934a22e3cd652d7ffbc512c4063841", size = 9177265, upload-time = "2025-06-26T16:10:54.729Z" }
 wheels = [
@@ -3471,8 +3477,8 @@ wheels = [
 
 [package.optional-dependencies]
 sentencepiece = [
-    { name = "protobuf", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "sentencepiece", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "protobuf", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sentencepiece", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -3624,14 +3630,14 @@ dependencies = [
     { name = "compressed-tensors" },
     { name = "depyf" },
     { name = "einops" },
-    { name = "fastapi", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "fastapi", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "filelock" },
     { name = "gguf" },
     { name = "huggingface-hub", extra = ["hf-xet"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
     { name = "lark" },
     { name = "llguidance", marker = "platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "lm-format-enforcer" },
-    { name = "mistral-common", extra = ["opencv"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "mistral-common", extra = ["opencv"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "msgspec" },
     { name = "ninja" },
     { name = "numba" },
