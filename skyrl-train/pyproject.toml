@@ -19,7 +19,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
     "loguru",
     "tqdm",
     "tensorboard",
@@ -46,6 +45,7 @@ conflicts = [
     [
         { extra = "vllm" },
         { extra = "sglang" },
+        { extra = "cpu_ci_test" },
     ],
 ]
 
@@ -56,12 +56,16 @@ skyrl-gym = { path = "./skyrl-gym" , editable = true }
 deepspeed = [
     "deepspeed==0.16.5"
 ]
+cpu_ci_test = [
+    "torch==2.6.0",
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
+]
 dev = [
     "ruff==0.11.9",
     "black==24.10.0",
     "pytest>=6.2.5",
     "pytest-asyncio",
-    "pre-commit"
+    "pre-commit",
 ]
 docs = [
     "sphinx>=7.0.0",
@@ -73,16 +77,15 @@ docs = [
 ]
 vllm = [
     "vllm==0.8.5",
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
     # NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
     # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime (terribly slow).
     "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
 ]
 sglang = [
-    "sglang[srt,openai]==0.4.6.post4",
-    "torch-memory-saver>=0.0.5",
-    # The version is pinned to 0.2.5 because sglang requires this
-    # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
-    "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
+    "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
+    "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
 ]
 
 
