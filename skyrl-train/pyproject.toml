@@ -63,7 +63,8 @@ dev = [
     "black==24.10.0",
     "pytest>=6.2.5",
     "pytest-asyncio",
-    "pre-commit"
+    "pre-commit",
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
 ]
 docs = [
     "sphinx>=7.0.0",
