@@ -60,7 +60,8 @@ deepspeed = [
     "deepspeed==0.16.5"
 ]
 cpu_ci_test = [
-    "flash-attn>=2.7.0",  # Let uv choose the appropriate wheel
+    "torch==2.6.0",
+    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
 ]
 dev = [
     "ruff==0.11.9",
