@@ -60,8 +60,8 @@ jobs:
       - name: Install skyrl-train
         run:  uv sync --frozen --extra dev # installs from lock file
       - name: Run cpu tests
-        # TODO(Charlie): remove --extra dev once flash-attn can be shared between vllm and sglang and moved back to main dependencies
-        run:  uv run --frozen --extra dev pytest tests/cpu/
+        # TODO(Charlie): remove --extra cpu_ci_test once flash-attn can be shared between vllm and sglang and moved back to main dependencies
+        run:  uv run --frozen --extra cpu_ci_test pytest tests/cpu/
   
   skyrl_gym_tests:
     needs: check_code_quality

@@ -2,16 +2,19 @@ version = 1
 revision = 2
 requires-python = "==3.12.*"
 resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
 ]
 conflicts = [[
+    { package = "skyrl-train", extra = "cpu-ci-test" },
     { package = "skyrl-train", extra = "sglang" },
     { package = "skyrl-train", extra = "vllm" },
 ]]
@@ -39,8 +42,8 @@ dependencies = [
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bd/c2/b9e33ad13232606dded4c546e654fb06a15f1dbcbd95d81c9f9dd3ccc771/accelerate-1.8.1.tar.gz", hash = "sha256:f60df931671bc4e75077b852990469d4991ce8bd3a58e72375c3c95132034db9", size = 380872, upload-time = "2025-06-20T15:36:14.618Z" }
 wheels = [
@@ -347,10 +350,10 @@ version = "0.9.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/91/3e/f74c5dcca6552e15a00df4a78c6e4a8776a7c901acc5a8c1dd371698ef54/compressed_tensors-0.9.3.tar.gz", hash = "sha256:5bdc7774a6c217496cba7d6a4fca6ffac943e68adae0481ead6d036660c1b340", size = 66354, upload-time = "2025-04-02T17:05:52.263Z" }
 wheels = [
@@ -438,8 +441,8 @@ dependencies = [
     { name = "psutil" },
     { name = "py-cpuinfo" },
     { name = "pydantic" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/88/96569b2acb3219c9c72068f9b952c59beffe366e7d1edd9e922e5c68f08b/deepspeed-0.16.5.tar.gz", hash = "sha256:29e007a2bdafb1431b7a021126dace0126ce53c57eb79db1ba85a1484c0b770e", size = 1455833, upload-time = "2025-03-27T21:48:09.037Z" }
@@ -574,11 +577,11 @@ wheels = [
 [package.optional-dependencies]
 standard = [
     { name = "email-validator" },
-    { name = "fastapi-cli", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "fastapi-cli", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "httpx" },
     { name = "jinja2" },
     { name = "python-multipart" },
-    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "uvicorn", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -588,7 +591,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "rich-toolkit" },
     { name = "typer" },
-    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "uvicorn", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fe/73/82a5831fbbf8ed75905bacf5b2d9d3dfd6f04d6968b29fe6f72a5ae9ceb1/fastapi_cli-0.0.7.tar.gz", hash = "sha256:02b3b65956f526412515907a0793c9094abd4bfb5457b389f645b0ea6ba3605e", size = 16753, upload-time = "2024-12-15T14:28:10.028Z" }
 wheels = [
@@ -597,7 +600,7 @@ wheels = [
 
 [package.optional-dependencies]
 standard = [
-    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "uvicorn", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -614,14 +617,17 @@ name = "flash-attn"
 version = "2.7.4.post1"
 source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
 resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "sys_platform == 'darwin'",
-    "sys_platform != 'darwin' and sys_platform != 'linux'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
 ]
 dependencies = [
     { name = "einops" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", hash = "sha256:7e0b07913d56782d0f3f2ee76bd39587557742628983f6ab9ec2527c99437476" },
@@ -1181,8 +1187,8 @@ name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
 wheels = [
@@ -1331,8 +1337,8 @@ dependencies = [
     { name = "numpy", marker = "sys_platform == 'darwin'" },
     { name = "protobuf", marker = "sys_platform == 'darwin'" },
     { name = "pyyaml", marker = "sys_platform == 'darwin'" },
-    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, extra = ["sentencepiece"], marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/52/34/d2b551d4519a9bafdfd29f76987dbcaaee370b974cfa81acfba782d6063f/mlx_lm-0.25.2.tar.gz", hash = "sha256:7d01baa66916aabd5be7345786acbfaf01d4e3f646759d7232e14aebfd4420a8", size = 146815, upload-time = "2025-06-09T04:18:47.142Z" }
 wheels = [
@@ -1665,7 +1671,7 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-cublas-cu12", version = "12.4.5.8", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cublas-cu12", version = "12.4.5.8", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/fd/713452cd72343f682b1c7b9321e23829f00b842ceaedcda96e742ea0b0b3/nvidia_cudnn_cu12-9.1.0.70-py3-none-manylinux2014_x86_64.whl", hash = "sha256:165764f44ef8c61fcdfdfdbe769d687e06374059fbb388b6c89ecb0e28793a6f", size = 664752741, upload-time = "2024-04-22T15:24:15.253Z" },
@@ -1680,7 +1686,7 @@ resolution-markers = [
     "sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-cublas-cu12", version = "12.6.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cublas-cu12", version = "12.6.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/93/a201a12d3ec1caa8c6ac34c1c2f9eeb696b886f0c36ff23c638b46603bd0/nvidia_cudnn_cu12-9.5.1.17-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:9fd4584468533c61873e5fda8ca41bac3a38bcb2d12350830c69b0a96a7e4def", size = 570523509, upload-time = "2024-10-25T19:53:03.148Z" },
@@ -1696,7 +1702,7 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7a/8a/0e728f749baca3fbeffad762738276e5df60851958be7783af121a7221e7/nvidia_cufft_cu12-11.2.1.3-py3-none-manylinux2014_aarch64.whl", hash = "sha256:5dad8008fc7f92f5ddfa2101430917ce2ffacd86824914c82e28990ad7f00399", size = 211422548, upload-time = "2024-06-18T19:33:39.396Z" },
@@ -1712,7 +1718,7 @@ resolution-markers = [
     "sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1f/37/c50d2b2f2c07e146776389e3080f4faf70bcc4fa6e19d65bb54ca174ebc3/nvidia_cufft_cu12-11.3.0.4-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d16079550df460376455cba121db6564089176d9bac9e4f360493ca4741b22a6", size = 200164144, upload-time = "2024-11-20T17:40:58.288Z" },
@@ -1767,9 +1773,9 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-cublas-cu12", version = "12.4.5.8", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusparse-cu12", version = "12.3.1.170", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cublas-cu12", version = "12.4.5.8", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusparse-cu12", version = "12.3.1.170", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/6b/a5c33cf16af09166845345275c34ad2190944bcc6026797a39f8e0a282e0/nvidia_cusolver_cu12-11.6.1.9-py3-none-manylinux2014_aarch64.whl", hash = "sha256:d338f155f174f90724bbde3758b7ac375a70ce8e706d70b018dd3375545fc84e", size = 127634111, upload-time = "2024-06-18T19:35:01.793Z" },
@@ -1785,9 +1791,9 @@ resolution-markers = [
     "sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-cublas-cu12", version = "12.6.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusparse-cu12", version = "12.5.4.2", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cublas-cu12", version = "12.6.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusparse-cu12", version = "12.5.4.2", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/93/17/dbe1aa865e4fdc7b6d4d0dd308fdd5aaab60f939abfc0ea1954eac4fb113/nvidia_cusolver_cu12-11.7.1.2-py3-none-manylinux2014_aarch64.whl", hash = "sha256:0ce237ef60acde1efc457335a2ddadfd7610b892d94efee7b776c64bb1cac9e0", size = 157833628, upload-time = "2024-10-01T17:05:05.591Z" },
@@ -1805,7 +1811,7 @@ resolution-markers = [
     "platform_machine != 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine == 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/a9/c0d2f83a53d40a4a41be14cea6a0bf9e668ffcf8b004bd65633f433050c0/nvidia_cusparse_cu12-12.3.1.170-py3-none-manylinux2014_aarch64.whl", hash = "sha256:9d32f62896231ebe0480efd8a7f702e143c98cfaa0e8a76df3386c1ba2b54df3", size = 207381987, upload-time = "2024-06-18T19:35:32.989Z" },
@@ -1821,7 +1827,7 @@ resolution-markers = [
     "sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/eb/6681efd0aa7df96b4f8067b3ce7246833dd36830bb4cec8896182773db7d/nvidia_cusparse_cu12-12.5.4.2-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d25b62fb18751758fe3c93a4a08eff08effedfe4edf1c6bb5afd0890fe88f887", size = 216451147, upload-time = "2024-11-20T17:44:18.055Z" },
@@ -2156,8 +2162,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "referencing" },
     { name = "requests" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
@@ -2253,11 +2259,11 @@ dependencies = [
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
     { name = "tqdm" },
-    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
+    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/65/faa18cd8ffbe0f742c3f2559770646cce2574b9cd28a2a05e8d36f64e968/peft-0.15.2.tar.gz", hash = "sha256:7059029f4d42a092ded1aa117dd366a46084aef638bdd593f6ab0195d5427fcd", size = 472952, upload-time = "2025-04-15T15:27:53.09Z" }
 wheels = [
@@ -2564,7 +2570,7 @@ name = "pytest"
 version = "8.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -3074,12 +3080,15 @@ dependencies = [
     { name = "tensordict" },
     { name = "torchdata" },
     { name = "tqdm" },
-    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
+    { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "transformers", version = "4.52.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "wandb" },
 ]
 
 [package.optional-dependencies]
+cpu-ci-test = [
+    { name = "flash-attn", version = "2.7.4.post1", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" } },
+]
 deepspeed = [
     { name = "deepspeed" },
 ]
@@ -3101,7 +3110,7 @@ docs = [
 sglang = [
     { name = "flash-attn", version = "2.8.0.post2", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" } },
     { name = "flashinfer-python", version = "0.2.6.post1+cu128torch2.7", source = { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" } },
-    { name = "sglang", extra = ["openai", "srt", "torch-memory-saver"], marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "sglang", extra = ["openai", "srt", "torch-memory-saver"], marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 vllm = [
     { name = "flash-attn", version = "2.7.4.post1", source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" } },
@@ -3116,6 +3125,7 @@ requires-dist = [
     { name = "datasets" },
     { name = "debugpy", specifier = "==1.8.0" },
     { name = "deepspeed", marker = "extra == 'deepspeed'", specifier = "==0.16.5" },
+    { name = "flash-attn", marker = "extra == 'cpu-ci-test'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-attn", marker = "extra == 'sglang'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-attn", marker = "extra == 'vllm'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'sglang'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
@@ -3148,7 +3158,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.8.5" },
     { name = "wandb" },
 ]
-provides-extras = ["deepspeed", "dev", "docs", "vllm", "sglang"]
+provides-extras = ["deepspeed", "cpu-ci-test", "dev", "docs", "vllm", "sglang"]
 
 [[package]]
 name = "smmap"
@@ -3203,7 +3213,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alabaster" },
     { name = "babel" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "docutils" },
     { name = "imagesize" },
     { name = "jinja2" },
@@ -3382,7 +3392,7 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "mpmath", marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "mpmath", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ca/99/5a5b6f19ff9f083671ddf7b9632028436167cd3d33e11015754e41b249a4/sympy-1.13.1.tar.gz", hash = "sha256:9cebf7e04ff162015ce31c9c6c9144daa34a93bd082f54fd8f12deca4f47515f", size = 7533040, upload-time = "2024-07-19T09:26:51.238Z" }
 wheels = [
@@ -3398,7 +3408,7 @@ resolution-markers = [
     "sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "mpmath", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "mpmath", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
@@ -3445,8 +3455,8 @@ dependencies = [
     { name = "numpy" },
     { name = "orjson" },
     { name = "packaging" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/03/46f4a9d9e017f319aa1fe11c5e1cb3642b63257d1423abc4238c14970d33/tensordict-0.8.3-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:7657a6ec866c2045f0195c7d1553bce3ae9e2f0bb1294eb0d1fa681f835a5a32", size = 724610, upload-time = "2025-05-16T15:18:00.491Z" },
@@ -3509,27 +3519,27 @@ resolution-markers = [
     "sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "fsspec", marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "jinja2", marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "networkx", marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "nvidia-cublas-cu12", version = "12.4.5.8", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cuda-cupti-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cuda-nvrtc-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cuda-runtime-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cudnn-cu12", version = "9.1.0.70", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cufft-cu12", version = "11.2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-curand-cu12", version = "10.3.5.147", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusolver-cu12", version = "11.6.1.9", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusparse-cu12", version = "12.3.1.170", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusparselt-cu12", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nccl-cu12", version = "2.21.5", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nvtx-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "setuptools", marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "sympy", version = "1.13.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "triton", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "typing-extensions", marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "filelock", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "fsspec", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "jinja2", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "networkx", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cublas-cu12", version = "12.4.5.8", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cuda-cupti-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cuda-nvrtc-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cuda-runtime-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cudnn-cu12", version = "9.1.0.70", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cufft-cu12", version = "11.2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-curand-cu12", version = "10.3.5.147", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusolver-cu12", version = "11.6.1.9", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusparse-cu12", version = "12.3.1.170", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusparselt-cu12", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nccl-cu12", version = "2.21.5", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvtx-cu12", version = "12.4.127", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "setuptools", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sympy", version = "1.13.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "triton", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "typing-extensions", marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/35/0c52d708144c2deb595cd22819a609f78fdd699b95ff6f0ebcd456e3c7c1/torch-2.6.0-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:2bb8987f3bb1ef2675897034402373ddfc8f5ef0e156e2d8cfc47cacafdda4a9", size = 766624563, upload-time = "2025-01-29T16:23:19.084Z" },
@@ -3547,28 +3557,28 @@ resolution-markers = [
     "sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
-    { name = "fsspec", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
-    { name = "jinja2", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
-    { name = "networkx", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
-    { name = "nvidia-cublas-cu12", version = "12.6.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cuda-cupti-cu12", version = "12.6.80", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cuda-nvrtc-cu12", version = "12.6.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cuda-runtime-cu12", version = "12.6.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cudnn-cu12", version = "9.5.1.17", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cufft-cu12", version = "11.3.0.4", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-curand-cu12", version = "10.3.7.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusolver-cu12", version = "11.7.1.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusparse-cu12", version = "12.5.4.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-cusparselt-cu12", version = "0.6.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nccl-cu12", version = "2.26.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "nvidia-nvtx-cu12", version = "12.6.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "setuptools", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
-    { name = "sympy", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
-    { name = "triton", version = "3.3.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "typing-extensions", marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "fsspec", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "jinja2", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "networkx", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "nvidia-cublas-cu12", version = "12.6.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cuda-cupti-cu12", version = "12.6.80", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cuda-nvrtc-cu12", version = "12.6.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cuda-runtime-cu12", version = "12.6.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cudnn-cu12", version = "9.5.1.17", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cufft-cu12", version = "11.3.0.4", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cufile-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-curand-cu12", version = "10.3.7.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusolver-cu12", version = "11.7.1.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusparse-cu12", version = "12.5.4.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-cusparselt-cu12", version = "0.6.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nccl-cu12", version = "2.26.2", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvjitlink-cu12", version = "12.6.85", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "nvidia-nvtx-cu12", version = "12.6.77", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "setuptools", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "sympy", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "triton", version = "3.3.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'x86_64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "typing-extensions", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/87/93/fb505a5022a2e908d81fe9a5e0aa84c86c0d5f408173be71c6018836f34e/torch-2.7.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:27ea1e518df4c9de73af7e8a720770f3628e7f667280bce2be7a16292697e3fa", size = 98948276, upload-time = "2025-06-04T17:39:12.852Z" },
@@ -3639,8 +3649,8 @@ version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
-    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra == 'extra-11-skyrl-train-sglang' or extra != 'extra-11-skyrl-train-vllm'" },
     { name = "urllib3" },
 ]
 wheels = [
@@ -3720,16 +3730,16 @@ resolution-markers = [
     "sys_platform != 'linux'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "regex", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "requests", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-sglang'" },
-    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "regex", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "requests", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/07/42/271bcf364788337ac24e7f200005ac7142aaf022206bd6119d2daca22c04/transformers-4.52.3.tar.gz", hash = "sha256:2e1de29374f27920aaf6d589d4e6339f33def2fb08809e1a1d792e040e9fbce7", size = 8951324, upload-time = "2025-05-22T14:40:52.888Z" }
 wheels = [
@@ -3738,8 +3748,8 @@ wheels = [
 
 [package.optional-dependencies]
 sentencepiece = [
-    { name = "protobuf", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "sentencepiece", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "protobuf", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sentencepiece", marker = "(sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -3747,24 +3757,26 @@ name = "transformers"
 version = "4.52.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
-    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
-    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'darwin' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform == 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
+    "sys_platform != 'linux' and extra != 'extra-11-skyrl-train-cpu-ci-test' and extra != 'extra-11-skyrl-train-sglang' and extra != 'extra-11-skyrl-train-vllm'",
 ]
 dependencies = [
-    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "regex", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "requests", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
-    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
+    { name = "filelock", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "huggingface-hub", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "numpy", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "packaging", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "pyyaml", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "regex", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "requests", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "safetensors", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tokenizers", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "tqdm", marker = "extra == 'extra-11-skyrl-train-cpu-ci-test' or extra != 'extra-11-skyrl-train-sglang' or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/a9/275037087f9d846580b02f2d7cae0e0a6955d46f84583d0151d6227bd416/transformers-4.52.4.tar.gz", hash = "sha256:aff3764441c1adc192a08dba49740d3cbbcb72d850586075aed6bd89b98203e6", size = 8945376, upload-time = "2025-05-30T09:17:17.947Z" }
 wheels = [
@@ -3773,8 +3785,8 @@ wheels = [
 
 [package.optional-dependencies]
 sentencepiece = [
-    { name = "protobuf", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
-    { name = "sentencepiece", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "protobuf", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "sentencepiece", marker = "(sys_platform == 'darwin' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 
 [[package]]
@@ -3796,7 +3808,7 @@ resolution-markers = [
     "sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "setuptools", marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
+    { name = "setuptools", marker = "(sys_platform == 'linux' and extra == 'extra-11-skyrl-train-cpu-ci-test') or (sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform == 'linux' and extra != 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/24/5f/950fb373bf9c01ad4eb5a8cd5eaf32cdf9e238c02f9293557a2129b9c4ac/triton-3.3.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9999e83aba21e1a78c1f36f21bce621b77bcaa530277a50484a7cb4a822f6e43", size = 155669138, upload-time = "2025-05-29T23:39:51.771Z" },
@@ -3920,15 +3932,15 @@ dependencies = [
     { name = "compressed-tensors" },
     { name = "depyf" },
     { name = "einops" },
-    { name = "fastapi", extra = ["standard"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "fastapi", extra = ["standard"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "filelock" },
     { name = "gguf" },
-    { name = "huggingface-hub", extra = ["hf-xet"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "huggingface-hub", extra = ["hf-xet"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "importlib-metadata" },
     { name = "lark" },
     { name = "llguidance", marker = "platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "lm-format-enforcer" },
-    { name = "mistral-common", extra = ["opencv"], marker = "extra == 'extra-11-skyrl-train-vllm'" },
+    { name = "mistral-common", extra = ["opencv"], marker = "(extra == 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-sglang') or (extra != 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (extra != 'extra-11-skyrl-train-cpu-ci-test' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "msgspec" },
     { name = "ninja" },
     { name = "numba" },
