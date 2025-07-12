@@ -81,7 +81,7 @@ class GuixExecutor(Executor):
             "--ro-bind", script_file.name, script_file.name,
             "--bind", env_file.name, env_file.name,
             "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-            "--bind", "/home/ray/default/SkyRL/skyrl-train/examples/simplecoder/test-repo", "/home/skyrl",
+            "--bind", self.working_dir, "/home/skyrl",
             "--setenv", "HOME", "/home/skyrl/",
             "sh", script_file.name
         ])
@@ -282,7 +282,8 @@ if __name__ == "__main__":
     import os
     import simplecoder
     manifest = os.path.abspath("manifest.scm")
-    executor = simplecoder.GuixExecutor("test-repo", manifest)
+    working_dir = os.path.abspath("test-repo")
+    executor = simplecoder.GuixExecutor(working_dir, manifest)
 
     coder = simplecoder.SimpleCoder(os.environ["OPENAI_KEY"], "o4-mini", executor)
     task = """
