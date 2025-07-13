@@ -76,34 +76,17 @@ class GuixExecutor(Executor):
             [
                 "--",
                 "bwrap",
-                "--ro-bind",
-                "/bin",
-                "/bin",
-                "--ro-bind",
-                "/gnu",
-                "/gnu",
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--tmpfs",
-                "/tmp",
+                "--ro-bind", "/bin", "/bin",
+                "--ro-bind", "/gnu", "/gnu",
+                "--proc", "/proc",
+                "--dev", "/dev",
+                "--tmpfs", "/tmp",
                 "--new-session",
-                "--ro-bind",
-                script_file.name,
-                script_file.name,
-                "--bind",
-                env_file.name,
-                env_file.name,
-                "--ro-bind",
-                "/etc/resolv.conf",
-                "/etc/resolv.conf",
-                "--bind",
-                self.working_dir,
-                "/home/skyrl",
-                "--setenv",
-                "HOME",
-                "/home/skyrl/",
+                "--ro-bind", script_file.name, script_file.name,
+                "--bind", env_file.name, env_file.name,
+                "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+                "--bind", self.working_dir, "/home/skyrl",
+                "--setenv", "HOME", "/home/skyrl/",
                 "sh",
                 script_file.name,
             ]
@@ -290,7 +273,7 @@ if __name__ == "__main__":
     working_dir = os.path.abspath("test-repo")
     executor = simplecoder.GuixExecutor(working_dir, manifest)
 
-    coder = simplecoder.SimpleCoder(os.environ["OPENAI_KEY"], "o4-mini", executor)
+    coder = simplecoder.SimpleCoder(os.environ["OPENAI_API_KEY"], "o4-mini", executor)
     task = """
     I'm running missing_colon.py as follows:
 
