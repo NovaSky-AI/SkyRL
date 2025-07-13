@@ -73,6 +73,7 @@ class GuixExecutor(Executor):
         # are environments where that does not work (e.g. mounting the /proc filesystem
         # can fail in a GPU container). We might want to revisit this.
         guix_cmd.extend(
+            # fmt: off
             [
                 "--",
                 "bwrap",
@@ -90,6 +91,7 @@ class GuixExecutor(Executor):
                 "sh",
                 script_file.name,
             ]
+            # fmt: on
         )
 
         try:
