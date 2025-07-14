@@ -156,7 +156,6 @@ def update_weight_cuda_ipc(model, named_tensors):
     model.load_weights([(weight_name, weight)])
 
 
-
 CUSTOM_WEIGHT_LOADER_PATH = "skyrl_train.inference_engines.sglang.sglang_engine.update_weight_cuda_ipc"
 
 

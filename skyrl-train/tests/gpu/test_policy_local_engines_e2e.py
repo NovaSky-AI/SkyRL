@@ -4,8 +4,6 @@ uv run --isolated --extra dev --extra vllm --extra deepspeed pytest tests/gpu/te
 
 # Run only sglang tests (requires sglang extra):
 uv run --isolated --extra dev --extra sglang --extra deepspeed pytest tests/gpu/test_policy_local_engines_e2e.py -m "sglang"
-
-For deepspeed tests, also pass in `--extra deepspeed`.
 """
 
 import pytest
@@ -23,6 +21,7 @@ from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.utils import initialize_ray
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -48,22 +47,10 @@ async def run_inference(client, prompts):
     return await client.generate(engine_input)
 
 
-def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_all, backend):
+def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, backend):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
-    ray.init(
-        ignore_reinit_error=True,
-        runtime_env={
-            "env_vars": {
-                "NCCL_CUMEM_ENABLE": "0",
-                "NCCL_P2P_DISABLE": "0",
-                "CUDA_LAUNCH_BLOCKING": "1",
-                "VLLM_USE_V1": "1" if v1 else "0",
-                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
-                "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
-            }
-        },
-    )
+    initialize_ray(DictConfig({"generator": {"backend": backend}}))
     if colocate_all:
         pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
@@ -148,7 +135,6 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
             cfg=cfg,
-            v1=True,
             use_local=True,
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
