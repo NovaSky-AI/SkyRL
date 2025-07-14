@@ -165,9 +165,9 @@ DEFAULT_SYSTEM_CONTENT = "You are a helpful and harmless assistant."
 DEFAULT_USER_CONTENT_PREFIX = (
     "Answer the given question. You must conduct reasoning inside <think> and </think> "
     "first every time you get new information. After reasoning, if you find you lack "
-    "some knowledge, you can call a search engine by <tool_call> query </tool_call> "
-    "and it will return the top searched results between <tool_response> and "
-    "</tool_response>. You can search as many times as your want. If you find no "
+    "some knowledge, you can call a search engine by <search> query </search> "
+    "and it will return the top searched results between <information> and "
+    "</information>. You can search as many times as you want. If you find no "
     "further external knowledge needed, you can directly provide the answer inside "
     "<answer> and </answer>, without detailed illustrations. For example, "
     "<answer> Beijing </answer>. Question: "
@@ -270,7 +270,11 @@ def main():
                 df_processed = df_raw.apply(apply_process_row, axis=1)
 
                 # Save processed DataFrame
-                output_file_path = os.path.join(local_save_dir, f"{split}.parquet")
+                if split == "test":
+                    logger.info("Saving `test.parquet` from HF as `validation.parquet` locally")
+                    output_file_path = os.path.join(local_save_dir, "validation.parquet")
+                else:
+                    output_file_path = os.path.join(local_save_dir, f"{split}.parquet")
                 df_processed.to_parquet(output_file_path, index=False)
                 logger.info(f"Saved {len(df_processed)} processed rows to {output_file_path}")
                 processed_files.append(output_file_path)

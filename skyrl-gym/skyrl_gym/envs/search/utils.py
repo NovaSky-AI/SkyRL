@@ -15,7 +15,6 @@
 # limitations under the License.
 # Adapted from https://github.com/PeterGriffinJin/Search-R1/blob/main/verl/utils/reward_score/qa_em.py
 
-import random
 import re
 import string
 
@@ -65,15 +64,6 @@ def subem_check(prediction, golden_answers):
 
 def extract_solution(solution_str):
     """Extract the equation from the solution string."""
-    # Remove everything before the first "Assistant:"
-    # if "Assistant:" in solution_str:
-    #     solution_str = solution_str.split("Assistant:", 1)[1]
-    # elif "<|im_start|>assistant" in solution_str:
-    #     solution_str = solution_str.split("<|im_start|>assistant", 1)[1]
-    # else:
-    #     return None
-    # solution_str = solution_str.split('\n')[-1]
-
     answer_pattern = r"<answer>(.*?)</answer>"
     match = re.finditer(answer_pattern, solution_str, re.DOTALL)
     matches = list(match)
@@ -84,13 +74,6 @@ def extract_solution(solution_str):
 
     # If there are 2 or more matches, return the last one
     return matches[-1].group(1).strip()
-
-
-def count_answer_tags(text):
-    opening_tags = text.count("<answer>")
-    closing_tags = text.count("</answer>")
-
-    return opening_tags, closing_tags
 
 
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):
@@ -104,25 +87,11 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         score: the score for the correct answer
     """
     answer = extract_solution(solution_str=solution_str)
-    open_count, close_count = count_answer_tags(solution_str)
-    do_print = random.randint(1, 64) == 1
-
-    if do_print:
-        print("--------------------------------")
-        print(f"Golden answers: {ground_truth['target']}")
-        if answer is not None:
-            print(f"Extracted answer is not None: {answer}")
-        else:
-            print("Extracted answer: None!")
-        print(f"Solution string: {solution_str}")
 
     if answer is None:
         return 0
     else:
         if em_check(answer, ground_truth["target"]):
-            if open_count > 10 or close_count > 10:  # prevent output a lot of </answer>
-                score = score / 4
-                return score
             return score
         else:
             return format_score
@@ -139,13 +108,6 @@ def compute_score_subem(solution_str, ground_truth, method="strict", format_scor
         score: the score for the correct answer
     """
     answer = extract_solution(solution_str=solution_str)
-    do_print = random.randint(1, 64) == 1
-
-    if do_print:
-        print("--------------------------------")
-        print(f"Golden answers: {ground_truth['target']}")
-        print(f"Extracted answer: {answer}")
-        print(f"Solution string: {solution_str}")
 
     if answer is None:
         return 0

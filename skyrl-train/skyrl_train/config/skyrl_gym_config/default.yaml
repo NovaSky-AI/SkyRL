@@ -3,3 +3,8 @@
 max_env_workers: 32
 text2sql:
   db_path: "/home/ray/default/sql_data"
+search:
+  log_requests: false
+  search_url: "http://127.0.0.1:8000/retrieve"
+  topk: 3
+  timeout: 30

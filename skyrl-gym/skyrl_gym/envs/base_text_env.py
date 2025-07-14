@@ -22,8 +22,8 @@ class BaseTextEnv(Env[str, str]):
     Exposes only `step`, `init` and `close`.
 
     Input Types:
-        - ActType: str (LLM output)
         - ObsType: str (tool output, LLM input)
+        - ActType: str (LLM output)
     """
 
     def __init__(self):
