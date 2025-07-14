@@ -22,8 +22,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
 from typing import Tuple
 
-model = "Qwen/Qwen2.5-1.5B-Instruct"
-TP_SIZE = 2
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[InferenceEngineClient, subprocess.Popen]:
@@ -58,7 +57,7 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
             "-m",
             "skyrl_train.inference_engines.vllm.vllm_server",
             "--model",
-            model,
+            MODEL,
             "--enforce-eager",
             "--tensor-parallel-size",
             str(tp_size),
@@ -83,7 +82,7 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
             "-m",
             "skyrl_train.inference_engines.sglang.sglang_server",
             "--model-path",
-            model,
+            MODEL,
             "--tp-size",
             str(tp_size),
             "--dtype",
@@ -112,7 +111,7 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
 
     engines = create_remote_inference_engines(
         urls=[f"localhost:{engine_port}"],
-        model_name=model,
+        model_name=MODEL,
         engine_backend=backend,
         tensor_parallel_size=tp_size,
         sampling_params=get_sampling_params_for_backend(
@@ -124,17 +123,13 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
     return InferenceEngineClient(engines), server_process
 
 
-def init_ray_inference_engines(backend: str) -> InferenceEngineClient:
+def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
-    tp_size = TP_SIZE
-    # TODO(Charlie): remove when we support TP > 1 for sglang local engine
-    if backend == "sglang":
-        tp_size = 1
     engine = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
         model_dtype="bfloat16",
-        pretrain=model,
+        pretrain=MODEL,
         seed=42,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
@@ -150,7 +145,7 @@ def init_ray_inference_engines(backend: str) -> InferenceEngineClient:
             backend,
             DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0}),
         ),
-        tokenizer=AutoTokenizer.from_pretrained(model),
+        tokenizer=AutoTokenizer.from_pretrained(MODEL),
         backend=backend,
     )
     client = InferenceEngineClient(engine)
@@ -206,24 +201,25 @@ async def run_single_generation_with_tokens(client, prompt_token_ids):
 
 
 @pytest.mark.parametrize(
-    "backend",
+    "backend,tp_size",
     [
-        pytest.param("vllm", marks=pytest.mark.vllm),
-        pytest.param("sglang", marks=pytest.mark.sglang),
+        pytest.param("vllm", 2, marks=pytest.mark.vllm),
+        # TODO(Charlie): add TP > 1 tests for sglang when we support it
+        pytest.param("sglang", 1, marks=pytest.mark.sglang),
     ],
     ids=["vllm", "sglang"],
 )
-def test_inference_engines_generation(backend: str):
+def test_inference_engines_generation(backend: str, tp_size: int):
     """
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
     try:
         initialize_ray(DictConfig({"generator": {"backend": backend}}))
 
-        prompts = get_test_prompts(model)
+        prompts = get_test_prompts(MODEL)
 
         try:
-            llm_client, remote_server_process = init_remote_inference_servers(TP_SIZE, backend)
+            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend)
 
             # Batched generation
             remote_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
@@ -255,7 +251,7 @@ def test_inference_engines_generation(backend: str):
             remote_server_process.wait()
 
         # Get responses from Ray engine
-        llm_client = init_ray_inference_engines(backend)
+        llm_client = init_ray_inference_engines(backend, tp_size)
 
         # Batched generation
         local_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
@@ -294,26 +290,27 @@ def test_inference_engines_generation(backend: str):
 
 
 @pytest.mark.parametrize(
-    "backend",
+    "backend,tp_size",
     [
-        pytest.param("vllm", marks=pytest.mark.vllm),
-        pytest.param("sglang", marks=pytest.mark.sglang),
+        pytest.param("vllm", 2, marks=pytest.mark.vllm),
+        # TODO(Charlie): add TP > 1 tests for sglang when we support it
+        pytest.param("sglang", 1, marks=pytest.mark.sglang),
     ],
     ids=["vllm", "sglang"],
 )
-def test_token_based_generation(backend: str):
+def test_token_based_generation(backend: str, tp_size: int):
     """Test generation using prompt_token_ids for the specified backend."""
 
     try:
         initialize_ray(DictConfig({"generator": {"backend": backend}}))
 
-        prompts = get_test_prompts(model, 3)
-        tokenizer = AutoTokenizer.from_pretrained(model)
+        prompts = get_test_prompts(MODEL, 3)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts, add_generation_prompt=True, tokenize=True, return_dict=True
         )["input_ids"]
 
-        llm_client = init_ray_inference_engines(backend)
+        llm_client = init_ray_inference_engines(backend, tp_size)
 
         # Test batch generation with tokens
         token_batch_responses, _ = asyncio.run(run_batch_generation_with_tokens(llm_client, prompt_token_ids))

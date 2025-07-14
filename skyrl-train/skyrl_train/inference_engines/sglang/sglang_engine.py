@@ -137,7 +137,6 @@ def update_weight_cuda_ipc(model, named_tensors):
     _ = request["shape"]
     weight_name = request["name"]
 
-    # Below is mostly copied from vllm_engine.py's update_weight_cuda_ipc
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
     physical_gpu_id = str(props.uuid)
@@ -156,7 +155,6 @@ def update_weight_cuda_ipc(model, named_tensors):
     weight = func(*list_args)
     model.load_weights([(weight_name, weight)])
 
-    # TODO(charlie): vllm has a torch.cuda.synchronize() call here, do we need it here?
 
 
 CUSTOM_WEIGHT_LOADER_PATH = "skyrl_train.inference_engines.sglang.sglang_engine.update_weight_cuda_ipc"
@@ -223,9 +221,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         responses: List[str] = []
         stop_reasons: List[str] = []
 
-        if not isinstance(outputs, list):
-            outputs = [outputs]
-
         for output in outputs:
             responses.append(output["text"])
             stop_reasons.append(output["meta_info"]["finish_reason"]["type"])
@@ -238,13 +233,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using SGLang engine."""
         token_ids_prompts, sampling_params = self._preprocess_prompts(input_batch)
-
-        # Generate using SGLang's async method
-        # Otherwise using `await asyncio.to_thread(self.engine.generate)` will cause issues
-        # as SGLang's `generate()` method calls `loop = asyncio.get_event_loop()`, raising error
-        # `RuntimeError: There is no current event loop in thread 'ThreadPoolExecutor-0_0'.`
         outputs = await self.engine.async_generate(input_ids=token_ids_prompts, sampling_params=sampling_params)
-
         return self._postprocess_outputs(outputs)
 
     async def init_weight_update_communicator(
@@ -261,11 +250,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         )
 
         # NOTE(charlie): Call the async method on tokenizer_manager directly to avoid event loop
-        # conflicts since `sgl.Engine.init_weights_update_group` is sync, yet uses
-        # `asyncio.get_event_loop()` which prevents us from using `asyncio.to_thread`. We cannot
-        # call the sync method directly either because it runs into `RuntimeError: this event loop
-        # is already running.`
-        # Same underlying implementation: https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/model_executor/model_runner.py#L689
+        # conflicts. Same underlying implementation: https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/model_executor/model_runner.py#L689
         success, message = await self.engine.tokenizer_manager.init_weights_update_group(obj, None)
         return success, message
 
@@ -300,7 +285,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
                     MultiprocessingSerializer.serialize(request_tensor) for _ in range(self._tp_size)
                 ],
                 load_format=CUSTOM_WEIGHT_LOADER_PATH,
-                flush_cache=False,  # TODO(charlie): should we flush cache?
+                flush_cache=False,  # TODO(charlie): flush cache on last weight update?
             )
 
             # Call the underlying async method for the same reason as in `init_weight_update_communicator`
@@ -318,27 +303,21 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
     async def wake_up(self, tags: Optional[List[str]] = None):
         """Wake up the engine. For multi-stage waking up, pass in `"weight"` or `"kv_cache"` to tags."""
-        if tags is None:
-            obj = ResumeMemoryOccupationReqInput()
-        else:
-            obj = ResumeMemoryOccupationReqInput(tags=tags)
+        obj = ResumeMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
         print(
-            f"Free GPU memory after wake up with tags {tags if tags is not None else 'None'}: "
+            f"From SGLang engine -- Free GPU memory after wake up with tags {tags if tags is not None else 'None'}: "
             + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
         )
 
     async def sleep(self, tags: Optional[List[str]] = None):
         """Put engine to sleep."""
-        if tags is None:
-            obj = ReleaseMemoryOccupationReqInput()
-        else:
-            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+        obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
         print(
-            f"Free GPU memory after sleep with tags {tags if tags is not None else 'None'}: "
+            f"From SGLang engine -- Free GPU memory after sleep with tags {tags if tags is not None else 'None'}: "
             + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
         )
 

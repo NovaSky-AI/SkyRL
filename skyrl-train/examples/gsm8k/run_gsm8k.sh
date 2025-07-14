@@ -12,10 +12,10 @@ DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
-BACKEND="vllm"
-# BACKEND="sglang"
+INFERENCE_BACKEND="vllm"
+# INFERENCE_BACKEND="sglang"
 
-uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -40,7 +40,7 @@ uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
-  generator.backend=$BACKEND \
+  generator.backend=$INFERENCE_BACKEND \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \

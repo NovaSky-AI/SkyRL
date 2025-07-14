@@ -25,9 +25,6 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.tp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        # NOTE(Charlie): need to specify keyword `input_batch=input_batch` to avoid Ray's error on
-        # `TypeError: too many positional arguments` since we instantiate SGLang engine in a
-        # remote function.
         return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
