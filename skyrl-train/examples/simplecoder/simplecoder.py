@@ -60,9 +60,11 @@ class GuixExecutor(Executor):
             guix_cmd.extend(["-m", self.manifest_file])
 
         with tempfile.NamedTemporaryFile(mode="w", suffix="_env.sh", delete=False) as env_file:
+            print(f'Writing to env file: {env_file.name}')
             env_file.write(self.current_env)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix="_script.sh", delete=False) as script_file:
+            print(f'Writing to script file: {script_file.name}')
             script_file.write(f"source {env_file.name}\n")
             script_file.write("cd $PWD\n")
             script_file.write(f"{command}\n")
