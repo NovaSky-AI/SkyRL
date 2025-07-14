@@ -38,6 +38,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
   generator.batched=false \
+  generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=5 \
