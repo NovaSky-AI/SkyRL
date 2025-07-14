@@ -1,4 +1,4 @@
-# Launches sglang server for Meta-Llama-3-8B-Instruct on 2 GPUs.
+# Launches sglang server for Qwen2.5-1.5B-Instruct on 4 GPUs.
 # bash examples/remote_inference_engine/run_sglang_server.sh
 set -x
 
