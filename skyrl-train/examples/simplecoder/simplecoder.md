@@ -24,7 +24,7 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-For the following commands, we assume that you are in `sky-train/examples/simplecoder` directory. It is worth running the following command once to initialize the packages (this ensures the following commands won't time out):
+For the following commands, we assume that you are in the `sky-train/examples/simplecoder` directory. It is worth running the following command once to initialize the packages (this ensures the following commands won't time out):
 
 ```shell
 guix shell -m manifest.scm -- sh
