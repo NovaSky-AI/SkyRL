@@ -29,6 +29,8 @@ SkyRL is a full-stack RL library that provides the following components:
 
 # Getting Started
 
+For a guide on developing with SkyRL, take at look at our [Development Guide](https://skyrl.readthedocs.io/en/latest/getting-started/development.html) docs.
+
 For model training, checkout [`skyrl-train`](./skyrl-train) to start using, modifying, or building on top of the SkyRL training stack. See our [quickstart docs](https://skyrl.readthedocs.io/en/latest/index.html) to ramp up!
 
 For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your task in the simple gymnasium interface.
