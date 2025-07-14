@@ -31,6 +31,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightUpdateRequest,
 )
+from skyrl_train.utils import torch_dtype_to_str
 
 
 # Patch SGLang's _set_envs_and_config to avoid signal handler issues in Ray actors
@@ -142,7 +143,7 @@ def update_weight_cuda_ipc(model, named_tensors):
     physical_gpu_id = str(props.uuid)
 
     # Infer model dtype and device index from first parameter
-    model_dtype = next(model.parameters()).dtype
+    model_dtype = torch_dtype_to_str(next(model.parameters()).dtype)
     assert dtype == model_dtype, f"mismatch dtype: src {dtype}, dst {model_dtype}"
     device_id = next(model.parameters()).device.index
 
