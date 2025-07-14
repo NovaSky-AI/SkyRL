@@ -1,8 +1,8 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
-# Uses 1 node with 8 GPUs.
-# uv run examples/llm_as_a_judge/gsm8k_dataset_judge_env.py --output_dir $HOME/data/gsm8k_llm_judge
+# Colocated GRPO training+generation for Qwen2.5-Coder-1.5B-Instruct on GSM8k dataset.
+# Uses 1 node with 4 GPUs.
+# uv run examples/llm_as_a_judge/gsm8k_dataset_judge.py --output_dir $HOME/data/gsm8k_llm_judge
 # add OPENAI_API_KEY and WANDB_API_KEY to .env.llm_judge
 # bash examples/llm_as_a_judge/run_llm_judge.sh
 

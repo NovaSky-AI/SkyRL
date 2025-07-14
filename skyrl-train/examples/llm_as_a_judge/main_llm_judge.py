@@ -12,7 +12,7 @@ from skyrl_gym.envs import register
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Register the multiply environment inside the entrypoint task (no need to modify the skyrl-gym package).
+    # Register the llm_as_a_judge environment inside the entrypoint task (no need to modify the skyrl-gym package).
     register(
         id="llm_as_a_judge",
         entry_point="examples.llm_as_a_judge.llm_judge_env:GSM8kLLMJudgeEnv",

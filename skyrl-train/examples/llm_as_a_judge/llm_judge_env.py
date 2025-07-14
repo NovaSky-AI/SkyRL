@@ -7,15 +7,24 @@ import os
 import re
 
 PROMPT = """
-    You are a strict math evaluation assistant.
+You are a strict math evaluation assistant.
 
-    Compare the following **gold** and **predicted** math solutions. 
-    Determine if the predicted solution follows valid reasoning and reaches the correct final answer, even if the explanation differs in wording.
+Compare the following **gold** and **predicted** math solutions. Your job is to determine if the predicted solution is mathematically correct and arrives at the same final answer as the gold solution.
 
-    Rules:
-    - Only answer "1" if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
-    - Otherwise, answer "0".
-    - Do not include any explanation or extra text—output only a single character: "1" or "0".
+Instructions:
+- You may provide internal reasoning or explanation before giving your final judgment.
+- Your final judgment must appear as a separate line at the end of your response, in the format:
+
+### Final Score: 1
+
+or
+
+### Final Score: 0
+
+Where:
+- Use "1" only if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
+- Use "0" otherwise.
+- Do not include any explanation after the final score.
 """
 
 
@@ -48,6 +57,8 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
                 model=self.model, messages=[{"role": "user", "content": message}]
             )
             reply = response.choices[0].message.content.strip()
+
+            print(f"LLM Judge response: {reply}")
 
             # Try to parse score from "### Final Score: x"
             match = re.search(r"### Final Score:\s*([01](?:\.0)?)", reply)
