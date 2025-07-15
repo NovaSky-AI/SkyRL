@@ -354,10 +354,10 @@ class PolicyLoss(nn.Module):
     def __init__(
         self,
         clip_eps_low: float = 0.2,
-        clip_eps_high: float = 0.4,
+        clip_eps_high: float = 0.2,
         clip_ratio_c: float = 3.0,
         loss_type: Literal["regular", "dual_clip"] = "regular",
-        loss_reduction_type: Literal["token_mean", "sequence_mean"] = "token_mean",
+        loss_reduction: Literal["token_mean", "sequence_mean"] = "token_mean",
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -365,8 +365,11 @@ class PolicyLoss(nn.Module):
         self.clip_ratio_c = clip_ratio_c
         self.loss_type = loss_type
         assert loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
-        self.loss_reduction_type = loss_reduction_type
-        assert loss_reduction_type in ["token_mean", "sequence_mean"], "loss_reduction_type must be either 'token_mean' or 'sequence_mean'"
+        self.loss_reduction = loss_reduction
+        assert loss_reduction in [
+            "token_mean",
+            "sequence_mean",
+        ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
 
     def forward(
         self,
@@ -386,14 +389,14 @@ class PolicyLoss(nn.Module):
             pg_losses3 = -advantages * self.clip_ratio_c
             clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
             loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        if self.loss_reduction_type == "token_mean":
+        if self.loss_reduction == "token_mean":
             # sum over *all* valid tokens, divide by total valid-token count
             loss = masked_mean(loss, loss_mask)
-        elif self.loss_reduction_type == "sequence_mean":
+        elif self.loss_reduction == "sequence_mean":
             # per-sequence token-mean (dim=-1), then batch-mean
             loss = masked_mean(loss, loss_mask, dim=-1).mean()
         else:
-            raise ValueError(f"Invalid loss reduction type: {self.loss_reduction_type}")
+            raise ValueError(f"Invalid loss reduction type: {self.loss_reduction}")
         return loss, clip_ratio
 
 

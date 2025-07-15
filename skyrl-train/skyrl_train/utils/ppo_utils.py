@@ -53,7 +53,7 @@ class FixedKLController:
         pass
 
 
-def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = None) -> torch.Tensor:
+def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optional[int] = None) -> torch.Tensor:
     if mask is None:
         return tensor.mean(axis=dim)
     return (tensor * mask).sum(axis=dim) / (mask.sum(axis=dim) + 1e-8)

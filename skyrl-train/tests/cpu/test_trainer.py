@@ -86,7 +86,7 @@ def dummy_config():
                     "value_clip": 0.2,
                     "normalize_reward": True,
                     "ppo_loss_type": "regular",
-                    "ppo_loss_reduction_type": "token_mean",
+                    "loss_reduction": "token_mean",
                 },
                 "resume_mode": "none",
             },
