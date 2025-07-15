@@ -54,6 +54,9 @@ The only packages required are `build-essential` and `libnuma <https://github.co
 
 This will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile.
 
+Installing SkyRL-Train
+~~~~~~~~~~~~~~~~~~~~~~
+
 All project dependencies are managed by `uv`.
 
 Clone the repo and `cd` into the `skyrl` directory:
