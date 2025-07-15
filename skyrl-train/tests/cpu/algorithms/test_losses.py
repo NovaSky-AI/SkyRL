@@ -56,9 +56,6 @@ def test_policy_loss_reduction_modes():
 
     device = "cpu"
 
-    # Create test data with multiple sequences to see reduction differences
-    # Shape: (batch_size=2, seq_len=3)
-    # Use different advantage levels to ensure different sequence means
     advantages = torch.tensor(
         [
             [2.0, 2.0, 2.0],  # sequence 1: consistently higher advantages
@@ -74,11 +71,8 @@ def test_policy_loss_reduction_modes():
         device=device,
     )
 
-    # Create a mask that excludes tokens differently for each sequence
-    # This creates sequences with different numbers of valid tokens
-    loss_mask = torch.tensor(
-        [[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]], device=device  # sequence 1: 3 valid tokens  # sequence 2: 1 valid token
-    )
+    # Create masks to test sequences with different numbers of valid tokens
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]], device=device)
 
     # Test token_mean without mask
     loss_fn_token = PolicyLoss(loss_type="regular", loss_reduction="token_mean")
@@ -97,7 +91,7 @@ def test_policy_loss_reduction_modes():
     # Manual calculations to verify (using default PolicyLoss parameters)
     ratio = torch.exp(log_probs - old_log_probs)
     surr1 = ratio * advantages
-    surr2 = ratio.clamp(1 - 0.2, 1 + 0.2) * advantages  # clip_eps_low=0.2, clip_eps_high=0.4
+    surr2 = ratio.clamp(1 - 0.2, 1 + 0.2) * advantages  # clip_eps_low=0.2, clip_eps_high=0.2
     loss_per_token = -torch.min(surr1, surr2)
 
     # Expected token_mean without mask: mean of all tokens
@@ -113,9 +107,6 @@ def test_policy_loss_reduction_modes():
     seq_means_masked = (loss_per_token * loss_mask).sum(dim=1) / (loss_mask.sum(dim=1) + 1e-8)
     expected_seq_with_mask = seq_means_masked.mean()
 
-    print(f"expected_token_no_mask: {expected_token_no_mask}")
-    print(f"expected_seq_no_mask: {expected_seq_no_mask}")
-
     # Verify results
     torch.testing.assert_close(loss_token_no_mask, expected_token_no_mask, rtol=1e-5, atol=1e-8)
     torch.testing.assert_close(loss_token_with_mask, expected_token_with_mask, rtol=1e-5, atol=1e-8)
@@ -123,8 +114,6 @@ def test_policy_loss_reduction_modes():
     torch.testing.assert_close(loss_seq_with_mask, expected_seq_with_mask, rtol=1e-5, atol=1e-8)
 
     # Verify that the two reduction modes give the same results when sequences have equal length and no mask
-    print(f"token_mean (no mask): {loss_token_no_mask:.6f}")
-    print(f"sequence_mean (no mask): {loss_seq_no_mask:.6f}")
     assert torch.allclose(
         loss_token_no_mask, loss_seq_no_mask, rtol=1e-5
     ), "token_mean and sequence_mean should give same results when sequences have equal length and no mask"
@@ -132,11 +121,6 @@ def test_policy_loss_reduction_modes():
     assert not torch.allclose(
         loss_token_with_mask, loss_seq_with_mask, rtol=1e-3
     ), "token_mean and sequence_mean with mask should give different results"
-
-    print(f"token_mean (no mask): {loss_token_no_mask:.6f}")
-    print(f"token_mean (with mask): {loss_token_with_mask:.6f}")
-    print(f"sequence_mean (no mask): {loss_seq_no_mask:.6f}")
-    print(f"sequence_mean (with mask): {loss_seq_with_mask:.6f}")
 
 
 def test_policy_loss_reduction_edge_cases():
