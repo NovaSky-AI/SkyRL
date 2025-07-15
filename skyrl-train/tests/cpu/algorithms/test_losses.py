@@ -56,6 +56,9 @@ def test_policy_loss_reduction_modes():
 
     device = "cpu"
 
+    clip_eps_low = 0.2
+    clip_eps_high = 0.2
+
     advantages = torch.tensor(
         [
             [2.0, 2.0, 2.0],  # sequence 1: consistently higher advantages
@@ -75,14 +78,18 @@ def test_policy_loss_reduction_modes():
     loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]], device=device)
 
     # Test token_mean without mask
-    loss_fn_token = PolicyLoss(loss_type="regular", loss_reduction="token_mean")
+    loss_fn_token = PolicyLoss(
+        loss_type="regular", loss_reduction="token_mean", clip_eps_low=clip_eps_low, clip_eps_high=clip_eps_high
+    )
     loss_token_no_mask, _ = loss_fn_token(log_probs, old_log_probs, advantages)
 
     # Test token_mean with mask
     loss_token_with_mask, _ = loss_fn_token(log_probs, old_log_probs, advantages, loss_mask)
 
     # Test sequence_mean without mask
-    loss_fn_seq = PolicyLoss(loss_type="regular", loss_reduction="sequence_mean")
+    loss_fn_seq = PolicyLoss(
+        loss_type="regular", loss_reduction="sequence_mean", clip_eps_low=clip_eps_low, clip_eps_high=clip_eps_high
+    )
     loss_seq_no_mask, _ = loss_fn_seq(log_probs, old_log_probs, advantages)
 
     # Test sequence_mean with mask
@@ -91,7 +98,7 @@ def test_policy_loss_reduction_modes():
     # Manual calculations to verify (using default PolicyLoss parameters)
     ratio = torch.exp(log_probs - old_log_probs)
     surr1 = ratio * advantages
-    surr2 = ratio.clamp(1 - 0.2, 1 + 0.2) * advantages  # clip_eps_low=0.2, clip_eps_high=0.2
+    surr2 = ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages  # clip_eps_low=0.2, clip_eps_high=0.2
     loss_per_token = -torch.min(surr1, surr2)
 
     # Expected token_mean without mask: mean of all tokens
