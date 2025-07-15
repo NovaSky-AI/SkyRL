@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import socket
-from typing import Dict, Optional, Type, List, Literal, Any
+from typing import Dict, Optional, Type, List, Literal, Any, Tuple
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
 from collections import defaultdict
@@ -377,7 +377,7 @@ class PolicyLoss(nn.Module):
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, float]:
 
         ratio = (log_probs - old_log_probs).exp()
         surr1 = ratio * advantages
