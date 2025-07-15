@@ -43,15 +43,16 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 - `uv <https://docs.astral.sh/uv/>`_
 - `ray <https://docs.ray.io/en/latest/>`_ 2.44.0
 
-Apt packages
-~~~~~~~~~~~~
+System Dependencies
+~~~~~~~~~~~~~~~~~~~
 
-The only package required is `libnuma <https://github.com/numactl/numactl>`_.
+The only packages required are `build-essential` and `libnuma <https://github.com/numactl/numactl>`_. You can install them using the following command:
 
 .. code-block:: bash
-    sudo apt update && sudo apt-get install numactl libnuma-dev
 
-At this time, this will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile.
+    sudo apt update && sudo apt-get install build-essential libnuma-dev
+
+This will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile.
 
 All project dependencies are managed by `uv`.
 
