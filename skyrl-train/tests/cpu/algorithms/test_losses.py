@@ -70,7 +70,7 @@ def test_policy_loss_reduction_modes():
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
 
     log_probs = torch.tensor(
-        [[-1.5, -0.5, -1.2], [-0.8, -1.3, -0.9]],  # ratios ≈ [0.61, 1.65, 0.83]  # ratios ≈ [1.22, 0.74, 1.11]
+        [[-1.5, -0.5, -1.2], [-0.8, -1.3, -0.9]],  # ratios ≈ [[0.61, 1.65, 0.83],[1.22, 0.74, 1.11]]
         device=device,
     )
 
