@@ -22,7 +22,7 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
 .. code-block:: bash
 
-    docker run -it  --runtime=nvidia --gpus all  --name skyrl-train sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8 /bin/bash
+    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8 /bin/bash
 
 3. Inside the launched container, setup the latest version of the project:
 
