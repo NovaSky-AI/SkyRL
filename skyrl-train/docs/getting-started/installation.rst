@@ -50,7 +50,7 @@ The only packages required are `build-essential` and `libnuma <https://github.co
 
 .. code-block:: bash
 
-    sudo apt update && sudo apt-get install build-essential numactl libnuma-dev
+    sudo apt update && sudo apt-get install build-essential libnuma-dev
 
 This will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile.
 
