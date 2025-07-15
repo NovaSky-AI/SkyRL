@@ -93,6 +93,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             self.cfg.trainer.algorithm.eps_clip_high,
             self.cfg.trainer.algorithm.clip_ratio_c,
             loss_type=self.cfg.trainer.algorithm.ppo_loss_type,
+            loss_reduction_type=self.cfg.trainer.algorithm.ppo_loss_reduction_type,
         )
 
         self.use_cuda_ipc = False

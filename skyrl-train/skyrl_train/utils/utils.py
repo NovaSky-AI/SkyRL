@@ -191,6 +191,11 @@ def validate_cfg(cfg: DictConfig):
         "regular",
         "dual_clip",
     ), f"invalid loss type: {cfg.trainer.algorithm.ppo_loss_type}. Must be one of `['regular', 'dual_clip']`"
+    
+    assert cfg.trainer.algorithm.ppo_loss_reduction_type in (
+        "token_mean",
+        "sequence_mean",
+    ), f"invalid loss reduction type: {cfg.trainer.algorithm.ppo_loss_reduction_type}. Must be one of `['token_mean', 'sequence_mean']`"
 
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
