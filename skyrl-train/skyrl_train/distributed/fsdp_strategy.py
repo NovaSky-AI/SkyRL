@@ -118,13 +118,18 @@ class FSDPStrategy(DistributedStrategy):
             offload_fsdp_model_to_cpu(model, empty_cache=True)
 
             if optimizer is not None and self.manual_offload_optimizer:
-                print(f"TGRIGGS_MEM: offload_fsdp_optimizer with manual_offload_optimizer=True")
                 offload_fsdp_optimizer(optimizer)
-        else:
-            print(f"TGRIGGS_MEM: offload_to_cpu with manual_offload=False")
 
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        
+        free, total = torch.cuda.mem_get_info()
+        print(f"TGRIGGS_MEM: GPU memory at the end of offload_to_cpu: { {
+            'allocated': torch.cuda.memory_allocated() / 1024**3,
+            'reserved': torch.cuda.memory_reserved() / 1024**3,
+            'free': free / 1024**3,
+            'total': total / 1024**3,
+        } }")
 
     def backload_to_gpu(self, model, optimizer, non_blocking=True):
         """Reload model weights back to GPU."""
@@ -366,6 +371,82 @@ class FSDPStrategy(DistributedStrategy):
         # If no unwrapping needed, return the original model
         return model
 
+
+    # def save_ckpt(
+    #     self,
+    #     model,
+    #     ckpt_dir,
+    #     global_step,
+    #     node_local_rank,
+    #     optimizer=None,
+    #     scheduler=None,
+    #     client_state={},
+    #     tag=None,
+    # ):
+    #     """Save model checkpoint for FSDP2 with proper offloading"""
+    #     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict, get_optimizer_state_dict
+        
+    #     if node_local_rank == 0:
+    #         os.makedirs(ckpt_dir, exist_ok=True)
+
+    #     dist.barrier()
+
+    #     # Extract the actual model for saving
+    #     save_model = model
+    #     if isinstance(model, Actor):
+    #         save_model = model.model
+
+    #     rank = self.get_rank()
+    #     world_size = self.world_size
+        
+    #     # Use PyTorch's distributed checkpoint APIs with built-in offloading
+    #     model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+    #     optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+    #     extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
+
+    #     # Get model state dict with offloading
+    #     options = StateDictOptions(full_state_dict=False, cpu_offload=True)
+    #     model_state_dict = get_model_state_dict(save_model, options=options)
+        
+    #     self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
+    #     torch.save(model_state_dict, model_path)
+    #     del model_state_dict
+
+    #     # Get optimizer state dict with offloading
+    #     optimizer_state_dict = {}
+    #     if optimizer is not None:
+    #         # Use the proper FSDP2 optimizer state dict method
+    #         options = StateDictOptions(full_state_dict=False, cpu_offload=True)
+    #         optimizer_state_dict = get_optimizer_state_dict(save_model, optimizer, options=options)
+        
+    #     self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
+    #     torch.save(optimizer_state_dict, optim_path)
+    #     del optimizer_state_dict
+
+    #     # Save extra state as before
+    #     lr_scheduler_state_dict = {}
+    #     if scheduler is not None:
+    #         lr_scheduler_state_dict = scheduler.state_dict()
+
+    #     extra_state_dict = {
+    #         "lr_scheduler": lr_scheduler_state_dict,
+    #         "client_state": client_state,
+    #         "tag": tag,
+    #         "fsdp_strategy": self.fsdp_strategy,
+    #         "world_size": world_size,
+    #         "rank": rank,
+    #         "global_step": global_step,
+    #         "rng": self.get_rng_state(),
+    #     }
+        
+    #     self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
+    #     torch.save(extra_state_dict, extra_path)
+
+    #     dist.barrier()
+    #     torch.cuda.synchronize()
+    #     torch.cuda.empty_cache()
+    #     self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
+
     def save_ckpt(
         self,
         model,
@@ -413,39 +494,44 @@ class FSDPStrategy(DistributedStrategy):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                print(f"TGRIGGS_MEM: doing nothing in sav checkpoint")
-                # # Get and save model state dict
-                # model_state_dict = save_model.state_dict()
-                # self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
-                # torch.save(model_state_dict, model_path)
+                # Get and save model state dict
+                model_state_dict = save_model.state_dict()
+                self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
+                torch.save(model_state_dict, model_path)
 
-                # # Get and save optimizer state dict if optimizer is provided
-                # optimizer_state_dict = {}
-                # if optimizer is not None:
-                #     optimizer_state_dict = optimizer.state_dict()
-                # self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
-                # torch.save(optimizer_state_dict, optim_path)
+                del model_state_dict
+                
+                # Get and save optimizer state dict if optimizer is provided
+                optimizer_state_dict = {}
+                if optimizer is not None:
+                    optimizer_state_dict = optimizer.state_dict()
+                self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
+                torch.save(optimizer_state_dict, optim_path)
+                del optimizer_state_dict
+                import gc; gc.collect()
+                
+                # Get scheduler state dict if scheduler is provided
+                lr_scheduler_state_dict = {}
+                if scheduler is not None:
+                    lr_scheduler_state_dict = scheduler.state_dict()
+    
+                # Create extra state dict with client state and any additional info
+                extra_state_dict = {
+                    "lr_scheduler": lr_scheduler_state_dict,
+                    "client_state": client_state,
+                    "tag": tag,
+                    "fsdp_strategy": self.fsdp_strategy,
+                    "world_size": world_size,
+                    "rank": rank,
+                    "global_step": global_step,
+                    "rng": self.get_rng_state(),  # Add RNG state for reproducibility
+                }
+                
+                del lr_scheduler_state_dict
 
-                # # Get scheduler state dict if scheduler is provided
-                # lr_scheduler_state_dict = {}
-                # if scheduler is not None:
-                #     lr_scheduler_state_dict = scheduler.state_dict()
-
-                # # Create extra state dict with client state and any additional info
-                # extra_state_dict = {
-                #     "lr_scheduler": lr_scheduler_state_dict,
-                #     "client_state": client_state,
-                #     "tag": tag,
-                #     "fsdp_strategy": self.fsdp_strategy,
-                #     "world_size": world_size,
-                #     "rank": rank,
-                #     "global_step": global_step,
-                #     "rng": self.get_rng_state(),  # Add RNG state for reproducibility
-                # }
-
-                # # Save extra state
-                # self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
-                # torch.save(extra_state_dict, extra_path)
+                # Save extra state
+                self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
+                torch.save(extra_state_dict, extra_path)
 
         # Final barrier to ensure all operations complete
         dist.barrier()

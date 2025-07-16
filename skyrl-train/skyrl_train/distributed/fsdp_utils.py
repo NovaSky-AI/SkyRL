@@ -161,39 +161,30 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
-    def print_memory_info(stage):
-        free, total = torch.cuda.mem_get_info()
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        free_gb = free / 1024**3
-        total_gb = total / 1024**3
-        print(f"TGRIGGS_MEM: GPU memory {stage}: allocated={allocated:.3f}GB, reserved={reserved:.3f}GB, free={free_gb:.3f}GB, total={total_gb:.3f}GB")
-        return allocated, reserved, free_gb, total_gb
-    
-    print_memory_info("before offload_fsdp2_model_to_cpu")
-    
-    # Count parameters being moved
-    param_count = 0
-    total_param_size = 0
+    free, total = torch.cuda.mem_get_info()
+    print(f"TGRIGGS_MEM: GPU memory before offload_fsdp2_model_to_cpu: { {
+        'allocated': torch.cuda.memory_allocated() / 1024**3,
+        'reserved': torch.cuda.memory_reserved() / 1024**3,
+        'free': free / 1024**3,
+        'total': total / 1024**3,
+    } }")
     
     # model.to("cpu", non_blocking=True)
     for param in model.parameters():
-        if param.data.is_cuda:
-            param_count += 1
-            total_param_size += param.data.numel() * param.data.element_size()
-            param.data = param.data.to("cpu", non_blocking=True)
-    
-    print(f"TGRIGGS_MEM: Moved {param_count} parameters totaling {total_param_size / 1024**3:.3f}GB to CPU")
-    
-    print_memory_info("after moving parameters (before sync)")
-    
+        param.data = param.data.to("cpu", non_blocking=True)
+        
     torch.cuda.synchronize() 
-    print_memory_info("after synchronize (before empty_cache)")
-    
     if empty_cache:
         torch.cuda.empty_cache()
     
-    print_memory_info("after offload_fsdp2_model_to_cpu (final)")
+    free, total = torch.cuda.mem_get_info()
+    print(f"TGRIGGS_MEM: GPU memory after offload_fsdp2_model_to_cpu: { {
+        'allocated': torch.cuda.memory_allocated() / 1024**3,
+        'reserved': torch.cuda.memory_reserved() / 1024**3,
+        'free': free / 1024**3,
+        'total': total / 1024**3,
+    } }")
+    
 
 
 @torch.no_grad()
@@ -243,6 +234,12 @@ def offload_fsdp_optimizer(optimizer):
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to("cpu", non_blocking=True)
+
+    # optimizer.zero_grad(set_to_none=True)
+                    
+    torch.cuda.synchronize() 
+    # import gc; gc.collect()
+
     free, total = torch.cuda.mem_get_info()
     print(f"TGRIGGS_MEM: GPU memory after offload_fsdp_optimizer: { {
         'allocated': torch.cuda.memory_allocated() / 1024**3,
@@ -262,7 +259,7 @@ def load_fsdp_optimizer(optimizer, device_id):
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(device_id, non_blocking=True)
-
+                    
 
 def fsdp_version(model):
     if isinstance(model, FSDP):
