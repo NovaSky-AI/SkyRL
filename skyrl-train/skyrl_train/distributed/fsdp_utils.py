@@ -169,11 +169,11 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
         'total': total / 1024**3,
     } }")
     
-    # model.to("cpu", non_blocking=True)
-    for param in model.parameters():
-        param.data = param.data.to("cpu", non_blocking=True)
+    model.to("cpu", non_blocking=True)
+    # for param in model.parameters():
+    #     param.data = param.data.to("cpu", non_blocking=True)
         
-    torch.cuda.synchronize() 
+    # torch.cuda.synchronize() 
     if empty_cache:
         torch.cuda.empty_cache()
     
@@ -210,9 +210,9 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = torch.cuda.current_device()
-    # model.to(device, non_blocking=True)
-    for param in model.parameters():
-        param.data = param.data.to(device, non_blocking=True)
+    model.to(device, non_blocking=True)
+    # for param in model.parameters():
+        # param.data = param.data.to(device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -237,7 +237,7 @@ def offload_fsdp_optimizer(optimizer):
 
     # optimizer.zero_grad(set_to_none=True)
                     
-    torch.cuda.synchronize() 
+    # torch.cuda.synchronize() 
     # import gc; gc.collect()
 
     free, total = torch.cuda.mem_get_info()

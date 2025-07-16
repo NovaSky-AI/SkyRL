@@ -499,16 +499,12 @@ class FSDPStrategy(DistributedStrategy):
                 self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
                 torch.save(model_state_dict, model_path)
 
-                del model_state_dict
-                
                 # Get and save optimizer state dict if optimizer is provided
                 optimizer_state_dict = {}
                 if optimizer is not None:
                     optimizer_state_dict = optimizer.state_dict()
                 self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
                 torch.save(optimizer_state_dict, optim_path)
-                del optimizer_state_dict
-                import gc; gc.collect()
                 
                 # Get scheduler state dict if scheduler is provided
                 lr_scheduler_state_dict = {}
@@ -526,17 +522,18 @@ class FSDPStrategy(DistributedStrategy):
                     "global_step": global_step,
                     "rng": self.get_rng_state(),  # Add RNG state for reproducibility
                 }
-                
-                del lr_scheduler_state_dict
 
                 # Save extra state
                 self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
                 torch.save(extra_state_dict, extra_path)
+                del model_state_dict
+                del optimizer_state_dict
+                del lr_scheduler_state_dict
+                import gc; gc.collect()
 
         # Final barrier to ensure all operations complete
         dist.barrier()
         torch.cuda.synchronize()
-        torch.cuda.empty_cache()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_ckpt(
