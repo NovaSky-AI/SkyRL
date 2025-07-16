@@ -319,7 +319,7 @@ class RayPPOTrainer:
                         self.save_checkpoints()
                     memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
                     print(f"After saving checkpoints: {memory}")
-                        
+
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
                     with Timer("save_hf_model", self.all_timings):
                         self.save_models()

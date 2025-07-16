@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
+import gc
 
 import numpy as np
 import torch
@@ -114,7 +115,6 @@ class FSDPStrategy(DistributedStrategy):
             model = model
 
         if self.manual_offload:
-            print(f"TGRIGGS_MEM: offload_to_cpu with manual_offload=True")
             offload_fsdp_model_to_cpu(model, empty_cache=True)
 
             if optimizer is not None and self.manual_offload_optimizer:
@@ -122,14 +122,6 @@ class FSDPStrategy(DistributedStrategy):
 
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-        
-        free, total = torch.cuda.mem_get_info()
-        print(f"TGRIGGS_MEM: GPU memory at the end of offload_to_cpu: { {
-            'allocated': torch.cuda.memory_allocated() / 1024**3,
-            'reserved': torch.cuda.memory_reserved() / 1024**3,
-            'free': free / 1024**3,
-            'total': total / 1024**3,
-        } }")
 
     def backload_to_gpu(self, model, optimizer, non_blocking=True):
         """Reload model weights back to GPU."""
@@ -371,7 +363,6 @@ class FSDPStrategy(DistributedStrategy):
         # If no unwrapping needed, return the original model
         return model
 
-
     # def save_ckpt(
     #     self,
     #     model,
@@ -385,7 +376,7 @@ class FSDPStrategy(DistributedStrategy):
     # ):
     #     """Save model checkpoint for FSDP2 with proper offloading"""
     #     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict, get_optimizer_state_dict
-        
+
     #     if node_local_rank == 0:
     #         os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -398,7 +389,7 @@ class FSDPStrategy(DistributedStrategy):
 
     #     rank = self.get_rank()
     #     world_size = self.world_size
-        
+
     #     # Use PyTorch's distributed checkpoint APIs with built-in offloading
     #     model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
     #     optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
@@ -407,7 +398,7 @@ class FSDPStrategy(DistributedStrategy):
     #     # Get model state dict with offloading
     #     options = StateDictOptions(full_state_dict=False, cpu_offload=True)
     #     model_state_dict = get_model_state_dict(save_model, options=options)
-        
+
     #     self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
     #     torch.save(model_state_dict, model_path)
     #     del model_state_dict
@@ -418,7 +409,7 @@ class FSDPStrategy(DistributedStrategy):
     #         # Use the proper FSDP2 optimizer state dict method
     #         options = StateDictOptions(full_state_dict=False, cpu_offload=True)
     #         optimizer_state_dict = get_optimizer_state_dict(save_model, optimizer, options=options)
-        
+
     #     self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
     #     torch.save(optimizer_state_dict, optim_path)
     #     del optimizer_state_dict
@@ -438,7 +429,7 @@ class FSDPStrategy(DistributedStrategy):
     #         "global_step": global_step,
     #         "rng": self.get_rng_state(),
     #     }
-        
+
     #     self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
     #     torch.save(extra_state_dict, extra_path)
 
@@ -469,12 +460,10 @@ class FSDPStrategy(DistributedStrategy):
         dist.barrier()
 
         # Extract the actual model for saving
-        save_model = model
         if isinstance(model, Actor):
-            print(f"TGRIGGS_MEM: saving an Actor model")
             save_model = model.model
         else:
-            print(f"TGRIGGS_MEM: saving a non-Actor model")
+            save_model = model
 
         if self.fsdp_strategy not in ("fsdp", "fsdp2"):
             raise ValueError(f"Unsupported FSDP strategy: {self.fsdp_strategy}")
@@ -505,12 +494,12 @@ class FSDPStrategy(DistributedStrategy):
                     optimizer_state_dict = optimizer.state_dict()
                 self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
                 torch.save(optimizer_state_dict, optim_path)
-                
+
                 # Get scheduler state dict if scheduler is provided
                 lr_scheduler_state_dict = {}
                 if scheduler is not None:
                     lr_scheduler_state_dict = scheduler.state_dict()
-    
+
                 # Create extra state dict with client state and any additional info
                 extra_state_dict = {
                     "lr_scheduler": lr_scheduler_state_dict,
@@ -529,7 +518,7 @@ class FSDPStrategy(DistributedStrategy):
                 del model_state_dict
                 del optimizer_state_dict
                 del lr_scheduler_state_dict
-                import gc; gc.collect()
+                gc.collect()
 
         # Final barrier to ensure all operations complete
         dist.barrier()

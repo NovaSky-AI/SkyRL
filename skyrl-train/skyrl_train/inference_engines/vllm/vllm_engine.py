@@ -307,6 +307,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         from vllm.device_allocator.cumem import CuMemAllocator
+
         allocator = CuMemAllocator.get_instance()
         print(f"vllm cumem usage before wake up: {allocator.get_current_usage()}")
         await self.llm.wake_up(tags=kwargs.get("tags", None))

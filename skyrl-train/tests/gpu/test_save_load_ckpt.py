@@ -11,17 +11,19 @@ import os
 import shutil
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor
+from tests.gpu.utils import init_worker_with_type, make_dummy_experience
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils.utils import print_mem
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 CKPT_PATH = "$HOME/ckpts/test/"
 
+
 def get_rank_0_memory(actor_group, message: str):
     mem = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
     print_mem(message, mem)
     return mem["allocated"]
+
 
 def get_test_actor_config(strategy: str) -> DictConfig:
     with hydra.initialize_config_dir(config_dir=config_dir):
@@ -76,7 +78,7 @@ def test_save_load_checkpoint(strategy):
             dummy_experience_2.sequences[i] = torch.randint(100, 200, seq.shape, device=seq.device)
 
         global_step, local_step, accumulation_steps = 0, 0, 1
-        
+
         actor_group.offload_to_cpu()
 
         initial_offload_mem = get_rank_0_memory(actor_group, "After initial offload")
@@ -98,21 +100,19 @@ def test_save_load_checkpoint(strategy):
 
         # Step 2: Save checkpoint
         ray.get(actor_group.async_run_ray_method("pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path))
-        
+
         after_training = get_rank_0_memory(actor_group, "After ckpt")
 
         # Offload model to CPU
         actor_group.offload_to_cpu()
 
         after_offload = get_rank_0_memory(actor_group, "After offload")
-        
+
         offload_delta = after_training - after_offload
         assert offload_delta > 5, f"Offload delta is {offload_delta}, should be ~11"
-        
+
         # print(f"Offloaded {after_training - after_offload}, should be {initial_offload_mem - after_offload}")
         # print(f"Delta: {after_offload - initial_offload_mem}")
-        
-        
 
         # # Step 3: Do second training step and record results
         # ray.get(
