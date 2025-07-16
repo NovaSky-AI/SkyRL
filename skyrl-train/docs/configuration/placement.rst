@@ -17,7 +17,7 @@ A typical PPO training workflow involves 5 model-based components:
 *Note: GRPO training generally uses the first 2-4 components depending on the setup – no critic model needed.*
 
 Inference Engine Placement
-----------------------
+--------------------------
 
 The ``generator.run_engines_locally`` setting controls inference engine placement.
 

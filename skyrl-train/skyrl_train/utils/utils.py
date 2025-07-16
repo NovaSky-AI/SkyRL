@@ -248,12 +248,8 @@ def get_physical_gpu_id():
 
 
 def initialize_ray(cfg: DictConfig):
-    # TODO(tgriggs): Are all of these env vars necessary?
-    env_vars = {
-        "NCCL_CUMEM_ENABLE": "0",
-        "NCCL_P2P_DISABLE": "0",
-        "CUDA_LAUNCH_BLOCKING": "1",
-    }
+    # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
+    env_vars = {}
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.

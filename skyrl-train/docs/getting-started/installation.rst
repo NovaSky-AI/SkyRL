@@ -22,7 +22,7 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
 .. code-block:: bash
 
-    docker run -it  --runtime=nvidia --gpus all  --name skyrl-train sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8 /bin/bash
+    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8 /bin/bash
 
 3. Inside the launched container, setup the latest version of the project:
 
@@ -42,6 +42,20 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 - CUDA 12.8
 - `uv <https://docs.astral.sh/uv/>`_
 - `ray <https://docs.ray.io/en/latest/>`_ 2.44.0
+
+System Dependencies
+~~~~~~~~~~~~~~~~~~~
+
+The only packages required are `build-essential` and `libnuma <https://github.com/numactl/numactl>`_. You can install them using the following command:
+
+.. code-block:: bash
+
+    sudo apt update && sudo apt-get install build-essential libnuma-dev
+
+This will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile.
+
+Installing SkyRL-Train
+~~~~~~~~~~~~~~~~~~~~~~
 
 All project dependencies are managed by `uv`.
 

@@ -19,6 +19,6 @@ RUN sudo apt update && sudo apt install --fix-broken && sudo apt install -y defa
     && sudo rm -rf /var/lib/apt/lists/*
 
 # NOTE: vllm installation in base environment is needed for uv + vLLM to work
-RUN pip install vllm==0.9.2 \
+RUN pip install vllm==0.9.2 --extra-index-url https://download.pytorch.org/whl/cu128 \
     && pip install ray==2.44.0 \
     && rm -rf ~/.cache/pip

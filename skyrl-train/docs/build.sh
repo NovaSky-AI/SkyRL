@@ -10,7 +10,7 @@ set -e
 cd "$(dirname "$0")"  # Ensure we're in the docs directory
 
 if [ "$1" = "--build-only" ]; then
-    uv run --extra docs --isolated sphinx-build -b html . _build/html
+    uv run --extra docs --isolated sphinx-build -b html . _build/html $@
 else
-    uv run --extra docs --isolated sphinx-autobuild . _build/html
+    uv run --extra docs --isolated sphinx-autobuild . _build/html $@
 fi
