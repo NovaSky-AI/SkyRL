@@ -114,10 +114,14 @@ class FSDPStrategy(DistributedStrategy):
             model = model
 
         if self.manual_offload:
+            print(f"TGRIGGS_MEM: offload_to_cpu with manual_offload=True")
             offload_fsdp_model_to_cpu(model, empty_cache=True)
 
             if optimizer is not None and self.manual_offload_optimizer:
+                print(f"TGRIGGS_MEM: offload_fsdp_optimizer with manual_offload_optimizer=True")
                 offload_fsdp_optimizer(optimizer)
+        else:
+            print(f"TGRIGGS_MEM: offload_to_cpu with manual_offload=False")
 
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -386,7 +390,10 @@ class FSDPStrategy(DistributedStrategy):
         # Extract the actual model for saving
         save_model = model
         if isinstance(model, Actor):
+            print(f"TGRIGGS_MEM: saving an Actor model")
             save_model = model.model
+        else:
+            print(f"TGRIGGS_MEM: saving a non-Actor model")
 
         if self.fsdp_strategy not in ("fsdp", "fsdp2"):
             raise ValueError(f"Unsupported FSDP strategy: {self.fsdp_strategy}")
@@ -406,44 +413,44 @@ class FSDPStrategy(DistributedStrategy):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                # Get and save model state dict
-                model_state_dict = save_model.state_dict()
-                self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
-                torch.save(model_state_dict, model_path)
+                print(f"TGRIGGS_MEM: doing nothing in sav checkpoint")
+                # # Get and save model state dict
+                # model_state_dict = save_model.state_dict()
+                # self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
+                # torch.save(model_state_dict, model_path)
 
-                # Get and save optimizer state dict if optimizer is provided
-                optimizer_state_dict = {}
-                if optimizer is not None:
-                    optimizer_state_dict = optimizer.state_dict()
-                self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
-                torch.save(optimizer_state_dict, optim_path)
+                # # Get and save optimizer state dict if optimizer is provided
+                # optimizer_state_dict = {}
+                # if optimizer is not None:
+                #     optimizer_state_dict = optimizer.state_dict()
+                # self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
+                # torch.save(optimizer_state_dict, optim_path)
 
-                # Get scheduler state dict if scheduler is provided
-                lr_scheduler_state_dict = {}
-                if scheduler is not None:
-                    lr_scheduler_state_dict = scheduler.state_dict()
+                # # Get scheduler state dict if scheduler is provided
+                # lr_scheduler_state_dict = {}
+                # if scheduler is not None:
+                #     lr_scheduler_state_dict = scheduler.state_dict()
 
-                # Create extra state dict with client state and any additional info
-                extra_state_dict = {
-                    "lr_scheduler": lr_scheduler_state_dict,
-                    "client_state": client_state,
-                    "tag": tag,
-                    "fsdp_strategy": self.fsdp_strategy,
-                    "world_size": world_size,
-                    "rank": rank,
-                    "global_step": global_step,
-                    "rng": self.get_rng_state(),  # Add RNG state for reproducibility
-                }
+                # # Create extra state dict with client state and any additional info
+                # extra_state_dict = {
+                #     "lr_scheduler": lr_scheduler_state_dict,
+                #     "client_state": client_state,
+                #     "tag": tag,
+                #     "fsdp_strategy": self.fsdp_strategy,
+                #     "world_size": world_size,
+                #     "rank": rank,
+                #     "global_step": global_step,
+                #     "rng": self.get_rng_state(),  # Add RNG state for reproducibility
+                # }
 
-                # Save extra state
-                self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
-                torch.save(extra_state_dict, extra_path)
-
-        # Wait for all ranks to finish saving
-        dist.barrier()
+                # # Save extra state
+                # self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
+                # torch.save(extra_state_dict, extra_path)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_ckpt(

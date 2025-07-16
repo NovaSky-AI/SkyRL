@@ -49,17 +49,33 @@ class InferenceWeightsManager:
         We wake up the inference engine in two phases to minimize the peak GPU memory usage if
         `colocate_all` is enabled.
         """
+        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+        print(f"TGRIGGS_MEM: Before weights wake up: {memory}")
+        
         if self.colocate_all:
             asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
-
+            memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+            print(f"TGRIGGS_MEM: After weights wake up: {memory}")
+            
         if not self.no_sync:
             with Timer("sync_weights_to_inference_engines"):
                 ray.get(self.sync_policy_weights_to_inference_engines())
-
+            memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+            print(f"TGRIGGS_MEM: After weights sync: {memory}")
+            
         if self.colocate_all:
+            memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+            print(f"TGRIGGS_MEM: Before policy offload: {memory}")
+            
             with Timer("offload_policy_model_to_cpu"):
                 self.policy_model.offload_to_cpu()
+            memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+            print(f"TGRIGGS_MEM: After policy offload: {memory}")
+            
             asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
+            memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+            print(f"TGRIGGS_MEM: After kv_cache wake up: {memory}")
+            
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):

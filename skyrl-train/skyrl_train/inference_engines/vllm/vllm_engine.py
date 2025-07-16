@@ -306,7 +306,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return self._postprocess_outputs(outputs)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
+        from vllm.device_allocator.cumem import CuMemAllocator
+        allocator = CuMemAllocator.get_instance()
+        print(f"vllm cumem usage before wake up: {allocator.get_current_usage()}")
         await self.llm.wake_up(tags=kwargs.get("tags", None))
+        print(f"vllm cumem usage after wake up: {allocator.get_current_usage()}")
 
     async def sleep(self, *args: Any, **kwargs: Any):
         # TODO(team): remove once vllm fixes this

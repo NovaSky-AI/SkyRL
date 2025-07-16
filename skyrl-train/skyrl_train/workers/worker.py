@@ -199,10 +199,10 @@ class Worker(DistributedTorchRayActor):
         torch.cuda.synchronize()
         free, total = torch.cuda.mem_get_info()
         return {
-            "allocated": torch.cuda.memory_allocated(),
-            "reserved": torch.cuda.memory_reserved(),
-            "free": free,
-            "total": total,
+            "allocated": torch.cuda.memory_allocated() / 1024**3,
+            "reserved": torch.cuda.memory_reserved() / 1024**3,
+            "free": free / 1024**3,
+            "total": total / 1024**3,
         }
 
     def save_memory_snapshot(self, global_step=None, local_step=None):
