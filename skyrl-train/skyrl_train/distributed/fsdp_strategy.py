@@ -12,7 +12,14 @@ from torch import optim
 from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
+import torch.distributed.checkpoint as dcp
 
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    get_optimizer_state_dict,
+    get_state_dict,
+    StateDictOptions,
+)
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
@@ -255,8 +262,8 @@ class FSDPStrategy(DistributedStrategy):
             }
             actor_module = model.model if is_actor else model
             full_state = actor_module.state_dict()
-            apply_fsdp2(actor_module, fsdp_kwargs, self.fsdp_config)
-            fsdp2_load_full_state_dict(actor_module, full_state, cpu_offload)
+            actor_module = apply_fsdp2(actor_module, fsdp_kwargs, self.fsdp_config)
+            actor_module = fsdp2_load_full_state_dict(actor_module, full_state, cpu_offload)
             fsdp_module = actor_module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
@@ -289,6 +296,9 @@ class FSDPStrategy(DistributedStrategy):
             model.model = fsdp_module
         else:
             model = fsdp_module
+            
+        print("wrapped type:", type(model.model))
+        print("FSDP modules:", FSDP.fsdp_modules(model.model))
 
         return model, actor_optimizer, actor_lr_scheduler
 
@@ -401,6 +411,62 @@ class FSDPStrategy(DistributedStrategy):
         # Set up state dict configurations for sharded saving
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
+        print("TGRIGGS: save_model type:", type(save_model))
+        
+        print("TGRIGGS: FSDP modules:", FSDP.fsdp_modules(save_model))
+        print("TGRIGGS: Sub-modules:", [k for k, _ in save_model.named_modules()])
+        
+        # DEBUG: Check parameter ID alignment
+        if optimizer is not None:
+            print(f"TGRIGGS_DEBUG: Checking parameter ID alignment...")
+            
+            # Get model parameter IDs
+            model_param_ids = set(id(p) for p in save_model.parameters())
+            print(f"TGRIGGS_DEBUG: Model has {len(model_param_ids)} parameters")
+            
+            # Get optimizer parameter IDs
+            optim_param_ids = set()
+            for group in optimizer.param_groups:
+                for param in group['params']:
+                    optim_param_ids.add(id(param))
+            print(f"TGRIGGS_DEBUG: Optimizer has {len(optim_param_ids)} parameters")
+            
+            # Check for mismatches
+            missing_in_model = optim_param_ids - model_param_ids
+            missing_in_optim = model_param_ids - optim_param_ids
+            
+            if missing_in_model:
+                print(f"TGRIGGS_DEBUG: ERROR - {len(missing_in_model)} optimizer params not found in model!")
+                print(f"TGRIGGS_DEBUG: Missing param IDs: {list(missing_in_model)[:10]}...")  # Show first 10
+                
+            if missing_in_optim:
+                print(f"TGRIGGS_DEBUG: WARNING - {len(missing_in_optim)} model params not found in optimizer")
+                
+            if not missing_in_model and not missing_in_optim:
+                print(f"TGRIGGS_DEBUG: ✅ All parameter IDs match perfectly")
+            
+            # Additional debug: check if this is the FSDP2 case
+            print(f"TGRIGGS_DEBUG: FSDP strategy: {self.fsdp_strategy}")
+            print(f"TGRIGGS_DEBUG: Model type: {type(save_model).__name__}")
+            print(f"TGRIGGS_DEBUG: Optimizer type: {type(optimizer).__name__}")
+        
+        model_shard, optim_shard = get_state_dict(
+            save_model,
+            [optimizer] if optimizer is not None else [],
+            options=StateDictOptions(full_state_dict=False, cpu_offload=True)
+        )
+
+        # --- 3) Save via DCP; each rank writes its own file under `ckpt_dir` ---
+        rank = self.get_rank()
+        world_size = self.world_size
+        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+        dcp.save(
+            {"model": model_shard, "optim": optim_shard},
+            checkpoint_id=optim_path,
+        )
+
+
+
 
         # Define paths for saving individual rank files
         rank = self.get_rank()
@@ -413,39 +479,224 @@ class FSDPStrategy(DistributedStrategy):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                print(f"TGRIGGS_MEM: doing nothing in sav checkpoint")
-                # # Get and save model state dict
+            # with FSDP.state_dict_type(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+                # Get and save model state dict
                 # model_state_dict = save_model.state_dict()
                 # self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
                 # torch.save(model_state_dict, model_path)
 
-                # # Get and save optimizer state dict if optimizer is provided
-                # optimizer_state_dict = {}
+                # del model_state_dict
+                
+                # Get and save optimizer state dict if optimizer is provided
                 # if optimizer is not None:
-                #     optimizer_state_dict = optimizer.state_dict()
-                # self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
-                # torch.save(optimizer_state_dict, optim_path)
+                #     model_shard, optim_shard = get_state_dict(
+                #         save_model,
+                #         optimizer,
+                #         options=StateDictOptions(full_state_dict=False, cpu_offload=True)
+                #     )
 
-                # # Get scheduler state dict if scheduler is provided
-                # lr_scheduler_state_dict = {}
-                # if scheduler is not None:
-                #     lr_scheduler_state_dict = scheduler.state_dict()
+                #     # --- 3) Save via DCP; each rank writes its own file under `ckpt_dir` ---
+                #     dcp.save(
+                #         {"model": model_shard, "optim": optim_shard},
+                #         checkpoint_id=optim_path,
+                #     )
+                    
+                    # with FSDP.state_dict_type(
+                    #     model,
+                    #     StateDictType.SHARDED_STATE_DICT,
+                    #     optim_state_dict_config=ShardedOptimStateDictConfig(offload_to_cpu=False)
+                    # ):
+                    # optimizer_state_dict = FSDP.optim_state_dict(model, optimizer)
+                    # self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
+                    # torch.save(optimizer_state_dict, optim_path)
+                    # del optimizer_state_dict
+                        
+                        # def deep_debug_optimizer_state(optimizer, stage_name):
+                        #     """Comprehensive debugging of optimizer state"""
+                        #     print(f"\n=== OPTIMIZER STATE DEBUG - {stage_name} ===")
+                            
+                        #     # 1. Basic optimizer info
+                        #     print(f"Optimizer type: {type(optimizer).__name__}")
+                        #     print(f"Optimizer state keys: {list(optimizer.state.keys())}")
+                        #     print(f"Number of param groups: {len(optimizer.param_groups)}")
+                            
+                        #     # 2. Check all attributes of optimizer
+                        #     optimizer_attrs = [attr for attr in dir(optimizer) if not attr.startswith('_')]
+                        #     print(f"Optimizer attributes: {optimizer_attrs}")
+                            
+                        #     # 3. Check for FSDP-specific attributes
+                        #     fsdp_attrs = [attr for attr in dir(optimizer) if 'fsdp' in attr.lower()]
+                        #     if fsdp_attrs:
+                        #         print(f"FSDP-related attributes: {fsdp_attrs}")
+                            
+                        #     # 4. Deep dive into state structure
+                        #     total_tensors = 0
+                        #     total_gpu_memory = 0
+                        #     state_summary = {}
+                            
+                        #     for group_idx, param_group in enumerate(optimizer.param_groups):
+                        #         print(f"\n--- Param Group {group_idx} ---")
+                        #         print(f"Group keys: {list(param_group.keys())}")
+                        #         print(f"Number of params: {len(param_group['params'])}")
+                                
+                        #         for param_idx, param in enumerate(param_group['params']):
+                        #             param_state = optimizer.state.get(param, {})
+                        #             if not param_state:
+                        #                 continue
+                                        
+                        #             param_info = {
+                        #                 'param_id': id(param),
+                        #                 'param_shape': param.shape,
+                        #                 'param_device': param.device,
+                        #                 'param_dtype': param.dtype,
+                        #                 'state_keys': list(param_state.keys()),
+                        #                 'tensor_states': {}
+                        #             }
+                                    
+                        #             # Check each state tensor
+                        #             for state_key, state_value in param_state.items():
+                        #                 if isinstance(state_value, torch.Tensor):
+                        #                     total_tensors += 1
+                        #                     tensor_memory = state_value.element_size() * state_value.numel()
+                        #                     if state_value.device.type == 'cuda':
+                        #                         total_gpu_memory += tensor_memory
+                                            
+                        #                     param_info['tensor_states'][state_key] = {
+                        #                         'tensor_id': id(state_value),
+                        #                         'shape': state_value.shape,
+                        #                         'device': state_value.device,
+                        #                         'dtype': state_value.dtype,
+                        #                         'memory_bytes': tensor_memory,
+                        #                         'data_ptr': state_value.data_ptr() if state_value.device.type == 'cuda' else None,
+                        #                         'storage_id': id(state_value.storage()),
+                        #                         'is_contiguous': state_value.is_contiguous(),
+                        #                     }
+                                            
+                        #                     # Check for any views or aliases
+                        #                     try:
+                        #                         param_info['tensor_states'][state_key]['storage_offset'] = state_value.storage_offset()
+                        #                         param_info['tensor_states'][state_key]['stride'] = state_value.stride()
+                        #                     except:
+                        #                         pass
+                                    
+                        #             state_summary[f'group_{group_idx}_param_{param_idx}'] = param_info
+                                    
+                        #             # Print summary for first few params
+                        #             if param_idx < 3:  # Only print first 3 params to avoid spam
+                        #                 print(f"  Param {param_idx}: shape={param.shape}, device={param.device}")
+                        #                 for state_key, tensor_info in param_info['tensor_states'].items():
+                        #                     print(f"    {state_key}: shape={tensor_info['shape']}, device={tensor_info['device']}, "
+                        #                           f"id={tensor_info['tensor_id']}, data_ptr={tensor_info['data_ptr']}")
+                            
+                        #     print(f"\n--- SUMMARY ---")
+                        #     print(f"Total state tensors: {total_tensors}")
+                        #     print(f"Total GPU memory in optimizer state: {total_gpu_memory / (1024**3):.3f} GB")
+                            
+                        #     # 5. Check current GPU memory
+                        #     if torch.cuda.is_available():
+                        #         allocated = torch.cuda.memory_allocated() / (1024**3)
+                        #         reserved = torch.cuda.memory_reserved() / (1024**3)
+                        #         print(f"Current GPU memory - Allocated: {allocated:.3f} GB, Reserved: {reserved:.3f} GB")
+                            
+                        #     return state_summary
+                        
+                        # # Debug BEFORE state_dict()
+                        # state_before = deep_debug_optimizer_state(optimizer, "BEFORE state_dict()")
+                        
+                        # # Call state_dict()
+                        # print(f"\n🔍 CALLING optimizer.state_dict()...")
+                        # optimizer_state_dict = optimizer.state_dict()
+                        # print(f"✅ optimizer.state_dict() completed")
+                        
+                        # # Debug AFTER state_dict()
+                        # state_after = deep_debug_optimizer_state(optimizer, "AFTER state_dict()")
+                        
+                        # # Compare states in detail
+                        # print(f"\n=== DETAILED COMPARISON ===")
+                        # changes_detected = False
+                        
+                        # for param_key in state_before.keys():
+                        #     if param_key not in state_after:
+                        #         print(f"❌ MISSING: {param_key} not found in after state")
+                        #         changes_detected = True
+                        #         continue
+                                
+                        #     before_param = state_before[param_key]
+                        #     after_param = state_after[param_key]
+                            
+                        #     # Compare basic param info
+                        #     if before_param['param_id'] != after_param['param_id']:
+                        #         print(f"❌ PARAM ID CHANGED: {param_key} - {before_param['param_id']} -> {after_param['param_id']}")
+                        #         changes_detected = True
+                            
+                        #     if before_param['state_keys'] != after_param['state_keys']:
+                        #         print(f"❌ STATE KEYS CHANGED: {param_key} - {before_param['state_keys']} -> {after_param['state_keys']}")
+                        #         changes_detected = True
+                            
+                        #     # Compare tensor states
+                        #     for state_key in before_param['tensor_states'].keys():
+                        #         if state_key not in after_param['tensor_states']:
+                        #             print(f"❌ TENSOR MISSING: {param_key}.{state_key}")
+                        #             changes_detected = True
+                        #             continue
+                                    
+                        #         before_tensor = before_param['tensor_states'][state_key]
+                        #         after_tensor = after_param['tensor_states'][state_key]
+                                
+                        #         # Check critical properties
+                        #         critical_props = ['tensor_id', 'device', 'data_ptr', 'storage_id']
+                        #         for prop in critical_props:
+                        #             if prop in before_tensor and prop in after_tensor:
+                        #                 if before_tensor[prop] != after_tensor[prop]:
+                        #                     print(f"❌ {prop.upper()} CHANGED: {param_key}.{state_key} - {before_tensor[prop]} -> {after_tensor[prop]}")
+                        #                     changes_detected = True
+                        
+                        # if not changes_detected:
+                        #     print("✅ No detectable changes in optimizer state structure")
+                        
+                        # # Additional check: verify that offloading would actually work
+                        # print(f"\n=== OFFLOAD SIMULATION TEST ===")
+                        # gpu_tensors_found = 0
+                        # for param_group in optimizer.param_groups:
+                        #     for param in param_group["params"]:
+                        #         if param in optimizer.state:
+                        #             for key, value in optimizer.state[param].items():
+                        #                 if isinstance(value, torch.Tensor) and value.device.type == 'cuda':
+                        #                     gpu_tensors_found += 1
+                        #                     print(f"GPU tensor found: param_id={id(param)}, state_key={key}, "
+                        #                           f"device={value.device}, shape={value.shape}, data_ptr={value.data_ptr()}")
+                        
+                        # print(f"Total GPU tensors that would be offloaded: {gpu_tensors_found}")
+                        
+                        # self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
+                        # torch.save(optimizer_state_dict, optim_path)
+                        # del optimizer_state_dict
+                
+                
+                
+                # Get scheduler state dict if scheduler is provided
+                lr_scheduler_state_dict = {}
+                if scheduler is not None:
+                    lr_scheduler_state_dict = scheduler.state_dict()
+    
+                # Create extra state dict with client state and any additional info
+                extra_state_dict = {
+                    "lr_scheduler": lr_scheduler_state_dict,
+                    "client_state": client_state,
+                    "tag": tag,
+                    "fsdp_strategy": self.fsdp_strategy,
+                    "world_size": world_size,
+                    "rank": rank,
+                    "global_step": global_step,
+                    "rng": self.get_rng_state(),  # Add RNG state for reproducibility
+                }
+                
+                # del optimizer_state_dict
+                del lr_scheduler_state_dict
 
-                # # Create extra state dict with client state and any additional info
-                # extra_state_dict = {
-                #     "lr_scheduler": lr_scheduler_state_dict,
-                #     "client_state": client_state,
-                #     "tag": tag,
-                #     "fsdp_strategy": self.fsdp_strategy,
-                #     "world_size": world_size,
-                #     "rank": rank,
-                #     "global_step": global_step,
-                #     "rng": self.get_rng_state(),  # Add RNG state for reproducibility
-                # }
-
-                # # Save extra state
-                # self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
-                # torch.save(extra_state_dict, extra_path)
+                # Save extra state
+                self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
+                torch.save(extra_state_dict, extra_path)
 
         # Final barrier to ensure all operations complete
         dist.barrier()

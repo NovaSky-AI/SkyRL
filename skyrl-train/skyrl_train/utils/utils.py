@@ -323,7 +323,7 @@ def str_to_torch_dtype(dtype: str) -> torch.dtype:
 
 
 def format_gib(mem_bytes: int) -> str:
-    return f"{mem_bytes / (1024 ** 3):.2f} GiB"
+    return f"{mem_bytes:.2f} GiB"
 
 
 def print_mem(tag: str, mem: dict):

@@ -1,0 +1,141 @@
+Installed 120 packages in 244ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.11, pytest-8.4.1, pluggy-1.6.0 -- /home/ubuntu/.cache/uv/builds-v0/.tmpDSBkkf/bin/python
+cachedir: .pytest_cache
+rootdir: /home/ubuntu/tgriggs/SkyRL/skyrl-train
+configfile: pyproject.toml
+plugins: asyncio-1.0.0, hydra-core-1.3.2, jaxtyping-0.3.2
+asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/gpu/test_save_load_ckpt.py::test_save_load_checkpoint[fsdp] 2025-07-16 17:22:06,128	INFO worker.py:1852 -- Started a local Ray instance.
+2025-07-16 17:22:07.875 | INFO     | skyrl_train.workers.worker:_initiate_actors:543 - Initializing process group for RayActorGroup
+2025-07-16 17:22:14.109 | INFO     | skyrl_train.workers.worker:_initiate_actors:545 - Initialized process group for RayActorGroup
+2025-07-16 17:22:14.115 | INFO     | skyrl_train.workers.worker:_initiate_actors:547 - Mesh Ranks: [MeshRank(dp=0, sp=0, tp=0, world_size=1, dp_size=1)]
+[36m(FSDPPolicyRayActorBase pid=61860)[0m Flash Attention 2.0 only supports torch.float16 and torch.bfloat16 dtypes, but the current dype in Qwen2ForCausalLM is torch.float32. You should run training or inference using Automatic Mixed-Precision via the `with torch.autocast(device_type='torch_device'):` decorator, or load the model with the `torch_dtype` argument. Example: `model = AutoModel.from_pretrained("openai/whisper-tiny", attn_implementation="flash_attention_2", torch_dtype=torch.float16)`
+[36m(FSDPPolicyRayActorBase pid=61860)[0m You are attempting to use Flash Attention 2.0 with a model not initialized on GPU. Make sure to move the model to GPU after initializing it on CPU with `model.to('cuda')`.
+[36m(FSDPPolicyRayActorBase pid=61860)[0m /home/ubuntu/.cache/uv/builds-v0/.tmpDSBkkf/lib/python3.12/site-packages/torch/distributed/fsdp/_init_utils.py:430: UserWarning: FSDP is switching to use `NO_SHARD` instead of ShardingStrategy.FULL_SHARD since the world size is 1.
+[36m(FSDPPolicyRayActorBase pid=61860)[0m   warnings.warn(
+[36m(FSDPPolicyRayActorBase pid=61860)[0m /home/ubuntu/.cache/uv/builds-v0/.tmpDSBkkf/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4631: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+[36m(FSDPPolicyRayActorBase pid=61860)[0m   warnings.warn(  # warn only once
+[36m(FSDPPolicyRayActorBase pid=61860)[0m /home/ubuntu/.cache/uv/builds-v0/.tmpDSBkkf/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4631: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+[36m(FSDPPolicyRayActorBase pid=61860)[0m   warnings.warn(  # warn only once
+After init - Allocated: 5.75 GiB, Reserved: 14.94 GiB, Free: 63.17 GiB, Total: 79.19 GiB
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: offload_to_cpu with manual_offload=True
+After initial offload - Allocated: 5.75 GiB, Reserved: 5.75 GiB, Free: 72.34 GiB, Total: 79.19 GiB
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: offload_fsdp_optimizer with manual_offload_optimizer=True
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: optimizer.state is empty
+Before training - Allocated: 11.50 GiB, Reserved: 11.51 GiB, Free: 66.59 GiB, Total: 79.19 GiB
+After training step 1 - Allocated: 17.31 GiB, Reserved: 40.76 GiB, Free: 37.21 GiB, Total: 79.19 GiB
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: saving an Actor model
+[36m(FSDPPolicyRayActorBase pid=61860)[0m [rank-0]: Saving model to /home/ubuntu/ckpts/test/global_step_1/policy/model_world_size_1_rank_0.pt
+[36m(FSDPPolicyRayActorBase pid=61860)[0m [rank-0]: Saving optim to /home/ubuntu/ckpts/test/global_step_1/policy/optim_world_size_1_rank_0.pt
+After ckpt - Allocated: 23.94 GiB, Reserved: 28.76 GiB, Free: 49.21 GiB, Total: 79.19 GiB
+[36m(FSDPPolicyRayActorBase pid=61860)[0m [rank-0]: Saving extra_state to /home/ubuntu/ckpts/test/global_step_1/policy/extra_state_world_size_1_rank_0.pt
+[36m(FSDPPolicyRayActorBase pid=61860)[0m [rank-0]: Checkpoint saved to /home/ubuntu/ckpts/test/global_step_1/policy
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: offload_to_cpu with manual_offload=True
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: offload_fsdp_optimizer with manual_offload_optimizer=True
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: GPU memory before offload_fsdp_optimizer: {'allocated': 23.93572187423706, 'reserved': 28.76171875, 'free': 49.2080078125, 'total': 79.1893310546875}
+[36m(FSDPPolicyRayActorBase pid=61860)[0m TGRIGGS_MEM: GPU memory after offload_fsdp_optimizer: {'allocated': 23.93572187423706, 'reserved': 28.76171875, 'free': 49.1767578125, 'total': 79.1893310546875}
+After offload - Allocated: 23.94 GiB, Reserved: 28.76 GiB, Free: 49.18 GiB, Total: 79.19 GiB
+Removing checkpoint directory: /home/ubuntu/ckpts/test/global_step_1
+FAILED
+
+=================================== FAILURES ===================================
+_______________________ test_save_load_checkpoint[fsdp] ________________________
+
+strategy = 'fsdp'
+
+    @pytest.mark.parametrize(
+        "strategy",
+        [
+            # "deepspeed",
+            "fsdp",
+            # "fsdp2",
+        ],
+    )
+    def test_save_load_checkpoint(strategy):
+        """
+        Test checkpointing logic by:
+        1. Creating model and doing one training step
+        2. Saving checkpoint
+        3. Doing second training step and recording model logits
+        4. Loading checkpoint
+        5. Repeating second training step and comparing logits
+        """
+        cfg = get_test_actor_config(strategy)
+    
+        try:
+            actor_group = init_worker_with_type(
+                "policy",
+                shared_pg=None,
+                colocate_all=False,
+                num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+                cfg=cfg,
+            )
+            get_rank_0_memory(actor_group, "After init")
+    
+            checkpoint_dir = None
+            # Create dummy experiences for training steps
+            dummy_experience_1 = make_dummy_experience()  # First training step
+            dummy_experience_2 = make_dummy_experience()  # Second training step
+    
+            # Ensure the second experience is different from the first
+            for i, seq in enumerate(dummy_experience_2.sequences):
+                dummy_experience_2.sequences[i] = torch.randint(100, 200, seq.shape, device=seq.device)
+    
+            global_step, local_step, accumulation_steps = 0, 0, 1
+    
+            actor_group.offload_to_cpu()
+    
+            initial_offload_mem = get_rank_0_memory(actor_group, "After initial offload")
+    
+            # Backload to GPU
+            actor_group.backload_to_gpu()
+            get_rank_0_memory(actor_group, "Before training")
+    
+            # Step 1: Do initial training step
+            ray.get(
+                actor_group.async_run_ray_method(
+                    "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
+                )
+            )
+            get_rank_0_memory(actor_group, "After training step 1")
+    
+            checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))
+            checkpoint_dir = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1"))  # Store for cleanup
+    
+            # Step 2: Save checkpoint
+            ray.get(actor_group.async_run_ray_method("pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path))
+    
+            after_training = get_rank_0_memory(actor_group, "After ckpt")
+    
+            # Offload model to CPU
+            actor_group.offload_to_cpu()
+    
+            after_offload = get_rank_0_memory(actor_group, "After offload")
+    
+            offload_delta = after_training - after_offload
+>           assert offload_delta > 5, f"Offload delta is {offload_delta}, should be ~11"
+E           AssertionError: Offload delta is 0.0, should be ~11
+E           assert 0.0 > 5
+
+tests/gpu/test_save_load_ckpt.py:110: AssertionError
+=============================== warnings summary ===============================
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: Type google._upb._message.MessageMapContainer uses PyType_Spec with a metaclass that has custom tp_new. This is deprecated and will no longer be allowed in Python 3.14.
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: Type google._upb._message.ScalarMapContainer uses PyType_Spec with a metaclass that has custom tp_new. This is deprecated and will no longer be allowed in Python 3.14.
+
+tests/gpu/test_save_load_ckpt.py::test_save_load_checkpoint[fsdp]
+  /home/ubuntu/tgriggs/SkyRL/skyrl-train/tests/gpu/test_save_load_ckpt.py:27: UserWarning: 
+  The version_base parameter is not specified.
+  Please specify a compatability version level, or None.
+  Will assume defaults for version 1.1
+    with hydra.initialize_config_dir(config_dir=config_dir):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/gpu/test_save_load_ckpt.py::test_save_load_checkpoint[fsdp] - As...
+=================== 1 failed, 3 warnings in 79.53s (0:01:19) ===================
