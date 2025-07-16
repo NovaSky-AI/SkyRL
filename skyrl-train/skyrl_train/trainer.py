@@ -312,13 +312,8 @@ class RayPPOTrainer:
                 self.all_metrics = {}
 
                 if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                    memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
-                    print(f"Before saving checkpoints: {memory}")
-                    # TODO: Measure GPU memory usage before and after saving checkpoints
                     with Timer("save_checkpoints", self.all_timings):
                         self.save_checkpoints()
-                    memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
-                    print(f"After saving checkpoints: {memory}")
 
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
                     with Timer("save_hf_model", self.all_timings):

@@ -190,15 +190,12 @@ def load_fsdp_model_to_gpu(model: FSDP):
 def load_fsdp2_model_to_gpu(model):
     device = torch.cuda.current_device()
     model.to(device, non_blocking=True)
-    # for param in model.parameters():
-    # param.data = param.data.to(device, non_blocking=True)
 
 
 @torch.no_grad()
 def offload_fsdp_optimizer(optimizer):
     if not optimizer.state:
         return
-
     for param_group in optimizer.param_groups:
         for param in param_group["params"]:
             state = optimizer.state[param]

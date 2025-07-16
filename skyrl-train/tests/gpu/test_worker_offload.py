@@ -6,13 +6,17 @@ import ray
 import pytest
 import hydra
 from omegaconf import DictConfig
+import os
+import torch
+import shutil
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, make_dummy_tensorbatch
 from skyrl_train.utils.utils import print_mem
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.training_batch import TrainingOutputBatch
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+CKPT_PATH = "$HOME/ckpts/test/"
 
 
 def get_test_actor_config() -> DictConfig:
@@ -20,8 +24,11 @@ def get_test_actor_config() -> DictConfig:
         cfg = hydra.compose(config_name="ppo_base_config")
 
     cfg.trainer.policy.model.path = MODEL_NAME
-    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.use_sample_packing = False
+    
+    cfg.trainer.ckpt_path = CKPT_PATH
+    cfg.trainer.export_path = CKPT_PATH
 
     return cfg
 
@@ -288,3 +295,82 @@ async def test_cpu_offload_correctness(cfg, worker_type, strategy):
 
     finally:
         ray.shutdown()
+
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        # "deepspeed",
+        # "fsdp",
+        "fsdp2",
+    ],
+)
+def test_optimizer_offload_after_ckpt(strategy):
+    """
+    Test ckpt+offload logic by:
+    1. Creating model and doing one training step
+    2. Saving checkpoint
+    3. Offload policy and optimizer
+    4. Ensure that memory was freed
+    """
+    cfg = get_test_actor_config()
+    cfg.trainer.strategy = strategy
+
+    checkpoint_dir = None
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+        get_rank_0_memory(actor_group, "After init")
+
+        # Create dummy experiences for training steps
+        dummy_experience_1 = make_dummy_experience()  # First training step
+
+        global_step, local_step, accumulation_steps = 0, 0, 1
+
+        actor_group.offload_to_cpu()
+
+        initial_offload_mem = get_rank_0_memory(actor_group, "After initial offload")
+
+        # # Backload to GPU
+        actor_group.backload_to_gpu()
+        
+        get_rank_0_memory(actor_group, "Before training")
+
+        # Step 1: Do initial training step
+        ray.get(
+            actor_group.async_run_ray_method(
+                "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
+            )
+        )
+        get_rank_0_memory(actor_group, "After training step 1")
+
+        checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))
+        checkpoint_dir = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1"))  # Store for cleanup
+
+        # Step 2: Save checkpoint
+        ray.get(actor_group.async_run_ray_method("pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path))
+
+        after_training = get_rank_0_memory(actor_group, "After ckpt")
+
+        # Offload model to CPU
+        actor_group.offload_to_cpu()
+
+        after_offload = get_rank_0_memory(actor_group, "After offload")
+
+        offload_delta = after_training - after_offload
+        assert offload_delta > 5, f"Offload delta is {offload_delta}, should be ~11"
+
+    finally:
+        # Clean up ray
+        ray.shutdown()
+
+        # Clean up checkpoint directory
+        if checkpoint_dir and os.path.exists(checkpoint_dir):
+            print(f"Removing checkpoint directory: {checkpoint_dir}")
+            shutil.rmtree(checkpoint_dir)
