@@ -12,3 +12,10 @@ repos:
     hooks:
       - id: black
         exclude: (^skyagent/.*)$
+
+  # Detect secrets and sensitive information
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+        args: [--verbose]
