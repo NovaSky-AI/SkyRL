@@ -440,7 +440,7 @@ class FSDPStrategy(DistributedStrategy):
                 # Save extra state
                 self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
                 torch.save(extra_state_dict, extra_path)
-                
+
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
 
