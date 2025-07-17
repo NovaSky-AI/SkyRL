@@ -440,9 +440,9 @@ class FSDPStrategy(DistributedStrategy):
                 # Save extra state
                 self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
                 torch.save(extra_state_dict, extra_path)
-                del model_state_dict
-                del optimizer_state_dict
-                del lr_scheduler_state_dict
+                # del model_state_dict
+                # del optimizer_state_dict
+                # del lr_scheduler_state_dict
                 gc.collect()
 
         # Final barrier to ensure all operations complete

@@ -15,7 +15,6 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.training_batch import TrainingOutputBatch
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-CKPT_PATH = "$HOME/ckpts/test/"
 
 
 def get_test_actor_config() -> DictConfig:
@@ -25,9 +24,6 @@ def get_test_actor_config() -> DictConfig:
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.use_sample_packing = False
-
-    cfg.trainer.ckpt_path = CKPT_PATH
-    cfg.trainer.export_path = CKPT_PATH
 
     return cfg
 
@@ -309,10 +305,13 @@ def test_offload_after_ckpt(strategy):
     Test ckpt+offload logic by:
     1. Creating model and doing one training step
     2. Saving checkpoint
-    3. Offload policy and optimizer
+    3. Offload parameters and optimizer
     4. Ensure that memory was freed
     """
     cfg = get_test_actor_config()
+    ckpt_path = "$HOME/ckpts/test/"
+    cfg.trainer.ckpt_path = ckpt_path
+    cfg.trainer.export_path = ckpt_path
     cfg.trainer.strategy = strategy
 
     checkpoint_dir = None
@@ -351,7 +350,6 @@ def test_offload_after_ckpt(strategy):
 
         # Step 4: Check that memory is offloaded
         offload_delta = after_training - after_offload
-        print(f"Offload delta: {offload_delta}")
         assert offload_delta > 5 * 1024**3, f"Offload memory is {offload_delta} bytes, should be > 5GB"
 
     finally:
