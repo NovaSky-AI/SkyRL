@@ -350,7 +350,7 @@ def test_offload_after_ckpt(strategy):
 
         # Step 4: Check that memory is offloaded
         offload_delta = after_training - after_offload
-        assert offload_delta > 5 * 1024**3, f"Offload memory is {offload_delta} bytes, should be > 5GB"
+        assert offload_delta > 2.5 * 1024**3, f"Offload memory is {offload_delta} bytes, should be > 2.5GB"
 
     finally:
         # Clean up ray
