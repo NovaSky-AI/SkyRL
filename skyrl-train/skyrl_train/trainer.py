@@ -314,7 +314,6 @@ class RayPPOTrainer:
                 if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                     with Timer("save_checkpoints", self.all_timings):
                         self.save_checkpoints()
-
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
                     with Timer("save_hf_model", self.all_timings):
                         self.save_models()

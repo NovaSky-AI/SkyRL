@@ -60,7 +60,6 @@ class InferenceWeightsManager:
             with Timer("offload_policy_model_to_cpu"):
                 self.policy_model.offload_to_cpu()
             asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
-
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):

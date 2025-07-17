@@ -7,7 +7,6 @@ import pytest
 import hydra
 from omegaconf import DictConfig
 import os
-import torch
 import shutil
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, make_dummy_tensorbatch
@@ -26,7 +25,7 @@ def get_test_actor_config() -> DictConfig:
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.use_sample_packing = False
-    
+
     cfg.trainer.ckpt_path = CKPT_PATH
     cfg.trainer.export_path = CKPT_PATH
 
@@ -297,16 +296,15 @@ async def test_cpu_offload_correctness(cfg, worker_type, strategy):
         ray.shutdown()
 
 
-
 @pytest.mark.parametrize(
     "strategy",
     [
-        # "deepspeed",
-        # "fsdp",
+        "deepspeed",
+        "fsdp",
         "fsdp2",
     ],
 )
-def test_optimizer_offload_after_ckpt(strategy):
+def test_offload_after_ckpt(strategy):
     """
     Test ckpt+offload logic by:
     1. Creating model and doing one training step
@@ -330,17 +328,7 @@ def test_optimizer_offload_after_ckpt(strategy):
 
         # Create dummy experiences for training steps
         dummy_experience_1 = make_dummy_experience()  # First training step
-
         global_step, local_step, accumulation_steps = 0, 0, 1
-
-        actor_group.offload_to_cpu()
-
-        initial_offload_mem = get_rank_0_memory(actor_group, "After initial offload")
-
-        # # Backload to GPU
-        actor_group.backload_to_gpu()
-        
-        get_rank_0_memory(actor_group, "Before training")
 
         # Step 1: Do initial training step
         ray.get(
@@ -355,16 +343,16 @@ def test_optimizer_offload_after_ckpt(strategy):
 
         # Step 2: Save checkpoint
         ray.get(actor_group.async_run_ray_method("pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path))
-
         after_training = get_rank_0_memory(actor_group, "After ckpt")
 
-        # Offload model to CPU
+        # Step 3:Offload model to CPU
         actor_group.offload_to_cpu()
-
         after_offload = get_rank_0_memory(actor_group, "After offload")
 
+        # Step 4: Check that memory is offloaded
         offload_delta = after_training - after_offload
-        assert offload_delta > 5, f"Offload delta is {offload_delta}, should be ~11"
+        print(f"Offload delta: {offload_delta}")
+        assert offload_delta > 5 * 1024**3, f"Offload memory is {offload_delta} bytes, should be > 5GB"
 
     finally:
         # Clean up ray
