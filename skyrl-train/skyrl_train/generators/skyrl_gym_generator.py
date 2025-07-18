@@ -7,7 +7,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
 import threading
-from openai import AsyncOpenAI
+import aiohttp
 from skyrl_train.inference_engines.launch_inference_engine_http_server import (
     serve,
     wait_for_server_ready,
@@ -73,12 +73,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 port=self.http_server_inference_engine_client_port,
                 max_wait_seconds=30,
             )
-            self.openai_client = AsyncOpenAI(
-                base_url=f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}/v1",
-                api_key="dummy-key",
-            )
+            # Store the base URL for direct HTTP requests
+            self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
         else:
-            self.openai_client = None
+            self.base_url = None
 
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
@@ -104,22 +102,68 @@ class SkyRLGymGenerator(GeneratorInterface):
             except Exception:
                 pass
 
+    def _convert_to_openai_params(self, sampling_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Convert VLLM sampling parameters to OpenAI API compatible parameters."""
+        if not sampling_params:
+            return {}
+        
+        openai_params = {}
+        
+        # Map VLLM parameters to OpenAI parameters
+        param_mapping = {
+            'max_generate_length': 'max_tokens',
+            'temperature': 'temperature',
+            'top_p': 'top_p',
+            # Note: OpenAI API doesn't support min_p, top_k, min_tokens directly
+            # We'll skip these parameters for OpenAI compatibility
+        }
+        
+        for vllm_param, openai_param in param_mapping.items():
+            if vllm_param in sampling_params:
+                openai_params[openai_param] = sampling_params[vllm_param]
+        
+        # Handle special cases
+        if 'max_tokens' in sampling_params:
+            openai_params['max_tokens'] = sampling_params['max_tokens']
+        
+        return openai_params
+
     async def _openai_generate(self, prompts: List[ConversationType], sampling_params: Optional[Dict[str, Any]] = None):
-        tasks = []
-        params = sampling_params or {}
-        for prompt in prompts:
-            messages = [{"role": m["role"], "content": m["content"]} for m in prompt]
-            tasks.append(
-                self.openai_client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    **params,
+        """Generate responses using direct HTTP session.post calls without concurrency limiting."""
+        params = self._convert_to_openai_params(sampling_params)
+        
+        # Use aiohttp session for direct HTTP requests (no concurrency limiting)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            headers = {"Content-Type": "application/json"}
+            output_tasks = []
+            
+            for prompt in prompts:
+                payload = params.copy()
+                payload["model"] = self.model_name
+                payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in prompt]
+                
+                output_tasks.append(
+                    session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers)
                 )
-            )
-        results = await asyncio.gather(*tasks)
-        responses = [r.choices[0].message.content for r in results]
-        finish_reasons = [r.choices[0].finish_reason or "stop" for r in results]
-        return {"responses": responses, "stop_reasons": finish_reasons}
+            
+            # Execute all requests concurrently
+            responses = await asyncio.gather(*output_tasks)
+            
+            # Parse responses
+            results = []
+            finish_reasons = []
+            
+            for response in responses:
+                response_json = await response.json()
+                if 'choices' in response_json and len(response_json['choices']) > 0:
+                    choice = response_json['choices'][0]
+                    results.append(choice.get('message', {}).get('content', ''))
+                    finish_reasons.append(choice.get('finish_reason', 'stop'))
+                else:
+                    results.append('')
+                    finish_reasons.append('error')
+            
+            return {"responses": results, "stop_reasons": finish_reasons}
 
     async def agent_loop(
         self,
