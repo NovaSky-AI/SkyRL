@@ -18,7 +18,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.entrypoints.main_base import config_dir
 
-model = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 tp_size = 2
 
 
@@ -28,7 +28,7 @@ def get_test_actor_config() -> DictConfig:
         cfg = hydra.compose(config_name="ppo_base_config")
 
         # Override specific parameters
-        cfg.trainer.policy.model.path = model
+        cfg.trainer.policy.model.path = MODEL
         cfg.trainer.critic.model.path = ""
         cfg.trainer.placement.policy_num_gpus_per_node = 2
         cfg.generator.async_engine = True
@@ -56,6 +56,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
                 "VLLM_USE_V1": "1" if v1 else "0",
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
                 "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+                "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             }
         },
     )
@@ -70,7 +71,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
         model_dtype="bfloat16",
-        pretrain=model,
+        pretrain=cfg.trainer.policy.model.path,
         seed=42,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
@@ -83,7 +84,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         sampling_params=get_sampling_params_for_backend("vllm", cfg.generator.sampling_params),
-        tokenizer=AutoTokenizer.from_pretrained(model),
+        tokenizer=AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path),
     )
     client = InferenceEngineClient(eps)
     if sleep:
@@ -143,6 +144,6 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy):
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        asyncio.run(run_vllm_inference(client, get_test_prompts(model)))
+        asyncio.run(run_vllm_inference(client, get_test_prompts(MODEL)))
     finally:
         ray.shutdown()
