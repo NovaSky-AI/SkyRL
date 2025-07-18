@@ -159,7 +159,10 @@ generator:
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
-  max_turns: 1 
+  use_http_server_inference_engine_client: false
+  http_server_inference_engine_client_host: "127.0.0.1"
+  http_server_inference_engine_client_port: 8000
+  max_turns: 1
 
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
