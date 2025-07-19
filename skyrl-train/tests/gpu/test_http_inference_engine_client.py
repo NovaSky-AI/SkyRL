@@ -58,6 +58,7 @@ def get_test_actor_config() -> DictConfig:
 
         return cfg
 
+
 @pytest.mark.vllm
 @pytest.mark.parametrize("test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session"])
 def test_http_server_openai_api_with_weight_sync(test_type):
@@ -211,22 +212,25 @@ def _full_request():
         trajectory_id="test_trajectory_id",
     )
 
+
 @pytest.mark.parametrize(
     "backend",
     [
         pytest.param("vllm", marks=pytest.mark.vllm),
         pytest.param("sglang", marks=pytest.mark.sglang),
-    ]
+    ],
 )
 def test_full_build_sampling_params(backend: str):
     full_req = _full_request()
     if backend == "vllm":
         from vllm import SamplingParams as VLLMSamplingParams
+
         full_params_vllm = build_sampling_params(full_req, "vllm")
         vllm_sampling_params = VLLMSamplingParams(**full_params_vllm)  # has __post_init__ to check validity
         assert vllm_sampling_params is not None
     elif backend == "sglang":
         from sglang.srt.sampling.sampling_params import SamplingParams as SGLangSamplingParams
+
         # makes sure that the inclusion of `include_stop_str_in_output` will raise an error
         with pytest.raises(ValueError):
             full_params_sglang = build_sampling_params(full_req, "sglang")

@@ -105,7 +105,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             except Exception:
                 pass
 
-    async def _openai_generate(self, prompts: List[ConversationType], trajectory_id: Optional[Hashable] = None):
+    async def _openai_generate(
+        self,
+        prompts: List[ConversationType],
+        trajectory_id: Optional[Hashable] = None,
+        sampling_params: Optional[Dict[str, Any]] = None,
+    ):
         """Generate responses using direct HTTP session.post calls without concurrency limiting."""
         # Use aiohttp session for direct HTTP requests (no concurrency limiting)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
@@ -117,6 +122,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     "model": self.model_name,
                     "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
                     "trajectory_id": trajectory_id,
+                    **(sampling_params or {}),
                 }
                 output_tasks.append(session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers))
 
@@ -195,9 +201,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
             if self.use_http_server_inference_engine_client:
-                # TODO(Charlie): we discard sampling_params here. Fix after we understand the workflow for
-                # users to use inference engine http server.
-                engine_output = await self._openai_generate(prompts=[chat_history], trajectory_id=trajectory_id)
+                engine_output = await self._openai_generate(
+                    prompts=[chat_history],
+                    trajectory_id=trajectory_id,
+                    sampling_params=sampling_params,
+                )
             else:
                 engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]

@@ -55,6 +55,7 @@ def set_global_state(inference_engine_client: InferenceEngineClient, uvicorn_ser
     _global_uvicorn_server = uvicorn_server
     _global_backend = backend
 
+
 def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: str) -> InferenceEngineInput:
     """Convert OpenAI request to InferenceEngineInput format."""
     # Convert messages to our ConversationType format
@@ -99,7 +100,8 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
     if _global_inference_engine_client.model_name != request.model:
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}"
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}",
         )
 
     try:

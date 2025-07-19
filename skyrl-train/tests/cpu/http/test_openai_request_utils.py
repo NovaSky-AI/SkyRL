@@ -17,6 +17,8 @@ from skyrl_train.inference_engines.launch_inference_engine_http_server import (
 
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
 def _basic_request(**kwargs):
     return ChatCompletionRequest(
         model=MODEL_NAME,
@@ -48,16 +50,16 @@ def test_convert_openai_to_inference_input():
         temperature=0.5,
         trajectory_id="test_trajectory_123",
     )
-    
+
     for backend in ["vllm", "sglang"]:
         result = convert_openai_to_inference_input(req, backend)
-        
+
         expected_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "What is the capital of France?"},
             {"role": "assistant", "content": "The capital of France is Paris."},
         ]
-        
+
         assert result["prompts"] == [expected_conversation]
         assert result["trajectory_ids"] == ["test_trajectory_123"]
         assert result["sampling_params"] is not None
@@ -76,7 +78,7 @@ def test_convert_inference_output_to_openai():
         responses=[response],
         stop_reasons=[stop_reason],
     )
-    
+
     result = convert_inference_output_to_openai(engine_output, MODEL_NAME)
     assert result.model == MODEL_NAME
 
@@ -85,7 +87,7 @@ def test_convert_inference_output_to_openai():
     assert result.object == "chat.completion"
     assert isinstance(result.created, int)
     assert result.id.startswith("chatcmpl-")
-    
+
     # Check choices
     assert len(result.choices) == 1
     choice = result.choices[0]
@@ -93,4 +95,3 @@ def test_convert_inference_output_to_openai():
     assert choice.message.role == "assistant"
     assert choice.message.content == response
     assert choice.finish_reason == stop_reason
-
