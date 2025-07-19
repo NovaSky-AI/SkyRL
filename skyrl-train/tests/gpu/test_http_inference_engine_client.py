@@ -14,6 +14,7 @@ import ray
 import hydra
 import threading
 import requests
+import aiohttp
 from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
@@ -28,6 +29,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready, shutdown_server
 from openai import OpenAI
 from .test_policy_vllm_e2e import init_inference_engines
+from concurrent.futures import ThreadPoolExecutor
 
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -51,7 +53,7 @@ def get_test_actor_config() -> DictConfig:
 
         return cfg
 
-@pytest.mark.parametrize("test_type", ["chat_completions_create", "request_posting"])
+@pytest.mark.parametrize("test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session"])
 def test_http_server_openai_api_with_weight_sync(test_type):
     """
     Test the HTTP server with OpenAI client and policy weight sync.
@@ -94,9 +96,10 @@ def test_http_server_openai_api_with_weight_sync(test_type):
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        test_prompts = get_test_prompts(MODEL, num_samples=2)
+        num_samples = 50
+        test_prompts = get_test_prompts(MODEL, num_samples=num_samples)
 
-        # Generate outputs
+        # Generate outputs based on test type
         if test_type == "chat_completions_create":
             # 1.1 Test chat.completions.create
             # Create OpenAI client (with dummy API key since we don't authenticate)
@@ -104,34 +107,63 @@ def test_http_server_openai_api_with_weight_sync(test_type):
                 base_url=base_url,
                 api_key="dummy-key"  # Our server doesn't authenticate, but OpenAI client requires a key
             )
-            outputs = []
-            for prompt in test_prompts:
-                # Convert our ConversationType to OpenAI format
-                messages = [{"role": msg["role"], "content": msg["content"]} for msg in prompt]
-                
-                response = openai_client.chat.completions.create(
+            def generate_output(prompt):
+                return openai_client.chat.completions.create(
                     model=MODEL,
-                    messages=messages,
-                )
-                print(f"Generated response: {response.choices[0].message.content[:100]}...")
-                outputs.append(response.model_dump())
-
-        else:
+                    messages=prompt,
+                ).model_dump()
+            
+            with ThreadPoolExecutor() as executor:
+                output_tasks = [
+                    executor.submit(generate_output, prompt) for prompt in test_prompts
+                ]
+                outputs = [task.result() for task in output_tasks]
+                
+        elif test_type == "request_posting":
             # 1.2 Test request posting
-            outputs = []
-            for prompt in test_prompts:
-                messages = [{"role": msg["role"], "content": msg["content"]} for msg in prompt]
-                response = requests.post(
+            def generate_output(prompt):
+                return requests.post(
                     f"{base_url}/chat/completions",
                     json={
                         "model": MODEL,
-                        "messages": messages,
+                        "messages": prompt,
                     }
-                )
-                assert response.status_code == 200, f"Response: {response.text}"
-                response_data = response.json()
-                print(f"Generated response: {response_data['choices'][0]['message']['content'][:100]}...")
-                outputs.append(response_data)
+                ).json()
+            
+            with ThreadPoolExecutor() as executor:
+                output_tasks = [
+                    executor.submit(generate_output, prompt) for prompt in test_prompts
+                ]
+                outputs = [task.result() for task in output_tasks]
+                
+        elif test_type == "aiohttp_client_session":
+            # 1.3 Test aiohttp.ClientSession
+            async def generate_outputs_async():
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+                    headers = {"Content-Type": "application/json"}
+                    output_tasks = []
+                    
+                    for prompt in test_prompts:
+                        payload = {
+                            "model": MODEL,
+                            "messages": prompt,
+                        }
+                        output_tasks.append(
+                            session.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+                        )
+                    
+                    responses = await asyncio.gather(*output_tasks)
+                    return [await response.json() for response in responses]
+            
+            outputs = asyncio.run(generate_outputs_async())
+        else:
+            raise ValueError(f"Invalid test type: {test_type}")
+
+        print_n = 5
+        assert len(outputs) == num_samples
+        print(f"First {print_n} generated responses out of {num_samples} using {test_type}:")
+        for i, output in enumerate(outputs[:print_n]):
+            print(f"{i}: {output['choices'][0]['message']['content'][:100]}...")
 
         # 2. Check response structure
         for response_data in outputs:
@@ -151,6 +183,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
             server_thread.join(timeout=5)
 
     finally:
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
 
 
