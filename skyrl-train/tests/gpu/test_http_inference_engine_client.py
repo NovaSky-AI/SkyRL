@@ -18,15 +18,12 @@ import aiohttp
 from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from transformers import AutoTokenizer
-from ray.util.placement_group import placement_group
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready, shutdown_server
+from skyrl_train.inference_engines.launch_inference_engine_http_server import (
+    serve,
+    wait_for_server_ready,
+    shutdown_server,
+)
 from openai import OpenAI
 from .test_policy_vllm_e2e import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +33,7 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 TP_SIZE = 1
 SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
+
 
 def get_test_actor_config() -> DictConfig:
     """Get base config with test-specific overrides."""
@@ -52,6 +50,7 @@ def get_test_actor_config() -> DictConfig:
         cfg.generator.run_engines_locally = True
 
         return cfg
+
 
 @pytest.mark.parametrize("test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session"])
 def test_http_server_openai_api_with_weight_sync(test_type):
@@ -72,14 +71,14 @@ def test_http_server_openai_api_with_weight_sync(test_type):
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
         )
-        
+
         # Start server in background thread using serve function directly
         def run_server():
             serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
-        
+
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
-        
+
         # Wait for server to be ready using the helper method
         wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
         base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
@@ -105,20 +104,19 @@ def test_http_server_openai_api_with_weight_sync(test_type):
             # Create OpenAI client (with dummy API key since we don't authenticate)
             openai_client = OpenAI(
                 base_url=base_url,
-                api_key="dummy-key"  # Our server doesn't authenticate, but OpenAI client requires a key
+                api_key="dummy-key",  # Our server doesn't authenticate, but OpenAI client requires a key
             )
+
             def generate_output(prompt):
                 return openai_client.chat.completions.create(
                     model=MODEL,
                     messages=prompt,
                 ).model_dump()
-            
+
             with ThreadPoolExecutor() as executor:
-                output_tasks = [
-                    executor.submit(generate_output, prompt) for prompt in test_prompts
-                ]
+                output_tasks = [executor.submit(generate_output, prompt) for prompt in test_prompts]
                 outputs = [task.result() for task in output_tasks]
-                
+
         elif test_type == "request_posting":
             # 1.2 Test request posting
             def generate_output(prompt):
@@ -127,34 +125,30 @@ def test_http_server_openai_api_with_weight_sync(test_type):
                     json={
                         "model": MODEL,
                         "messages": prompt,
-                    }
+                    },
                 ).json()
-            
+
             with ThreadPoolExecutor() as executor:
-                output_tasks = [
-                    executor.submit(generate_output, prompt) for prompt in test_prompts
-                ]
+                output_tasks = [executor.submit(generate_output, prompt) for prompt in test_prompts]
                 outputs = [task.result() for task in output_tasks]
-                
+
         elif test_type == "aiohttp_client_session":
             # 1.3 Test aiohttp.ClientSession
             async def generate_outputs_async():
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     headers = {"Content-Type": "application/json"}
                     output_tasks = []
-                    
+
                     for prompt in test_prompts:
                         payload = {
                             "model": MODEL,
                             "messages": prompt,
                         }
-                        output_tasks.append(
-                            session.post(f"{base_url}/chat/completions", json=payload, headers=headers)
-                        )
-                    
+                        output_tasks.append(session.post(f"{base_url}/chat/completions", json=payload, headers=headers))
+
                     responses = await asyncio.gather(*output_tasks)
                     return [await response.json() for response in responses]
-            
+
             outputs = asyncio.run(generate_outputs_async())
         else:
             raise ValueError(f"Invalid test type: {test_type}")
@@ -207,19 +201,19 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #         )
 
 #         from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready
-        
+
 #         # Start server in background thread
 #         def run_server():
 #             serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
-        
+
 #         server_thread = threading.Thread(target=run_server, daemon=True)
 #         server_thread.start()
-        
+
 #         # Wait for server to be ready
 #         wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-        
+
 #         base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
-        
+
 #         # Test 1: Invalid request - streaming not supported
 #         response = requests.post(
 #             f"{base_url}/v1/chat/completions",
@@ -234,12 +228,12 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #         assert "detail" in error_data
 #         # Pydantic returns detailed field validation errors
 #         assert any("stream" in str(detail) for detail in error_data["detail"])
-        
+
 #         # Test 2: Invalid request - tools not supported
 #         response = requests.post(
 #             f"{base_url}/v1/chat/completions",
 #             json={
-#                 "model": "test-model", 
+#                 "model": "test-model",
 #                 "messages": [{"role": "user", "content": "Hello"}],
 #                 "tools": [{"type": "function", "function": {"name": "test"}}]
 #             }
@@ -248,7 +242,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #         error_data = response.json()
 #         assert "detail" in error_data
 #         assert any("tools" in str(detail) for detail in error_data["detail"])
-        
+
 #         # Test 3: Invalid request - response_format not supported
 #         response = requests.post(
 #             f"{base_url}/v1/chat/completions",
@@ -262,7 +256,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #         error_data = response.json()
 #         assert "detail" in error_data
 #         assert any("response_format" in str(detail) for detail in error_data["detail"])
-        
+
 #         # Test 4: Invalid request - missing required fields
 #         response = requests.post(
 #             f"{base_url}/v1/chat/completions",
@@ -275,7 +269,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #         error_data = response.json()
 #         assert "detail" in error_data
 #         assert any("messages" in str(detail) for detail in error_data["detail"])
-        
+
 #         # Test 5: Invalid request - malformed JSON
 #         response = requests.post(
 #             f"{base_url}/v1/chat/completions",
@@ -283,7 +277,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #             headers={"Content-Type": "application/json"}
 #         )
 #         assert response.status_code == 422
-        
+
 #         # Test 6: Invalid request - empty messages array
 #         response = requests.post(
 #             f"{base_url}/v1/chat/completions",
@@ -295,13 +289,12 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 #         assert response.status_code == 422
 #         error_data = response.json()
 #         assert "detail" in error_data
-        
+
 #         # Test 7: Health check endpoint should work
 #         response = requests.get(f"{base_url}/health")
 #         assert response.status_code == 200
 #         health_data = response.json()
 #         assert health_data["status"] == "healthy"
-        
+
 #     finally:
 #         ray.shutdown()
-

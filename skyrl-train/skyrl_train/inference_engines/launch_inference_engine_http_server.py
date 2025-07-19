@@ -28,41 +28,55 @@ from fastapi.responses import JSONResponse
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput, ConversationType
-from skyrl_train.inference_engines.openai_api_protocol import ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, ChatMessage, ErrorResponse
+from skyrl_train.inference_engines.openai_api_protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatMessage,
+    ErrorResponse,
+    check_unsupported_fields,
+    build_sampling_params,
+)
 
 logger = logging.getLogger(__name__)
 
-# Global state to hold the inference engine client
+# Global state to hold the inference engine client and backend
 _global_inference_engine_client: Optional[InferenceEngineClient] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
+_global_backend: str | None = None
 
 
-def set_global_state(inference_engine_client: InferenceEngineClient, uvicorn_server: uvicorn.Server):
+def set_global_state(inference_engine_client: InferenceEngineClient, uvicorn_server: uvicorn.Server, backend: str):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
+    global _global_backend
     _global_inference_engine_client = inference_engine_client
     _global_uvicorn_server = uvicorn_server
+    _global_backend = backend
 
 
-def convert_openai_to_inference_input(request: ChatCompletionRequest) -> InferenceEngineInput:
+def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: str) -> InferenceEngineInput:
     """Convert OpenAI request to InferenceEngineInput format."""
     # Convert messages to our ConversationType format
     conversation: ConversationType = []
     for msg in request.messages:
         conversation.append({"role": msg.role, "content": msg.content})
 
+    sampling_params = build_sampling_params(request, backend)
+
     engine_input: InferenceEngineInput = {
         "prompts": [conversation],
         "prompt_token_ids": None,
-        # TODO(Charlie): Fix this after we figure out the workflow for users to use inference engine http server.
-        "sampling_params": None,
+        "sampling_params": sampling_params if sampling_params else None,
         "trajectory_ids": [request.trajectory_id] if request.trajectory_id else None,
     }
     return engine_input
 
 
-def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, request: ChatCompletionRequest) -> ChatCompletionResponse:
+def convert_inference_output_to_openai(
+    engine_output: InferenceEngineOutput, request: ChatCompletionRequest
+) -> ChatCompletionResponse:
     """Convert InferenceEngineOutput to OpenAI response format."""
     response_text = engine_output["responses"][0]
     stop_reason = engine_output["stop_reasons"][0]
@@ -72,7 +86,7 @@ def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, req
         message=ChatMessage(role="assistant", content=response_text),
         finish_reason=stop_reason,
     )
-    
+
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
         model=request.model,
@@ -83,23 +97,27 @@ def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, req
 async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Request) -> ChatCompletionResponse:
     """Handle chat completion request."""
     if _global_inference_engine_client is None:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized")
-    
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized"
+        )
+
     try:
+        check_unsupported_fields(request)
         # Convert to our internal format
-        engine_input = convert_openai_to_inference_input(request)
-        
+        engine_input = convert_openai_to_inference_input(request, _global_backend or "vllm")
+
         # Call the inference engine
         engine_output = await _global_inference_engine_client.generate(engine_input)
-        
+
         # Convert back to OpenAI format
         response = convert_inference_output_to_openai(engine_output, request)
-        
+
         return response
-        
+
     except Exception as e:
         logger.error(f"Error in chat completion: {str(e)}\n{traceback.format_exc()}")
         raise e
+
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
     """Shutdown the server.
@@ -133,18 +151,18 @@ def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds:
 def wait_for_server_ready(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
     """
     Wait for the HTTP server to be ready by polling the health endpoint.
-    
+
     Args:
         host: Host where the server is running
-        port: Port where the server is running  
+        port: Port where the server is running
         max_wait_seconds: Maximum time to wait in seconds
-        
+
     Raises:
         Exception: If server doesn't become ready within max_wait_seconds
     """
     max_retries = max_wait_seconds
     health_url = f"http://{host}:{port}/health"
-    
+
     for i in range(max_retries):
         try:
             response = requests.get(health_url, timeout=1)
@@ -159,18 +177,19 @@ def wait_for_server_ready(host: str = "127.0.0.1", port: int = 8000, max_wait_se
 
 def create_app() -> fastapi.FastAPI:
     """Create the FastAPI application."""
+
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
         logger.info("Starting inference engine HTTP server...")
         yield
-    
+
     app = fastapi.FastAPI(
         title="InferenceEngine OpenAI-Compatible API",
         description="OpenAI-compatible chat completion API using InferenceEngineClient",
         version="1.0.0",
-        lifespan=lifespan
+        lifespan=lifespan,
     )
-    
+
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
@@ -179,18 +198,17 @@ def create_app() -> fastapi.FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # Chat completion endpoint
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
     async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
         return await handle_chat_completion(request, raw_request)
-    
+
     # Health check endpoint
     @app.get("/health")
     async def health_check():
         return {"status": "healthy"}
 
-    
     # Exception handler for unhandled server errors
     # Note: Pydantic validation errors (400-level) are handled automatically by FastAPI
     # This handler only catches unexpected server-side exceptions
@@ -201,11 +219,11 @@ def create_app() -> fastapi.FastAPI:
             status_code=500,
             content=ErrorResponse(
                 message=f"Internal server error: {str(exc)}",
-                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase, 
-                code=HTTPStatus.INTERNAL_SERVER_ERROR
-            ).model_dump()
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            ).model_dump(),
         )
-    
+
     return app
 
 
@@ -213,37 +231,33 @@ def serve(
     inference_engine_client: InferenceEngineClient,
     host: str = "0.0.0.0",
     port: int = 8000,
-    log_level: str = "info"
+    log_level: str = "info",
+    backend: str = "vllm",
 ):
     """
     Start the HTTP server.
-    
+
     Args:
         inference_engine_client: The InferenceEngineClient to use as backend
         host: Host to bind to (default: "0.0.0.0")
         port: Port to bind to (default: 8000)
         log_level: Logging level (default: "info")
+        backend: Backend name ("vllm" or "sglang") used for sampling param conversion
     """
     # Create app
     app = create_app()
-    
+
     # Configure logging
     logging.basicConfig(level=getattr(logging, log_level.upper()))
-    
+
     logger.info(f"Starting server on {host}:{port}")
-    
+
     # Run server
-    config = uvicorn.Config(
-        app,
-        host=host,
-        port=port,
-        log_level=log_level,
-        access_log=True
-    )
+    config = uvicorn.Config(app, host=host, port=port, log_level=log_level, access_log=True)
     server = uvicorn.Server(config)
-    
+
     # Expose server for external shutdown control (tests)
-    set_global_state(inference_engine_client, server)
+    set_global_state(inference_engine_client, server, backend)
 
     try:
         # Run until shutdown

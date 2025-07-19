@@ -56,6 +56,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             "http_server_inference_engine_client_port", 8000
         )
 
+        self.backend = generator_cfg.get("backend", "vllm")
+
         if self.use_http_server_inference_engine_client:
             self._server_thread = threading.Thread(
                 target=serve,
@@ -64,6 +66,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     "host": self.http_server_inference_engine_client_host,
                     "port": self.http_server_inference_engine_client_port,
                     "log_level": "warning",
+                    "backend": self.backend,
                 },
                 daemon=True,
             )
@@ -108,30 +111,28 @@ class SkyRLGymGenerator(GeneratorInterface):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             headers = {"Content-Type": "application/json"}
             output_tasks = []
-            
+
             for prompt in prompts:
                 payload = {
                     "model": self.model_name,
                     "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
                     "trajectory_id": trajectory_id,
                 }
-                output_tasks.append(
-                    session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers)
-                )
-            
+                output_tasks.append(session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers))
+
             # Execute all requests concurrently
             responses = await asyncio.gather(*output_tasks)
-            
+
             # Parse responses
             results = []
             finish_reasons = []
 
             for response in responses:
                 response_json = await response.json()
-                choice = response_json['choices'][0]
-                results.append(choice['message']['content'])
-                finish_reasons.append(choice['finish_reason'])
-            
+                choice = response_json["choices"][0]
+                results.append(choice["message"]["content"])
+                finish_reasons.append(choice["finish_reason"])
+
             return {"responses": results, "stop_reasons": finish_reasons}
 
     async def agent_loop(
