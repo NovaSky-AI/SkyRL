@@ -72,8 +72,8 @@ class ChatCompletionResponse(BaseModel):
     id: str
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
     choices: List[ChatCompletionResponseChoice]
+    # model: str  # since we do not support model in request, we do not include it here
 
 
 class ErrorResponse(BaseModel):
@@ -101,6 +101,8 @@ def check_unsupported_fields(request: ChatCompletionRequest) -> None:
 
 def build_sampling_params(request: ChatCompletionRequest, backend: str) -> Dict[str, Any]:
     """Convert request sampling params to backend specific sampling params."""
+    assert backend in ["vllm", "sglang"], f"Unsupported backend: {backend}"
+
     request_dict = request.model_dump(exclude_unset=True)
 
     sampling_fields = [

@@ -74,9 +74,7 @@ def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: s
     return engine_input
 
 
-def convert_inference_output_to_openai(
-    engine_output: InferenceEngineOutput, request: ChatCompletionRequest
-) -> ChatCompletionResponse:
+def convert_inference_output_to_openai(engine_output: InferenceEngineOutput) -> ChatCompletionResponse:
     """Convert InferenceEngineOutput to OpenAI response format."""
     response_text = engine_output["responses"][0]
     stop_reason = engine_output["stop_reasons"][0]
@@ -89,7 +87,6 @@ def convert_inference_output_to_openai(
 
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        model=request.model,
         choices=[choice],
     )
 
@@ -110,7 +107,7 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
         engine_output = await _global_inference_engine_client.generate(engine_input)
 
         # Convert back to OpenAI format
-        response = convert_inference_output_to_openai(engine_output, request)
+        response = convert_inference_output_to_openai(engine_output)
 
         return response
 

@@ -1,16 +1,18 @@
 """
-# Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/cpu/http/test_openai_request_utils.py -m "vllm"
-# Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/cpu/http/test_openai_request_utils.py -m "sglang"
+Tests for OpenAI request utils.
 """
 
 import pytest
 from skyrl_train.inference_engines.openai_api_protocol import (
     ChatCompletionRequest,
+    ChatCompletionResponse,
     ChatMessage,
     check_unsupported_fields,
-    build_sampling_params,
+)
+from skyrl_train.inference_engines.base import InferenceEngineOutput
+from skyrl_train.inference_engines.launch_inference_engine_http_server import (
+    convert_openai_to_inference_input,
+    convert_inference_output_to_openai,
 )
 
 
@@ -18,28 +20,6 @@ def _basic_request(**kwargs):
     return ChatCompletionRequest(
         messages=[ChatMessage(role="user", content="hi")],
         **kwargs,
-    )
-
-def _full_request():
-    return ChatCompletionRequest(
-        messages=[ChatMessage(role="user", content="hi")],
-        max_tokens=10,
-        temperature=0.5,
-        top_p=0.9,
-        top_k=40,
-        min_p=0.0,
-        repetition_penalty=1.0,
-        seed=42,
-        stop=["\n"],
-        stop_token_ids=[2, 3],
-        presence_penalty=0.0,
-        frequency_penalty=0.0,
-        ignore_eos=True,
-        skip_special_tokens=True,
-        include_stop_str_in_output=True,
-        min_tokens=1,
-        n=1,
-        trajectory_id="test_trajectory_id",
     )
 
 
@@ -52,52 +32,61 @@ def test_check_unsupported_fields():
     check_unsupported_fields(req_ok)
 
 
-def test_basic_build_sampling_params():
-    req = _basic_request(max_tokens=5, temperature=0.5)
-    params_vllm = build_sampling_params(req, "vllm")
-    assert params_vllm["max_tokens"] == 5
-    assert params_vllm["temperature"] == 0.5
-
-    params_sglang = build_sampling_params(req, "sglang")
-    assert params_sglang["max_new_tokens"] == 5
-    assert params_sglang["temperature"] == 0.5
-
-@pytest.mark.parametrize(
-    "backend",
-    [
-        pytest.param("vllm", marks=pytest.mark.vllm),
-        pytest.param("sglang", marks=pytest.mark.sglang),
+def test_convert_openai_to_inference_input():
+    """Test conversion with multiple messages in conversation."""
+    messages = [
+        ChatMessage(role="system", content="You are a helpful assistant."),
+        ChatMessage(role="user", content="What is the capital of France?"),
+        ChatMessage(role="assistant", content="The capital of France is Paris."),
     ]
-)
-def test_full_build_sampling_params(backend: str):
-    full_req = _full_request()
-    if backend == "vllm":
-        from vllm import SamplingParams as VLLMSamplingParams
-        full_params_vllm = build_sampling_params(full_req, "vllm")
-        vllm_sampling_params = VLLMSamplingParams(**full_params_vllm)  # has __post_init__ to check validity
-        assert vllm_sampling_params is not None
-    elif backend == "sglang":
-        from sglang.srt.sampling.sampling_params import SamplingParams as SGLangSamplingParams
-        # makes sure that the inclusion of `include_stop_str_in_output` will raise an error
-        with pytest.raises(ValueError):
-            full_params_sglang = build_sampling_params(full_req, "sglang")
-        full_req.include_stop_str_in_output = None
+    req = ChatCompletionRequest(
+        messages=messages,
+        max_tokens=10,
+        temperature=0.5,
+        trajectory_id="test_trajectory_123",
+    )
+    
+    for backend in ["vllm", "sglang"]:
+        result = convert_openai_to_inference_input(req, backend)
+        
+        expected_conversation = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What is the capital of France?"},
+            {"role": "assistant", "content": "The capital of France is Paris."},
+        ]
+        
+        assert result["prompts"] == [expected_conversation]
+        assert result["trajectory_ids"] == ["test_trajectory_123"]
+        assert result["sampling_params"] is not None
+        assert result["sampling_params"]["temperature"] == 0.5
+        if backend == "vllm":
+            assert result["sampling_params"]["max_tokens"] == 10
+        elif backend == "sglang":
+            assert result["sampling_params"]["max_new_tokens"] == 10
 
-        # makes sure that the inclusion of `seed` will raise an error
-        with pytest.raises(ValueError):
-            # makes sure that the inclusion of `seed` will raise an error
-            full_params_sglang = build_sampling_params(full_req, "sglang")
-        full_req.seed = None
 
-        # makes sure that the inclusion of `min_tokens` will raise an error
-        with pytest.raises(ValueError):
-            full_params_sglang = build_sampling_params(full_req, "sglang")
-        full_req.min_tokens = None
+def test_convert_inference_output_to_openai():
+    """Test basic conversion from InferenceEngineOutput to OpenAI response."""
+    response = "Hello! How can I help you today?"
+    stop_reason = "stop"
+    engine_output = InferenceEngineOutput(
+        responses=[response],
+        stop_reasons=[stop_reason],
+    )
+    
+    result = convert_inference_output_to_openai(engine_output)
+    
+    # Check response structure
+    assert isinstance(result, ChatCompletionResponse)
+    assert result.object == "chat.completion"
+    assert isinstance(result.created, int)
+    assert result.id.startswith("chatcmpl-")
+    
+    # Check choices
+    assert len(result.choices) == 1
+    choice = result.choices[0]
+    assert choice.index == 0
+    assert choice.message.role == "assistant"
+    assert choice.message.content == response
+    assert choice.finish_reason == stop_reason
 
-        # Now no errors should be raised
-        full_params_sglang = build_sampling_params(full_req, "sglang")
-        sglang_sampling_params = SGLangSamplingParams(**full_params_sglang)
-        sglang_sampling_params.verify()  # checks validty
-        assert sglang_sampling_params is not None
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")

@@ -2711,6 +2711,7 @@ dependencies = [
     { name = "accelerate" },
     { name = "datasets" },
     { name = "debugpy" },
+    { name = "fastapi" },
     { name = "flash-attn" },
     { name = "func-timeout" },
     { name = "hf-transfer" },
@@ -2727,6 +2728,7 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers", version = "4.52.3", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
     { name = "transformers", version = "4.53.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-11-skyrl-train-vllm' or extra != 'extra-11-skyrl-train-sglang'" },
+    { name = "uvicorn" },
     { name = "wandb" },
 ]
 
@@ -2771,6 +2773,7 @@ requires-dist = [
     { name = "datasets" },
     { name = "debugpy", specifier = "==1.8.0" },
     { name = "deepspeed", marker = "extra == 'deepspeed'", specifier = "==0.16.5" },
+    { name = "fastapi" },
     { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'sglang'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
@@ -2803,6 +2806,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'vllm'", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm" },
     { name = "transformers", specifier = ">=4.51.0" },
+    { name = "uvicorn" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.9.2" },
     { name = "wandb" },
 ]
