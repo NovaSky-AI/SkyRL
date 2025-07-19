@@ -5,7 +5,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightUpdateRequest,
 )
 import asyncio
-from typing import List, Any
+from typing import List, Any, Dict
 
 
 class InferenceEngineClient(InferenceEngineInterface):
@@ -15,8 +15,10 @@ class InferenceEngineClient(InferenceEngineInterface):
     Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single engine.
     """
 
-    def __init__(self, engines: List[InferenceEngineInterface]):
+    def __init__(self, engines: List[InferenceEngineInterface], generator_config: Dict[str, Any]):
         self.engines = engines
+        self.generator_config = generator_config
+        self.model_name = generator_config.get("model_name")
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")
 
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):

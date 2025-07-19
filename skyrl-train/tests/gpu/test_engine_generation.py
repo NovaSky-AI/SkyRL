@@ -83,7 +83,7 @@ def init_remote_vinference_engines(tp_size):
         ),
     )
 
-    return InferenceEngineClient(engines), vllm_process
+    return InferenceEngineClient(engines, generator_config=DictConfig({"model_name": model})), vllm_process
 
 
 def init_ray_vllm_engines():
@@ -108,7 +108,7 @@ def init_ray_vllm_engines():
         ),
         tokenizer=AutoTokenizer.from_pretrained(model),
     )
-    client = InferenceEngineClient(engine)
+    client = InferenceEngineClient(engine, generator_config=DictConfig({"model_name": model}))
     return client
 
 

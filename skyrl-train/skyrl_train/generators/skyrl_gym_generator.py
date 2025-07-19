@@ -2,10 +2,17 @@ import asyncio
 import copy
 from uuid import uuid4
 import skyrl_gym
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Hashable
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
+import threading
+import aiohttp
+from skyrl_train.inference_engines.launch_inference_engine_http_server import (
+    serve,
+    wait_for_server_ready,
+    shutdown_server,
+)
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -34,9 +41,45 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.model_name = model_name
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+
+        self.use_http_server_inference_engine_client = generator_cfg.get(
+            "use_http_server_inference_engine_client", False
+        )
+        self.http_server_inference_engine_client_host = generator_cfg.get(
+            "http_server_inference_engine_client_host", "127.0.0.1"
+        )
+        self.http_server_inference_engine_client_port = generator_cfg.get(
+            "http_server_inference_engine_client_port", 8000
+        )
+
+        self.backend = generator_cfg.get("backend", "vllm")
+
+        if self.use_http_server_inference_engine_client:
+            self._server_thread = threading.Thread(
+                target=serve,
+                args=(self.inference_engine_client,),
+                kwargs={
+                    "host": self.http_server_inference_engine_client_host,
+                    "port": self.http_server_inference_engine_client_port,
+                    "log_level": "warning",
+                    "backend": self.backend,
+                },
+                daemon=True,
+            )
+            self._server_thread.start()
+            wait_for_server_ready(
+                host=self.http_server_inference_engine_client_host,
+                port=self.http_server_inference_engine_client_port,
+                max_wait_seconds=30,
+            )
+            # Store the base URL for direct HTTP requests
+            self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        else:
+            self.base_url = None
 
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
@@ -48,6 +91,55 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         else:
             self.env_executor = None
+
+    def __del__(self):
+        if getattr(self, "use_http_server_inference_engine_client", False):
+            try:
+                shutdown_server(
+                    host=self.http_server_inference_engine_client_host,
+                    port=self.http_server_inference_engine_client_port,
+                    max_wait_seconds=5,
+                )
+                if hasattr(self, "_server_thread") and self._server_thread.is_alive():
+                    self._server_thread.join(timeout=5)
+            except Exception:
+                pass
+
+    async def _openai_generate(
+        self,
+        prompts: List[ConversationType],
+        trajectory_id: Optional[Hashable] = None,
+        sampling_params: Optional[Dict[str, Any]] = None,
+    ):
+        """Generate responses using direct HTTP session.post calls without concurrency limiting."""
+        # Use aiohttp session for direct HTTP requests (no concurrency limiting)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            headers = {"Content-Type": "application/json"}
+            output_tasks = []
+
+            for prompt in prompts:
+                payload = {
+                    "model": self.model_name,
+                    "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
+                    "trajectory_id": trajectory_id,
+                    **(sampling_params or {}),
+                }
+                output_tasks.append(session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers))
+
+            # Execute all requests concurrently
+            responses = await asyncio.gather(*output_tasks)
+
+            # Parse responses
+            results = []
+            finish_reasons = []
+
+            for response in responses:
+                response_json = await response.json()
+                choice = response_json["choices"][0]
+                results.append(choice["message"]["content"])
+                finish_reasons.append(choice["finish_reason"])
+
+            return {"responses": results, "stop_reasons": finish_reasons}
 
     async def agent_loop(
         self,
@@ -108,7 +200,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            if self.use_http_server_inference_engine_client:
+                engine_output = await self._openai_generate(
+                    prompts=[chat_history],
+                    trajectory_id=trajectory_id,
+                    sampling_params=sampling_params,
+                )
+            else:
+                engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             stop_reason = engine_output["stop_reasons"][0]
             if self.env_executor is not None:
@@ -204,7 +303,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             envs.append(env)
 
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        engine_output = await self.inference_engine_client.generate(engine_input)
+        if self.use_http_server_inference_engine_client:
+            engine_output = await self._openai_generate(init_prompts)
+        else:
+            engine_output = await self.inference_engine_client.generate(engine_input)
         responses = engine_output["responses"]
         stop_reasons = engine_output["stop_reasons"]
         truncated_responses = []
