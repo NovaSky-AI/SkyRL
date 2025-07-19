@@ -190,6 +190,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 
 def _full_request():
     return ChatCompletionRequest(
+        model=MODEL,
         messages=[ChatMessage(role="user", content="hi")],
         max_tokens=10,
         temperature=0.5,

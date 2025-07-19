@@ -16,8 +16,10 @@ from skyrl_train.inference_engines.launch_inference_engine_http_server import (
 )
 
 
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 def _basic_request(**kwargs):
     return ChatCompletionRequest(
+        model=MODEL_NAME,
         messages=[ChatMessage(role="user", content="hi")],
         **kwargs,
     )
@@ -40,6 +42,7 @@ def test_convert_openai_to_inference_input():
         ChatMessage(role="assistant", content="The capital of France is Paris."),
     ]
     req = ChatCompletionRequest(
+        model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
         temperature=0.5,
@@ -74,8 +77,9 @@ def test_convert_inference_output_to_openai():
         stop_reasons=[stop_reason],
     )
     
-    result = convert_inference_output_to_openai(engine_output)
-    
+    result = convert_inference_output_to_openai(engine_output, MODEL_NAME)
+    assert result.model == MODEL_NAME
+
     # Check response structure
     assert isinstance(result, ChatCompletionResponse)
     assert result.object == "chat.completion"

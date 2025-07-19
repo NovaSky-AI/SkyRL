@@ -86,7 +86,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         sampling_params=get_sampling_params_for_backend("vllm", cfg.generator.sampling_params),
         tokenizer=AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path),
     )
-    client = InferenceEngineClient(eps)
+    client = InferenceEngineClient(eps, generator_config=cfg.generator)
     if sleep:
         asyncio.run(client.wake_up())
     return client, pg

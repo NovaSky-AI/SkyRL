@@ -55,7 +55,6 @@ def set_global_state(inference_engine_client: InferenceEngineClient, uvicorn_ser
     _global_uvicorn_server = uvicorn_server
     _global_backend = backend
 
-
 def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: str) -> InferenceEngineInput:
     """Convert OpenAI request to InferenceEngineInput format."""
     # Convert messages to our ConversationType format
@@ -74,7 +73,7 @@ def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: s
     return engine_input
 
 
-def convert_inference_output_to_openai(engine_output: InferenceEngineOutput) -> ChatCompletionResponse:
+def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, model_name: str) -> ChatCompletionResponse:
     """Convert InferenceEngineOutput to OpenAI response format."""
     response_text = engine_output["responses"][0]
     stop_reason = engine_output["stop_reasons"][0]
@@ -87,6 +86,7 @@ def convert_inference_output_to_openai(engine_output: InferenceEngineOutput) -> 
 
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        model=model_name,
         choices=[choice],
     )
 
@@ -96,6 +96,10 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
     if _global_inference_engine_client is None:
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized"
+        )
+    if _global_inference_engine_client.model_name != request.model:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}"
         )
 
     try:
@@ -107,7 +111,7 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
         engine_output = await _global_inference_engine_client.generate(engine_input)
 
         # Convert back to OpenAI format
-        response = convert_inference_output_to_openai(engine_output)
+        response = convert_inference_output_to_openai(engine_output, _global_inference_engine_client.model_name)
 
         return response
 

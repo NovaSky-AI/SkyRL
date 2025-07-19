@@ -50,7 +50,7 @@ async def run_generation(client, prompts):
     await client.generate(engine_input)
 
 
-def init_sglang_engines(use_local, tp_size, colocate_all, sampling_params):
+def init_sglang_engines(cfg, use_local, tp_size, colocate_all, sampling_params):
     assert not use_local, "SGLang currently does not support local engines"
     assert not colocate_all, "SGLang currently does not support colocation"
 
@@ -128,7 +128,7 @@ def init_sglang_engines(use_local, tp_size, colocate_all, sampling_params):
         tensor_parallel_size=tp_size,
         sampling_params=sampling_params,
     )
-    client = InferenceEngineClient(engines)
+    client = InferenceEngineClient(engines, generator_config=cfg.generator)
     if sleep:
         asyncio.run(client.wake_up())
 
@@ -154,6 +154,7 @@ def test_policy_sglang_e2e(weight_sync_backend):
     cfg.generator.weight_sync_backend = weight_sync_backend
 
     llm_client, pg, server_actor = init_sglang_engines(
+        cfg=cfg,
         use_local=cfg.generator.run_engines_locally,
         tp_size=cfg.generator.inference_engine_tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,

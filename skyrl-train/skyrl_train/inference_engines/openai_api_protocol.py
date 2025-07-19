@@ -18,6 +18,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """OpenAI chat completion request model (minimal version)."""
 
+    model: str
     messages: List[ChatMessage]
 
     # Common sampling parameters
@@ -46,7 +47,6 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Any] = None
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
-    model: Optional[str] = None
     best_of: Optional[int] = None
 
     @field_validator("n")
@@ -73,7 +73,7 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     choices: List[ChatCompletionResponseChoice]
-    # model: str  # since we do not support model in request, we do not include it here
+    model: str
 
 
 class ErrorResponse(BaseModel):
@@ -84,7 +84,7 @@ class ErrorResponse(BaseModel):
     code: int
 
 
-UNSUPPORTED_FIELDS = ["tools", "tool_choice", "logprobs", "top_logprobs", "model", "best_of"]
+UNSUPPORTED_FIELDS = ["tools", "tool_choice", "logprobs", "top_logprobs", "best_of"]
 
 
 def check_unsupported_fields(request: ChatCompletionRequest) -> None:
@@ -117,6 +117,7 @@ def build_sampling_params(request: ChatCompletionRequest, backend: str) -> Dict[
         "frequency_penalty",
         "ignore_eos",
         "skip_special_tokens",
+        "n",
     ]
 
     params = {field: request_dict[field] for field in sampling_fields if field in request_dict}

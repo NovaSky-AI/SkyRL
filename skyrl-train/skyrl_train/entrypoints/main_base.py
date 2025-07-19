@@ -248,7 +248,7 @@ class BasePPOExp:
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg)
 
-        inference_engine_client = InferenceEngineClient(inference_engines)
+        inference_engine_client = InferenceEngineClient(inference_engines, self.cfg.generator)
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
