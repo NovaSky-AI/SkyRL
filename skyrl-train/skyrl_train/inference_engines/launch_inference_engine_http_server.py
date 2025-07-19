@@ -17,6 +17,7 @@ import requests
 import traceback
 import uuid
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from typing import Optional
 
 import fastapi
@@ -26,8 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
-from skyrl_train.inference_engines.openai_api_protocol import ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, ChatMessage, UsageInfo, ErrorResponse
+from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput, ConversationType
+from skyrl_train.inference_engines.openai_api_protocol import ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, ChatMessage, ErrorResponse
 
 logger = logging.getLogger(__name__)
 
@@ -50,79 +51,39 @@ def convert_openai_to_inference_input(request: ChatCompletionRequest) -> Inferen
     conversation: ConversationType = []
     for msg in request.messages:
         conversation.append({"role": msg.role, "content": msg.content})
-    
-    # Build sampling parameters
-    sampling_params = {}
-    
-    if request.temperature is not None:
-        sampling_params["temperature"] = request.temperature
-    if request.max_tokens is not None:
-        sampling_params["max_tokens"] = request.max_tokens
-    if request.top_p is not None:
-        sampling_params["top_p"] = request.top_p
-    if request.frequency_penalty is not None:
-        sampling_params["frequency_penalty"] = request.frequency_penalty
-    if request.presence_penalty is not None:
-        sampling_params["presence_penalty"] = request.presence_penalty
-    if request.stop is not None:
-        sampling_params["stop"] = request.stop
-    if request.seed is not None:
-        sampling_params["seed"] = request.seed
-    if request.top_k is not None:
-        sampling_params["top_k"] = request.top_k
-    if request.repetition_penalty is not None:
-        sampling_params["repetition_penalty"] = request.repetition_penalty
-    if request.min_p is not None:
-        sampling_params["min_p"] = request.min_p
-    
+
     engine_input: InferenceEngineInput = {
         "prompts": [conversation],
         "prompt_token_ids": None,
-        "sampling_params": sampling_params if sampling_params else None,
-        "trajectory_ids": None
+        # TODO(Charlie): Fix this after we figure out the workflow for users to use inference engine http server.
+        "sampling_params": None,
+        "trajectory_ids": [request.trajectory_id] if request.trajectory_id else None,
     }
     return engine_input
 
 
-def convert_inference_output_to_openai(engine_output, request: ChatCompletionRequest) -> ChatCompletionResponse:
+def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, request: ChatCompletionRequest) -> ChatCompletionResponse:
     """Convert InferenceEngineOutput to OpenAI response format."""
     response_text = engine_output["responses"][0]
     stop_reason = engine_output["stop_reasons"][0]
-    
-    # Map stop reasons to OpenAI format
-    finish_reason = None
-    if stop_reason == "stop":
-        finish_reason = "stop"
-    elif stop_reason == "length":
-        finish_reason = "length"
-    else:
-        finish_reason = "stop"  # Default fallback
-    
+
     choice = ChatCompletionResponseChoice(
         index=0,
         message=ChatMessage(role="assistant", content=response_text),
-        finish_reason=finish_reason
-    )
-    
-    # For minimal version, we'll provide basic usage stats
-    usage = UsageInfo(
-        prompt_tokens=0,  # We don't track these in minimal version
-        completion_tokens=0,
-        total_tokens=0
+        finish_reason=stop_reason,
     )
     
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
         model=request.model,
         choices=[choice],
-        usage=usage
     )
 
 
 async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Request) -> ChatCompletionResponse:
     """Handle chat completion request."""
     if _global_inference_engine_client is None:
-        raise HTTPException(status_code=500, detail="Inference engine client not initialized")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized")
     
     try:
         # Convert to our internal format
@@ -138,8 +99,6 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
         
     except Exception as e:
         logger.error(f"Error in chat completion: {str(e)}\n{traceback.format_exc()}")
-        # Re-raise as a general Exception so our custom handler catches it
-        # instead of HTTPException which FastAPI handles differently
         raise e
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
@@ -240,11 +199,11 @@ def create_app() -> fastapi.FastAPI:
         logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()}")
         return JSONResponse(
             status_code=500,
-            content=ErrorResponse(error={
-                "message": f"Internal server error: {str(exc)}",
-                "type": "server_error", 
-                "code": "internal_error"
-            }).model_dump()
+            content=ErrorResponse(
+                message=f"Internal server error: {str(exc)}",
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase, 
+                code=HTTPStatus.INTERNAL_SERVER_ERROR
+            ).model_dump()
         )
     
     return app

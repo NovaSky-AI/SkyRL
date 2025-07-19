@@ -112,14 +112,8 @@ def test_http_server_openai_api_with_weight_sync(test_type):
                 response = openai_client.chat.completions.create(
                     model=MODEL,
                     messages=messages,
-                    max_tokens=50,
-                    temperature=0.7,
-                    top_p=0.9,
-                    frequency_penalty=0.1,
-                    presence_penalty=0.2,
                 )
                 print(f"Generated response: {response.choices[0].message.content[:100]}...")
-                # Use model_dump() instead of deprecated json() method
                 outputs.append(response.model_dump())
 
         else:
@@ -132,11 +126,6 @@ def test_http_server_openai_api_with_weight_sync(test_type):
                     json={
                         "model": MODEL,
                         "messages": messages,
-                        "max_tokens": 50,
-                        "temperature": 0.7,
-                        "top_p": 0.9,
-                        "frequency_penalty": 0.1,
-                        "presence_penalty": 0.2,
                     }
                 )
                 assert response.status_code == 200, f"Response: {response.text}"
@@ -146,7 +135,7 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 
         # 2. Check response structure
         for response_data in outputs:
-            for key in ["id", "object", "created", "model", "choices", "usage"]:
+            for key in ["id", "object", "created", "model", "choices"]:
                 assert key in response_data
                 assert response_data[key] is not None
 

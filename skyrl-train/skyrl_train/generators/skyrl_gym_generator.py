@@ -2,7 +2,7 @@ import asyncio
 import copy
 from uuid import uuid4
 import skyrl_gym
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Hashable
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
@@ -102,46 +102,19 @@ class SkyRLGymGenerator(GeneratorInterface):
             except Exception:
                 pass
 
-    def _convert_to_openai_params(self, sampling_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Convert VLLM sampling parameters to OpenAI API compatible parameters."""
-        if not sampling_params:
-            return {}
-        
-        openai_params = {}
-        
-        # Map VLLM parameters to OpenAI parameters
-        param_mapping = {
-            'max_generate_length': 'max_tokens',
-            'temperature': 'temperature',
-            'top_p': 'top_p',
-            # Note: OpenAI API doesn't support min_p, top_k, min_tokens directly
-            # We'll skip these parameters for OpenAI compatibility
-        }
-        
-        for vllm_param, openai_param in param_mapping.items():
-            if vllm_param in sampling_params:
-                openai_params[openai_param] = sampling_params[vllm_param]
-        
-        # Handle special cases
-        if 'max_tokens' in sampling_params:
-            openai_params['max_tokens'] = sampling_params['max_tokens']
-        
-        return openai_params
-
-    async def _openai_generate(self, prompts: List[ConversationType], sampling_params: Optional[Dict[str, Any]] = None):
+    async def _openai_generate(self, prompts: List[ConversationType], trajectory_id: Optional[Hashable] = None):
         """Generate responses using direct HTTP session.post calls without concurrency limiting."""
-        params = self._convert_to_openai_params(sampling_params)
-        
         # Use aiohttp session for direct HTTP requests (no concurrency limiting)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             headers = {"Content-Type": "application/json"}
             output_tasks = []
             
             for prompt in prompts:
-                payload = params.copy()
-                payload["model"] = self.model_name
-                payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in prompt]
-                
+                payload = {
+                    "model": self.model_name,
+                    "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
+                    "trajectory_id": trajectory_id,
+                }
                 output_tasks.append(
                     session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers)
                 )
@@ -152,16 +125,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Parse responses
             results = []
             finish_reasons = []
-            
+
             for response in responses:
                 response_json = await response.json()
-                if 'choices' in response_json and len(response_json['choices']) > 0:
-                    choice = response_json['choices'][0]
-                    results.append(choice.get('message', {}).get('content', ''))
-                    finish_reasons.append(choice.get('finish_reason', 'stop'))
-                else:
-                    results.append('')
-                    finish_reasons.append('error')
+                choice = response_json['choices'][0]
+                results.append(choice['message']['content'])
+                finish_reasons.append(choice['finish_reason'])
             
             return {"responses": results, "stop_reasons": finish_reasons}
 
@@ -225,7 +194,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
             if self.use_http_server_inference_engine_client:
-                engine_output = await self._openai_generate(prompts=[chat_history], sampling_params=sampling_params)
+                # TODO(Charlie): we discard sampling_params here. Fix after we understand the workflow for
+                # users to use inference engine http server.
+                engine_output = await self._openai_generate(prompts=[chat_history], trajectory_id=trajectory_id)
             else:
                 engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
@@ -324,7 +295,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
         if self.use_http_server_inference_engine_client:
-            engine_output = await self._openai_generate(init_prompts, sampling_params)
+            engine_output = await self._openai_generate(init_prompts)
         else:
             engine_output = await self.inference_engine_client.generate(engine_input)
         responses = engine_output["responses"]
