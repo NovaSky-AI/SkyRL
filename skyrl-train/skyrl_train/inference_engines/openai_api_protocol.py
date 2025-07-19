@@ -18,7 +18,6 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """OpenAI chat completion request model (minimal version)."""
 
-    model: str  # We'll ignore this
     messages: List[ChatMessage]
 
     # Common sampling parameters
@@ -28,7 +27,6 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = None
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
-    length_penalty: Optional[float] = None
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
@@ -38,18 +36,18 @@ class ChatCompletionRequest(BaseModel):
     skip_special_tokens: Optional[bool] = None
     include_stop_str_in_output: Optional[bool] = None
     min_tokens: Optional[int] = None
-    best_of: Optional[int] = None
-    use_beam_search: Optional[bool] = None
-    logprobs: Optional[bool] = None
-    top_logprobs: Optional[int] = None
+    n: Optional[int] = None  # Only n=1 is supported
+
+    # SkyRL-specific parameters
+    trajectory_id: Optional[Hashable] = None
 
     # Unsupported parameters that we still parse for error reporting
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
-    n: Optional[int] = None
-
-    # SkyRL-specific parameters
-    trajectory_id: Optional[Hashable] = None
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
+    model: Optional[str] = None
+    best_of: Optional[int] = None
 
     @field_validator("n")
     @classmethod
@@ -57,11 +55,6 @@ class ChatCompletionRequest(BaseModel):
         if v is not None and v != 1:
             raise ValueError("Only n=1 is supported")
         return v
-
-    # TODO(Charlie): we currently ignore all other parameters. Will revisit
-    # once we figure out the workflow for users to use inference engine http server.
-    # The curernt behavior is that we will use the sampling parameters defined in
-    # ppo_base_config.yaml for all requests.
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -91,7 +84,7 @@ class ErrorResponse(BaseModel):
     code: int
 
 
-UNSUPPORTED_FIELDS = ["tools", "tool_choice"]
+UNSUPPORTED_FIELDS = ["tools", "tool_choice", "logprobs", "top_logprobs", "model", "best_of"]
 
 
 def check_unsupported_fields(request: ChatCompletionRequest) -> None:
@@ -108,34 +101,36 @@ def check_unsupported_fields(request: ChatCompletionRequest) -> None:
 
 def build_sampling_params(request: ChatCompletionRequest, backend: str) -> Dict[str, Any]:
     """Convert request sampling params to backend specific sampling params."""
-    params: Dict[str, Any] = {}
+    request_dict = request.model_dump(exclude_unset=True)
 
-    def set_param(name: str, value: Any, target_name: Optional[str] = None) -> None:
-        if value is not None:
-            params[target_name or name] = value
+    sampling_fields = [
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+        "stop",
+        "stop_token_ids",
+        "presence_penalty",
+        "frequency_penalty",
+        "ignore_eos",
+        "skip_special_tokens",
+    ]
 
-    # map common params
-    set_param("temperature", request.temperature)
-    set_param("top_p", request.top_p)
-    set_param("top_k", request.top_k)
-    set_param("min_p", request.min_p)
-    set_param("repetition_penalty", request.repetition_penalty)
-    set_param("length_penalty", request.length_penalty)
-    set_param("seed", request.seed)
-    set_param("stop", request.stop)
-    set_param("stop_token_ids", request.stop_token_ids)
-    set_param("presence_penalty", request.presence_penalty)
-    set_param("frequency_penalty", request.frequency_penalty)
-    set_param("ignore_eos", request.ignore_eos)
-    set_param("skip_special_tokens", request.skip_special_tokens)
-    set_param("include_stop_str_in_output", request.include_stop_str_in_output)
-    set_param("min_tokens", request.min_tokens)
-    set_param("best_of", request.best_of)
-    set_param("use_beam_search", request.use_beam_search)
-    set_param("logprobs", request.logprobs)
-    set_param("top_logprobs", request.top_logprobs)
+    params = {field: request_dict[field] for field in sampling_fields if field in request_dict}
 
     max_token_key = "max_tokens" if backend == "vllm" else "max_new_tokens"
-    set_param(max_token_key, request.max_tokens)
+    if "max_tokens" in request_dict:
+        params[max_token_key] = request_dict["max_tokens"]
+
+    # Fields that only vllm supports
+    vllm_only_sampling_fields = ["include_stop_str_in_output", "seed", "min_tokens"]
+    for field in vllm_only_sampling_fields:
+        if field in request_dict:
+            if backend == "vllm":
+                params[field] = request_dict[field]
+            elif backend == "sglang":
+                if request_dict[field] is not None:
+                    raise ValueError(f"{field} is not supported for sglang backend")
 
     return params
