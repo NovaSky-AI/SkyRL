@@ -4,7 +4,7 @@ on:
   push: 
     branches: 
       - main 
-      - skyrl_ci # TESTING
+      - gpu_ci # TESTING
   workflow_dispatch: # manual trigger
 
 permissions:
