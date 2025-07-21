@@ -5,7 +5,8 @@ on:
     branches: 
       - main 
       - gpu_ci # TESTING
-  workflow_dispatch: # manual trigger
+  pull_request:
+
 
 permissions:
   checks: write   # for status checks to appear
