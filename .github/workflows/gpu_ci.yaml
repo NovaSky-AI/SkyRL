@@ -4,7 +4,6 @@ on:
   push: 
     branches: 
       - main 
-      - gpu_ci # TESTING
   workflow_dispatch:
 
 
