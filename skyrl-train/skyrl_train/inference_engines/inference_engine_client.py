@@ -5,6 +5,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightUpdateRequest,
 )
 import asyncio
+import threading
 from typing import List, Any, Dict
 
 
@@ -19,7 +20,74 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.engines = engines
         self.generator_config = generator_config
         self.model_name = generator_config.get("model_name")
+        self.backend = generator_config.get("backend")
+
+        self.use_http_server_inference_engine_client = generator_config.get(
+            "use_http_server_inference_engine_client", False
+        )
+        self.http_server_inference_engine_client_host = generator_config.get(
+            "http_server_inference_engine_client_host", "127.0.0.1"
+        )
+        self.http_server_inference_engine_client_port = generator_config.get(
+            "http_server_inference_engine_client_port", 8000
+        )
+
+        if self.use_http_server_inference_engine_client:
+            self._spin_up_http_server()
+
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")
+
+    def _spin_up_http_server(self):
+        from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready
+
+        self._server_thread = threading.Thread(
+            target=serve,
+            args=(self,),
+            kwargs={
+                "host": self.http_server_inference_engine_client_host,
+                "port": self.http_server_inference_engine_client_port,
+                "log_level": "warning",
+                "backend": self.backend,
+            },
+            daemon=True,
+        )
+        self._server_thread.start()
+        wait_for_server_ready(
+            host=self.http_server_inference_engine_client_host,
+            port=self.http_server_inference_engine_client_port,
+            max_wait_seconds=30,
+        )
+        print(
+            f"InferenceEngineClient HTTP server started on {self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        )
+
+    def __del__(self):
+        """
+        Destructor to shut down the HTTP server if it was started.
+        """
+        if self.use_http_server_inference_engine_client:
+            try:
+                from skyrl_train.inference_engines.launch_inference_engine_http_server import shutdown_server
+
+                shutdown_server(
+                    host=self.http_server_inference_engine_client_host,
+                    port=self.http_server_inference_engine_client_port,
+                    max_wait_seconds=5,
+                )
+                if hasattr(self, "_server_thread") and self._server_thread.is_alive():
+                    self._server_thread.join(timeout=5)
+            except Exception as e:
+                print(f"Error shutting down HTTP server: {e}")
+
+    def __getstate__(self):
+        """
+        Override to avoid pickling the server thread.
+        Needed when passing InferenceEngineClient as an argument to async_run_ray_method().
+        """
+        state = self.__dict__.copy()
+        # Thread objects are not picklable – just drop the reference.
+        state["_server_thread"] = None
+        return state
 
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """

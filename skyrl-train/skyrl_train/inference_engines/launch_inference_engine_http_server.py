@@ -11,6 +11,7 @@ Main functions:
 """
 
 import asyncio
+import aiohttp
 import logging
 import time
 import requests
@@ -18,7 +19,7 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import fastapi
 import uvicorn
@@ -26,8 +27,10 @@ from fastapi import HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput, ConversationType
+
+if TYPE_CHECKING:
+    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.openai_api_protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -41,12 +44,12 @@ from skyrl_train.inference_engines.openai_api_protocol import (
 logger = logging.getLogger(__name__)
 
 # Global state to hold the inference engine client and backend
-_global_inference_engine_client: Optional[InferenceEngineClient] = None
+_global_inference_engine_client: Optional["InferenceEngineClient"] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
 _global_backend: str | None = None
 
 
-def set_global_state(inference_engine_client: InferenceEngineClient, uvicorn_server: uvicorn.Server, backend: str):
+def set_global_state(inference_engine_client: "InferenceEngineClient", uvicorn_server: uvicorn.Server, backend: str):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -120,6 +123,54 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
     except Exception as e:
         logger.error(f"Error in chat completion: {str(e)}\n{traceback.format_exc()}")
         raise e
+
+
+async def generate_with_http_server(
+    base_url: str,
+    model_name: str,
+    input_batch: InferenceEngineInput,
+) -> InferenceEngineOutput:
+    """Generate responses using direct ClientSession.post calls with the InferenceEngineClient HTTP server."""
+    prompts = input_batch.get("prompts")
+    trajectory_ids = input_batch.get("trajectory_ids")
+    sampling_params = input_batch.get("sampling_params")
+    if trajectory_ids is not None:
+        assert len(prompts) == len(trajectory_ids), "prompts and trajectory_ids must have the same length"
+
+    # Use aiohttp session for direct HTTP requests (no concurrency limiting)
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+        headers = {"Content-Type": "application/json"}
+        output_tasks = []
+
+        for i, prompt in enumerate(prompts):
+            trajectory_id = trajectory_ids[i] if trajectory_ids is not None else None
+            payload = {
+                "model": model_name,
+                "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
+                "trajectory_id": trajectory_id,
+                **(sampling_params or {}),
+            }
+            output_tasks.append(session.post(f"{base_url}/v1/chat/completions", json=payload, headers=headers))
+
+        # Execute all requests concurrently
+        responses = await asyncio.gather(*output_tasks)
+
+        # Parse responses
+        results = []
+        finish_reasons = []
+
+        for response in responses:
+            response_json = await response.json()
+            choice = response_json["choices"][0]
+            results.append(choice["message"]["content"])
+            finish_reasons.append(choice["finish_reason"])
+
+    inference_engine_output: InferenceEngineOutput = {
+        "responses": results,
+        "stop_reasons": finish_reasons,
+    }
+
+    return inference_engine_output
 
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
@@ -231,7 +282,7 @@ def create_app() -> fastapi.FastAPI:
 
 
 def serve(
-    inference_engine_client: InferenceEngineClient,
+    inference_engine_client: "InferenceEngineClient",
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info",
