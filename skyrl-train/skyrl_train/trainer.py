@@ -50,6 +50,7 @@ from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
     GLOBAL_STEP_PREFIX,
+    upload_to_remote_background,
 )
 
 
@@ -88,6 +89,7 @@ class RayPPOTrainer:
         self.reward_model: Optional[PPORayActorGroup] = None
         # used for checkpoint cleanup
         self._node_ids: Optional[List[str]] = None
+        self._upload_refs: Optional[List[ray.ObjectRef]] = None
 
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
@@ -235,6 +237,8 @@ class RayPPOTrainer:
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
+
+                    self.save_checkpoints()  # TESTING
 
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
@@ -1016,6 +1020,9 @@ class RayPPOTrainer:
         """
         Save the model, optimizer, and training states to disk.
         """
+        if self._upload_refs:
+            ray.get(self._upload_refs)
+
         # Create global step folder structure
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
@@ -1077,6 +1084,13 @@ class RayPPOTrainer:
             f.write(str(self.global_step))
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
+        if self.cfg.trainer.enable_anyscale_upload:
+            if not self._node_ids:
+                self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
+            self._upload_refs = upload_to_remote_background(
+                self.cfg, self._node_ids, self.global_step, global_step_folder, latest_checkpoint_file
+            )
+            ray.get(self._upload_refs)  # TESTING
 
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):
@@ -1085,12 +1099,14 @@ class RayPPOTrainer:
     def _cleanup_old_checkpoints(self):
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
-        run_on_each_node(
-            self._node_ids,
-            cleanup_old_checkpoints,
-            self.cfg.trainer.ckpt_path,
-            self.cfg.trainer.max_ckpts_to_keep,
-            self.global_step,
+        ray.get(
+            run_on_each_node(
+                self._node_ids,
+                cleanup_old_checkpoints,
+                self.cfg.trainer.ckpt_path,
+                self.cfg.trainer.max_ckpts_to_keep,
+                self.global_step,
+            )
         )
         # run on driver as well
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent

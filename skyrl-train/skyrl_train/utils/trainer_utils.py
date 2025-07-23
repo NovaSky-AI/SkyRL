@@ -1,3 +1,4 @@
+import time
 from typing import List, Dict, Any, Union, Callable, Optional
 from enum import Enum
 import ray
@@ -12,6 +13,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output
 from skyrl_train.generators.base import GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
+from .upload_utils import upload_dir_to_anyscale, upload_file_to_anyscale
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -76,7 +78,7 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
         )
         refs.append(node_task.remote(*args, **kwargs))
 
-    return ray.get(refs)
+    return refs
 
 
 def extract_step_from_path(path: str) -> int:
@@ -232,3 +234,23 @@ def dump_per_dataset_eval_results(
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
     print(f"Dumped aggregated eval metrics to {aggregated_filename}")
+
+
+def upload_to_remote_background(
+    config, node_ids, global_step, local_global_step_folder, main_rank_latest_checkpointed_iteration
+):
+
+    def _upload_to_remote_background(config, global_step, local_global_step_folder):
+        dir_path = os.path.join(config.trainer.anyscale_remote_upload_dir, f"{GLOBAL_STEP_PREFIX}{global_step}")
+        print(f"Uploading checkpoint to path: {dir_path}")
+        s = time.time()
+        upload_dir_to_anyscale(local_global_step_folder, dir_path)
+        e = time.time()
+        print(f"took {e - s} to upload")
+
+    # only upload on main rank/ caller
+    file_path = os.path.join(config.trainer.anyscale_remote_upload_dir, "latest_ckpt_global_step.txt")
+    upload_file_to_anyscale(main_rank_latest_checkpointed_iteration, file_path)
+
+    # use num_cpus > 0 to schedule only on worker nodes
+    return run_on_each_node(node_ids, _upload_to_remote_background, config, global_step, local_global_step_folder)

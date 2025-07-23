@@ -137,7 +137,8 @@ trainer:
   logger: "wandb"
   dump_data_batch: false
   dump_eval_results: true
-
+  anyscale_remote_upload_dir: remote_checkpoints/${trainer.project_name}/${trainer.run_name}
+  enable_anyscale_upload: false
 
 generator:
   model_dtype: "bfloat16" # should match dtype for inference engine

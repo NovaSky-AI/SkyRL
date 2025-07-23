@@ -38,6 +38,7 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
+    "boto3"
 ]
 
 [tool.uv]
