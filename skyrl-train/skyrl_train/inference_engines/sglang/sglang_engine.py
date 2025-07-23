@@ -276,10 +276,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             tensor_data = bytearray(data_with_marker)
             tensor_data.extend(b"\x00" * (padded_size - data_size))
             tensor_array = torch.frombuffer(tensor_data, dtype=torch.uint8)
-            request_tensor = tensor_array.cuda()
 
             # Use SGLang's API to update weights with custom loader
-            request_tensor = [("ipc_request", request_tensor)]
+            request_tensor = [("ipc_request", tensor_array)]
             obj = UpdateWeightsFromTensorReqInput(
                 serialized_named_tensors=[
                     MultiprocessingSerializer.serialize(request_tensor) for _ in range(self._tp_size)
