@@ -5,7 +5,7 @@ import ray
 import torch
 from loguru import logger
 from omegaconf.dictconfig import DictConfig
-from ray.util.placement_group import PlacementGroup
+from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
 
 
 class Timer:
@@ -342,10 +342,7 @@ def print_mem(tag: str, mem: dict):
     )
 
 
-def peer_access_supported():
-    if not torch.cuda.is_available():
-        return False
-
+def run_p2p_access_check():
     device_count = torch.cuda.device_count()
     if device_count < 2:
         return False
@@ -360,3 +357,19 @@ def peer_access_supported():
                     return False
 
     return True
+
+
+def peer_access_supported():
+    if not torch.cuda.is_available():
+        # maybe we are on cpu head node
+        ray.init()
+        pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")
+        result = ray.get(
+            ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
+                run_p2p_access_check
+            ).remote()
+        )
+        ray.shutdown()
+        return result
+    else:
+        return run_p2p_access_check()
