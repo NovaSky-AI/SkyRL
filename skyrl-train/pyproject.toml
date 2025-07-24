@@ -29,7 +29,7 @@ dependencies = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.44.0",
+    "ray==2.48.0",
     "peft",
     "debugpy==1.8.0",
     "hf_transfer",
@@ -41,7 +41,6 @@ dependencies = [
 ]
 
 [tool.uv]
-override-dependencies = ["ray==2.44.0"]
 conflicts = [
     [
         { extra = "vllm" },

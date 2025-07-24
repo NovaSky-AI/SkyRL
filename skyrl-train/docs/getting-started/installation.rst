@@ -8,13 +8,13 @@ Requirements
 
 We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
 
-If you're running on an existing Ray cluster, make sure to use Ray 2.44.0 and Python 3.12.
+If you're running on an existing Ray cluster, make sure to use Ray 2.48.0 and Python 3.12.
 
 
 Docker (recommended)
 ---------------------
 
-We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8`` for quick setup. 
+We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray-2.48.0-py3.12-cu12.8`` for quick setup. 
 
 1. Make sure to have `NVIDIA Container Runtime <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>`_ installed.
 
@@ -22,7 +22,7 @@ We provide a docker image with the base dependencies ``sumanthrh/skyrl-train-ray
 
 .. code-block:: bash
 
-    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8 /bin/bash
+    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train sumanthrh/skyrl-train-ray-2.48.0-py3.12-cu12.8 /bin/bash
 
 3. Inside the launched container, setup the latest version of the project:
 
@@ -41,7 +41,7 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 
 - CUDA 12.8
 - `uv <https://docs.astral.sh/uv/>`_
-- `ray <https://docs.ray.io/en/latest/>`_ 2.44.0
+- `ray <https://docs.ray.io/en/latest/>`_ 2.48.0
 
 System Dependencies
 ~~~~~~~~~~~~~~~~~~~
