@@ -139,7 +139,7 @@ For ray versions >= 2.44.0 but < 2.48.0, you need to install vllm in the base pi
 .. code-block:: bash
 
     pip install vllm==0.9.2 --extra-index-url https://download.pytorch.org/whl/cu128
-    pip install ray==2.46.0
+    pip install ray==2.46.0 omegaconf==2.3.0 loguru==0.7.3 jaxtyping==0.3.2 pyarrow==20.0.0
 
 Development 
 -----------
