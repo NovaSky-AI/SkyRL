@@ -1,6 +1,5 @@
 import pytest
 import ray
-import os
 from loguru import logger
 from functools import lru_cache
 import torch
@@ -11,14 +10,15 @@ def log_once(msg):
     logger.info(msg)
     return None
 
+
 def peer_access_supported():
     if not torch.cuda.is_available():
         return False
-    
+
     device_count = torch.cuda.device_count()
     if device_count < 2:
         return False
-    
+
     # Check P2P access between all GPU pairs
     for i in range(device_count):
         for j in range(device_count):
@@ -27,8 +27,9 @@ def peer_access_supported():
                 can_access = torch.cuda.can_device_access_peer(i, j)
                 if not can_access:
                     return False
-    
+
     return True
+
 
 @pytest.fixture
 def ray_init_fixture():
