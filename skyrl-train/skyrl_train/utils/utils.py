@@ -269,7 +269,7 @@ def initialize_ray(cfg: DictConfig):
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     if not peer_access_supported():
-        logger.info("Peer access is not supported, disabling P2P and SHM")
+        logger.info("Peer access is not supported on this node type, disabling P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
