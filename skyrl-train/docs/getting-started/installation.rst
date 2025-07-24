@@ -8,7 +8,7 @@ Requirements
 
 We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
 
-If you're running on an existing Ray cluster, make sure to use Ray 2.48.0 and Python 3.12.
+If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`, make sure to use Ray 2.48.0 and Python 3.12.
 
 
 Docker (recommended)
@@ -103,7 +103,6 @@ After activating the virtual environment, make sure to configure Ray to use `uv`
     export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
     # or add to your .bashrc
     # echo 'export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook' >> ~/.bashrc
-
 
 Initialize Ray cluster
 ----------------------
