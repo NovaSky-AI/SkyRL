@@ -121,6 +121,15 @@ Finally, you can initialize a Ray cluster using the following command (for singl
 
 You should now be to able to run our :doc:`quick start example <quickstart>`.
 
+Running on an existing Ray cluster
+----------------------------------
+
+For running on an existing Ray cluster, you need to first make sure that the python version used is 3.12. SkyRL-Train should be compatible with any Ray version 2.44 and above (except 2.47.0 and 2.47.1 -- which we do not recommend due to an issue in the uv + Ray integration). Since we use a uv lockfile to pin dependencies, the best way to run SkyRL-Train on a custom Ray version (say 2.46) would be to override the version at runtime with the ``--with`` flag. For example, to run with Ray 2.46, you can do:
+
+.. code-block:: bash
+
+    uv run .... --with ray==2.46.0 -m skyrl_train.entrypoints.main_base ...
+
 
 Development 
 -----------
