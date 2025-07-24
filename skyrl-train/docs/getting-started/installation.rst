@@ -8,7 +8,7 @@ Requirements
 
 We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
 
-If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`, make sure to use Ray 2.48.0 and Python 3.12.
+If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`, we suggest using Ray 2.48.0 and Python 3.12.
 
 
 Docker (recommended)
@@ -121,15 +121,25 @@ Finally, you can initialize a Ray cluster using the following command (for singl
 
 You should now be to able to run our :doc:`quick start example <quickstart>`.
 
+.. _running-on-existing-ray-cluster:
+
 Running on an existing Ray cluster
 ----------------------------------
 
-For running on an existing Ray cluster, you need to first make sure that the python version used is 3.12. SkyRL-Train should be compatible with any Ray version 2.44 and above (except 2.47.0 and 2.47.1 -- which we do not recommend due to an issue in the uv + Ray integration). Since we use a uv lockfile to pin dependencies, the best way to run SkyRL-Train on a custom Ray version (say 2.46) would be to override the version at runtime with the ``--with`` flag. For example, to run with Ray 2.46, you can do:
+For running on an existing Ray cluster, you need to first make sure that the python version used is 3.12. 
+
+We recommend using Ray version 2.48.0 and above for the best experience. However, SkyRL-Train is compatible with any Ray version 2.44.0 and above (except 2.47.0 and 2.47.1 -- which we do not recommend due to an issue in the uv + Ray integration). Since we use a uv lockfile to pin dependencies, the best way to run SkyRL-Train on a custom Ray version (say 2.46.0) would be to override the version at runtime with the ``--with`` flag. For example, to run with Ray 2.46.0, you can do:
 
 .. code-block:: bash
 
     uv run .... --with ray==2.46.0 -m skyrl_train.entrypoints.main_base ...
 
+For ray versions >= 2.44.0 but < 2.48.0, you need to install vllm in the base pip environment, and then re-install ray to your desired version to ensure that the uv + Ray integration works as expected.
+
+.. code-block:: bash
+
+    pip install vllm==0.9.2 --extra-index-url https://download.pytorch.org/whl/cu128
+    pip install ray==2.46.0
 
 Development 
 -----------
