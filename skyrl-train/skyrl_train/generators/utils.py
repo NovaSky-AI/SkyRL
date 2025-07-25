@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple
+from typing import List, Tuple, Union, Optional
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
@@ -49,21 +49,30 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
+def get_metrics_from_generator_output(
+    generator_output: GeneratorOutput, uids: List[str]
+) -> Tuple[float, Optional[float]]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
     """
-    rewards: List[float] = generator_output["rewards"]
+    rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
+    if not len(rewards):
+        raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    # Compute pass@N metrics
-    pass_at_n_dict = defaultdict(list)
-    for i, reward in enumerate(rewards):
-        pass_at_n_dict[uids[i]].append(reward)
+    if isinstance(rewards[0], list):
+        # We just compute mean over sequence reward.
+        # TODO: We should make metrics customizable by the environment
+        mean_raw_reward = float(np.mean([sum(seq_rewards) for seq_rewards in rewards]))
+        pass_at_n = None  # not computed for token-level rewards since it's ill-defined
+    else:
+        mean_raw_reward = float(np.mean(rewards))
+        # Compute pass@N metrics
+        pass_at_n_dict = defaultdict(list)
+        for i, reward in enumerate(rewards):
+            pass_at_n_dict[uids[i]].append(reward)
 
-    mean_raw_reward = np.mean(rewards)
-
-    # pass@N metric
-    pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
+        # pass@N metric
+        pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
 
     return mean_raw_reward, pass_at_n
 

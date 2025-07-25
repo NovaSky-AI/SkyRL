@@ -2,7 +2,7 @@ import asyncio
 import math
 import os
 import shutil
-from typing import Any, List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -684,10 +684,10 @@ class RayPPOTrainer:
             uids,
         )
 
-        rewards = generator_output["rewards"]
+        rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]
         per_token_rewards: List[List[float]] = []
-        
+
         # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
         if rewards and isinstance(rewards[0], list):
             # Token-level rewards: rewards is List[List[float]]
