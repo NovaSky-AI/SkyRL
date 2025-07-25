@@ -148,7 +148,7 @@ For example, to run with Ray 2.46.0, you can do:
     uv run .... --with ray==2.46.0 -m skyrl_train.entrypoints.main_base ...
 
 For ray versions >= 2.44.0 but < 2.48.0, you additionally need to install vllm in the base pip environment, and then re-install ray to your desired version to ensure that the uv + Ray integration works as expected. 
-We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <https://github.com/NovaSky-AI/SkyRL/blob/main/docker/Dockerfile.ray244>`_.
+We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <https://github.com/NovaSky-AI/SkyRL/blob/main/docker/Dockerfile.ray244>`_, or you can install them manually:
 
 .. code-block:: bash
 
