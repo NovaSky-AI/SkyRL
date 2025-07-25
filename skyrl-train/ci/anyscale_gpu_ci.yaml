@@ -1,8 +1,8 @@
 name: skyrl-train-gpu-ci
 entrypoint: bash ci/gpu_ci_run.sh
-image_uri: sumanthrh/skyrl-train-ray-2.44.0-py3.12-cu12.8 # (Optional) Exclusive with `containerfile`.
+image_uri: erictang000/skyrl-train-ray-2.48.0-py3.12-cu12.8 # (Optional) Exclusive with `containerfile`.
 cloud: sky-anyscale-aws-us-east-1
-ray_version: "2.44.0"
+ray_version: "2.48.0"
 compute_config: l4_ci 
 working_dir: . # (Optional) Use current working directory "." as the working_dir. Can be any local path or remote .zip file in cloud storage.
 env_vars:
