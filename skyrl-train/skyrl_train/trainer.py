@@ -2,7 +2,7 @@ import asyncio
 import math
 import os
 import shutil
-from typing import Any, List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -679,19 +679,25 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        # TODO (tgriggs): This assumes response-level rewards. Should support per-token rewards from generator
         mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
             generator_output,
             uids,
         )
 
-        rewards: List[float] = generator_output["rewards"]
+        rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]
         per_token_rewards: List[List[float]] = []
-        for reward, response in zip(rewards, responses):
-            per_token_reward = [0] * len(response)
-            per_token_reward[-1] = float(reward)
-            per_token_rewards.append(per_token_reward)
+
+        # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
+        if rewards and isinstance(rewards[0], list):
+            # Token-level rewards: rewards is List[List[float]]
+            per_token_rewards = rewards
+        else:
+            # Response-level rewards: rewards is List[float], convert to per-token rewards
+            for reward, response in zip(rewards, responses):
+                per_token_reward = [0.0] * len(response)
+                per_token_reward[-1] = float(reward)
+                per_token_rewards.append(per_token_reward)
 
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 

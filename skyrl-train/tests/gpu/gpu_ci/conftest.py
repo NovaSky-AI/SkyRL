@@ -1,8 +1,8 @@
 import pytest
 import ray
-import os
 from loguru import logger
 from functools import lru_cache
+from skyrl_train.utils.utils import peer_access_supported
 
 
 @lru_cache(5)
@@ -15,11 +15,8 @@ def log_once(msg):
 def ray_init_fixture():
     if ray.is_initialized():
         ray.shutdown()
-    # NOTE (sumanthrh): We disable SHM for CI environment by default - L4s don't support P2P access
-    # if `CI=false`, then this will be overriden.
     env_vars = {}
-    val = os.environ.get("CI", "").lower()
-    if val in ("1", "true", "yes"):
+    if not peer_access_supported():
         log_once("Disabling NCCL P2P for CI environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
     ray.init(runtime_env={"env_vars": env_vars})

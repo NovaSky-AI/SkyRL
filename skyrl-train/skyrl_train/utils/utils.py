@@ -5,7 +5,7 @@ import ray
 import torch
 from loguru import logger
 from omegaconf.dictconfig import DictConfig
-from ray.util.placement_group import PlacementGroup
+from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
 
 
 class Timer:
@@ -268,6 +268,11 @@ def initialize_ray(cfg: DictConfig):
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+    if not peer_access_supported(cfg):
+        logger.info("Peer access is not supported on this node type, disabling P2P and SHM")
+        env_vars["NCCL_P2P_DISABLE"] = "1"
+        env_vars["NCCL_SHM_DISABLE"] = "1"
+
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):
@@ -335,3 +340,49 @@ def print_mem(tag: str, mem: dict):
         f"Free: {format_gib(mem['free'])}, "
         f"Total: {format_gib(mem['total'])}"
     )
+
+
+def run_p2p_access_check():
+    device_count = torch.cuda.device_count()
+    if device_count < 2:
+        return False
+
+    # Check P2P access between all GPU pairs
+    for i in range(device_count):
+        for j in range(device_count):
+            if i != j:
+                # This checks if device i can access device j's memory
+                can_access = torch.cuda.can_device_access_peer(i, j)
+                if not can_access:
+                    return False
+
+    return True
+
+
+def peer_access_supported(cfg: DictConfig):
+    # whatever the max num gpus per node is, we can check p2p access if there are at least 2 GPUs
+    # if max is 1, p2p access is not supported
+    max_num_gpus_per_node = max(
+        [
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg.trainer.placement.critic_num_gpus_per_node,
+            cfg.trainer.placement.ref_num_gpus_per_node,
+            cfg.trainer.placement.reward_num_gpus_per_node,
+        ]
+    )
+    if max_num_gpus_per_node <= 1:
+        return False
+
+    if not torch.cuda.is_available():
+        # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
+        ray.init()
+        pg = ray.get(placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK").ready(), timeout=120)
+        result = ray.get(
+            ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
+                run_p2p_access_check
+            ).remote()
+        )
+        ray.shutdown()
+        return result
+    else:
+        return run_p2p_access_check()
