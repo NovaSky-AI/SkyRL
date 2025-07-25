@@ -135,7 +135,7 @@ We recommend using Ray version 2.48.0 and above for the best experience. In this
 
 .. code-block:: bash
 
-    uv run -m skyrl_train.entrypoints.main_base ...
+    uv run ... --with ray==2.xx.yy -m skyrl_train.entrypoints.main_base ...
 
 Ray < 2.48.0
 ~~~~~~~~~~~~
