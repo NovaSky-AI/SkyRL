@@ -72,6 +72,17 @@ async def run_generator_end_to_end(
     End to end generator test - requires minimum 2 GPUs
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
+    # Create a mock generator config
+    generator_cfg = DictConfig(
+        {
+            "sampling_params": {"max_generate_length": max_generate_length},
+            "max_input_length": max_input_length,
+            "batched": batched,
+            "max_turns": max_turns,
+            "zero_reward_on_non_stop": False,
+            "use_conversation_multi_turn": use_conversation_multi_turn,
+        }
+    )
 
     inference_engine_client = InferenceEngineClient(
         create_ray_wrapped_inference_engines(
@@ -103,22 +114,11 @@ async def run_generator_end_to_end(
                 ),
             ),
             tokenizer=tokenizer,
-        )
+        ),
+        generator_config=generator_cfg,
     )
 
     await inference_engine_client.wake_up()
-
-    # Create a mock generator config
-    generator_cfg = DictConfig(
-        {
-            "sampling_params": {"max_generate_length": max_generate_length},
-            "max_input_length": max_input_length,
-            "batched": batched,
-            "max_turns": max_turns,
-            "zero_reward_on_non_stop": False,
-            "use_conversation_multi_turn": use_conversation_multi_turn,
-        }
-    )
 
     env_cfg = DictConfig(
         {

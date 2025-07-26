@@ -38,6 +38,8 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
+    "fastapi",
+    "uvicorn",
 ]
 
 [tool.uv]
