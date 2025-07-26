@@ -12,7 +12,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids
+from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids, apply_overlong_filtering
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -230,6 +230,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         responses = truncated_responses
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
+        if self.generator_cfg.apply_overlong_filtering:
+            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
             "response_ids": responses,
@@ -293,9 +296,13 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_token_ids = sum([[output[4]] for output in all_outputs], [])
 
         rollout_metrics = self._rollout_metrics(responses, rewards)
+
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
             rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
+
+        if self.generator_cfg.apply_overlong_filtering:
+            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
