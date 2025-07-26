@@ -268,7 +268,15 @@ def initialize_ray(cfg: DictConfig):
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
-    if not peer_access_supported(cfg):
+    max_num_gpus_per_node = max(
+        [
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg.trainer.placement.critic_num_gpus_per_node,
+            cfg.trainer.placement.ref_num_gpus_per_node,
+            cfg.trainer.placement.reward_num_gpus_per_node,
+        ]
+    )
+    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
         logger.info("Peer access is not supported on this node type, disabling P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
@@ -359,17 +367,9 @@ def run_p2p_access_check():
     return True
 
 
-def peer_access_supported(cfg: DictConfig):
+def peer_access_supported(max_num_gpus_per_node: int):
     # whatever the max num gpus per node is, we can check p2p access if there are at least 2 GPUs
     # if max is 1, p2p access is not supported
-    max_num_gpus_per_node = max(
-        [
-            cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg.trainer.placement.critic_num_gpus_per_node,
-            cfg.trainer.placement.ref_num_gpus_per_node,
-            cfg.trainer.placement.reward_num_gpus_per_node,
-        ]
-    )
     if max_num_gpus_per_node <= 1:
         return False
 
