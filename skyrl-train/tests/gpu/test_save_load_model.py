@@ -2,7 +2,7 @@
 Test save_hf_model and load_hf_model functionality for different strategies.
 
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_save_load_model.py
+uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/test_save_load_model.py
 """
 
 import ray
@@ -24,6 +24,7 @@ from tests.gpu.utils import (
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_ARCH = "Qwen2ForCausalLM"
 
 
 def get_test_actor_config(strategy: str) -> DictConfig:
@@ -103,8 +104,7 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
 
         with open(os.path.join(model_save_dir, "config.json"), "r") as f:
             config = json.load(f)
-        assert all(["FSDP" not in x for x in config["architectures"]]), "FSDP should not be in the architecture name"
-        breakpoint()
+        assert config["architectures"] == [MODEL_ARCH], "Architecture should be Qwen2ForCausalLM"
 
         # Step 4: Destroy first worker to ensure fresh weights.
         ray.shutdown()
