@@ -9,7 +9,13 @@ import re
 PROMPT = """
 You are a strict math evaluation assistant.
 
-Compare the following **gold** and **predicted** math solutions. Your job is to determine if the predicted solution is mathematically correct and arrives at the same final answer as the gold solution.
+Compare the following **gold** and **predicted** math solutions. Your job is to determine if the predicted solution is mathematically correct and if the predicted solution ends with a line of the form:
+
+#### <number>
+
+You must only give a score of "1" if:
+- The final line of the predicted solution **ends with `#### <number>`**, and
+- The number **matches the final answer in the gold solution** exactly.
 
 Instructions:
 - You may provide internal reasoning or explanation before giving your final judgment.
@@ -21,10 +27,7 @@ or
 
 ### Final Score: 0
 
-Where:
-- Use "1" only if the predicted solution is mathematically correct and leads to the same final answer as the gold solution.
-- Use "0" otherwise.
-- Do not include any explanation after the final score.
+Do not include any explanation after the final score.
 """
 
 
@@ -57,8 +60,6 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
                 model=self.model, messages=[{"role": "user", "content": message}]
             )
             reply = response.choices[0].message.content.strip()
-
-            print(f"LLM Judge response: {reply}")
 
             # Try to parse score from "### Final Score: x"
             match = re.search(r"### Final Score:\s*([01](?:\.0)?)", reply)
