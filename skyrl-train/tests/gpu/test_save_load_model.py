@@ -131,9 +131,6 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         torch.testing.assert_close(logits_from_trained_model, logits_from_loaded_saved_model, atol=1e-8, rtol=1e-8)
 
     finally:
-        # Clean up ray
-        ray.shutdown()
-
         # Clean up temporary directories
         for temp_dir in [cfg.trainer.ckpt_path, cfg.trainer.export_path, model_save_dir]:
             if temp_dir and os.path.exists(temp_dir):
