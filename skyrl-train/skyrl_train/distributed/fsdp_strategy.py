@@ -1,4 +1,5 @@
 import os
+import copy
 import random
 from collections import defaultdict
 from datetime import timedelta
@@ -592,8 +593,28 @@ class FSDPStrategy(DistributedStrategy):
                 output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs  # Always use safetensors
             )
 
-            # Save config
-            model_to_save.config.save_pretrained(output_dir)
+            # Determine which config to save
+            config_to_save = model_to_save.config
+
+            # Fix architecture name by removing FSDP prefix if present
+            if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+                # Create a copy of the config to avoid modifying the original
+                config_to_save = copy.deepcopy(config_to_save)
+
+                # Fix architecture names to remove FSDP prefix
+                fixed_architectures = []
+                for arch in config_to_save.architectures:
+                    fixed_arch = arch
+                    if arch.startswith("FSDP"):
+                        # Remove "FSDP" prefix (for fsdp2)
+                        fixed_arch = arch[len("FSDP") :]
+                        self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                    fixed_architectures.append(fixed_arch)
+
+                config_to_save.architectures = fixed_architectures
+
+            # Save the config
+            config_to_save.save_pretrained(output_dir)
 
             # Save tokenizer if provided
             if tokenizer is not None:

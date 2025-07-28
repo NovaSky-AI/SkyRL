@@ -10,6 +10,7 @@ from omegaconf import DictConfig
 import hydra
 from typing import List
 from transformers import AutoTokenizer
+from functools import lru_cache
 
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -19,6 +20,8 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
+from skyrl_train.utils.utils import peer_access_supported
+
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -321,3 +324,17 @@ def get_model_logits_from_actor(actor_group: PPORayActorGroup, input_sequences, 
     logits = ret_databatch["output"]
 
     return logits
+
+
+@lru_cache(5)
+def log_once(msg):
+    logger.info(msg)
+    return None
+
+
+def ray_init_for_tests():
+    env_vars = {}
+    if not peer_access_supported(max_num_gpus_per_node=4):
+        log_once("Disabling NCCL P2P for test environment")
+        env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
+    ray.init(runtime_env={"env_vars": env_vars})
