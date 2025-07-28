@@ -1,4 +1,5 @@
 import os
+import copy
 import random
 from collections import defaultdict
 from datetime import timedelta
@@ -595,8 +596,6 @@ class FSDPStrategy(DistributedStrategy):
             # Fix architecture name by removing FSDP prefix if present
             if hasattr(model_to_save.config, "architectures") and model_to_save.config.architectures:
                 # Create a copy of the config to avoid modifying the original
-                import copy
-
                 config_copy = copy.deepcopy(model_to_save.config)
 
                 # Fix architecture names to remove FSDP prefix
