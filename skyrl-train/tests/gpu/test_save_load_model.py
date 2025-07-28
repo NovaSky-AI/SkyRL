@@ -13,8 +13,14 @@ import os
 import shutil
 import tempfile
 from omegaconf import DictConfig
+import json
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor
+from tests.gpu.utils import (
+    init_worker_with_type,
+    make_dummy_experience,
+    get_model_logits_from_actor,
+    ray_init_for_tests,
+)
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -43,7 +49,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
         "fsdp2",
     ],
 )
-def test_save_load_hf_model(strategy):
+def test_save_load_hf_model(ray_init_fixture, strategy):
     """
     Test save_hf_model functionality by:
     1. Loading a pretrained model into an ActorGroup
@@ -95,11 +101,16 @@ def test_save_load_hf_model(strategy):
             file_path = os.path.join(model_save_dir, expected_file)
             assert os.path.exists(file_path), f"Expected model file not found: {file_path}"
 
+        with open(os.path.join(model_save_dir, "config.json"), "r") as f:
+            config = json.load(f)
+        assert all(["FSDP" not in x for x in config["architectures"]]), "FSDP should not be in the architecture name"
+        breakpoint()
+
         # Step 4: Destroy first worker to ensure fresh weights.
         ray.shutdown()
 
         # ============= PHASE 2: Fresh Worker Loading from Saved Path =============
-
+        ray_init_for_tests()
         # Create a new config that points to the saved model instead of the original model
         cfg_fresh = get_test_actor_config(strategy)
         # IMPT: Point to the saved model directory instead of original model

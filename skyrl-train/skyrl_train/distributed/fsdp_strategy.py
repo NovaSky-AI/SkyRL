@@ -592,8 +592,32 @@ class FSDPStrategy(DistributedStrategy):
                 output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs  # Always use safetensors
             )
 
-            # Save config
-            model_to_save.config.save_pretrained(output_dir)
+            # Fix architecture name by removing FSDP prefix if present
+            if hasattr(model_to_save.config, "architectures") and model_to_save.config.architectures:
+                # Create a copy of the config to avoid modifying the original
+                import copy
+
+                config_copy = copy.deepcopy(model_to_save.config)
+
+                # Fix architecture names to remove FSDP prefix
+                fixed_architectures = []
+                for arch in config_copy.architectures:
+                    if arch.startswith("FSDP"):
+                        # Remove "FSDP" prefix (for fsdp2)
+                        fixed_arch = arch[4:]  # Remove "FSDP" (4 characters)
+                        fixed_architectures.append(fixed_arch)
+                        self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                    else:
+                        # for fsdp1, no need to fix
+                        fixed_architectures.append(arch)
+
+                config_copy.architectures = fixed_architectures
+
+                # save config
+                config_copy.save_pretrained(output_dir)
+            else:
+                # save config
+                model_to_save.config.save_pretrained(output_dir)
 
             # Save tokenizer if provided
             if tokenizer is not None:
