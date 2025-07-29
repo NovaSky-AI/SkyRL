@@ -1037,6 +1037,7 @@ class RayPPOTrainer:
                 "save_ckpt",
                 global_step=self.global_step,
                 ckpt_dir=policy_save_dir,
+                tokenizer=self.tokenizer,
             )
         )
 
@@ -1052,6 +1053,7 @@ class RayPPOTrainer:
                     "save_ckpt",
                     global_step=self.global_step,
                     ckpt_dir=critic_save_dir,
+                    tokenizer=self.tokenizer,
                 )
             )
 
