@@ -15,7 +15,6 @@ from torch import optim
 from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
-from transformers import GenerationConfig
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
@@ -450,23 +449,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             config_save_model = self._unwrap_model(model)
-            hf_config_tokenizer_path = os.path.join(ckpt_dir, "huggingface")
-            os.makedirs(hf_config_tokenizer_path, exist_ok=True)
-            model_config = config_save_model.config
-            generation_config = None
-            if config_save_model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
-                try:
-                    # Some model's name_or_path is empty if not initialized from pretrained,
-                    # in this cases, we don't save generation config.
-                    generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
-                    generation_config.save_pretrained(hf_config_tokenizer_path)
-                except Exception:
-                    # if the generation config isn't available, we don't save it
-                    pass
-
-            model_config.save_pretrained(hf_config_tokenizer_path)
-            if tokenizer is not None:
-                tokenizer.save_pretrained(hf_config_tokenizer_path)
+            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
