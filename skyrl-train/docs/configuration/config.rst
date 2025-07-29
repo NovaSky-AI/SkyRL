@@ -317,6 +317,7 @@ Algorithm Configuration
 - ``algorithm.value_head_prefix``: The name used to identify the value head in the critic model.
 - ``algorithm.policy_loss_type``: Type of PPO loss to use. Currently, we implement ``regular`` and ``dual_clip``, where ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_. Custom policy losses can be registered with the ``PolicyLossRegistry``.
 - ``algorithm.loss_reduction``: Type of PPO loss reduction to use. Currently, we support ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
+- ``algorithm.importance_sampling_level``: Level at which importance sampling is aggregated. Currently, we support ``token`` and ``sequence``. ``token`` is the default and matches the original PPO/GRPO loss. ``sequence`` computes importance sampling at the sequence level, as proposed in `GSPO <https://www.arxiv.org/pdf/2507.18071>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.

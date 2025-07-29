@@ -214,3 +214,82 @@ def test_policy_loss_reduction_edge_cases():
     # Should handle zero mask gracefully (due to +1e-8 in denominator)
     assert torch.isfinite(loss_token_masked)
     assert torch.isfinite(loss_seq_masked)
+
+
+def test_gspo_importance_sampling_levels():
+    """Tests different importance_sampling_level modes in PolicyLoss function (GSPO implementation)."""
+
+    device = "cpu"
+
+    clip_eps_low = 0.2
+    clip_eps_high = 0.2
+
+    # Create test data where sequence-level importance sampling should differ from token-level
+    advantages = torch.tensor(
+        [
+            [1.0, 2.0, 1.5],  # sequence 1: 3 tokens
+            [2.0, 1.0, 0.0],  # sequence 2: only 2 valid tokens (last masked)
+        ],
+        device=device,
+    )
+
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
+
+    # Set log_probs to create different ratios per sequence
+    log_probs = torch.tensor(
+        [[-0.5, -1.5, -0.8], [-0.7, -1.2, -2.0]],  # ratios ≈ [[1.65, 0.61, 1.22], [1.35, 0.82, 0.37]]
+        device=device,
+    )
+
+    # Create mask to make sequences have different effective lengths
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], device=device)
+
+    # Test token-level importance sampling (standard PPO)
+    loss_fn_token = PolicyLoss(
+        loss_type="regular",
+        loss_reduction="token_mean",
+        clip_eps_low=clip_eps_low,
+        clip_eps_high=clip_eps_high,
+        importance_sampling_level="token",
+    )
+    loss_token, _ = loss_fn_token(log_probs, old_log_probs, advantages, loss_mask)
+
+    # Test sequence-level importance sampling (GSPO)
+    loss_fn_sequence = PolicyLoss(
+        loss_type="regular",
+        loss_reduction="token_mean",
+        clip_eps_low=clip_eps_low,
+        clip_eps_high=clip_eps_high,
+        importance_sampling_level="sequence",
+    )
+    loss_sequence, _ = loss_fn_sequence(log_probs, old_log_probs, advantages, loss_mask)
+
+    # Manual calculation for token-level (standard PPO)
+    log_ratio = log_probs - old_log_probs
+    ratio_token = log_ratio.exp()
+    surr1_token = ratio_token * advantages
+    surr2_token = ratio_token.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
+    loss_per_token_token = -torch.min(surr1_token, surr2_token)
+    expected_token = (loss_per_token_token * loss_mask).sum() / (loss_mask.sum() + 1e-8)
+
+    # Manual calculation for sequence-level (GSPO)
+    # First compute sequence-level importance weights
+    from skyrl_train.utils import masked_mean
+    
+    log_importance_weights_seq = masked_mean(log_ratio, loss_mask, dim=-1)
+    # Expand to match the shape of log_ratio
+    log_importance_weights_seq = log_importance_weights_seq.unsqueeze(-1).expand_as(log_ratio)
+    ratio_sequence = log_importance_weights_seq.exp()
+    surr1_sequence = ratio_sequence * advantages
+    surr2_sequence = ratio_sequence.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
+    loss_per_token_sequence = -torch.min(surr1_sequence, surr2_sequence)
+    expected_sequence = (loss_per_token_sequence * loss_mask).sum() / (loss_mask.sum() + 1e-8)
+
+    # Verify results
+    torch.testing.assert_close(loss_token, expected_token, rtol=1e-5, atol=1e-8)
+    torch.testing.assert_close(loss_sequence, expected_sequence, rtol=1e-5, atol=1e-8)
+
+    # Token-level and sequence-level should give different results when sequences have different patterns
+    assert not torch.allclose(
+        loss_token, loss_sequence, rtol=1e-3
+    ), "Token-level and sequence-level importance sampling should give different results"
