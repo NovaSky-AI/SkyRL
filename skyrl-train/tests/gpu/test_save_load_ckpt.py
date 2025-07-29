@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_save_load_ckpt.py
+uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/test_save_load_ckpt.py
 """
 
 import ray
@@ -9,7 +9,9 @@ import hydra
 import torch
 import os
 import shutil
+import json
 from omegaconf import DictConfig
+from transformers import AutoTokenizer
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor
 from skyrl_train.entrypoints.main_base import config_dir
@@ -40,7 +42,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
         "fsdp2",
     ],
 )
-def test_save_load_checkpoint(strategy):
+def test_save_load_checkpoint(ray_init_fixture, strategy):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -59,6 +61,7 @@ def test_save_load_checkpoint(strategy):
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
         )
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
         checkpoint_dir = None
         # Create dummy experiences for training steps
@@ -82,7 +85,25 @@ def test_save_load_checkpoint(strategy):
         checkpoint_dir = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1"))  # Store for cleanup
 
         # Step 2: Save checkpoint
-        ray.get(actor_group.async_run_ray_method("pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path))
+        ray.get(
+            actor_group.async_run_ray_method(
+                "pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path, tokenizer=tokenizer
+            )
+        )
+
+        # check that relevant files are saved
+        huggingface_dir = os.path.join(checkpoint_path, "huggingface")
+        expected_files = ["config.json", "generation_config.json", "tokenizer.json"]
+        for file in expected_files:
+            assert os.path.exists(
+                os.path.join(huggingface_dir, file)
+            ), f"File {file} not found in huggingface directory"
+        if "fsdp" in strategy:
+            fsdp_config_path = os.path.join(checkpoint_path, "fsdp_config.json")
+            with open(fsdp_config_path, "r") as f:
+                fsdp_config = json.load(f)
+            assert fsdp_config["fsdp_strategy"] == strategy
+            assert fsdp_config["world_size"] == 2
 
         # Step 3: Do second training step and record results
         ray.get(
@@ -117,9 +138,6 @@ def test_save_load_checkpoint(strategy):
         torch.testing.assert_close(logits_after_second_training, logits_after_reload_and_training, atol=0.0, rtol=0.0)
 
     finally:
-        # Clean up ray
-        ray.shutdown()
-
         # Clean up checkpoint directory
         if checkpoint_dir and os.path.exists(checkpoint_dir):
             print(f"Removing checkpoint directory: {checkpoint_dir}")

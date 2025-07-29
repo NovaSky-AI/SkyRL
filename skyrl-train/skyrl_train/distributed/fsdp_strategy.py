@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
 import gc
+import json
 
 import numpy as np
 import torch
@@ -14,6 +15,7 @@ from torch import optim
 from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
+from transformers import GenerationConfig
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
@@ -374,6 +376,7 @@ class FSDPStrategy(DistributedStrategy):
         scheduler=None,
         client_state={},
         tag=None,
+        tokenizer=None,
     ):
         """Save model checkpoint for FSDP"""
         import warnings
@@ -444,6 +447,31 @@ class FSDPStrategy(DistributedStrategy):
 
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
+
+        if self.is_rank_0():
+            config_save_model = self._unwrap_model(model)
+            hf_config_tokenizer_path = os.path.join(ckpt_dir, "huggingface")
+            os.makedirs(hf_config_tokenizer_path, exist_ok=True)
+            model_config = config_save_model.config
+            generation_config = None
+            if config_save_model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
+                try:
+                    # Some model's name_or_path is empty if not initialized from pretrained,
+                    # in this cases, we don't save generation config.
+                    generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
+                    generation_config.save_pretrained(hf_config_tokenizer_path)
+                except Exception:
+                    # if the generation config isn't available, we don't save it
+                    pass
+
+            model_config.save_pretrained(hf_config_tokenizer_path)
+            if tokenizer is not None:
+                tokenizer.save_pretrained(hf_config_tokenizer_path)
+
+            # Also save runtime FSDP config
+            fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
+            with open(fsdp_config_path, "w") as f:
+                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()

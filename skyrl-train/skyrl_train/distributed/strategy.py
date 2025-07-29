@@ -45,7 +45,7 @@ class DistributedStrategy(ABC):
         pass
 
     @abstractmethod
-    def save_ckpt(self, model, optimizer, scheduler, ckpt_dir, global_step, node_local_rank):
+    def save_ckpt(self, model, optimizer, scheduler, ckpt_dir, global_step, node_local_rank, tokenizer=None):
         """Save checkpoint"""
         pass
 
