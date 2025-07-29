@@ -18,10 +18,82 @@
 
 import torch
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union, List, Callable, Dict
+from enum import Enum
 from skyrl_train.training_batch import TrainingInputBatch
 from jaxtyping import Float
 from collections import defaultdict
+
+
+class AdvantageEstimator(Enum):
+    GAE = "gae"
+    GRPO = "grpo"
+
+    def __str__(self):
+        return self.value
+
+
+class AdvantageEstimatorRegistry:
+    """
+    Registry for advantage estimator functions.
+
+    This registry allows users to register custom advantage estimators without modifying
+    the skyrl_train package. Custom estimators can be registered by calling
+    AdvantageEstimatorRegistry.register() directly or by using the @register_advantage_estimator
+    decorator.
+
+    See examples/algorithm/custom_advantage_estimator for a simple example of how to
+    register and use custom advantage estimators.
+    """
+
+    _estimators: Dict[str, Callable] = {}
+
+    @classmethod
+    def register(cls, name: Union[str, AdvantageEstimator], func: Callable):
+        """Register an advantage estimator function."""
+        # Convert enum to string if needed
+        if isinstance(name, AdvantageEstimator):
+            name = name.value
+
+        if name in cls._estimators:
+            raise ValueError(f"Estimator '{name}' already registered")
+
+        cls._estimators[name] = func
+
+    @classmethod
+    def get(cls, name: str) -> Callable:
+        """Get an estimator function by name."""
+        if name not in cls._estimators:
+            available = list(cls._estimators.keys())
+            raise ValueError(f"Unknown estimator '{name}'. Available: {available}")
+        return cls._estimators[name]
+
+    @classmethod
+    def list_available(cls) -> List[str]:
+        """List all registered estimators."""
+        return list(cls._estimators.keys())
+
+    @classmethod
+    def unregister(cls, name: Union[str, AdvantageEstimator]):
+        """Unregister an advantage estimator function. Useful for testing."""
+        # Convert enum to string if needed
+        if isinstance(name, AdvantageEstimator):
+            name = name.value
+
+        if name not in cls._estimators:
+            raise ValueError(f"Estimator '{name}' not registered")
+
+        del cls._estimators[name]
+
+
+def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
+    """Decorator to register an advantage estimator function."""
+
+    def decorator(func: Callable):
+        AdvantageEstimatorRegistry.register(name, func)
+        return func
+
+    return decorator
 
 
 # TODO (erictang000): unused right now, but will be useful as we add more algorithm support
@@ -144,12 +216,14 @@ def masked_whiten(values, mask, shift_mean=True):
     return whitened
 
 
+@register_advantage_estimator(AdvantageEstimator.GAE)
 def compute_gae_advantage_return(
     token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],
     values: Float[torch.Tensor, "batch_size seqlen"],
     response_mask: Float[torch.Tensor, "batch_size seqlen"],
     gamma: float,
     lambd: float,
+    **kwargs,
 ) -> Tuple[Float[torch.Tensor, "batch_size seqlen"], Float[torch.Tensor, "batch_size seqlen"]]:
     """
     Compute advantage and return for GAE.
@@ -173,12 +247,14 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
+@register_advantage_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
+    **kwargs,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
@@ -228,27 +304,25 @@ def compute_advantages_and_returns(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
-    adv_estimator: str,
+    adv_estimator: Union[str, AdvantageEstimator],
     values: Optional[torch.Tensor] = None,
     norm_adv_by_std_in_grpo: bool = True,
     gamma=1.0,
     lambd=1.0,
 ):
-    if adv_estimator == "gae":
-        advantages, returns = compute_gae_advantage_return(
-            token_level_rewards=token_level_rewards,
-            values=values,
-            response_mask=response_mask,
-            gamma=gamma,
-            lambd=lambd,
-        )
-    elif adv_estimator == "grpo":
-        advantages, returns = compute_grpo_outcome_advantage(
-            token_level_rewards=token_level_rewards,
-            response_mask=response_mask,
-            index=index,
-            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-        )
+    if isinstance(adv_estimator, AdvantageEstimator):
+        estimator_name = adv_estimator.value
     else:
-        raise ValueError(f"Invalid adv_estimator: {adv_estimator}")
-    return advantages, returns
+        estimator_name = adv_estimator
+
+    estimator_func = AdvantageEstimatorRegistry.get(estimator_name)
+
+    return estimator_func(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        values=values,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        gamma=gamma,
+        lambd=lambd,
+    )

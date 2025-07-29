@@ -307,7 +307,7 @@ Algorithm Configuration
       value_clip: 0.2
       normalize_reward: true
 
-- ``algorithm.advantage_estimator``: Advantage estimator to use. Currently, we support ``grpo`` and ``gae``.
+- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo`` and ``gae``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance.
 - ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation.
 - ``algorithm.use_kl_in_reward``: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as ``rewards - kl * kl_loss_coef``.

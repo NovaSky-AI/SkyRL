@@ -140,10 +140,6 @@ def validate_cfg(cfg: DictConfig):
         cfg.trainer.sequence_parallel_backend == "ulysses"
     ), f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
 
-    assert cfg.trainer.algorithm.advantage_estimator in (
-        "gae",
-        "grpo",
-    ), f"invalid advantage estimator: {cfg.trainer.algorithm.advantage_estimator}"
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":
         assert (
