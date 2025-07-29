@@ -48,9 +48,9 @@ FSDP checkpoints are organized according to the following directory hierarchy:
     │   │   └── lr_scheduler_state.pt
     │   ├── data.pt                          # Dataloader state
     │   └── trainer_state.pt                 # High-level trainer state
-    ├── global_step_20/                       # Checkpoint at training step 20
+    ├── global_step_20/                      # Checkpoint at training step 20
     │   └── ...
-    └── global_step_30/                       # Checkpoint at training step 30
+    └── global_step_30/                      # Checkpoint at training step 30
         └── ...
 
 DeepSpeed checkpoints follow a similar directory structure but the model checkpoint files under ``policy`` and ``critic`` are created by the DeepSpeed checkpoint API, and are not explicitly managed by SkyRL.
