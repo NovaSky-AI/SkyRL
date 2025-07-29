@@ -64,6 +64,10 @@ DeepSpeed checkpoints follow a similar directory structure but the model checkpo
     │   │   ├── huggingface/                 # HuggingFace config and tokenizer 
     │   │   ├── global_step10/               # Deepspeed checkpoint directory
     │   │   ├── ...                          # other deepspeed checkpointing files
+    │   ├── critic/                          # Critic model checkpoint (if enabled)
+    │   │   ├── huggingface/                 # HuggingFace config and tokenizer 
+    │   │   ├── global_step10/               # Deepspeed checkpoint directory
+    │   │   ├── ...                          # other deepspeed checkpointing files
     ├── global_step_20/                      # Checkpoint at training step 20
     │   └── ...
     └── global_step_30/                      # Checkpoint at training step 30

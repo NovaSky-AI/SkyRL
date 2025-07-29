@@ -93,8 +93,9 @@ class DistributedStrategy(ABC):
                 # in this cases, we don't save generation config.
                 generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
                 generation_config.save_pretrained(hf_config_tokenizer_path)
-            except Exception:
+            except Exception as e:
                 # if the generation config isn't available, we don't save it
+                print(f"Warning: Could not save generation config for '{model_config.name_or_path}'. Error: {e}")
                 pass
 
         model_config.save_pretrained(hf_config_tokenizer_path)
