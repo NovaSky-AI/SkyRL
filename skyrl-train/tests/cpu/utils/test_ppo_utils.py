@@ -15,6 +15,8 @@ from skyrl_train.utils.ppo_utils import (
     FixedKLController,
     AdvantageEstimatorRegistry,
     register_advantage_estimator,
+    PolicyLossRegistry,
+    register_policy_loss,
 )
 import numpy as np
 
@@ -168,6 +170,78 @@ def test_advantage_estimator_registration():
 
     # Clean up
     AdvantageEstimatorRegistry.unregister("dummy")
+
+
+def test_policy_loss_registration():
+    """Test that we can register and retrieve a custom policy loss function."""
+    from omegaconf import DictConfig
+
+    # Create a simple dummy policy loss function
+    def dummy_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+        return torch.tensor(0.5), 0.1  # dummy loss and clip_ratio
+
+    # Register it
+    PolicyLossRegistry.register("dummy_loss", dummy_policy_loss)
+
+    # Check it's retrievable
+    retrieved_func = PolicyLossRegistry.get("dummy_loss")
+    assert retrieved_func == dummy_policy_loss
+
+    # Check it's in the available list
+    assert "dummy_loss" in PolicyLossRegistry.list_available()
+
+    # Test the function works
+    config = DictConfig({"policy_loss_type": "dummy_loss"})
+    loss, clip_ratio = retrieved_func(
+        log_probs=torch.tensor([[0.1]]),
+        old_log_probs=torch.tensor([[0.2]]),
+        advantages=torch.tensor([[1.0]]),
+        config=config,
+    )
+    assert loss.item() == 0.5
+    assert clip_ratio == 0.1
+
+    # Clean up
+    PolicyLossRegistry.unregister("dummy_loss")
+
+
+def test_policy_loss_decorator():
+    """Test the register_policy_loss decorator works."""
+
+    @register_policy_loss("decorated_loss")
+    def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+        return torch.tensor(1.0), 0.2
+
+    # Check it was registered
+    assert "decorated_loss" in PolicyLossRegistry.list_available()
+    retrieved_func = PolicyLossRegistry.get("decorated_loss")
+    assert retrieved_func == decorated_policy_loss
+
+    # Clean up
+    PolicyLossRegistry.unregister("decorated_loss")
+
+
+def test_policy_loss_registry_errors():
+    """Test PolicyLossRegistry error handling."""
+
+    # Test getting non-existent loss
+    with pytest.raises(ValueError, match="Unknown policy loss"):
+        PolicyLossRegistry.get("non_existent")
+
+    # Test unregistering non-existent loss
+    with pytest.raises(ValueError, match="not registered"):
+        PolicyLossRegistry.unregister("non_existent")
+
+    # Test duplicate registration
+    def dummy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+        return torch.tensor(0.0), 0.0
+
+    PolicyLossRegistry.register("test_dup", dummy_loss)
+    with pytest.raises(ValueError, match="already registered"):
+        PolicyLossRegistry.register("test_dup", dummy_loss)
+
+    # Clean up
+    PolicyLossRegistry.unregister("test_dup")
 
 
 def test_duplicate_registration_error():

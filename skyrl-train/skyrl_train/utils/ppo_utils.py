@@ -20,6 +20,7 @@ import torch
 import numpy as np
 from typing import Optional, Tuple, Union, List, Callable, Dict
 from enum import Enum
+from omegaconf import DictConfig
 from skyrl_train.training_batch import TrainingInputBatch
 from jaxtyping import Float
 from collections import defaultdict
@@ -94,6 +95,114 @@ def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
         return func
 
     return decorator
+
+
+class PolicyLossType(Enum):
+    REGULAR = "regular"
+    DUAL_CLIP = "dual_clip"
+
+    def __str__(self):
+        return self.value
+
+
+class PolicyLossRegistry:
+    """
+    Registry for policy loss functions.
+
+    This registry allows users to register custom policy loss functions without modifying
+    the skyrl_train package. Custom functions can be registered by calling
+    PolicyLossRegistry.register() directly or by using the @register_policy_loss
+    decorator.
+
+    See examples/algorithm/custom_policy_loss for a simple example of how to
+    register and use custom policy loss functions.
+    """
+
+    _loss_functions: Dict[str, Callable] = {}
+
+    @classmethod
+    def register(cls, name: Union[str, PolicyLossType], func: Callable):
+        """Register a policy loss function."""
+        # Convert enum to string if needed
+        if isinstance(name, PolicyLossType):
+            name = name.value
+
+        if name in cls._loss_functions:
+            raise ValueError(f"Policy loss '{name}' already registered")
+
+        cls._loss_functions[name] = func
+
+    @classmethod
+    def get(cls, name: str) -> Callable:
+        """Get a policy loss function by name."""
+        if name not in cls._loss_functions:
+            available = list(cls._loss_functions.keys())
+            raise ValueError(f"Unknown policy loss '{name}'. Available: {available}")
+        return cls._loss_functions[name]
+
+    @classmethod
+    def list_available(cls) -> List[str]:
+        """List all registered policy loss functions."""
+        return list(cls._loss_functions.keys())
+
+    @classmethod
+    def unregister(cls, name: Union[str, PolicyLossType]):
+        """Unregister a policy loss function. Useful for testing."""
+        # Convert enum to string if needed
+        if isinstance(name, PolicyLossType):
+            name = name.value
+
+        if name not in cls._loss_functions:
+            raise ValueError(f"Policy loss '{name}' not registered")
+
+        del cls._loss_functions[name]
+
+
+def register_policy_loss(name: Union[str, PolicyLossType]):
+    """Decorator to register a policy loss function."""
+
+    def decorator(func: Callable):
+        PolicyLossRegistry.register(name, func)
+        return func
+
+    return decorator
+
+
+@register_policy_loss(PolicyLossType.REGULAR)
+@register_policy_loss(PolicyLossType.DUAL_CLIP)
+def ppo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
+    loss_reduction = config.loss_reduction
+    assert loss_reduction in [
+        "token_mean",
+        "sequence_mean",
+    ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
+
+    ratio = (log_probs - old_log_probs).exp()
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+    loss = -torch.min(surr1, surr2)
+    clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+    clip_pg_losses1 = loss
+    if config.policy_loss_type == "dual_clip":
+        pg_losses3 = -advantages * config.clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    if loss_reduction == "token_mean":
+        # sum over *all* valid tokens, divide by total valid-token count
+        loss = masked_mean(loss, loss_mask)
+    elif loss_reduction == "sequence_mean":
+        # per-sequence token-mean (dim=-1), then batch-mean
+        loss = masked_mean(loss, loss_mask, dim=-1).mean()
+    else:
+        raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
+    return loss, clip_ratio
 
 
 # TODO (erictang000): unused right now, but will be useful as we add more algorithm support
@@ -325,4 +434,48 @@ def compute_advantages_and_returns(
         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         gamma=gamma,
         lambd=lambd,
+    )
+
+
+def compute_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    policy_loss_type: Optional[Union[str, PolicyLossType]] = None,
+) -> Tuple[torch.Tensor, float]:
+    """
+    Compute policy loss using the specified policy loss function.
+
+    Args:
+        log_probs: Current log probabilities
+        old_log_probs: Reference log probabilities
+        advantages: Advantage estimates
+        config: Configuration containing policy loss parameters
+        loss_mask: Optional mask for loss computation
+        policy_loss_type: Policy loss type to use. If None, uses config.policy_loss_type
+
+    Returns:
+        Tuple of (loss, clip_ratio)
+    """
+    if policy_loss_type is None:
+        if hasattr(config, "policy_loss_type"):
+            loss_type = config.policy_loss_type
+        else:
+            loss_type = "regular"  # default
+    else:
+        if isinstance(policy_loss_type, PolicyLossType):
+            loss_type = policy_loss_type.value
+        else:
+            loss_type = policy_loss_type
+
+    loss_func = PolicyLossRegistry.get(loss_type)
+
+    return loss_func(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        loss_mask=loss_mask,
     )

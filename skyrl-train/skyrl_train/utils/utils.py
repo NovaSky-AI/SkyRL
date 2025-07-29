@@ -183,10 +183,10 @@ def validate_cfg(cfg: DictConfig):
             # for local engines or sglang, we disable
             cfg.generator.override_existing_update_group = "disable"
 
-    assert cfg.trainer.algorithm.ppo_loss_type in (
+    assert cfg.trainer.algorithm.policy_loss_type in (
         "regular",
         "dual_clip",
-    ), f"invalid ppo_loss_type: {cfg.trainer.algorithm.ppo_loss_type}. Must be one of `['regular', 'dual_clip']`"
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of `['regular', 'dual_clip']`"
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",

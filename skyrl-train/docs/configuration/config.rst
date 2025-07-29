@@ -290,7 +290,7 @@ Algorithm Configuration
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      ppo_loss_type: "regular" # "regular", "dual_clip"
+      policy_loss_type: "regular" # "regular", "dual_clip"
       loss_reduction: "token_mean" # "token_mean", "sequence_mean"
 
       # GAE parameters
