@@ -10,8 +10,11 @@ from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
+    compute_advantages_and_returns,
     AdaptiveKLController,
     FixedKLController,
+    AdvantageEstimatorRegistry,
+    register_advantage_estimator,
 )
 import numpy as np
 
@@ -144,3 +147,112 @@ def test_fixed_kl_controller():
     controller = FixedKLController(kl_coef=0.1)
     controller.update(current=1.0, n_steps=10)
     assert controller.value == 0.1  # Should remain unchanged
+
+
+def test_advantage_estimator_registration():
+    """Test that we can register and retrieve a custom estimator."""
+
+    # Create a simple dummy estimator
+    def dummy_estimator(**kwargs):
+        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
+
+    # Register it
+    AdvantageEstimatorRegistry.register("dummy", dummy_estimator)
+
+    # Check it's retrievable
+    retrieved_func = AdvantageEstimatorRegistry.get("dummy")
+    assert retrieved_func == dummy_estimator
+
+    # Check it's in the available list
+    assert "dummy" in AdvantageEstimatorRegistry.list_available()
+
+    # Clean up
+    AdvantageEstimatorRegistry.unregister("dummy")
+
+
+def test_duplicate_registration_error():
+    """Test that registering the same name twice raises an error."""
+
+    def estimator1(**kwargs):
+        return None, None
+
+    def estimator2(**kwargs):
+        return None, None
+
+    # Register first one
+    AdvantageEstimatorRegistry.register("duplicate_test", estimator1)
+
+    # Try to register second one with same name - should fail
+    with pytest.raises(ValueError, match="already registered"):
+        AdvantageEstimatorRegistry.register("duplicate_test", estimator2)
+
+    # Clean up
+    AdvantageEstimatorRegistry.unregister("duplicate_test")
+
+
+def test_unknown_estimator_error():
+    """Test that getting an unknown estimator raises error."""
+    with pytest.raises(ValueError, match="Unknown estimator.*Available:"):
+        AdvantageEstimatorRegistry.get("nonexistent_estimator")
+
+
+def test_decorator_registration():
+    """Test that the decorator works for registration."""
+
+    @register_advantage_estimator("decorated_estimator")
+    def my_custom_estimator(**kwargs):
+        return torch.ones_like(kwargs["token_level_rewards"]), torch.ones_like(kwargs["token_level_rewards"])
+
+    # Check it was registered
+    assert "decorated_estimator" in AdvantageEstimatorRegistry.list_available()
+
+    # Check we can retrieve it
+    retrieved = AdvantageEstimatorRegistry.get("decorated_estimator")
+    assert retrieved == my_custom_estimator
+
+    # Clean up
+    AdvantageEstimatorRegistry.unregister("decorated_estimator")
+
+
+def test_custom_estimator_integration(advantage_test_data):
+    """Test that compute_advantages_and_returns works with custom estimators."""
+    rewards, values, response_mask, index = advantage_test_data
+
+    # Register a simple custom estimator
+    @register_advantage_estimator("simple_test")
+    def simple_estimator(**kwargs):
+        # Just return the rewards as both advantages and returns
+        r = kwargs["token_level_rewards"]
+        return r, r
+
+    # Use it in the main function
+    adv, ret = compute_advantages_and_returns(
+        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="simple_test"
+    )
+
+    assert torch.allclose(adv, rewards)
+    assert torch.allclose(ret, rewards)
+
+    # Clean up
+    AdvantageEstimatorRegistry.unregister("simple_test")
+
+
+def test_unregister_estimator():
+    """Test that we can unregister estimators."""
+
+    def dummy_estimator(**kwargs):
+        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
+
+    # Register it
+    AdvantageEstimatorRegistry.register("unregister_test", dummy_estimator)
+    assert "unregister_test" in AdvantageEstimatorRegistry.list_available()
+
+    # Unregister it
+    AdvantageEstimatorRegistry.unregister("unregister_test")
+    assert "unregister_test" not in AdvantageEstimatorRegistry.list_available()
+
+
+def test_unregister_nonexistent_error():
+    """Test that unregistering a nonexistent estimator raises error."""
+    with pytest.raises(ValueError, match="not registered"):
+        AdvantageEstimatorRegistry.unregister("nonexistent_estimator")

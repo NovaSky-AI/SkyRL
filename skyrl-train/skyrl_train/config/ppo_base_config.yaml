@@ -76,7 +76,7 @@ trainer:
       fsdp_size: -1
     sequence_parallel_size: 1
   algorithm:
-    advantage_estimator: "grpo"
+    advantage_estimator: "grpo"  # Customizable with AdvantageEstimatorRegistry
     kl_target: null
     init_kl_coef: 0.0
     use_kl_estimator_k3: true
