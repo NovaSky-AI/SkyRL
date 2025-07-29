@@ -70,6 +70,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "batched": False,
             "max_turns": 3,
             "zero_reward_on_non_stop": False,
+            "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
         }
     )

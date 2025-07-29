@@ -405,6 +405,8 @@ Generator Configuration
 
     zero_reward_on_non_stop: false 
 
+    apply_overlong_filtering: false
+
 
 Inference Engine Placement Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -458,3 +460,4 @@ Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
+- ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
