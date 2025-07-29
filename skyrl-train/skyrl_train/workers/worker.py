@@ -358,6 +358,7 @@ class PolicyLoss(nn.Module):
         clip_ratio_c: float = 3.0,
         loss_type: Literal["regular", "dual_clip"] = "regular",
         loss_reduction: Literal["token_mean", "sequence_mean"] = "token_mean",
+        importance_sampling_level: Literal["token", "sequence"] = "token",
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -370,6 +371,8 @@ class PolicyLoss(nn.Module):
             "token_mean",
             "sequence_mean",
         ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
+        self.importance_sampling_level = importance_sampling_level
+        assert importance_sampling_level in ["token", "sequence"], "importance_sampling_level must be either 'token' or 'sequence'"
 
     def forward(
         self,
@@ -379,7 +382,16 @@ class PolicyLoss(nn.Module):
         loss_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, float]:
 
-        ratio = (log_probs - old_log_probs).exp()
+        log_ratio = log_probs - old_log_probs
+        if self.importance_sampling_level == "token":
+            log_importance_weights = log_ratio
+        elif self.importance_sampling_level == "sequence":
+            log_importance_weights = masked_mean(log_ratio, loss_mask, dim=-1)
+            # expand to match the shape of log_ratio
+            log_importance_weights = log_importance_weights.unsqueeze(-1).expand_as(log_ratio)
+        else:
+            raise ValueError(f"Invalid importance sampling level: {self.importance_sampling_level}")
+        ratio = log_importance_weights.exp()
         surr1 = ratio * advantages
         surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
         loss = -torch.min(surr1, surr2)
