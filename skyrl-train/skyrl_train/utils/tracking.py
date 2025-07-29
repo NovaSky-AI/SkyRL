@@ -21,6 +21,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Union
 from loguru import logger
+from omegaconf import DictConfig, OmegaConf
 import pprint
 
 
@@ -183,6 +184,9 @@ class _MlflowLoggingAdapter:
 def _compute_mlflow_params_from_objects(params) -> Dict[str, Any]:
     if params is None:
         return {}
+
+    if isinstance(params, DictConfig):
+        params = OmegaConf.to_container(params, resolve=True)
 
     return _flatten_dict(_transform_params_to_json_serializable(params, convert_list_to_dict=True), sep="/")
 
