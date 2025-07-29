@@ -1,5 +1,6 @@
 import pytest
 import torch
+from skyrl_train.utils import masked_mean
 from skyrl_train.workers.worker import PolicyLoss
 
 
@@ -160,32 +161,49 @@ def test_policy_loss_reduction_edge_cases():
 
 
 def test_gspo_importance_sampling_levels():
-    """Tests different importance_sampling_level modes in PolicyLoss function (GSPO implementation)."""
+    """Tests different importance_sampling_level modes in PolicyLoss function (GSPO implementation).
+    
+    This test focuses on GSPO's key benefit: stabilizing clipping behavior through sequence-level
+    importance sampling, which should lead to more consistent training dynamics compared to 
+    token-level importance sampling in standard PPO.
+    """
 
     device = "cpu"
 
     clip_eps_low = 0.2
     clip_eps_high = 0.2
 
-    # Create test data where sequence-level importance sampling should differ from token-level
+    # Create test data with varied sequence lengths and extreme ratios to test clipping stability
+    # GSPO's benefit is most apparent with sequences of different lengths and high variance
     advantages = torch.tensor(
         [
-            [1.0, 2.0, 1.5],  # sequence 1: 3 tokens
-            [2.0, 1.0, 0.0],  # sequence 2: only 2 valid tokens (last masked)
+            [1.5, 2.0, 1.0, 0.8, 0.5, 0.0, 0.0, 0.0],  # long sequence: 5 valid tokens
+            [3.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # short sequence: 2 valid tokens
+            [0.5, 0.8, 1.2, 2.5, 0.0, 0.0, 0.0, 0.0],  # medium sequence: 4 valid tokens
         ],
         device=device,
     )
 
-    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
+    old_log_probs = torch.tensor([
+        [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+    ], device=device)
 
-    # Set log_probs to create different ratios per sequence
-    log_probs = torch.tensor(
-        [[-0.5, -1.5, -0.8], [-0.7, -1.2, -2.0]],  # ratios ≈ [[1.65, 0.61, 1.22], [1.35, 0.82, 0.37]]
-        device=device,
-    )
+    # Create extreme log probability ratios to trigger significant clipping
+    # This tests GSPO's stability benefits under conditions that would cause unstable clipping
+    log_probs = torch.tensor([
+        [0.2, -2.5, -0.3, 0.1, -1.8, -1.0, -1.0, -1.0],  # high variance within sequence
+        [0.8, -0.2, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],  # extreme ratios (exp(1.8)≈6.0, exp(0.8)≈2.2)
+        [-0.5, 0.3, -1.7, 0.4, -1.0, -1.0, -1.0, -1.0],   # mixed extreme values
+    ], device=device)
 
-    # Create mask to make sequences have different effective lengths
-    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], device=device)
+    # Create masks for different sequence lengths (key for testing length normalization)
+    loss_mask = torch.tensor([
+        [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],  # 5 tokens
+        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # 2 tokens
+        [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],  # 4 tokens
+    ], device=device)
 
     # Test token-level importance sampling (standard PPO)
     loss_fn_token = PolicyLoss(
@@ -215,9 +233,12 @@ def test_gspo_importance_sampling_levels():
     loss_per_token_token = -torch.min(surr1_token, surr2_token)
     expected_token = (loss_per_token_token * loss_mask).sum() / (loss_mask.sum() + 1e-8)
 
+    # Calculate token-level clipping ratio
+    is_clipped_token = (-surr2_token > -surr1_token) & (loss_mask.bool())
+    clip_ratio_token = is_clipped_token.float().sum() / loss_mask.sum()
+
     # Manual calculation for sequence-level (GSPO)
-    # First compute sequence-level importance weights
-    from skyrl_train.utils import masked_mean
+    # First compute sequence-level importance weights (key GSPO innovation)
     
     log_importance_weights_seq = masked_mean(log_ratio, loss_mask, dim=-1)
     # Expand to match the shape of log_ratio
@@ -228,11 +249,47 @@ def test_gspo_importance_sampling_levels():
     loss_per_token_sequence = -torch.min(surr1_sequence, surr2_sequence)
     expected_sequence = (loss_per_token_sequence * loss_mask).sum() / (loss_mask.sum() + 1e-8)
 
-    # Verify results
+    # Calculate sequence-level clipping ratio
+    is_clipped_sequence = (-surr2_sequence > -surr1_sequence) & (loss_mask.bool())
+    clip_ratio_sequence = is_clipped_sequence.float().sum() / loss_mask.sum()
+
+    # Verify loss calculations
     torch.testing.assert_close(loss_token, expected_token, rtol=1e-5, atol=1e-8)
     torch.testing.assert_close(loss_sequence, expected_sequence, rtol=1e-5, atol=1e-8)
 
-    # Token-level and sequence-level should give different results when sequences have different patterns
+    # Core GSPO benefit test: Different clipping behavior
+    # GSPO should produce different clipping patterns due to sequence-level importance sampling
+    assert not torch.allclose(
+        clip_ratio_token, clip_ratio_sequence, rtol=1e-2
+    ), f"Clipping ratios should differ: token={clip_ratio_token:.4f} vs sequence={clip_ratio_sequence:.4f}"
+
+    # Test stability: sequence-level should smooth out extreme per-token variations
+    # Check that sequence-level ratios have lower variance within each sequence
+    token_ratio_variance = torch.var(ratio_token * loss_mask, dim=-1).mean()
+    sequence_ratio_variance = torch.var(ratio_sequence * loss_mask, dim=-1).mean()
+    
+    # The key insight: GSPO should reduce within-sequence variance by using sequence-averaged ratios
+    assert sequence_ratio_variance < token_ratio_variance, (
+        f"GSPO should reduce ratio variance: sequence={sequence_ratio_variance:.4f} < "
+        f"token={token_ratio_variance:.4f}"
+    )
+
+    # Token-level and sequence-level should give different results due to different importance weighting
     assert not torch.allclose(
         loss_token, loss_sequence, rtol=1e-3
-    ), "Token-level and sequence-level importance sampling should give different results"
+    ), f"Loss values should differ: token={loss_token:.6f} vs sequence={loss_sequence:.6f}"
+
+    # Test length normalization effect: sequences with different lengths should be handled more uniformly
+    # This is a key stability benefit of GSPO mentioned in the paper
+    seq_lengths = loss_mask.sum(dim=-1)  # [5, 2, 4]
+    
+    # In GSPO, the sequence-level importance weights should be the same across all tokens in a sequence
+    # This should make the treatment more uniform across different sequence lengths
+    for seq_idx in range(log_importance_weights_seq.shape[0]):
+        seq_len = int(seq_lengths[seq_idx])
+        if seq_len > 1:
+            # All importance weights within a sequence should be identical (GSPO property)
+            seq_weights = log_importance_weights_seq[seq_idx, :seq_len]
+            assert torch.allclose(seq_weights, seq_weights[0], rtol=1e-6), (
+                f"GSPO should have uniform importance weights within sequence {seq_idx}"
+            )
