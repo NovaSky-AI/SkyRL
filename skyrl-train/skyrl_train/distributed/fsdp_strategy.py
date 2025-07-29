@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
 import gc
+import json
 
 import numpy as np
 import torch
@@ -374,6 +375,7 @@ class FSDPStrategy(DistributedStrategy):
         scheduler=None,
         client_state={},
         tag=None,
+        tokenizer=None,
     ):
         """Save model checkpoint for FSDP"""
         import warnings
@@ -444,6 +446,15 @@ class FSDPStrategy(DistributedStrategy):
 
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
+
+        if self.is_rank_0():
+            config_save_model = self._unwrap_model(model)
+            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
+
+            # Also save runtime FSDP config
+            fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
+            with open(fsdp_config_path, "w") as f:
+                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
