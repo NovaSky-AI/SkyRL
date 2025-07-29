@@ -194,6 +194,11 @@ generator:
   # TODO (erictang000): Show clear ablations for benefits of this on GSM8K or SQL.
   zero_reward_on_non_stop: false 
 
+  # Whether to apply DAPO Overlong Filtering to the loss masks.
+  # For each trajectory that exceeds the max length (i.e., truncated and does not end with an 
+  # EOS token), this masks out every token in the loss mask.
+  apply_overlong_filtering: false
+
 environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:

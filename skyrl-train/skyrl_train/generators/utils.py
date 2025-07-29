@@ -94,3 +94,22 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     return result
+
+
+def apply_overlong_filtering(
+    loss_masks: List[List[int]],
+    response_ids: List[List[int]],
+    eos_token_id: int,
+) -> List[List[int]]:
+    """
+    Implements DAPO Overlong Filtering: zero-out every token's mask whenever
+    the response does not end with the eos token id (i.e. truncated).
+
+    Returns:
+        - The loss masks with tokens zeroed out for truncated responses
+    """
+    assert len(loss_masks) == len(response_ids), "loss_masks and response_ids must have the same length"
+    return [
+        [0] * len(mask) if not response or response[-1] != eos_token_id else mask
+        for mask, response in zip(loss_masks, response_ids)
+    ]
