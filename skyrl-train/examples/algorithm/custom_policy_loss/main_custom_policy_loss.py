@@ -28,10 +28,10 @@ def compute_simple_baseline_policy_loss(
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
+    # make sure that the training loop is not run on the head node.
     # Register the custom policy loss
     PolicyLossRegistry.register("simple_baseline", compute_simple_baseline_policy_loss)
 
-    # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()
 
@@ -41,7 +41,9 @@ def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 
-    initialize_ray(cfg)
+    # Check if Ray is already initialized
+    if not ray.is_initialized():
+        initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 
 

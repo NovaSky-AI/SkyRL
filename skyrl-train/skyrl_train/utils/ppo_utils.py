@@ -16,14 +16,50 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
+from enum import Enum
+from typing import Callable, Dict, List, Tuple, Union, Optional
+
 import torch
 import numpy as np
-from typing import Optional, Tuple, Union, List, Callable, Dict
-from enum import Enum
+
 from omegaconf import DictConfig
 from skyrl_train.training_batch import TrainingInputBatch
 from jaxtyping import Float
-from collections import defaultdict
+
+import ray
+
+# Import cloudpickle for function serialization
+try:
+    import cloudpickle
+except ImportError:
+    # Fallback to pickle if cloudpickle is not available
+    import pickle as cloudpickle
+
+
+# Shared registry actor class for both policy loss and advantage estimator registries
+@ray.remote
+class RegistryActor:
+    """Shared Ray actor for managing function registries across processes."""
+
+    def __init__(self):
+        self.registry = {}
+
+    def register(self, name: str, func_serialized: bytes):
+        """Register a serialized function."""
+        self.registry[name] = func_serialized
+
+    def get(self, name: str):
+        """Get a serialized function by name."""
+        return self.registry.get(name)
+
+    def list_available(self):
+        """List all available function names."""
+        return list(self.registry.keys())
+
+    def unregister(self, name: str):
+        """Unregister a function by name."""
+        return self.registry.pop(name, None)
 
 
 class AdvantageEstimator(Enum):
@@ -48,6 +84,46 @@ class AdvantageEstimatorRegistry:
     """
 
     _estimators: Dict[str, Callable] = {}
+    _ray_actor = None
+
+    @classmethod
+    def _get_or_create_actor(cls):
+        """Get or create the Ray actor for managing the registry using get_if_exists."""
+        if cls._ray_actor is None:
+            try:
+                # Use get_if_exists to create actor only if it doesn't exist
+                cls._ray_actor = RegistryActor.options(name="advantage_estimator_registry", get_if_exists=True).remote()
+            except Exception:
+                # If Ray is not available, return None
+                cls._ray_actor = None
+        return cls._ray_actor
+
+    @classmethod
+    def _sync_with_actor(cls):
+        """Sync local registry with Ray actor if Ray is available."""
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is None:
+                return
+
+            available = ray.get(actor.list_available.remote())
+
+            # Sync any new functions from actor to local registry
+            for name in available:
+                if name not in cls._estimators:
+                    func_serialized = ray.get(actor.get.remote(name))
+                    if func_serialized is not None:
+                        # Deserialize the function
+                        try:
+                            func = cloudpickle.loads(func_serialized)
+                            cls._estimators[name] = func
+                        except Exception:
+                            # If deserialization fails, skip this function
+                            pass
+
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
 
     @classmethod
     def register(cls, name: Union[str, AdvantageEstimator], func: Callable):
@@ -59,11 +135,26 @@ class AdvantageEstimatorRegistry:
         if name in cls._estimators:
             raise ValueError(f"Estimator '{name}' already registered")
 
+        # Store in local registry
         cls._estimators[name] = func
+
+        # Try to sync with Ray actor if available
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                # Serialize the function using cloudpickle
+                func_serialized = cloudpickle.dumps(func)
+                ray.get(actor.register.remote(name, func_serialized))
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
 
     @classmethod
     def get(cls, name: str) -> Callable:
         """Get an estimator function by name."""
+        # Try to sync with actor first
+        cls._sync_with_actor()
+
         if name not in cls._estimators:
             available = list(cls._estimators.keys())
             raise ValueError(f"Unknown estimator '{name}'. Available: {available}")
@@ -72,6 +163,8 @@ class AdvantageEstimatorRegistry:
     @classmethod
     def list_available(cls) -> List[str]:
         """List all registered estimators."""
+        # Try to sync with actor first
+        cls._sync_with_actor()
         return list(cls._estimators.keys())
 
     @classmethod
@@ -84,7 +177,17 @@ class AdvantageEstimatorRegistry:
         if name not in cls._estimators:
             raise ValueError(f"Estimator '{name}' not registered")
 
+        # Remove from local registry
         del cls._estimators[name]
+
+        # Try to sync with Ray actor if available
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                ray.get(actor.unregister.remote(name))
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
 
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
@@ -119,6 +222,46 @@ class PolicyLossRegistry:
     """
 
     _loss_functions: Dict[str, Callable] = {}
+    _ray_actor = None
+
+    @classmethod
+    def _get_or_create_actor(cls):
+        """Get or create the Ray actor for managing the registry using get_if_exists."""
+        if cls._ray_actor is None:
+            try:
+                # Use get_if_exists to create actor only if it doesn't exist
+                cls._ray_actor = RegistryActor.options(name="policy_loss_registry", get_if_exists=True).remote()
+            except Exception:
+                # If Ray is not available, return None
+                cls._ray_actor = None
+        return cls._ray_actor
+
+    @classmethod
+    def _sync_with_actor(cls):
+        """Sync local registry with Ray actor if Ray is available."""
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is None:
+                return
+
+            available = ray.get(actor.list_available.remote())
+
+            # Sync any new functions from actor to local registry
+            for name in available:
+                if name not in cls._loss_functions:
+                    func_serialized = ray.get(actor.get.remote(name))
+                    if func_serialized is not None:
+                        # Deserialize the function
+                        try:
+                            func = cloudpickle.loads(func_serialized)
+                            cls._loss_functions[name] = func
+                        except Exception:
+                            # If deserialization fails, skip this function
+                            pass
+
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
 
     @classmethod
     def register(cls, name: Union[str, PolicyLossType], func: Callable):
@@ -130,11 +273,26 @@ class PolicyLossRegistry:
         if name in cls._loss_functions:
             raise ValueError(f"Policy loss '{name}' already registered")
 
+        # Store in local registry
         cls._loss_functions[name] = func
+
+        # Try to sync with Ray actor if available
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                # Serialize the function using cloudpickle
+                func_serialized = cloudpickle.dumps(func)
+                ray.get(actor.register.remote(name, func_serialized))
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
 
     @classmethod
     def get(cls, name: str) -> Callable:
         """Get a policy loss function by name."""
+        # Try to sync with actor first
+        cls._sync_with_actor()
+
         if name not in cls._loss_functions:
             available = list(cls._loss_functions.keys())
             raise ValueError(f"Unknown policy loss '{name}'. Available: {available}")
@@ -143,6 +301,8 @@ class PolicyLossRegistry:
     @classmethod
     def list_available(cls) -> List[str]:
         """List all registered policy loss functions."""
+        # Try to sync with actor first
+        cls._sync_with_actor()
         return list(cls._loss_functions.keys())
 
     @classmethod
@@ -155,7 +315,17 @@ class PolicyLossRegistry:
         if name not in cls._loss_functions:
             raise ValueError(f"Policy loss '{name}' not registered")
 
+        # Remove from local registry
         del cls._loss_functions[name]
+
+        # Try to sync with Ray actor if available
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                ray.get(actor.unregister.remote(name))
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
 
 
 def register_policy_loss(name: Union[str, PolicyLossType]):
@@ -194,6 +364,11 @@ def ppo_policy_loss(
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    loss = reduce_loss(loss, loss_mask, loss_reduction)
+    return loss, clip_ratio
+
+
+def reduce_loss(loss: torch.Tensor, loss_mask: Optional[torch.Tensor], loss_reduction: str) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
         loss = masked_mean(loss, loss_mask)
@@ -202,7 +377,7 @@ def ppo_policy_loss(
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
-    return loss, clip_ratio
+    return loss
 
 
 # TODO (erictang000): unused right now, but will be useful as we add more algorithm support
