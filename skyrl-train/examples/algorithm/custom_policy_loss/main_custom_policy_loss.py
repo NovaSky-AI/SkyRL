@@ -23,7 +23,7 @@ def compute_simple_baseline_policy_loss(
     """
     A random policy loss that returns a random value.
     """
-    return torch.randn(1)
+    return torch.randn(1), 0.0
 
 
 @ray.remote(num_cpus=1)
