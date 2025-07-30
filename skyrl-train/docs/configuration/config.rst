@@ -328,31 +328,38 @@ Algorithm Configuration
 Policy Loss Formulation 
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``PolicyLoss`` class.
+It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``ppo_policy_loss`` function. 
 
 .. code-block:: python
 
   class PolicyLoss(nn.Module):
     ...
-    def forward(
-        self,
+    def ppo_policy_loss(
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
+        config: DictConfig, # trainer.algorithm config
         loss_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         ratio = (log_probs - old_log_probs).exp()
         surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
+        surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
         loss = -torch.min(surr1, surr2)
         clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
         clip_pg_losses1 = loss
-        if self.loss_type == "dual_clip":
-            pg_losses3 = -advantages * self.clip_ratio_c
+        if config.policy_loss_type == "dual_clip":
+            pg_losses3 = -advantages * config.clip_ratio_c
             clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
             loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
+        if loss_reduction == "token_mean":
+            # sum over *all* valid tokens, divide by total valid-token count
+            loss = masked_mean(loss, loss_mask)
+        elif loss_reduction == "sequence_mean":
+            # per-sequence token-mean (dim=-1), then batch-mean
+            loss = masked_mean(loss, loss_mask, dim=-1).mean()
+        else:
+            raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
         return loss, clip_ratio
   
 
