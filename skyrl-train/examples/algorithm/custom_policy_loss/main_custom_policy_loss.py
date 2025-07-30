@@ -1,7 +1,3 @@
-"""
-uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss
-"""
-
 import ray
 import hydra
 import torch
@@ -26,10 +22,14 @@ def compute_simple_baseline_policy_loss(
     return torch.randn(1), 0.0
 
 
+# Register the custom policy loss at module level - works even before Ray is initialized!
+PolicyLossRegistry.register("simple_baseline", compute_simple_baseline_policy_loss)
+
+
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Register the custom policy loss (Ray is already initialized with proper env vars)
-    PolicyLossRegistry.register("simple_baseline", compute_simple_baseline_policy_loss)
+    # No registration needed here - already done at module level
+    # The registry automatically syncs when Ray becomes available
 
     exp = BasePPOExp(cfg)
     exp.run()
@@ -40,9 +40,7 @@ def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 
-    # Check if Ray is already initialized
-    if not ray.is_initialized():
-        initialize_ray(cfg)
+    initialize_ray(cfg)
 
     ray.get(skyrl_entrypoint.remote(cfg))
 

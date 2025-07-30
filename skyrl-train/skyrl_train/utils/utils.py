@@ -6,6 +6,7 @@ import torch
 from loguru import logger
 from omegaconf.dictconfig import DictConfig
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
 
 
 class Timer:
@@ -284,6 +285,10 @@ def initialize_ray(cfg: DictConfig):
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     ray.init(runtime_env={"env_vars": env_vars})
+
+    # sync the registries with the ray actor
+    PolicyLossRegistry._sync_with_actor()
+    AdvantageEstimatorRegistry._sync_with_actor()
 
 
 def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):

@@ -18,7 +18,7 @@
 
 from collections import defaultdict
 from enum import Enum
-from typing import Callable, Dict, List, Tuple, Union, Optional
+from typing import Callable, List, Tuple, Union, Optional
 
 import torch
 import numpy as np
@@ -62,6 +62,171 @@ class RegistryActor:
         return self.registry.pop(name, None)
 
 
+class BaseRegistry:
+    """Base class for function registries with Ray actor synchronization."""
+
+    # Subclasses should override these class attributes
+    _actor_name = None
+    _function_type = "Function"
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._functions = {}
+        cls._ray_actor = None
+        cls._synced_to_actor = False
+
+    @classmethod
+    def _get_or_create_actor(cls):
+        """Get or create the Ray actor for managing the registry using get_if_exists."""
+        if cls._ray_actor is None:
+            try:
+                # Only try to create actors if Ray is initialized
+                if ray.is_initialized():
+                    # Use get_if_exists to create actor only if it doesn't exist
+                    cls._ray_actor = RegistryActor.options(name=cls._actor_name, get_if_exists=True).remote()
+            except Exception:
+                # If Ray is not available, return None
+                cls._ray_actor = None
+        return cls._ray_actor
+
+    @classmethod
+    def _sync_local_to_actor(cls):
+        """Sync all local functions to Ray actor (one-time when Ray becomes available)."""
+        if cls._synced_to_actor or not ray.is_initialized():
+            return
+
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                # Only sync if we have local functions to sync
+                # Don't overwrite actor registry with empty local registry
+                if cls._functions:
+                    # Push all local functions to the actor
+                    for name, func in cls._functions.items():
+                        try:
+                            func_serialized = cloudpickle.dumps(func)
+                            ray.get(actor.register.remote(name, func_serialized))
+                        except Exception:
+                            pass
+                cls._synced_to_actor = True
+        except Exception:
+            pass
+
+    @classmethod
+    def _sync_with_actor(cls):
+        """Sync local registry with Ray actor if Ray is available."""
+        try:
+            # Only try if Ray is initialized
+            if not ray.is_initialized():
+                return
+
+            # First, sync our local functions to the actor
+            cls._sync_local_to_actor()
+
+            actor = cls._get_or_create_actor()
+            if actor is None:
+                return
+
+            available = ray.get(actor.list_available.remote())
+
+            # Sync any new functions from actor to local registry
+            for name in available:
+                if name not in cls._functions:
+                    func_serialized = ray.get(actor.get.remote(name))
+                    if func_serialized is not None:
+                        # Deserialize the function
+                        try:
+                            func = cloudpickle.loads(func_serialized)
+                            cls._functions[name] = func
+                        except Exception:
+                            # If deserialization fails, skip this function
+                            pass
+
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            pass
+
+    @classmethod
+    def register(cls, name: Union[str, Enum], func: Callable):
+        """Register a function."""
+        # Convert enum to string if needed
+        if hasattr(name, "value"):
+            name = name.value
+
+        if name in cls._functions:
+            raise ValueError(f"{cls._function_type} '{name}' already registered")
+
+        # Always store in local registry first
+        cls._functions[name] = func
+
+        # Try to sync with Ray actor if Ray is initialized
+        try:
+            if ray.is_initialized():
+                actor = cls._get_or_create_actor()
+                if actor is not None:
+                    # Serialize the function using cloudpickle
+                    func_serialized = cloudpickle.dumps(func)
+                    ray.get(actor.register.remote(name, func_serialized))
+        except Exception:
+            # Ray not available or other error, continue with local registry
+            # The function will be synced later when Ray becomes available
+            pass
+
+    @classmethod
+    def get(cls, name: str) -> Callable:
+        """Get a function by name."""
+        # Try to sync with actor first if Ray is available
+        cls._sync_with_actor()
+
+        if name not in cls._functions:
+            available = list(cls._functions.keys())
+            raise ValueError(f"Unknown {cls._function_type.lower()} '{name}'. Available: {available}")
+        return cls._functions[name]
+
+    @classmethod
+    def list_available(cls) -> List[str]:
+        """List all registered functions."""
+        # Try to sync with actor first if Ray is available
+        cls._sync_with_actor()
+        return list(cls._functions.keys())
+
+    @classmethod
+    def unregister(cls, name: Union[str, Enum]):
+        """Unregister a function. Useful for testing."""
+        # Convert enum to string if needed
+        if hasattr(name, "value"):
+            name = name.value
+
+        # Try to sync with actor first to get any functions that might be in the actor but not local
+        cls._sync_with_actor()
+
+        # Track if we found the function anywhere
+        found_locally = name in cls._functions
+        found_in_actor = False
+
+        # Remove from local registry if it exists
+        if found_locally:
+            del cls._functions[name]
+
+        # Try to remove from Ray actor if Ray is available
+        try:
+            if ray.is_initialized():
+                actor = cls._get_or_create_actor()
+                if actor is not None:
+                    # Check if it exists in actor first
+                    available_in_actor = ray.get(actor.list_available.remote())
+                    if name in available_in_actor:
+                        found_in_actor = True
+                        ray.get(actor.unregister.remote(name))
+        except Exception:
+            # Ray not available or other error, continue
+            pass
+
+        # Only raise error if the function wasn't found anywhere
+        if not found_locally and not found_in_actor:
+            raise ValueError(f"{cls._function_type} '{name}' not registered")
+
+
 class AdvantageEstimator(Enum):
     GAE = "gae"
     GRPO = "grpo"
@@ -70,7 +235,7 @@ class AdvantageEstimator(Enum):
         return self.value
 
 
-class AdvantageEstimatorRegistry:
+class AdvantageEstimatorRegistry(BaseRegistry):
     """
     Registry for advantage estimator functions.
 
@@ -83,111 +248,8 @@ class AdvantageEstimatorRegistry:
     register and use custom advantage estimators.
     """
 
-    _estimators: Dict[str, Callable] = {}
-    _ray_actor = None
-
-    @classmethod
-    def _get_or_create_actor(cls):
-        """Get or create the Ray actor for managing the registry using get_if_exists."""
-        if cls._ray_actor is None:
-            try:
-                # Use get_if_exists to create actor only if it doesn't exist
-                cls._ray_actor = RegistryActor.options(name="advantage_estimator_registry", get_if_exists=True).remote()
-            except Exception:
-                # If Ray is not available, return None
-                cls._ray_actor = None
-        return cls._ray_actor
-
-    @classmethod
-    def _sync_with_actor(cls):
-        """Sync local registry with Ray actor if Ray is available."""
-        try:
-            actor = cls._get_or_create_actor()
-            if actor is None:
-                return
-
-            available = ray.get(actor.list_available.remote())
-
-            # Sync any new functions from actor to local registry
-            for name in available:
-                if name not in cls._estimators:
-                    func_serialized = ray.get(actor.get.remote(name))
-                    if func_serialized is not None:
-                        # Deserialize the function
-                        try:
-                            func = cloudpickle.loads(func_serialized)
-                            cls._estimators[name] = func
-                        except Exception:
-                            # If deserialization fails, skip this function
-                            pass
-
-        except Exception:
-            # Ray not available or other error, continue with local registry
-            pass
-
-    @classmethod
-    def register(cls, name: Union[str, AdvantageEstimator], func: Callable):
-        """Register an advantage estimator function."""
-        # Convert enum to string if needed
-        if isinstance(name, AdvantageEstimator):
-            name = name.value
-
-        if name in cls._estimators:
-            raise ValueError(f"Estimator '{name}' already registered")
-
-        # Store in local registry
-        cls._estimators[name] = func
-
-        # Try to sync with Ray actor if available
-        try:
-            actor = cls._get_or_create_actor()
-            if actor is not None:
-                # Serialize the function using cloudpickle
-                func_serialized = cloudpickle.dumps(func)
-                ray.get(actor.register.remote(name, func_serialized))
-        except Exception:
-            # Ray not available or other error, continue with local registry
-            pass
-
-    @classmethod
-    def get(cls, name: str) -> Callable:
-        """Get an estimator function by name."""
-        # Try to sync with actor first
-        cls._sync_with_actor()
-
-        if name not in cls._estimators:
-            available = list(cls._estimators.keys())
-            raise ValueError(f"Unknown estimator '{name}'. Available: {available}")
-        return cls._estimators[name]
-
-    @classmethod
-    def list_available(cls) -> List[str]:
-        """List all registered estimators."""
-        # Try to sync with actor first
-        cls._sync_with_actor()
-        return list(cls._estimators.keys())
-
-    @classmethod
-    def unregister(cls, name: Union[str, AdvantageEstimator]):
-        """Unregister an advantage estimator function. Useful for testing."""
-        # Convert enum to string if needed
-        if isinstance(name, AdvantageEstimator):
-            name = name.value
-
-        if name not in cls._estimators:
-            raise ValueError(f"Estimator '{name}' not registered")
-
-        # Remove from local registry
-        del cls._estimators[name]
-
-        # Try to sync with Ray actor if available
-        try:
-            actor = cls._get_or_create_actor()
-            if actor is not None:
-                ray.get(actor.unregister.remote(name))
-        except Exception:
-            # Ray not available or other error, continue with local registry
-            pass
+    _actor_name = "advantage_estimator_registry"
+    _function_type = "Estimator"
 
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
@@ -208,7 +270,7 @@ class PolicyLossType(Enum):
         return self.value
 
 
-class PolicyLossRegistry:
+class PolicyLossRegistry(BaseRegistry):
     """
     Registry for policy loss functions.
 
@@ -221,111 +283,8 @@ class PolicyLossRegistry:
     register and use custom policy loss functions.
     """
 
-    _loss_functions: Dict[str, Callable] = {}
-    _ray_actor = None
-
-    @classmethod
-    def _get_or_create_actor(cls):
-        """Get or create the Ray actor for managing the registry using get_if_exists."""
-        if cls._ray_actor is None:
-            try:
-                # Use get_if_exists to create actor only if it doesn't exist
-                cls._ray_actor = RegistryActor.options(name="policy_loss_registry", get_if_exists=True).remote()
-            except Exception:
-                # If Ray is not available, return None
-                cls._ray_actor = None
-        return cls._ray_actor
-
-    @classmethod
-    def _sync_with_actor(cls):
-        """Sync local registry with Ray actor if Ray is available."""
-        try:
-            actor = cls._get_or_create_actor()
-            if actor is None:
-                return
-
-            available = ray.get(actor.list_available.remote())
-
-            # Sync any new functions from actor to local registry
-            for name in available:
-                if name not in cls._loss_functions:
-                    func_serialized = ray.get(actor.get.remote(name))
-                    if func_serialized is not None:
-                        # Deserialize the function
-                        try:
-                            func = cloudpickle.loads(func_serialized)
-                            cls._loss_functions[name] = func
-                        except Exception:
-                            # If deserialization fails, skip this function
-                            pass
-
-        except Exception:
-            # Ray not available or other error, continue with local registry
-            pass
-
-    @classmethod
-    def register(cls, name: Union[str, PolicyLossType], func: Callable):
-        """Register a policy loss function."""
-        # Convert enum to string if needed
-        if isinstance(name, PolicyLossType):
-            name = name.value
-
-        if name in cls._loss_functions:
-            raise ValueError(f"Policy loss '{name}' already registered")
-
-        # Store in local registry
-        cls._loss_functions[name] = func
-
-        # Try to sync with Ray actor if available
-        try:
-            actor = cls._get_or_create_actor()
-            if actor is not None:
-                # Serialize the function using cloudpickle
-                func_serialized = cloudpickle.dumps(func)
-                ray.get(actor.register.remote(name, func_serialized))
-        except Exception:
-            # Ray not available or other error, continue with local registry
-            pass
-
-    @classmethod
-    def get(cls, name: str) -> Callable:
-        """Get a policy loss function by name."""
-        # Try to sync with actor first
-        cls._sync_with_actor()
-
-        if name not in cls._loss_functions:
-            available = list(cls._loss_functions.keys())
-            raise ValueError(f"Unknown policy loss '{name}'. Available: {available}")
-        return cls._loss_functions[name]
-
-    @classmethod
-    def list_available(cls) -> List[str]:
-        """List all registered policy loss functions."""
-        # Try to sync with actor first
-        cls._sync_with_actor()
-        return list(cls._loss_functions.keys())
-
-    @classmethod
-    def unregister(cls, name: Union[str, PolicyLossType]):
-        """Unregister a policy loss function. Useful for testing."""
-        # Convert enum to string if needed
-        if isinstance(name, PolicyLossType):
-            name = name.value
-
-        if name not in cls._loss_functions:
-            raise ValueError(f"Policy loss '{name}' not registered")
-
-        # Remove from local registry
-        del cls._loss_functions[name]
-
-        # Try to sync with Ray actor if available
-        try:
-            actor = cls._get_or_create_actor()
-            if actor is not None:
-                ray.get(actor.unregister.remote(name))
-        except Exception:
-            # Ray not available or other error, continue with local registry
-            pass
+    _actor_name = "policy_loss_registry"
+    _function_type = "Policy loss"
 
 
 def register_policy_loss(name: Union[str, PolicyLossType]):
