@@ -232,14 +232,15 @@ class InferenceEngineClient(InferenceEngineInterface):
                     tasks.append(task)
                     task_metadata[task] = metadata
 
-        # all_outputs = await asyncio.gather(*tasks, return_exceptions=True)
+        # Reconstruct output in original order
+        n = len(prompts_or_tokens)
+        responses: list[str] = [""] * n
+        stop_reasons: list[str] = [""] * n
 
-        # Flatten results
-        responses = []
-        stop_reasons = []
-        for output in results:
-            responses.extend(output["responses"])
-            stop_reasons.extend(output["stop_reasons"])
+        for indices, result in zip(result_indices, results):
+            for local_idx, original_idx in enumerate(indices):
+                responses[original_idx] = result["responses"][local_idx]
+                stop_reasons[original_idx] = result["stop_reasons"][local_idx]
 
         return InferenceEngineOutput(responses=responses, stop_reasons=stop_reasons)
 
