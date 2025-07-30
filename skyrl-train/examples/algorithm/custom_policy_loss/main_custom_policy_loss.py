@@ -1,3 +1,7 @@
+"""
+uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss
+"""
+
 import ray
 import hydra
 import torch
@@ -22,7 +26,7 @@ def compute_simple_baseline_policy_loss(
     return torch.randn(1, device=log_probs.device), 0.0
 
 
-# Register the custom policy loss at module level - works even before Ray is initialized!
+# Register the custom policy loss
 PolicyLossRegistry.register("simple_baseline", compute_simple_baseline_policy_loss)
 
 

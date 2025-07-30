@@ -347,17 +347,10 @@ It can be helpful to understand the final loss formulation to see how the differ
       clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
       clip_pg_losses1 = loss
       if config.policy_loss_type == "dual_clip":
-          pg_losses3 = -advantages * config.clip_ratio_c
-          clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-          loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-      if loss_reduction == "token_mean":
-          # sum over *all* valid tokens, divide by total valid-token count
-          loss = masked_mean(loss, loss_mask)
-      elif loss_reduction == "sequence_mean":
-          # per-sequence token-mean (dim=-1), then batch-mean
-          loss = masked_mean(loss, loss_mask, dim=-1).mean()
-      else:
-          raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
+        pg_losses3 = -advantages * config.clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+      loss = reduce_loss(loss, loss_mask, config.loss_reduction)
       return loss, clip_ratio
 
 

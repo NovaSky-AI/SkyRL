@@ -33,12 +33,12 @@ def compute_simple_baseline_advantage(
         return advantages, returns
 
 
+# Register the custom advantage estimator
+AdvantageEstimatorRegistry.register("simple_baseline", compute_simple_baseline_advantage)
+
+
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Register the custom advantage estimator
-    AdvantageEstimatorRegistry.register("simple_baseline", compute_simple_baseline_advantage)
-
-    # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()
 
