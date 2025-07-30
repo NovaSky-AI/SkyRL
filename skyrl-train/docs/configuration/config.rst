@@ -317,6 +317,7 @@ Algorithm Configuration
 - ``algorithm.value_head_prefix``: The name used to identify the value head in the critic model.
 - ``algorithm.ppo_loss_type``: Type of PPO loss to use. Currently, we support ``regular`` and ``dual_clip``. ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_.
 - ``algorithm.loss_reduction``: Type of PPO loss reduction to use. Currently, we support ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
+- ``algorithm.importance_sampling_level``: Level at which importance sampling is aggregated. Currently, we support ``token`` and ``sequence``. ``token`` is the default and matches the original PPO/GRPO loss. ``sequence`` computes importance sampling at the sequence level, as proposed in `GSPO <https://www.arxiv.org/pdf/2507.18071>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.
@@ -342,7 +343,16 @@ It can be helpful to understand the final loss formulation to see how the differ
         loss_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        ratio = (log_probs - old_log_probs).exp()
+        log_ratio = log_probs - old_log_probs
+        if self.importance_sampling_level == "token":
+            log_importance_weights = log_ratio
+        elif self.importance_sampling_level == "sequence":
+            log_importance_weights = masked_mean(log_ratio, loss_mask, dim=-1)
+            # expand to match the shape of log_ratio
+            log_importance_weights = log_importance_weights.unsqueeze(-1).expand_as(log_ratio)
+        else:
+            raise ValueError(f"Invalid importance sampling level: {self.importance_sampling_level}")
+        ratio = log_importance_weights.exp()
         surr1 = ratio * advantages
         surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
         loss = -torch.min(surr1, surr2)
@@ -352,7 +362,14 @@ It can be helpful to understand the final loss formulation to see how the differ
             pg_losses3 = -advantages * self.clip_ratio_c
             clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
             loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
+        if self.loss_reduction == "token_mean":
+            # sum over *all* valid tokens, divide by total valid-token count
+            loss = masked_mean(loss, loss_mask)
+        elif self.loss_reduction == "sequence_mean":
+            # per-sequence token-mean (dim=-1), then batch-mean
+            loss = masked_mean(loss, loss_mask, dim=-1).mean()
+        else:
+            raise ValueError(f"Invalid loss reduction type: {self.loss_reduction}")
         return loss, clip_ratio
   
 
