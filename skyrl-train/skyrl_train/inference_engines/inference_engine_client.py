@@ -40,9 +40,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     print(f"Engine {i} is dead")
-                    self.engines[i].teardown()
-                    self.engines[i] = None
-                    self.engines.pop(i)
+                    await self.engines[i].teardown()
+                    self.engine_health[i] = False
+
             print(f"Engine health check complete. {len(self.engines)} engines remaining.")
             # check every 5 seconds if any engine is dead
             await asyncio.sleep(5.0)
@@ -108,7 +108,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             coro = self.engines[engine_idx].generate(inp)
             task = asyncio.create_task(coro)
             tasks.append(task)
-            task_metadata[task] = TaskMetadata(engine_idx, group["traj_ids"], group["indices"], inp)
+            task_metadata[task] = TaskMetadata(engine_idx, group["traj_ids"], group["indices"], group["prompt_or_token"])
 
         results = []
         result_indices = []
@@ -195,7 +195,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             coro = self.engines[dp_rank].generate(engine_input)
             task = asyncio.create_task(coro)
             tasks.append(task)
-            task_metadata[task] = TaskMetadata(dp_rank, [], range(start_idx, end_idx), dp_items)
+            task_metadata[task] = TaskMetadata(dp_rank, [], list(range(start_idx, end_idx)), dp_items)
         results = []
         result_indices = []
         # detect errors as they happen and mark that engine as dead
@@ -236,6 +236,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         n = len(prompts_or_tokens)
         responses: list[str] = [""] * n
         stop_reasons: list[str] = [""] * n
+
+        print(f"result_indices: {result_indices}")
+        print(f"results: {results}")
 
         for indices, result in zip(result_indices, results):
             for local_idx, original_idx in enumerate(indices):
