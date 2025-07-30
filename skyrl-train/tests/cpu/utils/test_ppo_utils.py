@@ -421,31 +421,57 @@ def test_registry_cross_ray_process():
 
 
 def test_registry_named_actor_creation():
-    """Test that the registry attempts to create named Ray actors."""
+    """Test that the registry creates named Ray actors and properly serializes functions with cloudpickle."""
     import ray
 
-    # This test verifies that the registry tries to create named actors
-    # even though the function serialization is incomplete
-
     def test_func(**kwargs):
-        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
+        rewards = kwargs["token_level_rewards"]
+        return rewards * 2, rewards * 3  # Simple transformation to verify functionality
 
-    # Register a function (this should attempt to create/use a named actor)
+    # Register a function (this should create/use a named actor and serialize the function)
     AdvantageEstimatorRegistry.register("named_actor_test", test_func)
 
     try:
-        # Check that we can retrieve it locally
+        # Test 1: Check that we can retrieve it locally
         retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
         assert retrieved == test_func, "Should be able to retrieve function locally"
 
-        # Check if the named actor was created (it might exist even if not fully functional)
+        # Test 2: Verify the named actor was created and contains the serialized function
+        actor = ray.get_actor("advantage_estimator_registry")
+        assert actor is not None, "Named actor should be created"
+
+        # Test 3: Verify the function is actually stored in the Ray actor
+        available_in_actor = ray.get(actor.list_available.remote())
+        assert "named_actor_test" in available_in_actor, "Function should be stored in Ray actor"
+
+        # Test 4: Verify we can retrieve and deserialize the function from the actor
+        serialized_func = ray.get(actor.get.remote("named_actor_test"))
+        assert serialized_func is not None, "Serialized function should be retrievable from actor"
+
+        # Test 5: Verify cloudpickle deserialization works
         try:
-            actor = ray.get_actor("advantage_estimator_registry")
-            # If we get here, the named actor exists
-            assert actor is not None, "Named actor should be created"
-        except ValueError:
-            # Actor doesn't exist - this is also acceptable given the implementation
-            pass
+            import cloudpickle
+
+            deserialized_func = cloudpickle.loads(serialized_func)
+        except ImportError:
+            # Fallback to pickle if cloudpickle not available
+            import pickle
+
+            deserialized_func = pickle.loads(serialized_func)
+
+        # Test 6: Verify the deserialized function works correctly
+        test_rewards = torch.tensor([[1.0, 2.0]])
+        result = deserialized_func(
+            token_level_rewards=test_rewards,
+            response_mask=torch.tensor([[1.0, 1.0]]),
+            index=np.array(["0", "0"]),
+        )
+
+        expected_adv = test_rewards * 2
+        expected_ret = test_rewards * 3
+
+        assert torch.allclose(result[0], expected_adv), f"Expected advantages {expected_adv}, got {result[0]}"
+        assert torch.allclose(result[1], expected_ret), f"Expected returns {expected_ret}, got {result[1]}"
 
     finally:
         # Clean up
