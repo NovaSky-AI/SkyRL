@@ -1,6 +1,6 @@
 set -x
 
-# Example of custom advantage estimator: "simple_baseline"
+# Example of custom policy loss: "simple_baseline"
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k

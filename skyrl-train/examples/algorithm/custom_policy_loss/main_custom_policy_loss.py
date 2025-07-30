@@ -19,7 +19,7 @@ def compute_simple_baseline_policy_loss(
     """
     A random policy loss that returns a random value.
     """
-    return torch.randn(1), 0.0
+    return torch.randn(1, device=log_probs.device), 0.0
 
 
 # Register the custom policy loss at module level - works even before Ray is initialized!
@@ -28,9 +28,6 @@ PolicyLossRegistry.register("simple_baseline", compute_simple_baseline_policy_lo
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # No registration needed here - already done at module level
-    # The registry automatically syncs when Ray becomes available
-
     exp = BasePPOExp(cfg)
     exp.run()
 

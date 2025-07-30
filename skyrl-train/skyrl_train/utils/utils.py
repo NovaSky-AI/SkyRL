@@ -286,7 +286,7 @@ def initialize_ray(cfg: DictConfig):
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     ray.init(runtime_env={"env_vars": env_vars})
 
-    # sync the registries with the ray actor
+    # sync the registries with the ray actor now that ray is initialized
     PolicyLossRegistry._sync_with_actor()
     AdvantageEstimatorRegistry._sync_with_actor()
 
