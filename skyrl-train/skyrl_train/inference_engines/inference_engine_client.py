@@ -7,6 +7,7 @@ from skyrl_train.inference_engines.base import (
 import asyncio
 from typing import List, Any
 from dataclasses import dataclass
+import uuid
 
 @dataclass
 class TaskMetadata:
@@ -138,7 +139,13 @@ class InferenceEngineClient(InferenceEngineInterface):
                     traj_id = metadata.traj_ids[0]
                     # set a new engine idx for the metadata
                     metadata.engine_idx = self._consistent_hash_healthy_engines(str(traj_id))
-                    coro = self.engines[metadata.engine_idx].generate(metadata.inp)
+                    # reconstruct input
+                    inp = InferenceEngineInput(
+                        prompts=metadata.prompt_or_tokens if prompts is not None else None,
+                        prompt_token_ids=metadata.prompt_or_tokens if prompt_token_ids is not None else None,
+                        sampling_params=sampling_params,
+                    )
+                    coro = self.engines[metadata.engine_idx].generate(inp)
                     task = asyncio.create_task(coro)
                     tasks.append(task)
                     task_metadata[task] = metadata
@@ -171,6 +178,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         dp_item_size = (len(prompts_or_tokens) + num_inference_engines - 1) // num_inference_engines
 
         tasks = []
+        task_metadata = {}
         for dp_rank in range(num_inference_engines):
             start_idx = dp_rank * dp_item_size
             end_idx = (dp_rank + 1) * dp_item_size
@@ -184,14 +192,52 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=dp_items if prompt_token_ids is not None else None,
                 sampling_params=sampling_params,
             )
-            tasks.append(self.engines[dp_rank].generate(engine_input))
+            coro = self.engines[dp_rank].generate(engine_input)
+            task = asyncio.create_task(coro)
+            tasks.append(task)
+            task_metadata[task] = TaskMetadata(dp_rank, [], range(start_idx, end_idx), dp_items)
+        results = []
+        result_indices = []
+        # detect errors as they happen and mark that engine as dead
+        while tasks:
+            # Wait for at least one task to complete
+            done, _ = await asyncio.wait(
+                tasks, 
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            # Process all completed tasks
+            for completed_task in done:
+                metadata = task_metadata[completed_task]
+                # remove from task queue also in case this worker is actually alive and we get duplicated results
+                tasks.remove(completed_task)
+                try:
+                    result = await completed_task
+                    results.append(result)
+                    result_indices.append(metadata.indices)
+                except Exception:
+                    # engine raised an exception, mark as dead and redistribute tasks
+                    self.engine_health[metadata.engine_idx]= False
+                    # remove relevant engine group because we will redistribute tasks
 
-        all_outputs = await asyncio.gather(*tasks)
+                    # set a new engine idx for the metadata
+                    metadata.engine_idx = self._consistent_hash_healthy_engines(str(uuid.uuid4()))
+                    # reconstruct input
+                    inp = InferenceEngineInput(
+                        prompts=metadata.prompt_or_tokens if prompts is not None else None,
+                        prompt_token_ids=metadata.prompt_or_tokens if prompt_token_ids is not None else None,
+                        sampling_params=sampling_params,
+                    )
+                    coro = self.engines[metadata.engine_idx].generate(inp)
+                    task = asyncio.create_task(coro)
+                    tasks.append(task)
+                    task_metadata[task] = metadata
+
+        # all_outputs = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Flatten results
         responses = []
         stop_reasons = []
-        for output in all_outputs:
+        for output in results:
             responses.extend(output["responses"])
             stop_reasons.extend(output["stop_reasons"])
 
