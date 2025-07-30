@@ -6,7 +6,14 @@ from skyrl_train.inference_engines.base import (
 )
 import asyncio
 from typing import List, Any
+from dataclasses import dataclass
 
+@dataclass
+class TaskMetadata:
+    engine_idx: int
+    traj_ids: list[str]
+    indices: list[int]
+    prompt_or_tokens: list[Any]
 
 class InferenceEngineClient(InferenceEngineInterface):
     """
@@ -17,7 +24,28 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     def __init__(self, engines: List[InferenceEngineInterface]):
         self.engines = engines
+        self.engine_health = [True] * len(engines)
+        
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")
+
+    # TODO: Not used yet because ther isn't an easy way to restart engines when inference is mid flight rn
+    async def _long_standing_engine_health_checker(self):
+        while True:
+            tasks = []
+            for i in range(len(self.engines)):
+                tasks.append(asyncio.create_task(self.engines[i].check_health(timeout=10.0)))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"Engine {i} is dead")
+                    self.engines[i].teardown()
+                    self.engines[i] = None
+                    self.engines.pop(i)
+            print(f"Engine health check complete. {len(self.engines)} engines remaining.")
+            # check every 5 seconds if any engine is dead
+            await asyncio.sleep(5.0)
+
 
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """
@@ -47,6 +75,12 @@ class InferenceEngineClient(InferenceEngineInterface):
             # Split evenly across engines
             return await self._generate_batched(prompts, prompt_token_ids, sampling_params)
 
+    def _consistent_hash_healthy_engines(self, key: str) -> int:
+        # consistent hash across all healthy engines
+        healthy_engines = [i for i, is_healthy in enumerate(self.engine_health) if is_healthy]
+        healthy_engine_idx = abs(hash(str(key))) % len(healthy_engines)
+        return healthy_engines[healthy_engine_idx]
+
     async def _generate_with_trajectory_routing(self, prompts, prompt_token_ids, trajectory_ids, sampling_params):
         """
         Route prompts to engines based on trajectory_ids and return results in the original order of the prompts.
@@ -55,14 +89,15 @@ class InferenceEngineClient(InferenceEngineInterface):
         engine_groups: dict[int, dict[str, list]] = {}
         prompts_or_tokens = prompts if prompts is not None else prompt_token_ids
         for i, (prompt_or_token, traj_id) in enumerate(zip(prompts_or_tokens, trajectory_ids)):
-            engine_idx = abs(hash(str(traj_id))) % len(self.engines)
-            group = engine_groups.setdefault(engine_idx, {"prompt_or_token": [], "indices": []})
+            engine_idx = self._consistent_hash_healthy_engines(str(traj_id))
+            group = engine_groups.setdefault(engine_idx, {"prompt_or_token": [], "indices": [], "traj_ids": []})
             group["prompt_or_token"].append(prompt_or_token)
             group["indices"].append(i)
+            group["traj_ids"].append(traj_id)
 
         # Build two parallel lists: one of tasks, one of the index‐lists
         tasks: list[asyncio.Task] = []
-        indices_list: list[list[int]] = []
+        task_metadata = {}
         for engine_idx, group in engine_groups.items():
             inp = InferenceEngineInput(
                 prompts=group["prompt_or_token"] if prompts is not None else None,
@@ -70,17 +105,57 @@ class InferenceEngineClient(InferenceEngineInterface):
                 sampling_params=sampling_params,
             )
             coro = self.engines[engine_idx].generate(inp)
-            tasks.append(asyncio.create_task(coro))
-            indices_list.append(group["indices"])
+            task = asyncio.create_task(coro)
+            tasks.append(task)
+            task_metadata[task] = TaskMetadata(engine_idx, group["traj_ids"], group["indices"], inp)
 
-        results = await asyncio.gather(*tasks)
+        results = []
+        result_indices = []
+        # detect errors as they happen and mark that engine as dead
+        while tasks:
+            # Wait for at least one task to complete
+            done, _ = await asyncio.wait(
+                tasks, 
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            # Process all completed tasks
+            for completed_task in done:
+                metadata = task_metadata[completed_task]
+                # remove from task queue also in case this worker is actually alive and we get duplicated results
+                tasks.remove(completed_task)
+                try:
+                    result = await completed_task
+                    results.append(result)
+                    result_indices.append(metadata.indices)
+                except Exception:
+                    # engine raised an exception, mark as dead and redistribute tasks
+                    self.engine_health[metadata.engine_idx]= False
+                    # remove relevant engine group because we will redistribute tasks
+                    del engine_groups[metadata.engine_idx]
+
+                    assert len(metadata.traj_ids) > 0 # metadata should have at least one traj id
+
+                    traj_id = metadata.traj_ids[0]
+                    # set a new engine idx for the metadata
+                    metadata.engine_idx = self._consistent_hash_healthy_engines(str(traj_id))
+                    coro = self.engines[metadata.engine_idx].generate(metadata.inp)
+                    task = asyncio.create_task(coro)
+                    tasks.append(task)
+                    task_metadata[task] = metadata
+                    # TODO: redistribute in smaller chunks to each engine
+                    # for prompt_or_token, idx in zip(metadata.prompt_or_tokens, metadata.indices):
+                    #     redistributed_engine_idx = self._consistent_hash_healthy_engines(str(traj_id))
+
+                    #     tasks.append(self.engines[redistributed_engine_idx].generate(prompt_or_token))
+                    #     task_metadata[tasks[-1]] = TaskMetadata(redistributed_engine_idx, [idx], prompt_or_token)
+                
 
         # Reconstruct output in original order
         n = len(prompts_or_tokens)
         responses: list[str] = [""] * n
         stop_reasons: list[str] = [""] * n
 
-        for indices, result in zip(indices_list, results):
+        for indices, result in zip(result_indices, results):
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
