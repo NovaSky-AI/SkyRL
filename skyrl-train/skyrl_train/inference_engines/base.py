@@ -57,6 +57,6 @@ class InferenceEngineInterface(ABC):
     async def reset_prefix_cache(self):
         raise NotImplementedError()
 
-    @abstractmethod
-    async def check_health(self, timeout: float = 10.0):
-        raise NotImplementedError()
+    # @abstractmethod
+    # async def check_health(self, timeout: float = 10.0):
+    #     raise NotImplementedError()

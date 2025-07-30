@@ -352,11 +352,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("destroy_weights_update_group")
     
-    # either finish or raise an exception via timeout or true exception
-    async def check_health(self, timeout: float = 10.0):
-        engine = self._get_engine()
-        await asyncio.wait_for(engine.check_health, timeout=timeout)
-        return
+    # # either finish or raise an exception via timeout or true exception
+    # async def check_health(self, timeout: float = 10.0):
+    #     engine = self._get_engine()
+    #     await asyncio.wait_for(engine.check_health, timeout=timeout)
+    #     return
 
 
 VLLMRayActor = ray.remote(VLLMInferenceEngine)
