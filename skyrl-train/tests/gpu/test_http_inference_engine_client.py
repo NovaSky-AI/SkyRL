@@ -10,6 +10,7 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/test_http_inference_
 uv run --isolated --extra dev --extra sglang pytest tests/gpu/test_http_inference_engine_client.py -m "sglang"
 """
 
+import json
 import pytest
 import asyncio
 import ray
@@ -18,6 +19,7 @@ import threading
 import requests
 import aiohttp
 from omegaconf import DictConfig
+from pydantic import BaseModel
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
@@ -210,6 +212,14 @@ def _full_request():
         min_tokens=1,
         n=1,
         trajectory_id="test_trajectory_id",
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test_schema",
+                "description": "test_description",
+                "schema": {"type": "object"},
+            },
+        },
     )
 
 
@@ -228,6 +238,8 @@ def test_full_build_sampling_params(backend: str):
         full_params_vllm = build_sampling_params(full_req, "vllm")
         vllm_sampling_params = VLLMSamplingParams(**full_params_vllm)  # has __post_init__ to check validity
         assert vllm_sampling_params is not None
+        assert vllm_sampling_params.guided_decoding.json_object is None
+        assert vllm_sampling_params.guided_decoding.json == {"type": "object"}
     elif backend == "sglang":
         from sglang.srt.sampling.sampling_params import SamplingParams as SGLangSamplingParams
 
@@ -252,9 +264,76 @@ def test_full_build_sampling_params(backend: str):
         sglang_sampling_params = SGLangSamplingParams(**full_params_sglang)
         sglang_sampling_params.verify()  # checks validty
         assert sglang_sampling_params is not None
+        assert sglang_sampling_params.json_schema == '{"type": "object"}'
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
+@pytest.mark.vllm
+def test_structured_generation():
+    try:
+        cfg = get_test_actor_config()
+        cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+
+        client, _ = init_inference_engines(
+            cfg=cfg,
+            v1=True,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+        )
+
+        # Start server in background thread using serve function directly
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+
+        # Wait for server to be ready using the helper method
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+
+        # Create OpenAI client (with dummy API key since we don't authenticate)
+        openai_client = OpenAI(
+            base_url=base_url,
+            api_key="dummy-key",  # Our server doesn't authenticate, but OpenAI client requires a key
+        )
+
+        class TestSchema(BaseModel):
+            name: str
+            job: str
+
+        prompt = [
+            {
+                "role": "user",
+                "content": f"Introduce yourself in JSON format briefly, following the schema {TestSchema.model_json_schema()}.",
+            },
+        ]
+
+        output = openai_client.chat.completions.create(
+            model=MODEL,
+            messages=prompt,
+            max_tokens=1024,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "TestSchema",
+                    "schema": TestSchema.model_json_schema(),
+                    "strict": True,
+                },
+            },
+        )
+
+        # assert is valid json
+        text = output.choices[0].message.content
+        print(f"Output: {text}")
+        assert json.loads(text) is not None  # if json invalid
+    finally:
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        ray.shutdown()
 
 # def test_http_server_error_handling():
 #     """
