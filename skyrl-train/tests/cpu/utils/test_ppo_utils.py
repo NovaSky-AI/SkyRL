@@ -317,8 +317,6 @@ def test_registry_cross_ray_process():
         assert ret.shape == torch.Size([1, 2])
     finally:
         ray.shutdown()
-        PolicyLossRegistry.unregister("cross_process_test")
-        AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
         PolicyLossRegistry._ray_actor = None
         PolicyLossRegistry._synced_to_actor = False
         AdvantageEstimatorRegistry._ray_actor = None
@@ -377,6 +375,5 @@ def test_registry_named_actor_creation():
     finally:
         # Clean up
         ray.shutdown()
-        AdvantageEstimatorRegistry.unregister("named_actor_test")
         AdvantageEstimatorRegistry._ray_actor = None
         AdvantageEstimatorRegistry._synced_to_actor = False
