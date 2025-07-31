@@ -68,7 +68,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         # TODO(Charlie): __del__ is not guaranteed to be called in general. Add to `teardown` method
         # when the `_handle_termination` flow is implemented. See `worker.py` comments on
         # `_handle_termination` for more details.
-        if self.use_http_server_inference_engine_client:
+        if (
+            self.use_http_server_inference_engine_client
+            # don't want to shut down the server when it is pickled as a ray method argument.
+            and hasattr(self, "_server_thread")
+            and self._server_thread is not None
+        ):
             try:
                 from skyrl_train.inference_engines.launch_inference_engine_http_server import shutdown_server
 
