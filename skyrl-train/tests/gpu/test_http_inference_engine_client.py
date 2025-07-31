@@ -13,6 +13,7 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/test_http_inferenc
 import json
 import pytest
 import asyncio
+from http import HTTPStatus
 import ray
 import hydra
 import threading
@@ -336,121 +337,117 @@ def test_structured_generation():
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
 
+@pytest.mark.vllm
+def test_http_server_error_handling():
+    """
+    Test error handling for various invalid requests.
+    """
+    try:
+        cfg = get_test_actor_config()
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
 
-# def test_http_server_error_handling():
-#     """
-#     Test error handling for various invalid requests.
-#     """
-#     try:
-#         cfg = get_test_actor_config()
-#         cfg.trainer.placement.colocate_all = True
-#         cfg.generator.weight_sync_backend = "nccl"
-#         cfg.trainer.strategy = "fsdp2"
+        client, _ = init_inference_engines(
+            cfg=cfg,
+            v1=True,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+        )
 
-#         client, policy, pg = init_inference_engines(
-#             cfg=cfg,
-#             v1=True,
-#             use_local=True,
-#             async_engine=cfg.generator.async_engine,
-#             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-#             colocate_all=cfg.trainer.placement.colocate_all,
-#         )
+        from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready
 
-#         from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready
+        # Start server in background thread
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
 
-#         # Start server in background thread
-#         def run_server():
-#             serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
 
-#         server_thread = threading.Thread(target=run_server, daemon=True)
-#         server_thread.start()
+        # Wait for server to be ready
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
 
-#         # Wait for server to be ready
-#         wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
-#         base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
+        # Test 1: Invalid request - streaming not supported
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True
+            }
+        )
+        assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY  # 422
+        error_data = response.json()
+        assert "detail" in error_data
+        # Pydantic returns detailed field validation errors
+        print(f"Error data: {error_data}")
+        assert any("stream" in str(detail) for detail in error_data["detail"])
 
-#         # Test 1: Invalid request - streaming not supported
-#         response = requests.post(
-#             f"{base_url}/v1/chat/completions",
-#             json={
-#                 "model": "test-model",
-#                 "messages": [{"role": "user", "content": "Hello"}],
-#                 "stream": True
-#             }
-#         )
-#         assert response.status_code == 422
-#         error_data = response.json()
-#         assert "detail" in error_data
-#         # Pydantic returns detailed field validation errors
-#         assert any("stream" in str(detail) for detail in error_data["detail"])
+        # Test 2: Invalid request - tools not supported
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": [{"type": "function", "function": {"name": "test"}}]
+            }
+        )
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR  # 500
+        error_data = response.json()
+        assert "message" in error_data
+        assert "Unsupported fields: tools" in str(error_data["message"])
 
-#         # Test 2: Invalid request - tools not supported
-#         response = requests.post(
-#             f"{base_url}/v1/chat/completions",
-#             json={
-#                 "model": "test-model",
-#                 "messages": [{"role": "user", "content": "Hello"}],
-#                 "tools": [{"type": "function", "function": {"name": "test"}}]
-#             }
-#         )
-#         assert response.status_code == 422
-#         error_data = response.json()
-#         assert "detail" in error_data
-#         assert any("tools" in str(detail) for detail in error_data["detail"])
+        # Test 3: OAI can take fields not listed in the protocol.
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "xxx": "yyy"
+            }
+        )
+        assert response.status_code == HTTPStatus.OK  # 200
 
-#         # Test 3: Invalid request - response_format not supported
-#         response = requests.post(
-#             f"{base_url}/v1/chat/completions",
-#             json={
-#                 "model": "test-model",
-#                 "messages": [{"role": "user", "content": "Hello"}],
-#                 "response_format": {"type": "json_object"}
-#             }
-#         )
-#         assert response.status_code == 422
-#         error_data = response.json()
-#         assert "detail" in error_data
-#         assert any("response_format" in str(detail) for detail in error_data["detail"])
+        # Test 4: Invalid request - missing required fields
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": MODEL,
+                # Missing messages field
+            }
+        )
+        assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY  # 422
+        error_data = response.json()
+        assert "detail" in error_data
+        assert any("messages" in str(detail) for detail in error_data["detail"])
 
-#         # Test 4: Invalid request - missing required fields
-#         response = requests.post(
-#             f"{base_url}/v1/chat/completions",
-#             json={
-#                 "model": "test-model"
-#                 # Missing messages field
-#             }
-#         )
-#         assert response.status_code == 422
-#         error_data = response.json()
-#         assert "detail" in error_data
-#         assert any("messages" in str(detail) for detail in error_data["detail"])
+        # Test 5: Invalid request - malformed JSON
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            data="invalid json",
+            headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY  # 422
 
-#         # Test 5: Invalid request - malformed JSON
-#         response = requests.post(
-#             f"{base_url}/v1/chat/completions",
-#             data="invalid json",
-#             headers={"Content-Type": "application/json"}
-#         )
-#         assert response.status_code == 422
+        # Test 6: Invalid request - empty messages array
+        response = requests.post(
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": MODEL,
+                "messages": []
+            }
+        )
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR  # 500
 
-#         # Test 6: Invalid request - empty messages array
-#         response = requests.post(
-#             f"{base_url}/v1/chat/completions",
-#             json={
-#                 "model": "test-model",
-#                 "messages": []
-#             }
-#         )
-#         assert response.status_code == 422
-#         error_data = response.json()
-#         assert "detail" in error_data
+        # Test 7: Health check endpoint should work
+        response = requests.get(f"{base_url}/health")
+        assert response.status_code == HTTPStatus.OK  # 200
+        health_data = response.json()
+        assert health_data["status"] == "healthy"
 
-#         # Test 7: Health check endpoint should work
-#         response = requests.get(f"{base_url}/health")
-#         assert response.status_code == 200
-#         health_data = response.json()
-#         assert health_data["status"] == "healthy"
-
-#     finally:
-#         ray.shutdown()
+    finally:
+        ray.shutdown()

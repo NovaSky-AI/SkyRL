@@ -59,6 +59,7 @@ class ChatCompletionRequest(BaseModel):
     trajectory_id: Optional[Hashable] = None
 
     # Unsupported parameters that we still parse for error reporting
+    stream: bool = False
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
     logprobs: Optional[bool] = None
@@ -70,6 +71,13 @@ class ChatCompletionRequest(BaseModel):
     def validate_n(cls, v):
         if v is not None and v != 1:
             raise ValueError("Only n=1 is supported")
+        return v
+    
+    @field_validator("stream")
+    @classmethod
+    def validate_stream(cls, v):
+        if v:
+            raise ValueError("Streaming is not supported")
         return v
 
 
