@@ -77,7 +77,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         return await self.inference_engine_client.generate(engine_input)
 
-
     async def agent_loop(
         self,
         prompt: ConversationType,

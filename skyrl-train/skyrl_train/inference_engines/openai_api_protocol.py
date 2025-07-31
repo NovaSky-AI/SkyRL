@@ -72,7 +72,7 @@ class ChatCompletionRequest(BaseModel):
         if v is not None and v != 1:
             raise ValueError("Only n=1 is supported")
         return v
-    
+
     @field_validator("stream")
     @classmethod
     def validate_stream(cls, v):

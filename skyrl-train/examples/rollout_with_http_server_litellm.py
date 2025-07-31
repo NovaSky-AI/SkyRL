@@ -38,6 +38,7 @@ TP_SIZE = 1
 SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
 
+
 def get_test_actor_config() -> DictConfig:
     """Get base config with test-specific overrides."""
     with hydra.initialize_config_dir(config_dir=config_dir):
@@ -79,7 +80,6 @@ def init_to_simulate_trainer():
 
     # Wait for server to be ready using the helper method
     wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-
 
 
 def agent_loop(prompt: str, base_url: str):
@@ -128,12 +128,12 @@ def main():
         print(f"outputs[0]: {outputs[0]}")
         for output in outputs:
             assert len(output) == 3 * 2
-        
 
     finally:
         # You do not need to call this in your custom generator either.
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
+
 
 if __name__ == "__main__":
     main()

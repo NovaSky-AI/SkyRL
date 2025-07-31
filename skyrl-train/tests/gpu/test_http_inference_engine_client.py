@@ -337,6 +337,7 @@ def test_structured_generation():
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
 
+
 @pytest.mark.vllm
 def test_http_server_error_handling():
     """
@@ -374,11 +375,7 @@ def test_http_server_error_handling():
         # Test 1: Invalid request - streaming not supported
         response = requests.post(
             f"{base_url}/v1/chat/completions",
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "stream": True
-            }
+            json={"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], "stream": True},
         )
         assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY  # 422
         error_data = response.json()
@@ -393,8 +390,8 @@ def test_http_server_error_handling():
             json={
                 "model": MODEL,
                 "messages": [{"role": "user", "content": "Hello"}],
-                "tools": [{"type": "function", "function": {"name": "test"}}]
-            }
+                "tools": [{"type": "function", "function": {"name": "test"}}],
+            },
         )
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR  # 500
         error_data = response.json()
@@ -404,11 +401,7 @@ def test_http_server_error_handling():
         # Test 3: OAI can take fields not listed in the protocol.
         response = requests.post(
             f"{base_url}/v1/chat/completions",
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "xxx": "yyy"
-            }
+            json={"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], "xxx": "yyy"},
         )
         assert response.status_code == HTTPStatus.OK  # 200
 
@@ -418,7 +411,7 @@ def test_http_server_error_handling():
             json={
                 "model": MODEL,
                 # Missing messages field
-            }
+            },
         )
         assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY  # 422
         error_data = response.json()
@@ -427,20 +420,12 @@ def test_http_server_error_handling():
 
         # Test 5: Invalid request - malformed JSON
         response = requests.post(
-            f"{base_url}/v1/chat/completions",
-            data="invalid json",
-            headers={"Content-Type": "application/json"}
+            f"{base_url}/v1/chat/completions", data="invalid json", headers={"Content-Type": "application/json"}
         )
         assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY  # 422
 
         # Test 6: Invalid request - empty messages array
-        response = requests.post(
-            f"{base_url}/v1/chat/completions",
-            json={
-                "model": MODEL,
-                "messages": []
-            }
-        )
+        response = requests.post(f"{base_url}/v1/chat/completions", json={"model": MODEL, "messages": []})
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR  # 500
 
         # Test 7: Health check endpoint should work
