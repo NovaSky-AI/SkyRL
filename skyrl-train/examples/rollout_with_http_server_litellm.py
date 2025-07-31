@@ -4,6 +4,14 @@ Example of using LiteLLM with SkyRL's HTTP inference server.
 Note that `init_to_simulate_trainer()` is not needed in your custom generator, we
 do it here to simulate what the trainer will instantiate.
 
+Set the following configs in your bash script:
+```
+generator:
+  use_http_server_inference_engine_client: true
+  http_server_inference_engine_client_host: "127.0.0.1"
+  http_server_inference_engine_client_port: 8000
+```
+
 Also note that `trajectory_id` is important for better trajectory routing for prefix cache reuse.
 
 Run with:
