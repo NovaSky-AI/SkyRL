@@ -256,10 +256,6 @@ class BaseFunctionRegistry:
     @classmethod
     def register(cls, name: Union[str, Enum], func: Callable):
         """Register a function."""
-        # Convert enum to string if needed
-        if hasattr(name, "value"):
-            name = name.value
-
         if name in cls._functions:
             raise ValueError(f"{cls._function_type} '{name}' already registered")
 
@@ -295,10 +291,6 @@ class BaseFunctionRegistry:
     @classmethod
     def unregister(cls, name: Union[str, Enum]):
         """Unregister a function. Useful for testing."""
-        # Convert enum to string if needed
-        if hasattr(name, "value"):
-            name = name.value
-
         # Try to sync with actor first to get any functions that might be in the actor but not local
         cls._sync_with_actor()
 
@@ -332,6 +324,11 @@ class AdvantageEstimator(Enum):
     def __str__(self):
         return self.value
 
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.value == other
+        return super().__eq__(other)
+
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     """
@@ -356,6 +353,11 @@ class PolicyLossType(Enum):
 
     def __str__(self):
         return self.value
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.value == other
+        return super().__eq__(other)
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
