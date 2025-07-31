@@ -12,8 +12,8 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_c
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry
 
 
-# Example of custom policy loss: "simple_baseline"
-def compute_simple_baseline_policy_loss(
+# Example of custom policy loss: "reinforce"
+def compute_reinforce_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
@@ -31,7 +31,7 @@ def compute_simple_baseline_policy_loss(
 
 
 # Register the custom policy loss
-PolicyLossRegistry.register("simple_baseline", compute_simple_baseline_policy_loss)
+PolicyLossRegistry.register("reinforce", compute_reinforce_policy_loss)
 
 
 @ray.remote(num_cpus=1)

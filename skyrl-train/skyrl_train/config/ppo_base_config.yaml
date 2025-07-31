@@ -76,7 +76,7 @@ trainer:
       fsdp_size: -1
     sequence_parallel_size: 1
   algorithm:
-    advantage_estimator: "grpo"  # Customizable with AdvantageEstimatorRegistry
+    advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
     kl_target: null
     init_kl_coef: 0.0
     use_kl_estimator_k3: true
@@ -88,7 +88,7 @@ trainer:
     # this adds training batch level normalization to advantages 
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
-    policy_loss_type: "regular" # "regular", "dual_clip"
+    policy_loss_type: "regular" # "regular", "dual_clip", or customizable with PolicyLossRegistry
     loss_reduction: "token_mean" # "token_mean", "sequence_mean"
     # GAE parameters
     lambd: 1.0

@@ -6,7 +6,7 @@ import torch
 from loguru import logger
 from omegaconf.dictconfig import DictConfig
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
-from skyrl_train.utils.ppo_utils import sync_registries
+from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 
 
 class Timer:
@@ -183,6 +183,14 @@ def validate_cfg(cfg: DictConfig):
         else:
             # for local engines or sglang, we disable
             cfg.generator.override_existing_update_group = "disable"
+
+    assert (
+        cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
+
+    assert (
+        cfg.trainer.algorithm.advantage_estimator in AdvantageEstimatorRegistry.list_available()
+    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {AdvantageEstimatorRegistry.list_available()}"
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
