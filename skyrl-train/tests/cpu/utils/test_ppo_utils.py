@@ -332,8 +332,12 @@ def test_registry_cross_ray_process():
         assert clip_ratio_2 == 0.6
     finally:
         # Clean up
-        PolicyLossRegistry.unregister("cross_process_test")
-        AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
+        if "cross_process_test" in PolicyLossRegistry.list_available():
+            PolicyLossRegistry.unregister("cross_process_test")
+        if "cross_process_test_2" in PolicyLossRegistry.list_available():
+            PolicyLossRegistry.unregister("cross_process_test_2")
+        if "cross_process_adv_test" in AdvantageEstimatorRegistry.list_available():
+            AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
         PolicyLossRegistry._ray_actor = None
         PolicyLossRegistry._synced_to_actor = False
         AdvantageEstimatorRegistry._ray_actor = None
@@ -387,6 +391,7 @@ def test_registry_named_actor_creation():
 
     finally:
         # Clean up
-        AdvantageEstimatorRegistry.unregister("named_actor_test")
+        if "named_actor_test" in AdvantageEstimatorRegistry.list_available():
+            AdvantageEstimatorRegistry.unregister("named_actor_test")
         AdvantageEstimatorRegistry._ray_actor = None
         AdvantageEstimatorRegistry._synced_to_actor = False
