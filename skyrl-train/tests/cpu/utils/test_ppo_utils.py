@@ -178,7 +178,7 @@ def test_base_function_registry_error_handling():
         return None, None
 
     # Test getting non-existent function
-    with pytest.raises(ValueError, match="Unknown estimator"):
+    with pytest.raises(ValueError, match="Unknown advantage estimator"):
         AdvantageEstimatorRegistry.get("non_existent")
 
     # Test unregistering non-existent function
@@ -270,7 +270,7 @@ def test_policy_loss_registry_specific():
 
 
 def test_registry_cross_ray_process():
-    """Test that registry works with Ray - focusing on practical usage patterns."""
+    """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
     try:
         import ray
         from omegaconf import DictConfig
@@ -317,6 +317,9 @@ def test_registry_cross_ray_process():
         assert adv.shape == torch.Size([1, 2])
         assert ret.shape == torch.Size([1, 2])
     finally:
+        # Clean up
+        PolicyLossRegistry.unregister("cross_process_test")
+        AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
         PolicyLossRegistry._ray_actor = None
         PolicyLossRegistry._synced_to_actor = False
         AdvantageEstimatorRegistry._ray_actor = None
@@ -353,14 +356,9 @@ def test_registry_named_actor_creation():
         serialized_func = ray.get(actor.get.remote("named_actor_test"))
         assert serialized_func is not None
 
-        try:
-            import cloudpickle
+        import cloudpickle
 
-            deserialized_func = cloudpickle.loads(serialized_func)
-        except ImportError:
-            import pickle
-
-            deserialized_func = pickle.loads(serialized_func)
+        deserialized_func = cloudpickle.loads(serialized_func)
 
         # Test deserialized function works
         test_rewards = torch.tensor([[1.0, 2.0]])
@@ -375,5 +373,6 @@ def test_registry_named_actor_creation():
 
     finally:
         # Clean up
+        AdvantageEstimatorRegistry.unregister("named_actor_test")
         AdvantageEstimatorRegistry._ray_actor = None
         AdvantageEstimatorRegistry._synced_to_actor = False
