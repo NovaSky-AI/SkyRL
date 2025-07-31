@@ -73,6 +73,17 @@ def mock_generator_cfg():
     cfg.max_input_length = 512
     cfg.batched = True
     cfg.max_turns = 1
+
+    # Mock the new HTTP server configuration options from PR #101
+    # Set use_http_server_inference_engine_client to False by default to avoid HTTP server
+    cfg.get = MagicMock(
+        side_effect=lambda key, default=None: {
+            "use_http_server_inference_engine_client": False,
+            "http_server_inference_engine_client_host": "127.0.0.1",
+            "http_server_inference_engine_client_port": 8000,
+        }.get(key, default)
+    )
+
     return cfg
 
 

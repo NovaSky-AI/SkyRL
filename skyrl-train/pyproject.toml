@@ -38,6 +38,8 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
+    "fastapi",
+    "uvicorn",
 ]
 
 [tool.uv]
@@ -72,6 +74,9 @@ docs = [
     "myst-parser>=2.0.0",
     "sphinx-copybutton>=0.5.0",
     "sphinx-autobuild>=2021.3.14"
+]
+litellm = [
+    "litellm>=1.67.5",
 ]
 vllm = [
     "vllm==0.9.2",
