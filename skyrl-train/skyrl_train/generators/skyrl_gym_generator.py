@@ -10,7 +10,7 @@ from skyrl_train.inference_engines.launch_inference_engine_http_server import ge
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
+from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType, InferenceEngineOutput
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids
@@ -66,6 +66,17 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         else:
             self.env_executor = None
+
+    async def _generate_with_inference_engine_client(self, engine_input: InferenceEngineInput) -> InferenceEngineOutput:
+        """Helper to dispatch generation to either HTTP server or direct client."""
+        if self.use_http_server_inference_engine_client:
+            return await generate_with_http_server(
+                base_url=self.base_url,
+                model_name=self.model_name,
+                input_batch=engine_input,
+            )
+        return await self.inference_engine_client.generate(engine_input)
+
 
     async def agent_loop(
         self,
@@ -126,14 +137,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
-            if self.use_http_server_inference_engine_client:
-                engine_output = await generate_with_http_server(
-                    base_url=self.base_url,
-                    model_name=self.model_name,
-                    input_batch=engine_input,
-                )
-            else:
-                engine_output = await self.inference_engine_client.generate(engine_input)
+            engine_output = await self._generate_with_inference_engine_client(engine_input)
             output = engine_output["responses"][0]
             stop_reason = engine_output["stop_reasons"][0]
             if self.env_executor is not None:
@@ -229,12 +233,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             envs.append(env)
 
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        if self.use_http_server_inference_engine_client:
-            engine_output = await generate_with_http_server(
-                base_url=self.base_url, model_name=self.model_name, input_batch=engine_input
-            )
-        else:
-            engine_output = await self.inference_engine_client.generate(engine_input)
+        engine_output = await self._generate_with_inference_engine_client(engine_input)
         responses = engine_output["responses"]
         stop_reasons = engine_output["stop_reasons"]
         truncated_responses = []
