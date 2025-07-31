@@ -21,9 +21,13 @@ def compute_simple_baseline_policy_loss(
     loss_mask: Optional[torch.Tensor] = None,
 ):
     """
-    A random policy loss that returns a random value.
+    Simple REINFORCE baseline - basic policy gradient that will enable learning.
     """
-    return torch.randn(1, device=log_probs.device), 0.0
+    # Classic REINFORCE: minimize -log_prob * advantage
+    loss = (-log_probs * advantages).mean()
+
+    # Return loss and dummy clip_ratio (no clipping in REINFORCE)
+    return loss, 0.0
 
 
 # Register the custom policy loss

@@ -7,8 +7,6 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/algorithm/custom_policy_loss/run_custom_policy_loss.sh
 
-# NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
-
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
