@@ -282,6 +282,9 @@ def test_registry_cross_ray_process():
         def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
             return torch.tensor(2.0), 0.5
 
+        def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
+            return torch.tensor(3.0), 0.6
+
         def test_advantage_estimator(**kwargs):
             rewards = kwargs["token_level_rewards"]
             return rewards * 2, rewards * 3
@@ -316,6 +319,17 @@ def test_registry_cross_ray_process():
         assert clip_ratio == 0.5
         assert adv.shape == torch.Size([1, 2])
         assert ret.shape == torch.Size([1, 2])
+
+        # test that registration works after ray init as well
+        PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
+        loss_2, clip_ratio_2 = PolicyLossRegistry.get("cross_process_test_2")(
+            log_probs=torch.tensor([[0.1]]),
+            old_log_probs=torch.tensor([[0.2]]),
+            advantages=torch.tensor([[1.0]]),
+            config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
+        )
+        assert loss_2.item() == 3.0
+        assert clip_ratio_2 == 0.6
     finally:
         # Clean up
         PolicyLossRegistry.unregister("cross_process_test")

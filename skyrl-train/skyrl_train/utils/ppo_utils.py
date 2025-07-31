@@ -215,13 +215,9 @@ class BaseFunctionRegistry:
         try:
             actor = cls._get_or_create_actor()
             if actor is not None:
-                # Only sync if we have local functions to sync
-                # Don't overwrite actor registry with empty local registry
-                if cls._functions:
-                    # Push all local functions to the actor
-                    for name, func in cls._functions.items():
-                        func_serialized = cloudpickle.dumps(func)
-                        ray.get(actor.register.remote(name, func_serialized))
+                for name, func in cls._functions.items():
+                    func_serialized = cloudpickle.dumps(func)
+                    ray.get(actor.register.remote(name, func_serialized))
                 cls._synced_to_actor = True
         except Exception as e:
             logger.error(f"Error syncing {cls._function_type} to actor: {e}")

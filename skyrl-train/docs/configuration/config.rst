@@ -280,7 +280,9 @@ Algorithm Configuration
 .. code-block:: yaml
   
     algorithm:
-      advantage_estimator: "grpo"
+      advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
+      kl_target: null
+      init_kl_coef: 0.0
       use_kl_estimator_k3: true
       use_abs_kl: false
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
@@ -290,7 +292,7 @@ Algorithm Configuration
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      policy_loss_type: "regular" # "regular", "dual_clip"
+      policy_loss_type: "regular" # "regular", "dual_clip", or customizable with PolicyLossRegistry
       loss_reduction: "token_mean" # "token_mean", "sequence_mean"
 
       # GAE parameters
