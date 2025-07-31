@@ -281,8 +281,6 @@ Algorithm Configuration
   
     algorithm:
       advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
-      kl_target: null
-      init_kl_coef: 0.0
       use_kl_estimator_k3: true
       use_abs_kl: false
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
