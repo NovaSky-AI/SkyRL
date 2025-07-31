@@ -275,7 +275,8 @@ def test_registry_cross_ray_process():
         import ray
         from omegaconf import DictConfig
 
-        ray.init()
+        if not ray.is_initialized():
+            ray.init()
 
         # Create test functions
         def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
@@ -316,7 +317,6 @@ def test_registry_cross_ray_process():
         assert adv.shape == torch.Size([1, 2])
         assert ret.shape == torch.Size([1, 2])
     finally:
-        ray.shutdown()
         PolicyLossRegistry._ray_actor = None
         PolicyLossRegistry._synced_to_actor = False
         AdvantageEstimatorRegistry._ray_actor = None
@@ -328,7 +328,8 @@ def test_registry_named_actor_creation():
     try:
         import ray
 
-        ray.init()
+        if not ray.is_initialized():
+            ray.init()
 
         def test_func(**kwargs):
             rewards = kwargs["token_level_rewards"]
@@ -374,6 +375,5 @@ def test_registry_named_actor_creation():
 
     finally:
         # Clean up
-        ray.shutdown()
         AdvantageEstimatorRegistry._ray_actor = None
         AdvantageEstimatorRegistry._synced_to_actor = False
