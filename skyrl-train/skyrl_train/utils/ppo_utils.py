@@ -62,7 +62,7 @@ class RegistryActor:
         return self.registry.pop(name, None)
 
 
-class BaseRegistry:
+class BaseFunctionRegistry:
     """Base class for function registries with Ray actor synchronization."""
 
     # Subclasses should override these class attributes
@@ -235,7 +235,7 @@ class AdvantageEstimator(Enum):
         return self.value
 
 
-class AdvantageEstimatorRegistry(BaseRegistry):
+class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     """
     Registry for advantage estimator functions.
 
@@ -270,7 +270,7 @@ class PolicyLossType(Enum):
         return self.value
 
 
-class PolicyLossRegistry(BaseRegistry):
+class PolicyLossRegistry(BaseFunctionRegistry):
     """
     Registry for policy loss functions.
 

@@ -151,8 +151,8 @@ def test_fixed_kl_controller():
     assert controller.value == 0.1  # Should remain unchanged
 
 
-def test_base_registry_registration_and_retrieval():
-    """Test basic registration and retrieval functionality of BaseRegistry."""
+def test_base_function_registry_registration_and_retrieval():
+    """Test basic registration and retrieval functionality of BaseFunctionRegistry."""
 
     def dummy_function(**kwargs):
         return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
@@ -171,8 +171,8 @@ def test_base_registry_registration_and_retrieval():
     AdvantageEstimatorRegistry.unregister("test_basic")
 
 
-def test_base_registry_error_handling():
-    """Test error handling in BaseRegistry."""
+def test_base_function_registry_error_handling():
+    """Test error handling in BaseFunctionRegistry."""
 
     def dummy_function(**kwargs):
         return None, None
@@ -271,54 +271,74 @@ def test_policy_loss_registry_specific():
 
 def test_registry_cross_ray_process():
     """Test that registry works with Ray - focusing on practical usage patterns."""
-    import ray
-
-    # Create test functions
-    def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
-        return torch.tensor(2.0), 0.5
-
-    def test_advantage_estimator(**kwargs):
-        rewards = kwargs["token_level_rewards"]
-        return rewards * 2, rewards * 3
-
-    # Test basic registration and retrieval
-    PolicyLossRegistry.register("cross_process_test", test_policy_loss)
-    AdvantageEstimatorRegistry.register("cross_process_adv_test", test_advantage_estimator)
-
-    # Test Ray integration
-    @ray.remote
-    def test_ray_registry_access():
-        try:
-            policy_available = PolicyLossRegistry.list_available()
-            adv_available = AdvantageEstimatorRegistry.list_available()
-            return len(policy_available) > 0, len(adv_available) > 0
-        except Exception as e:
-            return False, str(e)
-
-    # Run Ray task
-    policy_ok, adv_ok = ray.get(test_ray_registry_access.remote())
-    print(f"Ray task - Policy registry accessible: {policy_ok}, Advantage registry accessible: {adv_ok}")
-
-    # Clean up - be lenient about cleanup failures
     try:
+        import ray
+        from omegaconf import DictConfig
+
+        ray.init()
+
+        # Create test functions
+        def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+            return torch.tensor(2.0), 0.5
+
+        def test_advantage_estimator(**kwargs):
+            rewards = kwargs["token_level_rewards"]
+            return rewards * 2, rewards * 3
+
+        # Test basic registration and retrieval
+        PolicyLossRegistry.register("cross_process_test", test_policy_loss)
+        AdvantageEstimatorRegistry.register("cross_process_adv_test", test_advantage_estimator)
+
+        # Test Ray integration
+        @ray.remote
+        def test_ray_registry_access():
+            policy_loss = PolicyLossRegistry.get("cross_process_test")
+            adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
+
+            loss, clip_ratio = policy_loss(
+                log_probs=torch.tensor([[0.1]]),
+                old_log_probs=torch.tensor([[0.2]]),
+                advantages=torch.tensor([[1.0]]),
+                config=DictConfig({"policy_loss_type": "cross_process_test"}),
+            )
+
+            adv, ret = adv_estimator(
+                token_level_rewards=torch.tensor([[1.0, 2.0]]),
+                response_mask=torch.tensor([[1.0, 1.0]]),
+                index=np.array(["0", "0"]),
+            )
+            return loss, clip_ratio, adv, ret
+
+        # Run Ray task
+        loss, clip_ratio, adv, ret = ray.get(test_ray_registry_access.remote())
+        assert loss.item() == 2.0
+        assert clip_ratio == 0.5
+        assert adv.shape == torch.Size([1, 2])
+        assert ret.shape == torch.Size([1, 2])
+    finally:
+        ray.shutdown()
         PolicyLossRegistry.unregister("cross_process_test")
         AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
-    except ValueError:
-        pass
+        PolicyLossRegistry._ray_actor = None
+        PolicyLossRegistry._synced_to_actor = False
+        AdvantageEstimatorRegistry._ray_actor = None
+        AdvantageEstimatorRegistry._synced_to_actor = False
 
 
 def test_registry_named_actor_creation():
     """Test that the registry creates named Ray actors and properly serializes functions."""
-    import ray
-
-    def test_func(**kwargs):
-        rewards = kwargs["token_level_rewards"]
-        return rewards * 2, rewards * 3
-
-    # Register function (should create/use named actor)
-    AdvantageEstimatorRegistry.register("named_actor_test", test_func)
-
     try:
+        import ray
+
+        ray.init()
+
+        def test_func(**kwargs):
+            rewards = kwargs["token_level_rewards"]
+            return rewards * 2, rewards * 3
+
+        # Register function (should create/use named actor)
+        AdvantageEstimatorRegistry.register("named_actor_test", test_func)
+
         # Verify local retrieval works
         retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
         assert retrieved == test_func
@@ -356,4 +376,7 @@ def test_registry_named_actor_creation():
 
     finally:
         # Clean up
+        ray.shutdown()
         AdvantageEstimatorRegistry.unregister("named_actor_test")
+        AdvantageEstimatorRegistry._ray_actor = None
+        AdvantageEstimatorRegistry._synced_to_actor = False
