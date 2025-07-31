@@ -88,6 +88,9 @@ sglang = [
     "torch==2.7.1",
     "torchvision",
 ]
+muon = [
+    "muon-optimizer@git+https://github.com/KellerJordan/Muon.git@f90a42b",
+]
 
 
 [[tool.uv.index]]

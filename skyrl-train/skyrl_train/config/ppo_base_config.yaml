@@ -28,7 +28,9 @@ trainer:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
+      optimizer_type: "adamw" # "adamw" or "muon"
       lr: 1.0e-6
+      muon_lr: 0.02 # Learning rate for Muon optimizer (2D+ parameters)
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
@@ -55,7 +57,9 @@ trainer:
       path: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
+      optimizer_type: "adamw" # "adamw" or "muon"
       lr: 5.0e-6
+      muon_lr: 0.02 # Learning rate for Muon optimizer (2D+ parameters)
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
