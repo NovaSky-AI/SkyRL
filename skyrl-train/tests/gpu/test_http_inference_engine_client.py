@@ -268,6 +268,7 @@ def test_full_build_sampling_params(backend: str):
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
+
 @pytest.mark.vllm
 def test_structured_generation():
     try:
@@ -334,6 +335,7 @@ def test_structured_generation():
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
+
 
 # def test_http_server_error_handling():
 #     """

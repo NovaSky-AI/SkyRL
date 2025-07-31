@@ -65,6 +65,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Destructor to shut down the HTTP server if it was started.
         """
+        # TODO(Charlie): __del__ is not guaranteed to be called in general. Add to `teardown` method
+        # when the `_handle_termination` flow is implemented. See `worker.py` comments on
+        # `_handle_termination` for more details.
         if self.use_http_server_inference_engine_client:
             try:
                 from skyrl_train.inference_engines.launch_inference_engine_http_server import shutdown_server

@@ -14,12 +14,13 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
+
 class JsonSchemaResponseFormat(BaseModel):
     name: str
     description: Optional[str] = None
     # schema is the field in openai but that causes conflicts with pydantic so
     # instead use json_schema with an alias
-    json_schema: Optional[dict[str, Any]] = Field(default=None, alias='schema')
+    json_schema: Optional[dict[str, Any]] = Field(default=None, alias="schema")
     strict: Optional[bool] = None
 
 
@@ -27,6 +28,7 @@ class ResponseFormat(BaseModel):
     # type must be "json_schema", "json_object", or "text"
     type: Literal["text", "json_object", "json_schema"]
     json_schema: Optional[JsonSchemaResponseFormat] = None
+
 
 class ChatCompletionRequest(BaseModel):
     """OpenAI chat completion request model (minimal version)."""
@@ -112,6 +114,7 @@ def check_unsupported_fields(request: ChatCompletionRequest) -> None:
     if unsupported:
         raise ValueError(f"Unsupported fields: {', '.join(unsupported)}")
 
+
 ########################################################
 # Building sampling params
 # TODO(Charlie): support structural_tag, and see if the
@@ -119,16 +122,18 @@ def check_unsupported_fields(request: ChatCompletionRequest) -> None:
 # are needed in ChatCompletionRequest.
 ########################################################
 
+
 def build_response_format_vllm(request: ChatCompletionRequest) -> Dict[str, Any]:
     """
     Build response format for vllm backend.
     Code adapted from https://github.com/vllm-project/vllm/blob/v0.9.2/vllm/entrypoints/openai/protocol.py#L483
     """
 
-    from vllm.sampling_params import GuidedDecodingParams
     guided_json_object = None
     guided_json = None
     if request.response_format is not None:
+        from vllm.sampling_params import GuidedDecodingParams
+
         if request.response_format.type == "json_object":
             guided_json_object = True
         elif request.response_format.type == "json_schema":
@@ -136,12 +141,13 @@ def build_response_format_vllm(request: ChatCompletionRequest) -> Dict[str, Any]
             assert json_schema is not None
             guided_json = json_schema.json_schema
 
-    guided_decoding = GuidedDecodingParams.from_optional(
-        json=guided_json,
-        json_object=guided_json_object,
-    )
-
-    return {"guided_decoding": guided_decoding}
+        guided_decoding = GuidedDecodingParams.from_optional(
+            json=guided_json,
+            json_object=guided_json_object,
+        )
+        return {"guided_decoding": guided_decoding}
+    else:
+        return {}
 
 
 def build_response_format_sglang(request: ChatCompletionRequest) -> Dict[str, Any]:
@@ -181,12 +187,11 @@ def build_response_format_sglang(request: ChatCompletionRequest) -> Dict[str, An
 
     result = {}
     if request.response_format and request.response_format.type == "json_schema":
-        result["json_schema"] = _convert_json_schema_to_str(
-            request.response_format.json_schema.json_schema
-        )
+        result["json_schema"] = _convert_json_schema_to_str(request.response_format.json_schema.json_schema)
     elif request.response_format and request.response_format.type == "json_object":
         result["json_schema"] = '{"type": "object"}'
     return result
+
 
 def build_sampling_params(request: ChatCompletionRequest, backend: str) -> Dict[str, Any]:
     """Convert request sampling params to backend specific sampling params."""
