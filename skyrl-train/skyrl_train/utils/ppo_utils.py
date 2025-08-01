@@ -17,8 +17,8 @@
 # limitations under the License.
 
 from collections import defaultdict
-from enum import Enum
-from typing import Callable, List, Tuple, Union, Optional
+from enum import StrEnum
+from typing import Callable, List, Tuple, Optional, Literal
 
 import torch
 import numpy as np
@@ -199,18 +199,18 @@ class BaseFunctionRegistry:
     @classmethod
     def _get_or_create_actor(cls):
         """Get or create the Ray actor for managing the registry using get_if_exists."""
+        if not ray.is_initialized():
+            raise Exception("Ray is not initialized, cannot create registry actor")
         if cls._ray_actor is None:
-            # Only try to create actors if Ray is initialized
-            if ray.is_initialized():
-                # Use get_if_exists to create actor only if it doesn't exist
-                cls._ray_actor = RegistryActor.options(name=cls._actor_name, get_if_exists=True).remote()
+            # Use get_if_exists to create actor only if it doesn't exist
+            cls._ray_actor = RegistryActor.options(name=cls._actor_name, get_if_exists=True).remote()
         return cls._ray_actor
 
     @classmethod
     def _sync_local_to_actor(cls):
         """Sync all local functions to Ray actor (one-time when Ray becomes available)."""
         if cls._synced_to_actor or not ray.is_initialized():
-            return
+            raise Exception("Ray is not initialized, cannot sync functions to actor")
 
         try:
             actor = cls._get_or_create_actor()
@@ -254,12 +254,8 @@ class BaseFunctionRegistry:
                         raise e
 
     @classmethod
-    def register(cls, name: Union[str, Enum], func: Callable):
+    def register(cls, name: StrEnum, func: Callable):
         """Register a function."""
-        # Convert enum to string if needed
-        if isinstance(name, Enum):
-            name = name.value
-
         if name in cls._functions:
             raise ValueError(f"{cls._function_type} '{name}' already registered")
 
@@ -293,12 +289,8 @@ class BaseFunctionRegistry:
         return list(cls._functions.keys())
 
     @classmethod
-    def unregister(cls, name: Union[str, Enum]):
+    def unregister(cls, name: StrEnum):
         """Unregister a function. Useful for testing."""
-        # Convert enum to string if needed
-        if isinstance(name, Enum):
-            name = name.value
-
         # Try to sync with actor first to get any functions that might be in the actor but not local
         cls._sync_with_actor()
 
@@ -325,12 +317,9 @@ class BaseFunctionRegistry:
             raise ValueError(f"{cls._function_type} '{name}' not registered")
 
 
-class AdvantageEstimator(Enum):
+class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
-
-    def __str__(self):
-        return self.value
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -350,12 +339,9 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     _function_type = "advantage estimator"
 
 
-class PolicyLossType(Enum):
+class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
-
-    def __str__(self):
-        return self.value
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -375,7 +361,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     _function_type = "policy loss"
 
 
-def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
+def register_advantage_estimator(name: AdvantageEstimator):
     """Decorator to register an advantage estimator function."""
 
     def decorator(func: Callable):
@@ -385,7 +371,7 @@ def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
     return decorator
 
 
-def register_policy_loss(name: Union[str, PolicyLossType]):
+def register_policy_loss(name: PolicyLossType):
     """Decorator to register a policy loss function."""
 
     def decorator(func: Callable):
@@ -432,7 +418,9 @@ def ppo_policy_loss(
     return loss, clip_ratio
 
 
-def reduce_loss(loss: torch.Tensor, loss_mask: Optional[torch.Tensor], loss_reduction: str) -> torch.Tensor:
+def reduce_loss(
+    loss: torch.Tensor, loss_mask: Optional[torch.Tensor], loss_reduction: Literal["token_mean", "sequence_mean"]
+) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
         loss = masked_mean(loss, loss_mask)
@@ -532,18 +520,13 @@ def compute_advantages_and_returns(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
-    adv_estimator: Union[str, AdvantageEstimator],
+    adv_estimator: AdvantageEstimator,
     values: Optional[torch.Tensor] = None,
     norm_adv_by_std_in_grpo: bool = True,
     gamma=1.0,
     lambd=1.0,
 ):
-    if isinstance(adv_estimator, AdvantageEstimator):
-        estimator_name = adv_estimator.value
-    else:
-        estimator_name = adv_estimator
-
-    estimator_func = AdvantageEstimatorRegistry.get(estimator_name)
+    estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
 
     return estimator_func(
         token_level_rewards=token_level_rewards,
