@@ -331,19 +331,8 @@ def test_registry_cross_ray_process():
         assert loss_2.item() == 3.0
         assert clip_ratio_2 == 0.6
     finally:
-        # Clean up
-        if "cross_process_test" in PolicyLossRegistry.list_available():
-            PolicyLossRegistry.unregister("cross_process_test")
-        if "cross_process_test_2" in PolicyLossRegistry.list_available():
-            PolicyLossRegistry.unregister("cross_process_test_2")
-        if "cross_process_adv_test" in AdvantageEstimatorRegistry.list_available():
-            AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
-        ray.kill(PolicyLossRegistry._ray_actor)
-        ray.kill(AdvantageEstimatorRegistry._ray_actor)
-        PolicyLossRegistry._ray_actor = None
-        PolicyLossRegistry._synced_to_actor = False
-        AdvantageEstimatorRegistry._ray_actor = None
-        AdvantageEstimatorRegistry._synced_to_actor = False
+        PolicyLossRegistry.reset()
+        AdvantageEstimatorRegistry.reset()
 
 
 def test_registry_named_actor_creation():
@@ -392,9 +381,4 @@ def test_registry_named_actor_creation():
         assert torch.allclose(result[1], test_rewards * 3)
 
     finally:
-        # Clean up
-        if "named_actor_test" in AdvantageEstimatorRegistry.list_available():
-            AdvantageEstimatorRegistry.unregister("named_actor_test")
-        ray.kill(AdvantageEstimatorRegistry._ray_actor)
-        AdvantageEstimatorRegistry._ray_actor = None
-        AdvantageEstimatorRegistry._synced_to_actor = False
+        AdvantageEstimatorRegistry.reset()

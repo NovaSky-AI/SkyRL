@@ -359,6 +359,18 @@ class BaseFunctionRegistry:
         if not found_locally and not found_in_actor:
             raise ValueError(f"{cls._function_type} '{name}' not registered")
 
+    @classmethod
+    def reset(cls):
+        """Resets the registry (useful for testing purposes)."""
+        if ray.is_initialized() and cls._ray_actor is not None:
+            try:
+                ray.kill(cls._ray_actor)
+            except Exception:
+                pass  # Actor may already be gone
+        cls._functions.clear()
+        cls._ray_actor = None
+        cls._synced_to_actor = False
+
 
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
@@ -404,7 +416,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     _function_type = "policy loss"
 
 
-def register_advantage_estimator(name: AdvantageEstimator):
+def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
     """Decorator to register an advantage estimator function."""
 
     def decorator(func: Callable):
@@ -418,7 +430,7 @@ def register_advantage_estimator(name: AdvantageEstimator):
     return decorator
 
 
-def register_policy_loss(name: PolicyLossType):
+def register_policy_loss(name: Union[str, PolicyLossType]):
     """Decorator to register a policy loss function."""
 
     def decorator(func: Callable):

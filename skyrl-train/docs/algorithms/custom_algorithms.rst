@@ -64,16 +64,19 @@ The registry system handles Ray actor synchronization when Ray is initialized. F
    from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, sync_registries
 
    # Register a function on the main process
-   AdvantageEstimatorRegistry.register("shared_function", my_function)
+   def my_function(**kwargs):
+       # A dummy function for demonstration
+       pass
+   AdvantageEstimatorRegistry.register("my_function", my_function)
 
    # After Ray is initialized, we sync the registries to a named ray actor (in utils/utils.py::initialize_ray)
    ray.init()
    sync_registries()
    
    @ray.remote(num_cpus=1)
-    def skyrl_entrypoint(cfg: DictConfig):
-        # Function is now available on all Ray actors
-        available_functions = AdvantageEstimatorRegistry.list_available()
+   def skyrl_entrypoint(cfg: DictConfig):
+        # Function is now available on all Ray processes
+        available_functions = AdvantageEstimatorRegistry.list_available() # will include "my_function"
 
         exp = BasePPOExp(cfg)
         exp.run()
