@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
+import os
 import subprocess
 import tempfile
 from typing import Optional, Dict, Any, List
@@ -26,7 +27,7 @@ class Executor(ABC):
         Args:
             command: The command to execute
             working_dir: The working directory of the command
-            timeout: Timeout in seconds (default: 30)
+            timeout: Timeout in seconds (default: 120)
 
         Returns:
             ExecutionResult containing the command output and status
@@ -64,7 +65,9 @@ class BubblewrapExecutor(Executor):
             script_file.write("cd $PWD\n")
             script_file.write(self.init_cmd + "\n")
             script_file.write(f"{command}\n")
+            script_file.write("exit_code=$?\n")
             script_file.write(f"export -p > {env_file.name}\n")
+            script_file.write("exit $exit_code")
 
         # Add a very lightweight sandbox using https://github.com/containers/bubblewrap.
         bwrap_cmd = [
@@ -73,6 +76,7 @@ class BubblewrapExecutor(Executor):
             "--ro-bind", "/bin", "/bin",
             "--ro-bind", "/lib", "/lib",
             "--ro-bind", "/lib64", "/lib64",
+            "--ro-bind", os.path.join(os.path.dirname(os.path.realpath(__file__)), "bin", "apply_patch"), "/opt/apply_patch",
             "--proc", "/proc",
             "--dev", "/dev",
             "--tmpfs", "/tmp",
@@ -83,12 +87,13 @@ class BubblewrapExecutor(Executor):
             "--bind", self.home_dir, "/home/skyrl",
             "--setenv", "HOME", "/home/skyrl/",
             "--setenv", "USER", "skyrl",
+            "--setenv", "PATH", "/opt:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         ]
 
         if working_dir:
             bwrap_cmd += ["--chdir", working_dir]
 
-        bwrap_cmd += ["sh", script_file.name]
+        bwrap_cmd += ["bash", script_file.name]
 
         try:
             result = subprocess.run(
@@ -168,7 +173,7 @@ class ShellCommandTool(Tool):
             "required": ["command"],
         }
 
-    def execute(self, command: str, timeout: int = 30) -> ToolResult:
+    def execute(self, command: str, timeout: int = 120) -> ToolResult:
         """Execute a shell command using the configured executor."""
         execution_result = self.executor.execute(command, timeout=timeout)
 
