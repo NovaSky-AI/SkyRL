@@ -15,6 +15,8 @@ from skyrl_train.utils.ppo_utils import (
     FixedKLController,
     AdvantageEstimatorRegistry,
     register_advantage_estimator,
+    PolicyLossRegistry,
+    register_policy_loss,
 )
 import numpy as np
 
@@ -149,110 +151,234 @@ def test_fixed_kl_controller():
     assert controller.value == 0.1  # Should remain unchanged
 
 
-def test_advantage_estimator_registration():
-    """Test that we can register and retrieve a custom estimator."""
+def test_base_function_registry_registration_and_retrieval():
+    """Test basic registration and retrieval functionality of BaseFunctionRegistry."""
 
-    # Create a simple dummy estimator
-    def dummy_estimator(**kwargs):
+    def dummy_function(**kwargs):
         return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
 
-    # Register it
-    AdvantageEstimatorRegistry.register("dummy", dummy_estimator)
+    # Register function
+    AdvantageEstimatorRegistry.register("test_basic", dummy_function)
 
-    # Check it's retrievable
-    retrieved_func = AdvantageEstimatorRegistry.get("dummy")
-    assert retrieved_func == dummy_estimator
+    # Test retrieval
+    retrieved_func = AdvantageEstimatorRegistry.get("test_basic")
+    assert retrieved_func == dummy_function
 
-    # Check it's in the available list
-    assert "dummy" in AdvantageEstimatorRegistry.list_available()
+    # Test it's in available list
+    assert "test_basic" in AdvantageEstimatorRegistry.list_available()
 
     # Clean up
-    AdvantageEstimatorRegistry.unregister("dummy")
+    AdvantageEstimatorRegistry.unregister("test_basic")
 
 
-def test_duplicate_registration_error():
-    """Test that registering the same name twice raises an error."""
+def test_base_function_registry_error_handling():
+    """Test error handling in BaseFunctionRegistry."""
 
-    def estimator1(**kwargs):
+    def dummy_function(**kwargs):
         return None, None
 
-    def estimator2(**kwargs):
-        return None, None
+    # Test getting non-existent function
+    with pytest.raises(ValueError, match="Unknown advantage estimator"):
+        AdvantageEstimatorRegistry.get("non_existent")
 
-    # Register first one
-    AdvantageEstimatorRegistry.register("duplicate_test", estimator1)
+    # Test unregistering non-existent function
+    with pytest.raises(ValueError, match="not registered"):
+        AdvantageEstimatorRegistry.unregister("non_existent")
 
-    # Try to register second one with same name - should fail
+    # Test duplicate registration
+    AdvantageEstimatorRegistry.register("test_dup", dummy_function)
     with pytest.raises(ValueError, match="already registered"):
-        AdvantageEstimatorRegistry.register("duplicate_test", estimator2)
+        AdvantageEstimatorRegistry.register("test_dup", dummy_function)
 
     # Clean up
-    AdvantageEstimatorRegistry.unregister("duplicate_test")
+    AdvantageEstimatorRegistry.unregister("test_dup")
 
 
-def test_unknown_estimator_error():
-    """Test that getting an unknown estimator raises error."""
-    with pytest.raises(ValueError, match="Unknown estimator.*Available:"):
-        AdvantageEstimatorRegistry.get("nonexistent_estimator")
+def test_base_registry_unregister():
+    """Test unregistration functionality."""
+
+    def dummy_function(**kwargs):
+        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
+
+    # Register and verify
+    AdvantageEstimatorRegistry.register("test_unregister", dummy_function)
+    assert "test_unregister" in AdvantageEstimatorRegistry.list_available()
+
+    # Unregister and verify
+    AdvantageEstimatorRegistry.unregister("test_unregister")
+    assert "test_unregister" not in AdvantageEstimatorRegistry.list_available()
 
 
-def test_decorator_registration():
-    """Test that the decorator works for registration."""
+def test_advantage_estimator_registry_specific():
+    """Test AdvantageEstimatorRegistry-specific functionality."""
 
-    @register_advantage_estimator("decorated_estimator")
-    def my_custom_estimator(**kwargs):
+    @register_advantage_estimator("test_decorator")
+    def decorated_estimator(**kwargs):
         return torch.ones_like(kwargs["token_level_rewards"]), torch.ones_like(kwargs["token_level_rewards"])
 
-    # Check it was registered
-    assert "decorated_estimator" in AdvantageEstimatorRegistry.list_available()
+    # Test decorator worked
+    assert "test_decorator" in AdvantageEstimatorRegistry.list_available()
+    retrieved = AdvantageEstimatorRegistry.get("test_decorator")
+    assert retrieved == decorated_estimator
 
-    # Check we can retrieve it
-    retrieved = AdvantageEstimatorRegistry.get("decorated_estimator")
-    assert retrieved == my_custom_estimator
+    # Test integration with compute_advantages_and_returns
+    rewards = torch.tensor([[1.0, 2.0, 3.0]])
+    response_mask = torch.tensor([[1.0, 1.0, 1.0]])
+    index = np.array(["0", "0", "0"])
 
-    # Clean up
-    AdvantageEstimatorRegistry.unregister("decorated_estimator")
-
-
-def test_custom_estimator_integration(advantage_test_data):
-    """Test that compute_advantages_and_returns works with custom estimators."""
-    rewards, values, response_mask, index = advantage_test_data
-
-    # Register a simple custom estimator
-    @register_advantage_estimator("simple_test")
-    def simple_estimator(**kwargs):
-        # Just return the rewards as both advantages and returns
-        r = kwargs["token_level_rewards"]
-        return r, r
-
-    # Use it in the main function
     adv, ret = compute_advantages_and_returns(
-        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="simple_test"
+        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="test_decorator"
     )
 
-    assert torch.allclose(adv, rewards)
-    assert torch.allclose(ret, rewards)
+    assert torch.allclose(adv, torch.ones_like(rewards))
+    assert torch.allclose(ret, torch.ones_like(rewards))
 
     # Clean up
-    AdvantageEstimatorRegistry.unregister("simple_test")
+    AdvantageEstimatorRegistry.unregister("test_decorator")
 
 
-def test_unregister_estimator():
-    """Test that we can unregister estimators."""
+def test_policy_loss_registry_specific():
+    """Test PolicyLossRegistry-specific functionality."""
+    from omegaconf import DictConfig
 
-    def dummy_estimator(**kwargs):
-        return torch.zeros_like(kwargs["token_level_rewards"]), torch.zeros_like(kwargs["token_level_rewards"])
+    @register_policy_loss("test_policy_decorator")
+    def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+        return torch.tensor(1.5), 0.3
 
-    # Register it
-    AdvantageEstimatorRegistry.register("unregister_test", dummy_estimator)
-    assert "unregister_test" in AdvantageEstimatorRegistry.list_available()
+    # Test decorator worked
+    assert "test_policy_decorator" in PolicyLossRegistry.list_available()
+    retrieved = PolicyLossRegistry.get("test_policy_decorator")
+    assert retrieved == decorated_policy_loss
 
-    # Unregister it
-    AdvantageEstimatorRegistry.unregister("unregister_test")
-    assert "unregister_test" not in AdvantageEstimatorRegistry.list_available()
+    # Test function execution
+    config = DictConfig({"policy_loss_type": "test_policy_decorator"})
+    loss, clip_ratio = retrieved(
+        log_probs=torch.tensor([[0.1]]),
+        old_log_probs=torch.tensor([[0.2]]),
+        advantages=torch.tensor([[1.0]]),
+        config=config,
+    )
+    assert loss.item() == 1.5
+    assert clip_ratio == 0.3
+
+    # Test error message includes "Policy loss"
+    with pytest.raises(ValueError, match="Unknown policy loss"):
+        PolicyLossRegistry.get("non_existent_policy")
+
+    # Clean up
+    PolicyLossRegistry.unregister("test_policy_decorator")
 
 
-def test_unregister_nonexistent_error():
-    """Test that unregistering a nonexistent estimator raises error."""
-    with pytest.raises(ValueError, match="not registered"):
-        AdvantageEstimatorRegistry.unregister("nonexistent_estimator")
+def test_registry_cross_ray_process():
+    """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
+    try:
+        import ray
+        from omegaconf import DictConfig
+
+        if not ray.is_initialized():
+            ray.init()
+
+        # Create test functions
+        def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+            return torch.tensor(2.0), 0.5
+
+        def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
+            return torch.tensor(3.0), 0.6
+
+        def test_advantage_estimator(**kwargs):
+            rewards = kwargs["token_level_rewards"]
+            return rewards * 2, rewards * 3
+
+        # Test basic registration and retrieval
+        PolicyLossRegistry.register("cross_process_test", test_policy_loss)
+        AdvantageEstimatorRegistry.register("cross_process_adv_test", test_advantage_estimator)
+
+        # Test Ray integration
+        @ray.remote
+        def test_ray_registry_access():
+            policy_loss = PolicyLossRegistry.get("cross_process_test")
+            adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
+
+            loss, clip_ratio = policy_loss(
+                log_probs=torch.tensor([[0.1]]),
+                old_log_probs=torch.tensor([[0.2]]),
+                advantages=torch.tensor([[1.0]]),
+                config=DictConfig({"policy_loss_type": "cross_process_test"}),
+            )
+
+            adv, ret = adv_estimator(
+                token_level_rewards=torch.tensor([[1.0, 2.0]]),
+                response_mask=torch.tensor([[1.0, 1.0]]),
+                index=np.array(["0", "0"]),
+            )
+            return loss, clip_ratio, adv, ret
+
+        # Run Ray task
+        loss, clip_ratio, adv, ret = ray.get(test_ray_registry_access.remote())
+        assert loss.item() == 2.0
+        assert clip_ratio == 0.5
+        assert adv.shape == torch.Size([1, 2])
+        assert ret.shape == torch.Size([1, 2])
+
+        # test that registration works after ray init as well
+        PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
+        loss_2, clip_ratio_2 = PolicyLossRegistry.get("cross_process_test_2")(
+            log_probs=torch.tensor([[0.1]]),
+            old_log_probs=torch.tensor([[0.2]]),
+            advantages=torch.tensor([[1.0]]),
+            config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
+        )
+        assert loss_2.item() == 3.0
+        assert clip_ratio_2 == 0.6
+    finally:
+        PolicyLossRegistry.reset()
+        AdvantageEstimatorRegistry.reset()
+
+
+def test_registry_named_actor_creation():
+    """Test that the registry creates named Ray actors and properly serializes functions."""
+    try:
+        import ray
+
+        if not ray.is_initialized():
+            ray.init()
+
+        def test_func(**kwargs):
+            rewards = kwargs["token_level_rewards"]
+            return rewards * 2, rewards * 3
+
+        # Register function (should create/use named actor)
+        AdvantageEstimatorRegistry.register("named_actor_test", test_func)
+
+        # Verify local retrieval works
+        retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
+        assert retrieved == test_func
+
+        # Verify named actor exists and contains function
+        actor = ray.get_actor("advantage_estimator_registry")
+        assert actor is not None
+
+        available_in_actor = ray.get(actor.list_available.remote())
+        assert "named_actor_test" in available_in_actor
+
+        # Verify function serialization/deserialization
+        serialized_func = ray.get(actor.get.remote("named_actor_test"))
+        assert serialized_func is not None
+
+        import cloudpickle
+
+        deserialized_func = cloudpickle.loads(serialized_func)
+
+        # Test deserialized function works
+        test_rewards = torch.tensor([[1.0, 2.0]])
+        result = deserialized_func(
+            token_level_rewards=test_rewards,
+            response_mask=torch.tensor([[1.0, 1.0]]),
+            index=np.array(["0", "0"]),
+        )
+
+        assert torch.allclose(result[0], test_rewards * 2)
+        assert torch.allclose(result[1], test_rewards * 3)
+
+    finally:
+        AdvantageEstimatorRegistry.reset()

@@ -16,84 +16,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
+from enum import StrEnum
+from typing import Callable, List, Tuple, Union, Optional, Literal
+from functools import wraps
+
 import torch
 import numpy as np
-from typing import Optional, Tuple, Union, List, Callable, Dict
-from enum import Enum
+
+from omegaconf import DictConfig
 from skyrl_train.training_batch import TrainingInputBatch
 from jaxtyping import Float
-from collections import defaultdict
+
+import ray
+from loguru import logger
 
 
-class AdvantageEstimator(Enum):
-    GAE = "gae"
-    GRPO = "grpo"
-
-    def __str__(self):
-        return self.value
-
-
-class AdvantageEstimatorRegistry:
-    """
-    Registry for advantage estimator functions.
-
-    This registry allows users to register custom advantage estimators without modifying
-    the skyrl_train package. Custom estimators can be registered by calling
-    AdvantageEstimatorRegistry.register() directly or by using the @register_advantage_estimator
-    decorator.
-
-    See examples/algorithm/custom_advantage_estimator for a simple example of how to
-    register and use custom advantage estimators.
-    """
-
-    _estimators: Dict[str, Callable] = {}
-
-    @classmethod
-    def register(cls, name: Union[str, AdvantageEstimator], func: Callable):
-        """Register an advantage estimator function."""
-        # Convert enum to string if needed
-        if isinstance(name, AdvantageEstimator):
-            name = name.value
-
-        if name in cls._estimators:
-            raise ValueError(f"Estimator '{name}' already registered")
-
-        cls._estimators[name] = func
-
-    @classmethod
-    def get(cls, name: str) -> Callable:
-        """Get an estimator function by name."""
-        if name not in cls._estimators:
-            available = list(cls._estimators.keys())
-            raise ValueError(f"Unknown estimator '{name}'. Available: {available}")
-        return cls._estimators[name]
-
-    @classmethod
-    def list_available(cls) -> List[str]:
-        """List all registered estimators."""
-        return list(cls._estimators.keys())
-
-    @classmethod
-    def unregister(cls, name: Union[str, AdvantageEstimator]):
-        """Unregister an advantage estimator function. Useful for testing."""
-        # Convert enum to string if needed
-        if isinstance(name, AdvantageEstimator):
-            name = name.value
-
-        if name not in cls._estimators:
-            raise ValueError(f"Estimator '{name}' not registered")
-
-        del cls._estimators[name]
-
-
-def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
-    """Decorator to register an advantage estimator function."""
-
-    def decorator(func: Callable):
-        AdvantageEstimatorRegistry.register(name, func)
-        return func
-
-    return decorator
+# Import cloudpickle for function serialization
+try:
+    import cloudpickle
+except ImportError:
+    # Fallback to pickle if cloudpickle is not available
+    import pickle as cloudpickle
 
 
 # TODO (erictang000): unused right now, but will be useful as we add more algorithm support
@@ -216,6 +160,343 @@ def masked_whiten(values, mask, shift_mean=True):
     return whitened
 
 
+# Shared registry actor class for both policy loss and advantage estimator registries
+@ray.remote
+class RegistryActor:
+    """Shared Ray actor for managing function registries across processes."""
+
+    def __init__(self):
+        self.registry = {}
+
+    def register(self, name: str, func_serialized: bytes):
+        """Register a serialized function."""
+        self.registry[name] = func_serialized
+
+    def get(self, name: str):
+        """Get a serialized function by name."""
+        return self.registry.get(name)
+
+    def list_available(self):
+        """List all available function names."""
+        return list(self.registry.keys())
+
+    def unregister(self, name: str):
+        """Unregister a function by name."""
+        return self.registry.pop(name, None)
+
+
+class BaseFunctionRegistry:
+    """Base class for function registries with Ray actor synchronization."""
+
+    # Subclasses should override these class attributes
+    _actor_name = None
+    _function_type = "Function"
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._functions = {}
+        cls._ray_actor = None
+        cls._synced_to_actor = False
+
+    @classmethod
+    def _get_or_create_actor(cls):
+        """Get or create the Ray actor for managing the registry using get_if_exists."""
+        if not ray.is_initialized():
+            raise Exception("Ray is not initialized, cannot create registry actor")
+
+        if cls._ray_actor is None:
+            # Use get_if_exists to create actor only if it doesn't exist
+            cls._ray_actor = RegistryActor.options(name=cls._actor_name, get_if_exists=True).remote()
+        return cls._ray_actor
+
+    @classmethod
+    def _sync_local_to_actor(cls):
+        """Sync all local functions to Ray actor."""
+        if cls._synced_to_actor:
+            return
+        if not ray.is_initialized():
+            raise Exception("Ray is not initialized, cannot sync with actor")
+
+        try:
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                for name, func in cls._functions.items():
+                    func_serialized = cloudpickle.dumps(func)
+                    ray.get(actor.register.remote(name, func_serialized))
+                cls._synced_to_actor = True
+        except Exception as e:
+            logger.error(f"Error syncing {cls._function_type} to actor: {e}")
+            raise e
+
+    @classmethod
+    def sync_with_actor(cls):
+        """Sync local registry with Ray actor if Ray is available."""
+        # Only try if Ray is initialized
+        if not ray.is_initialized():
+            raise Exception("Ray is not initialized, cannot sync with actor")
+
+        # First, sync our local functions to the actor
+        cls._sync_local_to_actor()
+
+        actor = cls._get_or_create_actor()
+        if actor is None:
+            return
+
+        available = ray.get(actor.list_available.remote())
+
+        # Sync any new functions from actor to local registry
+        for name in available:
+            if name not in cls._functions:
+                func_serialized = ray.get(actor.get.remote(name))
+                if func_serialized is not None:
+                    # Deserialize the function
+                    try:
+                        func = cloudpickle.loads(func_serialized)
+                        cls._functions[name] = func
+                    except Exception as e:
+                        # If deserialization fails, skip this function
+                        logger.error(f"Error deserializing {name} from actor: {e}")
+                        raise e
+
+    @classmethod
+    def register(cls, name: Union[str, StrEnum], func: Callable):
+        """Register a function.
+
+        If ray is initialized, this function will get or create a named ray actor (RegistryActor)
+        for the registry, and sync the registry to the actor.
+
+        If ray is not initalized, the function will be stored in the local registry only.
+
+        To make sure all locally registered functions are available to all ray processes,
+        call sync_with_actor() after ray.init().
+
+        Args:
+            name: Name of the function to register. Can be a string or a StrEnum.
+            func: Function to register.
+
+        Raises:
+            ValueError: If the function is already registered.
+        """
+        # Convert enum to string if needed
+        # note: StrEnum is not cloudpickleable: https://github.com/cloudpipe/cloudpickle/issues/558
+        if isinstance(name, StrEnum):
+            name = name.value
+
+        if name in cls._functions:
+            raise ValueError(f"{cls._function_type} '{name}' already registered")
+
+        # Always store in local registry first
+        cls._functions[name] = func
+
+        # Try to sync with Ray actor if Ray is initialized
+        if ray.is_initialized():
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                # Serialize the function using cloudpickle
+                func_serialized = cloudpickle.dumps(func)
+                ray.get(actor.register.remote(name, func_serialized))
+
+    @classmethod
+    def get(cls, name: str) -> Callable:
+        """Get a function by name.
+
+        If ray is initialized, this function will first sync the local registry with the RegistryActor.
+        Then it will return the function if it is found in the registry.
+
+        Args:
+            name: Name of the function to get. Can be a string or a StrEnum.
+
+        Returns:
+            The function if it is found in the registry.
+        """
+        # Try to sync with actor first if Ray is available
+        if ray.is_initialized():
+            cls.sync_with_actor()
+
+        if name not in cls._functions:
+            available = list(cls._functions.keys())
+            raise ValueError(f"Unknown {cls._function_type.lower()} '{name}'. Available: {available}")
+        return cls._functions[name]
+
+    @classmethod
+    def list_available(cls) -> List[str]:
+        """List all registered functions."""
+        # Try to sync with actor first if Ray is available
+        if ray.is_initialized():
+            cls.sync_with_actor()
+        return list(cls._functions.keys())
+
+    @classmethod
+    def unregister(cls, name: Union[str, StrEnum]):
+        """Unregister a function. Useful for testing."""
+        # Convert enum to string if needed
+        if isinstance(name, StrEnum):
+            name = name.value
+
+        # Try to sync with actor first to get any functions that might be in the actor but not local
+        if ray.is_initialized():
+            cls.sync_with_actor()
+
+        # Track if we found the function anywhere
+        found_locally = name in cls._functions
+        found_in_actor = False
+
+        # Remove from local registry if it exists
+        if found_locally:
+            del cls._functions[name]
+
+        # Try to remove from Ray actor if Ray is available
+        if ray.is_initialized():
+            actor = cls._get_or_create_actor()
+            if actor is not None:
+                # Check if it exists in actor first
+                available_in_actor = ray.get(actor.list_available.remote())
+                if name in available_in_actor:
+                    found_in_actor = True
+                    ray.get(actor.unregister.remote(name))
+
+        # Only raise error if the function wasn't found anywhere
+        if not found_locally and not found_in_actor:
+            raise ValueError(f"{cls._function_type} '{name}' not registered")
+
+    @classmethod
+    def reset(cls):
+        """Resets the registry (useful for testing purposes)."""
+        if ray.is_initialized() and cls._ray_actor is not None:
+            try:
+                ray.kill(cls._ray_actor)
+            except Exception:
+                pass  # Actor may already be gone
+        cls._functions.clear()
+        cls._ray_actor = None
+        cls._synced_to_actor = False
+
+
+class AdvantageEstimator(StrEnum):
+    GAE = "gae"
+    GRPO = "grpo"
+
+
+class AdvantageEstimatorRegistry(BaseFunctionRegistry):
+    """
+    Registry for advantage estimator functions.
+
+    This registry allows users to register custom advantage estimators without modifying
+    the skyrl_train package. Custom estimators can be registered by calling
+    AdvantageEstimatorRegistry.register() directly or by using the @register_advantage_estimator
+    decorator.
+
+    See examples/algorithm/custom_advantage_estimator for a simple example of how to
+    register and use custom advantage estimators.
+    """
+
+    _actor_name = "advantage_estimator_registry"
+    _function_type = "advantage estimator"
+
+
+class PolicyLossType(StrEnum):
+    REGULAR = "regular"
+    DUAL_CLIP = "dual_clip"
+
+
+class PolicyLossRegistry(BaseFunctionRegistry):
+    """
+    Registry for policy loss functions.
+
+    This registry allows users to register custom policy loss functions without modifying
+    the skyrl_train package. Custom functions can be registered by calling
+    PolicyLossRegistry.register() directly or by using the @register_policy_loss
+    decorator.
+
+    See examples/algorithm/custom_policy_loss for a simple example of how to
+    register and use custom policy loss functions.
+    """
+
+    _actor_name = "policy_loss_registry"
+    _function_type = "policy loss"
+
+
+def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
+    """Decorator to register an advantage estimator function."""
+
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        AdvantageEstimatorRegistry.register(name, wrapper)
+        return wrapper
+
+    return decorator
+
+
+def register_policy_loss(name: Union[str, PolicyLossType]):
+    """Decorator to register a policy loss function."""
+
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        PolicyLossRegistry.register(name, wrapper)
+        return wrapper
+
+    return decorator
+
+
+def sync_registries():
+    """Sync the registries with the ray actor once ray is initialized"""
+    if not ray.is_initialized():
+        raise ValueError("Ray is not initialized, cannot sync registries")
+    PolicyLossRegistry.sync_with_actor()
+    AdvantageEstimatorRegistry.sync_with_actor()
+    logger.info("Synced registries to ray actor")
+
+
+@register_policy_loss(PolicyLossType.REGULAR)
+@register_policy_loss(PolicyLossType.DUAL_CLIP)
+def ppo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
+    loss_reduction = config.loss_reduction
+    assert loss_reduction in [
+        "token_mean",
+        "sequence_mean",
+    ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
+
+    ratio = (log_probs - old_log_probs).exp()
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+    loss = -torch.min(surr1, surr2)
+    clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+    clip_pg_losses1 = loss
+    if config.policy_loss_type == "dual_clip":
+        pg_losses3 = -advantages * config.clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    loss = reduce_loss(loss, loss_mask, loss_reduction)
+    return loss, clip_ratio
+
+
+def reduce_loss(
+    loss: torch.Tensor, loss_mask: Optional[torch.Tensor], loss_reduction: Literal["token_mean", "sequence_mean"]
+) -> torch.Tensor:
+    if loss_reduction == "token_mean":
+        # sum over *all* valid tokens, divide by total valid-token count
+        loss = masked_mean(loss, loss_mask)
+    elif loss_reduction == "sequence_mean":
+        # per-sequence token-mean (dim=-1), then batch-mean
+        loss = masked_mean(loss, loss_mask, dim=-1).mean()
+    else:
+        raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
+    return loss
+
+
 @register_advantage_estimator(AdvantageEstimator.GAE)
 def compute_gae_advantage_return(
     token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],
@@ -304,18 +585,13 @@ def compute_advantages_and_returns(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
-    adv_estimator: Union[str, AdvantageEstimator],
+    adv_estimator: AdvantageEstimator,
     values: Optional[torch.Tensor] = None,
     norm_adv_by_std_in_grpo: bool = True,
     gamma=1.0,
     lambd=1.0,
 ):
-    if isinstance(adv_estimator, AdvantageEstimator):
-        estimator_name = adv_estimator.value
-    else:
-        estimator_name = adv_estimator
-
-    estimator_func = AdvantageEstimatorRegistry.get(estimator_name)
+    estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
 
     return estimator_func(
         token_level_rewards=token_level_rewards,
