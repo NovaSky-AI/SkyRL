@@ -49,6 +49,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    handle_dynamic_sampling,
     GLOBAL_STEP_PREFIX,
 )
 
@@ -91,6 +92,8 @@ class RayPPOTrainer:
 
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
+
+        self.dynamic_sampling_state = None
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -249,6 +252,15 @@ class RayPPOTrainer:
                         # 1.1 generation phase
                         with Timer("generate", self.all_timings):
                             generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+
+                    # dynamic sampling
+                    if self.cfg.trainer.algorithm.dynamic_sampling.type != "null":
+                        generator_output, uids, keep_sampling = self.dynamic_sampling(
+                            generator_output, uids
+                        )  # implement this
+                        # I want to exit gracefully if i hit self.cfg.trainer.algorithm.dynamic_sampling.max_resample_batches (also need to keep track of this somewhere...)
+                        if keep_sampling:
+                            continue
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -1006,6 +1018,42 @@ class RayPPOTrainer:
         ray.get(empty_cache_refs)
 
         return policy_status
+
+    def dynamic_sampling(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str], bool]:
+        """
+        Implement dynamic sampling
+
+        Args:
+            generator_output: Current batch generator output
+            uids: Current batch UIDs
+
+        Returns:
+            Tuple of (filtered_generator_output, filtered_uids, keep_sampling)
+        """
+        # Prepare sampling configuration
+        dynamic_sampling_config = {
+            "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
+            "metric": self.cfg.trainer.algorithm.dynamic_sampling.metric,
+            "max_resample_batches": self.cfg.trainer.algorithm.dynamic_sampling.max_resample_batches,
+            "train_batch_size": self.cfg.trainer.train_batch_size,
+            "n_samples_per_prompt": getattr(self.cfg.generator, "n_samples_per_prompt", 1),
+        }
+
+        # Handle dynamic sampling using utilities
+        processed_output, processed_uids, keep_sampling, updated_state = handle_dynamic_sampling(
+            generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
+        )
+
+        # Update state
+        self.dynamic_sampling_state = updated_state
+
+        if not keep_sampling:
+            # Reset state when sampling is complete
+            self.dynamic_sampling_state = None
+
+        return processed_output, processed_uids, keep_sampling
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union, Callable, Optional
+from typing import List, Dict, Any, Union, Callable, Optional, Tuple
 from enum import Enum
 import ray
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -8,7 +8,9 @@ import shutil
 from loguru import logger
 import glob
 import json
-from skyrl_train.generators.utils import get_metrics_from_generator_output
+import numpy as np
+from collections import defaultdict
+from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
 from skyrl_train.generators.base import GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
@@ -232,3 +234,259 @@ def dump_per_dataset_eval_results(
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
     print(f"Dumped aggregated eval metrics to {aggregated_filename}")
+
+
+def handle_dynamic_sampling(
+    generator_output: GeneratorOutput,
+    uids: List[str],
+    sampling_config: Dict[str, Any],
+    collected_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[GeneratorOutput, List[str], bool, Optional[Dict[str, Any]]]:
+    """
+    Handle dynamic sampling with different strategies (filter, replace).
+
+    filter (used in DAPO) - filter out groups with std == 0 and group size > 1 and resample until we have enough prompts
+    replace (used in POLARIS, WebSailor) - replace bad (std == 0) samples with good (std > 0) samples
+
+    Args:
+        generator_output: Current batch generator output
+        uids: Current batch UIDs
+        sampling_config: Configuration dict with sampling parameters
+        collected_state: State for accumulating data across batches (for filter strategy)
+
+    Returns:
+        Tuple of (processed_generator_output, processed_uids, keep_sampling, updated_state)
+    """
+    sampling_type = sampling_config.get("type", "null")
+
+    if sampling_type == "null":
+        return generator_output, uids, False, None
+
+    if sampling_type == "replace":
+        # For "replace" strategy, handle immediately without accumulation
+        processed_output, processed_uids, keep_sampling = handle_replace_sampling(
+            generator_output, uids, sampling_config
+        )
+        return processed_output, processed_uids, keep_sampling, collected_state
+    elif sampling_type == "filter":
+        # For filter strategies, handle with accumulation
+        return handle_filter_sampling(generator_output, uids, sampling_config, collected_state)
+    else:
+        raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
+
+
+def handle_replace_sampling(
+    generator_output: GeneratorOutput, uids: List[str], sampling_config: Dict[str, Any]
+) -> Tuple[GeneratorOutput, List[str], bool]:
+    """
+    Handle replace sampling strategy based on POLARIS implementation.
+
+    Args:
+        generator_output: Current batch generator output
+        uids: Current batch UIDs
+        sampling_config: Configuration dict with sampling parameters
+
+    Returns:
+        Tuple of (processed_generator_output, processed_uids, keep_sampling)
+    """
+    # Extract rewards and convert to sequence-level if needed
+    rewards = np.array(generator_output["rewards"])
+    n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
+    if isinstance(rewards[0], list):
+        # Token-level rewards: sum to get sequence rewards
+        rewards = rewards.sum(dim=-1)
+
+    # Group by UID and calculate metrics
+    uid2metric_vals = defaultdict(list)
+    for uid, reward in zip(uids, rewards):
+        uid2metric_vals[uid].append(reward)
+
+    uid2metric_std = {}
+    for uid, metric_vals in uid2metric_vals.items():
+        uid2metric_std[uid] = np.std(metric_vals)
+
+    # Determine good UIDs: those with std > 0 (or group size == 1)
+    good_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1]
+    bad_uids = [uid for uid, std in uid2metric_std.items() if std == 0 and n_samples_per_prompt > 1]
+
+    # Convert to sets for faster lookup
+    good_uids_set = set(good_uids)
+    bad_uids_set = set(bad_uids)
+
+    logger.info(f"Replace sampling: {len(good_uids)} good UIDs out of {len(uid2metric_vals)} total UIDs")
+
+    # Check if we have enough good UIDs (more than 1/3 of the batch)
+    if len(good_uids) > len(uid2metric_vals) // 3:
+        logger.info("============= POLARIS dynamic sampling replace ===========")
+        logger.info(f"Good UIDs: {good_uids_set}")
+        logger.info(f"Bad UIDs: {bad_uids_set}")
+
+        # Get trajectory indices for good and bad UIDs
+        good_traj_indices = []
+        bad_traj_indices = []
+
+        for idx, uid in enumerate(uids):
+            if uid in good_uids_set:
+                good_traj_indices.append(idx)
+            elif uid in bad_uids_set:
+                bad_traj_indices.append(idx)
+
+        # Choose good trajectories to replace bad ones
+        chosen_indices = []
+        for _ in bad_traj_indices:
+            chosen_idx = np.random.choice(good_traj_indices)
+            chosen_indices.append(chosen_idx)
+
+        # Create a copy of the generator output to modify
+        replaced_output = {
+            "prompt_token_ids": generator_output["prompt_token_ids"].copy(),
+            "response_ids": generator_output["response_ids"].copy(),
+            "rewards": generator_output["rewards"].copy(),
+            "loss_masks": generator_output["loss_masks"].copy(),
+            "stop_reasons": (
+                generator_output.get("stop_reasons", [None] * len(rewards)).copy()
+                if generator_output.get("stop_reasons")
+                else None
+            ),
+            "rollout_metrics": generator_output.get("rollout_metrics"),
+        }
+
+        # Replace bad samples with good ones
+        for bad_idx, chosen_idx in zip(bad_traj_indices, chosen_indices):
+            replaced_output["prompt_token_ids"][bad_idx] = replaced_output["prompt_token_ids"][chosen_idx]
+            replaced_output["response_ids"][bad_idx] = replaced_output["response_ids"][chosen_idx]
+            replaced_output["rewards"][bad_idx] = replaced_output["rewards"][chosen_idx]
+            replaced_output["loss_masks"][bad_idx] = replaced_output["loss_masks"][chosen_idx]
+            if replaced_output["stop_reasons"]:
+                replaced_output["stop_reasons"][bad_idx] = replaced_output["stop_reasons"][chosen_idx]
+
+        # Update UIDs accordingly
+        replaced_uids = uids.copy()
+        for bad_idx, chosen_idx in zip(bad_traj_indices, chosen_indices):
+            replaced_uids[bad_idx] = replaced_uids[chosen_idx]
+
+        # Log the replacement results
+        new_rewards = np.array(replaced_output["rewards"])
+        if isinstance(new_rewards[0], list):
+            new_rewards = new_rewards.sum(dim=-1)
+
+        logger.info(f"Before replacement - Good: {len(good_traj_indices)}, Bad: {len(bad_traj_indices)}")
+        logger.info(f"After replacement - Replaced {len(bad_traj_indices)} bad trajectories")
+
+        return replaced_output, replaced_uids, False
+    else:
+        logger.warning("===================== Warning ====================")
+        logger.warning("In this mini-batch, most training samples receive low variance rewards.")
+        logger.warning("If you continue to see this warning, please check your data difficulty distribution.")
+        logger.warning("==================================================")
+
+        # For simplicity, let the trainer handle resample logic
+        return generator_output, uids, True
+
+
+def handle_filter_sampling(
+    generator_output: GeneratorOutput,
+    uids: List[str],
+    sampling_config: Dict[str, Any],
+    collected_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[GeneratorOutput, List[str], bool, Dict[str, Any]]:
+    """
+    Handle filter-based sampling strategy.
+
+    Args:
+        generator_output: Current batch generator output
+        uids: Current batch UIDs
+        sampling_config: Configuration dict with sampling parameters
+        collected_state: State for accumulating data across batches
+
+    Returns:
+        Tuple of (processed_generator_output, processed_uids, keep_sampling, updated_state)
+    """
+    target_batch_size = sampling_config.get("train_batch_size")
+    max_resample_batches = sampling_config.get("max_resample_batches", 20)
+    n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
+
+    # Extract rewards from collected output
+    rewards = np.array(generator_output["rewards"])
+
+    # Convert to sequence-level rewards if needed
+    if isinstance(rewards[0], list):
+        rewards = rewards.sum(dim=-1)
+
+    # Group by UID and calculate standard deviation
+    uid2metric_vals = defaultdict(list)
+    for uid, reward in zip(uids, rewards):
+        uid2metric_vals[uid].append(reward)
+
+    uid2metric_std = {}
+    for uid, metric_vals in uid2metric_vals.items():
+        uid2metric_std[uid] = np.std(metric_vals)
+
+    # Filter out groups with std == 0 and group size > 1
+    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or len(n_samples_per_prompt) == 1]
+    kept_uids_set = set(kept_uids)
+
+    # Filter trajectories based on kept UIDs
+    kept_traj_idxs = []
+    for idx, traj_uid in enumerate(uids):
+        if traj_uid in kept_uids_set:
+            kept_traj_idxs.append(idx)
+
+    # Apply filtering to generator output
+    filtered_output = filter_generator_output(generator_output, kept_traj_idxs)
+    filtered_uids = [uids[idx] for idx in kept_traj_idxs]
+
+    if collected_state is None:
+        collected_state = {
+            "collected_generator_output": filtered_output,
+            "collected_uids": filtered_uids.copy(),
+            "num_prompts_in_batch": len(kept_uids),
+            "resample_batch_count": 1,
+        }
+    else:
+        collected_state["collected_generator_output"] = concatenate_generator_outputs(
+            [collected_state["collected_generator_output"], filtered_output]
+        )
+        collected_state["collected_uids"].extend(filtered_uids)
+        collected_state["num_prompts_in_batch"] += len(kept_uids)
+        collected_state["resample_batch_count"] += 1
+
+    # Check if we have enough prompts
+    if collected_state["num_prompts_in_batch"] < target_batch_size:
+        logger.info(f"Dynamic sampling: {collected_state['num_prompts_in_batch']} < {target_batch_size} prompts")
+
+        if max_resample_batches > 0 and collected_state["resample_batch_count"] >= max_resample_batches:
+            logger.warning(f"Hit max resample batches ({max_resample_batches}), proceeding with current batch")
+            return collected_state["collected_generator_output"], collected_state["collected_uids"], False, None
+        else:
+            logger.info(f"Resample batch {collected_state['resample_batch_count']}, continue sampling...")
+            return None, None, True, collected_state
+    else:
+        logger.info(
+            f"Dynamic sampling: collected {collected_state['num_prompts_in_batch']} >= {target_batch_size} prompts"
+        )
+        # Truncate to exact batch size if needed
+        n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
+        max_trajectories = target_batch_size * n_samples_per_prompt
+        if len(filtered_uids) > max_trajectories:
+            filtered_output = filter_generator_output(filtered_output, list(range(max_trajectories)))
+            filtered_uids = filtered_uids[:max_trajectories]
+
+        return filtered_output, filtered_uids, False, None
+
+
+def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:
+    """Filter GeneratorOutput based on kept indices."""
+    filtered = {
+        "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
+        "response_ids": [output["response_ids"][i] for i in kept_indices],
+        "rewards": [output["rewards"][i] for i in kept_indices],
+        "loss_masks": [output["loss_masks"][i] for i in kept_indices],
+        "stop_reasons": None,
+        "rollout_metrics": output.get("rollout_metrics"),
+    }
+
+    if output.get("stop_reasons"):
+        filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
+
+    return filtered
