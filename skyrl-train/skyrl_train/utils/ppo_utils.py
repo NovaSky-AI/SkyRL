@@ -18,7 +18,8 @@
 
 from collections import defaultdict
 from enum import StrEnum
-from typing import Callable, List, Tuple, Optional, Literal
+from typing import Callable, List, Tuple, Union, Optional, Literal
+from functools import wraps
 
 import torch
 import numpy as np
@@ -29,6 +30,7 @@ from jaxtyping import Float
 
 import ray
 from loguru import logger
+
 
 # Import cloudpickle for function serialization
 try:
@@ -201,6 +203,7 @@ class BaseFunctionRegistry:
         """Get or create the Ray actor for managing the registry using get_if_exists."""
         if not ray.is_initialized():
             raise Exception("Ray is not initialized, cannot create registry actor")
+
         if cls._ray_actor is None:
             # Use get_if_exists to create actor only if it doesn't exist
             cls._ray_actor = RegistryActor.options(name=cls._actor_name, get_if_exists=True).remote()
@@ -208,9 +211,11 @@ class BaseFunctionRegistry:
 
     @classmethod
     def _sync_local_to_actor(cls):
-        """Sync all local functions to Ray actor (one-time when Ray becomes available)."""
-        if cls._synced_to_actor or not ray.is_initialized():
-            raise Exception("Ray is not initialized, cannot sync functions to actor")
+        """Sync all local functions to Ray actor."""
+        if cls._synced_to_actor:
+            return
+        if not ray.is_initialized():
+            raise Exception("Ray is not initialized, cannot sync with actor")
 
         try:
             actor = cls._get_or_create_actor()
@@ -224,11 +229,11 @@ class BaseFunctionRegistry:
             raise e
 
     @classmethod
-    def _sync_with_actor(cls):
+    def sync_with_actor(cls):
         """Sync local registry with Ray actor if Ray is available."""
         # Only try if Ray is initialized
         if not ray.is_initialized():
-            return
+            raise Exception("Ray is not initialized, cannot sync with actor")
 
         # First, sync our local functions to the actor
         cls._sync_local_to_actor()
@@ -254,8 +259,29 @@ class BaseFunctionRegistry:
                         raise e
 
     @classmethod
-    def register(cls, name: StrEnum, func: Callable):
-        """Register a function."""
+    def register(cls, name: Union[str, StrEnum], func: Callable):
+        """Register a function.
+
+        If ray is initialized, this function will get or create a named ray actor (RegistryActor)
+        for the registry, and sync the registry to the actor.
+
+        If ray is not initalized, the function will be stored in the local registry only.
+
+        To make sure all locally registered functions are available to all ray processes,
+        call sync_with_actor() after ray.init().
+
+        Args:
+            name: Name of the function to register. Can be a string or a StrEnum.
+            func: Function to register.
+
+        Raises:
+            ValueError: If the function is already registered.
+        """
+        # Convert enum to string if needed
+        # note: StrEnum is not cloudpickleable: https://github.com/cloudpipe/cloudpickle/issues/558
+        if isinstance(name, StrEnum):
+            name = name.value
+
         if name in cls._functions:
             raise ValueError(f"{cls._function_type} '{name}' already registered")
 
@@ -272,9 +298,20 @@ class BaseFunctionRegistry:
 
     @classmethod
     def get(cls, name: str) -> Callable:
-        """Get a function by name."""
+        """Get a function by name.
+
+        If ray is initialized, this function will first sync the local registry with the RegistryActor.
+        Then it will return the function if it is found in the registry.
+
+        Args:
+            name: Name of the function to get. Can be a string or a StrEnum.
+
+        Returns:
+            The function if it is found in the registry.
+        """
         # Try to sync with actor first if Ray is available
-        cls._sync_with_actor()
+        if ray.is_initialized():
+            cls.sync_with_actor()
 
         if name not in cls._functions:
             available = list(cls._functions.keys())
@@ -285,14 +322,20 @@ class BaseFunctionRegistry:
     def list_available(cls) -> List[str]:
         """List all registered functions."""
         # Try to sync with actor first if Ray is available
-        cls._sync_with_actor()
+        if ray.is_initialized():
+            cls.sync_with_actor()
         return list(cls._functions.keys())
 
     @classmethod
-    def unregister(cls, name: StrEnum):
+    def unregister(cls, name: Union[str, StrEnum]):
         """Unregister a function. Useful for testing."""
+        # Convert enum to string if needed
+        if isinstance(name, StrEnum):
+            name = name.value
+
         # Try to sync with actor first to get any functions that might be in the actor but not local
-        cls._sync_with_actor()
+        if ray.is_initialized():
+            cls.sync_with_actor()
 
         # Track if we found the function anywhere
         found_locally = name in cls._functions
@@ -365,8 +408,12 @@ def register_advantage_estimator(name: AdvantageEstimator):
     """Decorator to register an advantage estimator function."""
 
     def decorator(func: Callable):
-        AdvantageEstimatorRegistry.register(name, func)
-        return func
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        AdvantageEstimatorRegistry.register(name, wrapper)
+        return wrapper
 
     return decorator
 
@@ -375,16 +422,20 @@ def register_policy_loss(name: PolicyLossType):
     """Decorator to register a policy loss function."""
 
     def decorator(func: Callable):
-        PolicyLossRegistry.register(name, func)
-        return func
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        PolicyLossRegistry.register(name, wrapper)
+        return wrapper
 
     return decorator
 
 
 def sync_registries():
     """Sync the registries with the ray actor once ray is initialized"""
-    PolicyLossRegistry._sync_with_actor()
-    AdvantageEstimatorRegistry._sync_with_actor()
+    PolicyLossRegistry.sync_with_actor()
+    AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
 
 

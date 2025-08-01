@@ -338,6 +338,8 @@ def test_registry_cross_ray_process():
             PolicyLossRegistry.unregister("cross_process_test_2")
         if "cross_process_adv_test" in AdvantageEstimatorRegistry.list_available():
             AdvantageEstimatorRegistry.unregister("cross_process_adv_test")
+        ray.kill(PolicyLossRegistry._ray_actor)
+        ray.kill(AdvantageEstimatorRegistry._ray_actor)
         PolicyLossRegistry._ray_actor = None
         PolicyLossRegistry._synced_to_actor = False
         AdvantageEstimatorRegistry._ray_actor = None
@@ -393,5 +395,6 @@ def test_registry_named_actor_creation():
         # Clean up
         if "named_actor_test" in AdvantageEstimatorRegistry.list_available():
             AdvantageEstimatorRegistry.unregister("named_actor_test")
+        ray.kill(AdvantageEstimatorRegistry._ray_actor)
         AdvantageEstimatorRegistry._ray_actor = None
         AdvantageEstimatorRegistry._synced_to_actor = False
