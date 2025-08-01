@@ -1,8 +1,8 @@
 Implementing Custom Algorithms
-=============================
+==============================
 
 SkyRL-Train provides a registry system for easily implementing custom algorithms (advantage estimators, policy loss) without modifying the core codebase. 
-Full documentation for the registry system can be found in the :doc:`registry API <../api/registry>`.
+The API for the registry system can be found in the :doc:`registry API <../api/registry>`.
 Example scripts of using the registry can be found in at :code_link:`examples/algorithm/`.
 
 Registering a Custom Advantage Estimator

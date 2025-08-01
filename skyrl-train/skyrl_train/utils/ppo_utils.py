@@ -446,6 +446,8 @@ def register_policy_loss(name: Union[str, PolicyLossType]):
 
 def sync_registries():
     """Sync the registries with the ray actor once ray is initialized"""
+    if not ray.is_initialized():
+        raise ValueError("Ray is not initialized, cannot sync registries")
     PolicyLossRegistry.sync_with_actor()
     AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
