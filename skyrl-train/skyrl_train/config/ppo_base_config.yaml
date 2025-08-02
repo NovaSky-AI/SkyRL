@@ -103,9 +103,8 @@ trainer:
     value_clip: 0.2
     normalize_reward: true
     dynamic_sampling:
-      type: "filter" # filter, replace, or null
-      metric: reward
-      max_resample_batches: 20 # if filtering, resample at most this many batches before stopping, -1 to resample forever
+      type: "filter" # filter, replace, or null/"none"
+      max_sample_batches: 20 # if filtering, sample at most this many batches before stopping, -1 to sample forever
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

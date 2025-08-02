@@ -235,6 +235,7 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
         self.global_step += 1  # start training at global_step 1
+        exit_loop = False
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
@@ -254,13 +255,12 @@ class RayPPOTrainer:
                             generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
 
                     # dynamic sampling
-                    if self.cfg.trainer.algorithm.dynamic_sampling.type != "null":
-                        generator_output, uids, keep_sampling = self.dynamic_sampling(
-                            generator_output, uids
-                        )  # implement this
-                        # I want to exit gracefully if i hit self.cfg.trainer.algorithm.dynamic_sampling.max_resample_batches (also need to keep track of this somewhere...)
-                        if keep_sampling:
+                    if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
+                        generator_output, uids, keep_sampling, exit_loop = self.dynamic_sampling(generator_output, uids)
+                        if keep_sampling:  # continue sampling
                             continue
+                        elif exit_loop:  # we want to exit gracefully if we hit the max sample batches
+                            break
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -339,6 +339,12 @@ class RayPPOTrainer:
                 self.global_step += 1
 
                 del training_input, generator_output
+
+            if exit_loop:
+                logger.info(
+                    "Exiting training loop due to hitting dynamic sampling limit. Please check your data difficulty distribution."
+                )
+                break
 
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
                 with Timer("update_ref_with_policy", self.all_timings):
@@ -1021,7 +1027,7 @@ class RayPPOTrainer:
 
     def dynamic_sampling(
         self, generator_output: GeneratorOutput, uids: List[str]
-    ) -> Tuple[GeneratorOutput, List[str], bool]:
+    ) -> Tuple[GeneratorOutput, List[str], bool, bool]:
         """
         Implement dynamic sampling
 
@@ -1030,22 +1036,38 @@ class RayPPOTrainer:
             uids: Current batch UIDs
 
         Returns:
-            Tuple of (filtered_generator_output, filtered_uids, keep_sampling)
+            processed_output: Filtered generator output
+            processed_uids: Filtered UIDs
+            keep_sampling: Whether to keep sampling
+            exit_loop: Whether to exit the training loop (if we hit the max sample batches)
         """
         # Prepare sampling configuration
+        max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
         dynamic_sampling_config = {
             "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
-            "metric": self.cfg.trainer.algorithm.dynamic_sampling.metric,
-            "max_resample_batches": self.cfg.trainer.algorithm.dynamic_sampling.max_resample_batches,
+            "max_sample_batches": max_sample_batches,
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": getattr(self.cfg.generator, "n_samples_per_prompt", 1),
         }
+
+        if self.dynamic_sampling_state is None:
+            self.dynamic_sampling_state = {
+                "sample_batch_count": 1,
+            }
+        else:
+            self.dynamic_sampling_state["sample_batch_count"] += 1
 
         # Handle dynamic sampling using utilities
         processed_output, processed_uids, keep_sampling, updated_state = handle_dynamic_sampling(
             generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
         )
 
+        # Check max resample limit, and if we hit it, return true for exit_loop
+        if max_sample_batches > 0 and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches:
+            logger.warning(
+                f"Hit max resample batches ({max_sample_batches}), but there are still not enough good prompts, stopping sampling"
+            )
+            return None, None, False, True
         # Update state
         self.dynamic_sampling_state = updated_state
 
@@ -1053,7 +1075,7 @@ class RayPPOTrainer:
             # Reset state when sampling is complete
             self.dynamic_sampling_state = None
 
-        return processed_output, processed_uids, keep_sampling
+        return processed_output, processed_uids, keep_sampling, False
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)

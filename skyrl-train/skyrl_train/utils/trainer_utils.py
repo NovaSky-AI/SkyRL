@@ -257,9 +257,9 @@ def handle_dynamic_sampling(
     Returns:
         Tuple of (processed_generator_output, processed_uids, keep_sampling, updated_state)
     """
-    sampling_type = sampling_config.get("type", "null")
+    sampling_type = sampling_config.get("type", None)
 
-    if sampling_type == "null":
+    if sampling_type is None:
         return generator_output, uids, False, None
 
     if sampling_type == "replace":
@@ -275,112 +275,102 @@ def handle_dynamic_sampling(
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
 
 
+def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:
+    num_replacements = len(bad_uids)
+    num_candidates = len(good_uids)
+
+    if num_candidates >= num_replacements:
+        perm = np.random.permutation(num_candidates)
+        chosen_replacement_idxs = np.array(list(good_uids))[perm[:num_replacements]]
+    else:
+        indices = np.random.randint(low=0, high=num_candidates, size=(num_replacements,))
+        chosen_replacement_idxs = np.array(list(good_uids))[indices]
+
+    return chosen_replacement_idxs
+
+
 def handle_replace_sampling(
     generator_output: GeneratorOutput, uids: List[str], sampling_config: Dict[str, Any]
 ) -> Tuple[GeneratorOutput, List[str], bool]:
     """
-    Handle replace sampling strategy based on POLARIS implementation.
+    Handle replace sampling strategy based on POLARIS implementation (https://github.com/ChenxinAn-fdu/POLARIS/).
 
     Args:
         generator_output: Current batch generator output
         uids: Current batch UIDs
         sampling_config: Configuration dict with sampling parameters
-
     Returns:
         Tuple of (processed_generator_output, processed_uids, keep_sampling)
     """
+    n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
+
     # Extract rewards and convert to sequence-level if needed
     rewards = np.array(generator_output["rewards"])
-    n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
     if isinstance(rewards[0], list):
         # Token-level rewards: sum to get sequence rewards
         rewards = rewards.sum(dim=-1)
 
-    # Group by UID and calculate metrics
+    # get mapping of uids to list of indices and metrics
+    uid2indices = defaultdict(list)
     uid2metric_vals = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
-        uid2metric_vals[uid].append(reward)
+    for idx, uid in enumerate(uids):
+        uid2indices[uid].append(idx)
+        uid2metric_vals[uid].append(rewards[idx])
 
+    # Group by UID and calculate metrics
     uid2metric_std = {}
     for uid, metric_vals in uid2metric_vals.items():
         uid2metric_std[uid] = np.std(metric_vals)
 
     # Determine good UIDs: those with std > 0 (or group size == 1)
-    good_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1]
-    bad_uids = [uid for uid, std in uid2metric_std.items() if std == 0 and n_samples_per_prompt > 1]
+    good_uids = set([uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1])
+    bad_uids = set([uid for uid, std in uid2metric_std.items() if std == 0 and n_samples_per_prompt > 1])
 
-    # Convert to sets for faster lookup
-    good_uids_set = set(good_uids)
-    bad_uids_set = set(bad_uids)
-
-    logger.info(f"Replace sampling: {len(good_uids)} good UIDs out of {len(uid2metric_vals)} total UIDs")
+    logger.info(f"Replace sampling: {len(good_uids)} good UIDs out of {len(uid2metric_vals)} total prompts")
 
     # Check if we have enough good UIDs (more than 1/3 of the batch)
     if len(good_uids) > len(uid2metric_vals) // 3:
         logger.info("============= POLARIS dynamic sampling replace ===========")
-        logger.info(f"Good UIDs: {good_uids_set}")
-        logger.info(f"Bad UIDs: {bad_uids_set}")
+        logger.info(f"Number of good prompts: {len(good_uids)}")
+        logger.info(f"Number of bad prompts: {len(bad_uids)}")
 
-        # Get trajectory indices for good and bad UIDs
-        good_traj_indices = []
-        bad_traj_indices = []
+        # Get good uids to replace the bad uids (length of bad uids)
+        replacement_uids = get_bad_sample_replacements(good_uids, bad_uids)  # uids to replace the bad uids
+        # get replacement indices
+        replacement_indices = []
+        for uid in replacement_uids:
+            replacement_indices.extend(uid2indices[uid])
+        # get bad indices
+        bad_indices = []
+        for uid in bad_uids:
+            bad_indices.extend(uid2indices[uid])
 
-        for idx, uid in enumerate(uids):
-            if uid in good_uids_set:
-                good_traj_indices.append(idx)
-            elif uid in bad_uids_set:
-                bad_traj_indices.append(idx)
-
-        # Choose good trajectories to replace bad ones
-        chosen_indices = []
-        for _ in bad_traj_indices:
-            chosen_idx = np.random.choice(good_traj_indices)
-            chosen_indices.append(chosen_idx)
-
-        # Create a copy of the generator output to modify
-        replaced_output = {
-            "prompt_token_ids": generator_output["prompt_token_ids"].copy(),
-            "response_ids": generator_output["response_ids"].copy(),
-            "rewards": generator_output["rewards"].copy(),
-            "loss_masks": generator_output["loss_masks"].copy(),
-            "stop_reasons": (
-                generator_output.get("stop_reasons", [None] * len(rewards)).copy()
-                if generator_output.get("stop_reasons")
-                else None
-            ),
-            "rollout_metrics": generator_output.get("rollout_metrics"),
-        }
-
-        # Replace bad samples with good ones
-        for bad_idx, chosen_idx in zip(bad_traj_indices, chosen_indices):
-            replaced_output["prompt_token_ids"][bad_idx] = replaced_output["prompt_token_ids"][chosen_idx]
-            replaced_output["response_ids"][bad_idx] = replaced_output["response_ids"][chosen_idx]
-            replaced_output["rewards"][bad_idx] = replaced_output["rewards"][chosen_idx]
-            replaced_output["loss_masks"][bad_idx] = replaced_output["loss_masks"][chosen_idx]
-            if replaced_output["stop_reasons"]:
-                replaced_output["stop_reasons"][bad_idx] = replaced_output["stop_reasons"][chosen_idx]
+        # Replace bad samples with good ones (modify in place because replacement_idx and bad_idx should not overlap)
+        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
+            generator_output["prompt_token_ids"][bad_idx] = generator_output["prompt_token_ids"][replacement_idx].copy()
+            generator_output["response_ids"][bad_idx] = generator_output["response_ids"][replacement_idx].copy()
+            if isinstance(rewards[0], list):
+                generator_output["rewards"][bad_idx] = generator_output["rewards"][replacement_idx].copy()
+            else:
+                generator_output["rewards"][bad_idx] = generator_output["rewards"][replacement_idx]
+            generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
+            if generator_output["stop_reasons"]:
+                generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
 
         # Update UIDs accordingly
         replaced_uids = uids.copy()
-        for bad_idx, chosen_idx in zip(bad_traj_indices, chosen_indices):
-            replaced_uids[bad_idx] = replaced_uids[chosen_idx]
+        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
+            replaced_uids[bad_idx] = uids[replacement_idx]
 
-        # Log the replacement results
-        new_rewards = np.array(replaced_output["rewards"])
-        if isinstance(new_rewards[0], list):
-            new_rewards = new_rewards.sum(dim=-1)
+        logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
 
-        logger.info(f"Before replacement - Good: {len(good_traj_indices)}, Bad: {len(bad_traj_indices)}")
-        logger.info(f"After replacement - Replaced {len(bad_traj_indices)} bad trajectories")
-
-        return replaced_output, replaced_uids, False
+        return generator_output, replaced_uids, False
     else:
         logger.warning("===================== Warning ====================")
         logger.warning("In this mini-batch, most training samples receive low variance rewards.")
         logger.warning("If you continue to see this warning, please check your data difficulty distribution.")
         logger.warning("==================================================")
 
-        # For simplicity, let the trainer handle resample logic
         return generator_output, uids, True
 
 
@@ -388,7 +378,7 @@ def handle_filter_sampling(
     generator_output: GeneratorOutput,
     uids: List[str],
     sampling_config: Dict[str, Any],
-    collected_state: Optional[Dict[str, Any]] = None,
+    collected_state: Dict[str, Any],
 ) -> Tuple[GeneratorOutput, List[str], bool, Dict[str, Any]]:
     """
     Handle filter-based sampling strategy.
@@ -403,7 +393,6 @@ def handle_filter_sampling(
         Tuple of (processed_generator_output, processed_uids, keep_sampling, updated_state)
     """
     target_batch_size = sampling_config.get("train_batch_size")
-    max_resample_batches = sampling_config.get("max_resample_batches", 20)
     n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
 
     # Extract rewards from collected output
@@ -423,7 +412,7 @@ def handle_filter_sampling(
         uid2metric_std[uid] = np.std(metric_vals)
 
     # Filter out groups with std == 0 and group size > 1
-    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or len(n_samples_per_prompt) == 1]
+    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1]
     kept_uids_set = set(kept_uids)
 
     # Filter trajectories based on kept UIDs
@@ -436,31 +425,26 @@ def handle_filter_sampling(
     filtered_output = filter_generator_output(generator_output, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
 
-    if collected_state is None:
-        collected_state = {
-            "collected_generator_output": filtered_output,
-            "collected_uids": filtered_uids.copy(),
-            "num_prompts_in_batch": len(kept_uids),
-            "resample_batch_count": 1,
-        }
+    if "collected_generator_output" not in collected_state:
+        collected_state.update(
+            {
+                "collected_generator_output": filtered_output,
+                "collected_uids": filtered_uids.copy(),
+                "num_prompts_in_batch": len(kept_uids),
+            }
+        )
     else:
         collected_state["collected_generator_output"] = concatenate_generator_outputs(
             [collected_state["collected_generator_output"], filtered_output]
         )
         collected_state["collected_uids"].extend(filtered_uids)
         collected_state["num_prompts_in_batch"] += len(kept_uids)
-        collected_state["resample_batch_count"] += 1
 
     # Check if we have enough prompts
     if collected_state["num_prompts_in_batch"] < target_batch_size:
         logger.info(f"Dynamic sampling: {collected_state['num_prompts_in_batch']} < {target_batch_size} prompts")
-
-        if max_resample_batches > 0 and collected_state["resample_batch_count"] >= max_resample_batches:
-            logger.warning(f"Hit max resample batches ({max_resample_batches}), proceeding with current batch")
-            return collected_state["collected_generator_output"], collected_state["collected_uids"], False, None
-        else:
-            logger.info(f"Resample batch {collected_state['resample_batch_count']}, continue sampling...")
-            return None, None, True, collected_state
+        logger.info(f"Resample batch {collected_state['sample_batch_count']}, continue sampling...")
+        return generator_output, uids, True, collected_state
     else:
         logger.info(
             f"Dynamic sampling: collected {collected_state['num_prompts_in_batch']} >= {target_batch_size} prompts"
@@ -468,11 +452,14 @@ def handle_filter_sampling(
         # Truncate to exact batch size if needed
         n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
         max_trajectories = target_batch_size * n_samples_per_prompt
-        if len(filtered_uids) > max_trajectories:
-            filtered_output = filter_generator_output(filtered_output, list(range(max_trajectories)))
-            filtered_uids = filtered_uids[:max_trajectories]
+        final_output = collected_state["collected_generator_output"]
+        final_uids = collected_state["collected_uids"]
 
-        return filtered_output, filtered_uids, False, None
+        if len(final_uids) > max_trajectories:
+            final_output = filter_generator_output(final_output, list(range(max_trajectories)))
+            final_uids = final_uids[:max_trajectories]
+
+        return final_output, final_uids, False, None
 
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:
