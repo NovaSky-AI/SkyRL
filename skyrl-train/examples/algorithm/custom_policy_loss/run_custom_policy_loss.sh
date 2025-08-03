@@ -1,23 +1,23 @@
 set -x
 
-# Example of custom advantage estimator: "simple_baseline"
+# Example of custom policy loss: "reinforce"
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/algorithm/custom_advantage_estimator/run_custom_adv_est.sh
+# bash examples/algorithm/custom_policy_loss/run_custom_policy_loss.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
-# Configure the advantage estimator to use
-ADV_EST="simple_baseline"
+# Configure the policy loss to use
+POLICY_LOSS="reinforce"
 
-uv run --isolated --extra vllm -m examples.algorithm.custom_advantage_estimator.main_custom_adv_est \
+uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.algorithm.advantage_estimator="$ADV_EST" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -48,8 +48,8 @@ uv run --isolated --extra vllm -m examples.algorithm.custom_advantage_estimator.
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="custom_adv_est_gsm8k" \
-  trainer.run_name="custom_adv_est_gsm8k_test" \
+  trainer.project_name="custom_policy_loss_gsm8k" \
+  trainer.run_name="custom_policy_loss_gsm8k_test" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   $@

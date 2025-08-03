@@ -280,7 +280,7 @@ Algorithm Configuration
 .. code-block:: yaml
   
     algorithm:
-      advantage_estimator: "grpo"
+      advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
       use_kl_estimator_k3: true
       use_abs_kl: false
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
@@ -290,7 +290,7 @@ Algorithm Configuration
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      ppo_loss_type: "regular" # "regular", "dual_clip"
+      policy_loss_type: "regular" # "regular", "dual_clip", or customizable with PolicyLossRegistry
       loss_reduction: "token_mean" # "token_mean", "sequence_mean"
 
       # GAE parameters
@@ -315,7 +315,7 @@ Algorithm Configuration
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.
 - ``algorithm.advantage_batch_normalize``: Whether to normalize advantages by the (global) batch mean and standard deviation.
 - ``algorithm.value_head_prefix``: The name used to identify the value head in the critic model.
-- ``algorithm.ppo_loss_type``: Type of PPO loss to use. Currently, we support ``regular`` and ``dual_clip``. ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_.
+- ``algorithm.policy_loss_type``: Type of PPO loss to use. Currently, we implement ``regular`` and ``dual_clip``, where ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_. Custom policy losses can be registered with the ``PolicyLossRegistry``.
 - ``algorithm.loss_reduction``: Type of PPO loss reduction to use. Currently, we support ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
@@ -328,33 +328,31 @@ Algorithm Configuration
 Policy Loss Formulation 
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``PolicyLoss`` class.
+It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``ppo_policy_loss`` function. 
 
 .. code-block:: python
 
-  class PolicyLoss(nn.Module):
-    ...
-    def forward(
-        self,
-        log_probs: torch.Tensor,
-        old_log_probs: torch.Tensor,
-        advantages: torch.Tensor,
-        loss_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+  def ppo_policy_loss(
+      log_probs: torch.Tensor,
+      old_log_probs: torch.Tensor,
+      advantages: torch.Tensor,
+      config: DictConfig, # trainer.algorithm config
+      loss_mask: Optional[torch.Tensor] = None,
+  ) -> torch.Tensor:
 
-        ratio = (log_probs - old_log_probs).exp()
-        surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
-        loss = -torch.min(surr1, surr2)
-        clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
-        clip_pg_losses1 = loss
-        if self.loss_type == "dual_clip":
-            pg_losses3 = -advantages * self.clip_ratio_c
-            clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-            loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        return loss, clip_ratio
-  
+      ratio = (log_probs - old_log_probs).exp()
+      surr1 = ratio * advantages
+      surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+      loss = -torch.min(surr1, surr2)
+      clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+      clip_pg_losses1 = loss
+      if config.policy_loss_type == "dual_clip":
+        pg_losses3 = -advantages * config.clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+      loss = reduce_loss(loss, loss_mask, config.loss_reduction)
+      return loss, clip_ratio
+
 
 Generator Configuration
 -----------------------

@@ -85,7 +85,7 @@ def dummy_config():
                     "clip_ratio_c": 3.0,
                     "value_clip": 0.2,
                     "normalize_reward": True,
-                    "ppo_loss_type": "regular",
+                    "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
                 },
                 "resume_mode": "none",

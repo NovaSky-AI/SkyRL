@@ -42,7 +42,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy_mini_batch_size=256 \
   trainer.algorithm.use_kl_loss=false \
-  trainer.algorithm.ppo_loss_type="dual_clip" \
+  trainer.algorithm.policy_loss_type="dual_clip" \
   trainer.ckpt_interval=5 \
   trainer.hf_save_interval=5 \
   trainer.export_path=$HOME/export/ \
