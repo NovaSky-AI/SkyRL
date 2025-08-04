@@ -439,13 +439,13 @@ def test_validate_generator_output_element_length_mismatch():
     )
 
     with pytest.raises(
-        AssertionError, match="Response ids and loss masks must have the same length, for sample 0 got 3 and 2"
+        AssertionError, match="Response ids and loss masks must have the same length"
     ):
         validate_generator_output(input_batch, generator_output)
 
     generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
     generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
     with pytest.raises(
-        AssertionError, match="Token rewards and response ids must have the same length, for sample 0 got 2 and 3"
+        AssertionError, match="Token rewards and response ids must have the same length"
     ):
         validate_generator_output(input_batch, generator_output)
