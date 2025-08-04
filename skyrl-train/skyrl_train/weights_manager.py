@@ -5,7 +5,6 @@ from ray import ObjectRef
 import asyncio
 from skyrl_train.utils import Timer
 import ray
-import contextlib
 
 
 class ConditionalWeightsManager:
@@ -18,8 +17,8 @@ class ConditionalWeightsManager:
 
     def __enter__(self):
         if self.condition:
-            return self.weights_manager.__enter__()
-        return contextlib.nullcontext()
+            self.weights_manager.__enter__()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.condition:

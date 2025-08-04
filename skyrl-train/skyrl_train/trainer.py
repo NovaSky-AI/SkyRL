@@ -1077,7 +1077,11 @@ class RayPPOTrainer:
         )
 
         # Check max resample limit, and if we hit it, return true for exit_loop
-        if max_sample_batches > 0 and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches:
+        if (
+            keep_sampling
+            and max_sample_batches > 0
+            and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
+        ):
             logger.warning(
                 f"Hit max sample batches ({max_sample_batches}), but there are still not enough good prompts, stopping sampling"
             )
