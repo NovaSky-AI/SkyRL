@@ -1067,7 +1067,7 @@ class RayPPOTrainer:
             logger.warning(
                 f"Hit max resample batches ({max_sample_batches}), but there are still not enough good prompts, stopping sampling"
             )
-            return None, None, False, True
+            return generator_output, uids, False, True
         # Update state
         self.dynamic_sampling_state = updated_state
 

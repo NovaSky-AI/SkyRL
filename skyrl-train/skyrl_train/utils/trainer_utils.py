@@ -308,7 +308,7 @@ def handle_replace_sampling(
     rewards = np.array(generator_output["rewards"])
     if isinstance(rewards[0], list):
         # Token-level rewards: sum to get sequence rewards
-        rewards = rewards.sum(dim=-1)
+        rewards = rewards.sum(axis=-1)
 
     # get mapping of uids to list of indices and metrics
     uid2indices = defaultdict(list)
@@ -349,10 +349,10 @@ def handle_replace_sampling(
         for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
             generator_output["prompt_token_ids"][bad_idx] = generator_output["prompt_token_ids"][replacement_idx].copy()
             generator_output["response_ids"][bad_idx] = generator_output["response_ids"][replacement_idx].copy()
-            if isinstance(rewards[0], list):
-                generator_output["rewards"][bad_idx] = generator_output["rewards"][replacement_idx].copy()
-            else:
-                generator_output["rewards"][bad_idx] = generator_output["rewards"][replacement_idx]
+            replacement_reward = generator_output["rewards"][replacement_idx]
+            generator_output["rewards"][bad_idx] = (
+                replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
+            )
             generator_output["loss_masks"][bad_idx] = generator_output["loss_masks"][replacement_idx].copy()
             if generator_output["stop_reasons"]:
                 generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
@@ -400,7 +400,7 @@ def handle_filter_sampling(
 
     # Convert to sequence-level rewards if needed
     if isinstance(rewards[0], list):
-        rewards = rewards.sum(dim=-1)
+        rewards = rewards.sum(axis=-1)
 
     # Group by UID and calculate standard deviation
     uid2metric_vals = defaultdict(list)
