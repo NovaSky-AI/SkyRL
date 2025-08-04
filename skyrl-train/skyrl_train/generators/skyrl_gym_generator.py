@@ -51,6 +51,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         )
 
         if self.use_http_server_inference_engine_client:
+            assert (
+                self.use_conversation_multi_turn
+            ), "HTTP server inference engine client in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
             # Store the base URL for direct HTTP requests
             self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
         else:

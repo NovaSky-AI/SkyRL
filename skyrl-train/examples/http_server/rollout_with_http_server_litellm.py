@@ -1,10 +1,9 @@
 """
-Example of using LiteLLM with SkyRL's HTTP inference server.
+Example of using LiteLLM with SkyRL's HTTP inference server. This simulates what your custom
+generator looks like when posting requests to the server (as opposed to using `skyrl_gym_generator.py`).
 
-Note that `init_to_simulate_trainer()` is not needed in your custom generator, we
-do it here to simulate what the trainer will instantiate.
-
-Set the following configs in your bash script:
+When you want to use the HTTP server, set the following configs in your bash script, as shown in
+`run_gsm8k_with_http_server.sh`:
 ```
 generator:
   use_http_server_inference_engine_client: true
@@ -12,10 +11,13 @@ generator:
   http_server_inference_engine_client_port: 8000
 ```
 
+Note that `init_to_simulate_trainer()` is not needed in your custom generator, we
+do it here to simulate what the trainer will instantiate.
+
 Also note that `trajectory_id` is important for better trajectory routing for prefix cache reuse.
 
 Run with:
-`uv run --isolated --extra dev --extra vllm --extra litellm python examples/rollout_with_http_server_litellm.py`
+`uv run --isolated --extra dev --extra vllm --extra litellm python examples/http_server/rollout_with_http_server_litellm.py`
 """
 
 import threading
