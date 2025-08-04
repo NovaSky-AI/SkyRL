@@ -1,3 +1,7 @@
+"""
+uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py
+"""
+
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
@@ -5,12 +9,15 @@ from skyrl_train.utils.trainer_utils import (
     sanitize_data_source,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    validate_generator_output,
 )
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from typing import Union
 import ray
 import os
 import tempfile
 import pytest
+import re
 
 from unittest.mock import Mock, patch, mock_open
 import json
@@ -312,3 +319,129 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
                 break
         except json.JSONDecodeError:
             continue
+
+
+def test_validate_generator_output_valid_case():
+    """Test validate_generator_output with valid case."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2", "prompt3"],
+        env_classes=["env1", "env2", "env3"],
+        env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
+        sampling_params={"temperature": 0.7},
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
+        response_ids=[[10, 11, 12], [13, 14], [15]],
+        rewards=[[0.5, 0.6, 0.7], [0.8, 0.9], [1.0]],  # Nested list structure
+        loss_masks=[[1, 1, 0], [1, 1], [0]],
+        stop_reasons=["stop", "length", "stop"],
+        rollout_metrics={"metric1": 0.5, "metric2": 0.6},
+    )
+
+    # Should not raise any exceptions
+    validate_generator_output(input_batch, generator_output)
+
+    # per trajectory rewards should work too
+    generator_output["rewards"] = [0.5, 0.6, 0.7]
+    validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_empty_response_ids():
+    """Test validate_generator_output raises RuntimeError when response_ids is empty."""
+    input_batch = GeneratorInput(prompts=["prompt1"], env_classes=["env1"], env_extras=None, sampling_params=None)
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3]], response_ids=[], rewards=[], loss_masks=[], stop_reasons=[]  # Empty response_ids
+    )
+
+    with pytest.raises(RuntimeError, match="No outputs generated"):
+        validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_mismatched_prompts_responses():
+    """Test validate_generator_output raises AssertionError when prompts and response_ids lengths don't match."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2", "prompt3"],  # 3 prompts
+        env_classes=["env1", "env2", "env3"],
+        env_extras=None,
+        sampling_params=None,
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2], [3, 4]],
+        response_ids=[[7, 8], [9, 10]],  # Only 2 responses
+        rewards=[0.5, 0.7],
+        loss_masks=[[1, 1], [1, 0]],
+        stop_reasons=["eos", "eos"],
+    )
+
+    with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
+        validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_all_loss_masked():
+    """Test validate_generator_output logs warning when all outputs are loss masked."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
+        response_ids=[[7, 8], [9, 10]],
+        rewards=[0.5, 0.7],
+        loss_masks=[[0, 0], [0, 0]],  # All zeros - completely loss masked
+        stop_reasons=["eos", "eos"],
+    )
+
+    # Capture log output to verify warning is issued
+    with patch("skyrl_train.utils.trainer_utils.logger") as mock_logger:
+        validate_generator_output(input_batch, generator_output)
+        mock_logger.info.assert_called_once_with(
+            "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
+        )
+
+
+def test_validate_generator_output_mismatched_list_lengths():
+    """Test validate_generator_output raises AssertionError when generator output lists have mismatched lengths."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
+        response_ids=[[7, 8], [9, 10]],  # Length 2
+        rewards=[0.5, 0.7, 0.9],  # Length 3 - mismatch!
+        loss_masks=[[1, 1], [1, 0]],
+        stop_reasons=["eos", "eos"],
+    )
+
+    with pytest.raises(AssertionError, match="Generator output rewards length must be equal to response_ids length"):
+        validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_element_length_mismatch():
+    """Test validate_generator_output with element length mismatch."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2", "prompt3"],
+        env_classes=["env1", "env2", "env3"],
+        env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
+        sampling_params={"temperature": 0.7},
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
+        response_ids=[[10, 11, 12], [13, 14], [15]],
+        rewards=[[0.5, 0.6, 0.7], [0.8, 0.9], [1.0]],
+        loss_masks=[[1, 1], [1], [1, 1]],  # loss masks are not the same length as response ids
+        stop_reasons=["stop", "length", "stop"],
+        rollout_metrics={"metric1": 0.5, "metric2": 0.6},
+    )
+
+    with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
+        validate_generator_output(input_batch, generator_output)
+
+    generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
+    generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
+    with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
+        validate_generator_output(input_batch, generator_output)
