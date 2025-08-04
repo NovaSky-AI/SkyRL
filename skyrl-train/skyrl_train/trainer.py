@@ -266,9 +266,9 @@ class RayPPOTrainer:
                             generator_output, uids, keep_sampling, exit_loop = self.handle_dynamic_sampling(
                                 generator_output, uids
                             )
+                            # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
+                            weights_manager.update_condition(not keep_sampling)
                             if keep_sampling:  # continue sampling
-                                # update weights manager condition (so we don't trigger sleep if we are continuing sampling)
-                                weights_manager.update_condition(not keep_sampling)
                                 continue
                             elif exit_loop:  # we want to exit gracefully if we hit the max sample batches
                                 break
