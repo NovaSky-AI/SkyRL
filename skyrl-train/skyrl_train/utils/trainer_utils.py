@@ -257,14 +257,16 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
             ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
 
     # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
-    for i in range(len(generator_output["response_ids"])):
-        assert len(generator_output["response_ids"][i]) == len(
-            generator_output["loss_masks"][i]
-        ), f"Response ids and loss masks must have the same length, for sample {i} got {len(generator_output['response_ids'][i])} and {len(generator_output['loss_masks'][i])}"
-        if isinstance(generator_output["rewards"][i], list):
-            assert len(generator_output["rewards"][i]) == len(
-                generator_output["response_ids"][i]
-            ), f"Token rewards and response ids must have the same length, for sample {i} got {len(generator_output['rewards'][i])} and {len(generator_output['response_ids'][i])}"
+    for i, (response_ids, loss_masks, rewards) in enumerate(
+        zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
+    ):
+        assert len(response_ids) == len(
+            loss_masks
+        ), f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        if isinstance(rewards, list):
+            assert len(rewards) == len(
+                response_ids
+            ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
 
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
