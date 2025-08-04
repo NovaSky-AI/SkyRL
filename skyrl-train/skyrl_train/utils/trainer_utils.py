@@ -303,6 +303,7 @@ def handle_replace_sampling(
         Tuple of (processed_generator_output, processed_uids, keep_sampling)
     """
     n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
+    min_replace_ratio = sampling_config.get("min_replace_ratio", 0.3)
 
     # Extract rewards and convert to sequence-level if needed
     rewards = np.array(generator_output["rewards"])
@@ -328,11 +329,12 @@ def handle_replace_sampling(
 
     logger.info(f"Replace sampling: {len(good_uids)} good UIDs out of {len(uid2metric_vals)} total prompts")
 
-    # Check if we have enough good UIDs (more than 1/3 of the batch)
-    if len(good_uids) > len(uid2metric_vals) // 3:
-        logger.info("============= POLARIS dynamic sampling replace ===========")
+    # Check if we have enough good UIDs (more than min_replace_ratio of the batch)
+    if len(good_uids) > len(uid2metric_vals) * min_replace_ratio:
+        logger.info("============= Dynamic sampling replace ===========")
         logger.info(f"Number of good prompts: {len(good_uids)}")
         logger.info(f"Number of bad prompts: {len(bad_uids)}")
+        logger.info("==================================================")
 
         # Get good uids to replace the bad uids (length of bad uids)
         replacement_uids = get_bad_sample_replacements(good_uids, bad_uids)  # uids to replace the bad uids
@@ -366,7 +368,7 @@ def handle_replace_sampling(
 
         return generator_output, replaced_uids, False
     else:
-        logger.warning("===================== Warning ====================")
+        logger.warning("===================== Warning (Dynamic sampling replace) ====================")
         logger.warning("In this mini-batch, most training samples receive low variance rewards.")
         logger.warning("If you continue to see this warning, please check your data difficulty distribution.")
         logger.warning("==================================================")
@@ -442,13 +444,17 @@ def handle_filter_sampling(
 
     # Check if we have enough prompts
     if collected_state["num_prompts_in_batch"] < target_batch_size:
+        logger.info("============= Dynamic sampling filter =============")
         logger.info(f"Dynamic sampling: {collected_state['num_prompts_in_batch']} < {target_batch_size} prompts")
         logger.info(f"Resample batch {collected_state['sample_batch_count']}, continue sampling...")
+        logger.info("==================================================")
         return generator_output, uids, True, collected_state
     else:
+        logger.info("============= Dynamic sampling filter =============")
         logger.info(
             f"Dynamic sampling: collected {collected_state['num_prompts_in_batch']} >= {target_batch_size} prompts"
         )
+        logger.info("==================================================")
         # Truncate to exact batch size if needed
         n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
         max_trajectories = target_batch_size * n_samples_per_prompt

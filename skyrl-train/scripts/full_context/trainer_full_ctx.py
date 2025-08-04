@@ -83,6 +83,7 @@ class FullCtxTrainer(RayPPOTrainer):
 
                 self.tracker.log(self.all_metrics, step=self.global_step)
                 self.all_metrics = {}
+                self.all_timings = {}
                 self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
                 self.global_step += 1
 

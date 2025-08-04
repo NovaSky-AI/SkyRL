@@ -103,8 +103,9 @@ trainer:
     value_clip: 0.2
     normalize_reward: true
     dynamic_sampling:
-      type: null # filter, replace, or null/"none"
-      max_sample_batches: 20 # sample at most this many batches before stopping, -1 to sample forever
+      type: null # filter, replace, or null
+      max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
+      min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

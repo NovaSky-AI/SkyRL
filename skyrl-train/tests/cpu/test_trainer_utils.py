@@ -377,7 +377,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
         "rollout_metrics": None,
     }
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
-    sampling_config = {"n_samples_per_prompt": 2}
+    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
     result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
 
@@ -407,7 +407,7 @@ def test_handle_replace_sampling_insufficient_good_samples():
         "rollout_metrics": None,
     }
     uids = ["uid1", "uid1", "uid2", "uid2"]  # 2 samples per prompt
-    sampling_config = {"n_samples_per_prompt": 2}
+    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
     result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
 
@@ -430,7 +430,7 @@ def test_handle_replace_sampling_single_sample_per_prompt():
         "rollout_metrics": None,
     }
     uids = ["uid1", "uid2"]
-    sampling_config = {"n_samples_per_prompt": 1}
+    sampling_config = {"n_samples_per_prompt": 1, "min_replace_ratio": 0.3}
 
     result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
 
@@ -453,7 +453,7 @@ def test_handle_replace_sampling_token_level_rewards():
         "rollout_metrics": None,
     }
     uids = ["uid1", "uid1", "uid2", "uid2"]  # uid1: [3.0, 7.0] (good), uid2: [2.0, 2.0] (bad)
-    sampling_config = {"n_samples_per_prompt": 2}
+    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
 
     result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
 

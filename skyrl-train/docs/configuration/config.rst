@@ -307,6 +307,13 @@ Algorithm Configuration
       value_clip: 0.2
       normalize_reward: true
 
+      # dynamic sampling parameters
+      dynamic_sampling:
+        type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
+        max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
+        min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+
+
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo`` and ``gae``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance.
 - ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation.

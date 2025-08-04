@@ -8,6 +8,7 @@ from pathlib import Path
 import ray
 import uuid
 import torch
+import contextlib
 from loguru import logger
 from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
@@ -232,10 +233,13 @@ class RayPPOTrainer:
             if self.cfg.trainer.placement.colocate_all:
                 self.policy_model.backload_to_gpu()
 
+        # setup for dynamic sampling
+        exit_loop = False
+        keep_sampling = False
+
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
         self.global_step += 1  # start training at global_step 1
-        exit_loop = False
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
@@ -246,10 +250,15 @@ class RayPPOTrainer:
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
 
+                    weights_manager = self.weights_manager
+                    if keep_sampling:
+                        # if we are continuing sampling, we don't need to manage weights
+                        weights_manager = contextlib.nullcontext()
+
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
                     # Policy model stays on cpu because the training loop will carefully backload different models depending on colocation strategy
-                    with self.weights_manager:
+                    with weights_manager:
                         # 1.1 generation phase
                         with Timer("generate", self.all_timings):
                             generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
@@ -341,9 +350,11 @@ class RayPPOTrainer:
                 del training_input, generator_output
 
             if exit_loop:
-                logger.info(
+                logger.warning("===================== Warning ====================")
+                logger.warning(
                     "Exiting training loop due to hitting dynamic sampling limit. Please check your data difficulty distribution."
                 )
+                logger.warning("===================== Warning ====================")
                 break
 
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
@@ -1046,6 +1057,7 @@ class RayPPOTrainer:
         dynamic_sampling_config = {
             "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
             "max_sample_batches": max_sample_batches,
+            "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": getattr(self.cfg.generator, "n_samples_per_prompt", 1),
         }
