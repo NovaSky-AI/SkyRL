@@ -17,6 +17,7 @@ import ray
 import os
 import tempfile
 import pytest
+import re
 
 from unittest.mock import Mock, patch, mock_open
 import json
@@ -375,7 +376,7 @@ def test_validate_generator_output_mismatched_prompts_responses():
         stop_reasons=["eos", "eos"],
     )
 
-    with pytest.raises(AssertionError, match="generate objects number must be equal to all inputs number"):
+    with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
         validate_generator_output(input_batch, generator_output)
 
 
@@ -437,10 +438,14 @@ def test_validate_generator_output_element_length_mismatch():
         rollout_metrics={"metric1": 0.5, "metric2": 0.6},
     )
 
-    with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
+    with pytest.raises(
+        AssertionError, match="Response ids and loss masks must have the same length, for sample 0 got 3 and 2"
+    ):
         validate_generator_output(input_batch, generator_output)
 
     generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
     generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
-    with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
+    with pytest.raises(
+        AssertionError, match="Token rewards and response ids must have the same length, for sample 0 got 2 and 3"
+    ):
         validate_generator_output(input_batch, generator_output)
