@@ -331,6 +331,11 @@ Algorithm Configuration
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
 - ``algorithm.normalize_reward``: Whether to normalize critic model output (i.e., values). When ``true``, the critic model learns the mean and standard deviation of the values during training and normalizes the values during forward pass.
+- ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
+  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (DAPO), ``replace`` (POLARIS/WebSailor), or ``null`` for no dynamic sampling.
+  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
+  - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+  
 
 Policy Loss Formulation 
 ~~~~~~~~~~~~~~~~~~~~~~~

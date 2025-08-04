@@ -263,30 +263,16 @@ def handle_dynamic_sampling(
         return generator_output, uids, False, None
 
     if sampling_type == "replace":
-        # For "replace" strategy, handle immediately without accumulation
+        # For "replace" strategy, the collected state is not used.
         processed_output, processed_uids, keep_sampling = handle_replace_sampling(
             generator_output, uids, sampling_config
         )
         return processed_output, processed_uids, keep_sampling, collected_state
     elif sampling_type == "filter":
-        # For filter strategies, handle with accumulation
+        # For filter strategies, accumulate the generator output and UIDs across batches in collected_state if we are sampling repeatedly.
         return handle_filter_sampling(generator_output, uids, sampling_config, collected_state)
     else:
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
-
-
-def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:
-    num_replacements = len(bad_uids)
-    num_candidates = len(good_uids)
-
-    if num_candidates >= num_replacements:
-        perm = np.random.permutation(num_candidates)
-        chosen_replacement_idxs = np.array(list(good_uids))[perm[:num_replacements]]
-    else:
-        indices = np.random.randint(low=0, high=num_candidates, size=(num_replacements,))
-        chosen_replacement_idxs = np.array(list(good_uids))[indices]
-
-    return chosen_replacement_idxs
 
 
 def handle_replace_sampling(
@@ -383,7 +369,7 @@ def handle_filter_sampling(
     collected_state: Dict[str, Any],
 ) -> Tuple[GeneratorOutput, List[str], bool, Dict[str, Any]]:
     """
-    Handle filter-based sampling strategy.
+    Handle filter-based sampling strategy (like DAPO).
 
     Args:
         generator_output: Current batch generator output
@@ -466,6 +452,20 @@ def handle_filter_sampling(
             final_uids = final_uids[:max_trajectories]
 
         return final_output, final_uids, False, None
+
+
+def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:
+    num_replacements = len(bad_uids)
+    num_candidates = len(good_uids)
+
+    if num_candidates >= num_replacements:
+        perm = np.random.permutation(num_candidates)
+        chosen_replacement_idxs = np.array(list(good_uids))[perm[:num_replacements]]
+    else:
+        indices = np.random.randint(low=0, high=num_candidates, size=(num_replacements,))
+        chosen_replacement_idxs = np.array(list(good_uids))[indices]
+
+    return chosen_replacement_idxs
 
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:

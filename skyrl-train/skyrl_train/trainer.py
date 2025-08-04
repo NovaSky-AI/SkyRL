@@ -18,7 +18,6 @@ from transformers import AutoTokenizer
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.generators.base import (
     GeneratorInput,
@@ -30,6 +29,7 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train import utils
+from skyrl_train.utils import trainer_utils
 from skyrl_train.utils import (
     Timer,
     compute_approx_kl,
@@ -50,8 +50,8 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
-    handle_dynamic_sampling,
     GLOBAL_STEP_PREFIX,
+    ResumeMode,
 )
 
 
@@ -250,10 +250,8 @@ class RayPPOTrainer:
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
 
-                    weights_manager = self.weights_manager
-                    if keep_sampling:
-                        # if we are continuing sampling, we don't need to manage weights
-                        weights_manager = contextlib.nullcontext()
+                    # if we are continuing sampling, we don't need to manage weights
+                    weights_manager = self.weights_manager if not keep_sampling else contextlib.nullcontext()
 
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
@@ -265,7 +263,9 @@ class RayPPOTrainer:
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                        generator_output, uids, keep_sampling, exit_loop = self.dynamic_sampling(generator_output, uids)
+                        generator_output, uids, keep_sampling, exit_loop = self.handle_dynamic_sampling(
+                            generator_output, uids
+                        )
                         if keep_sampling:  # continue sampling
                             continue
                         elif exit_loop:  # we want to exit gracefully if we hit the max sample batches
@@ -1036,11 +1036,16 @@ class RayPPOTrainer:
 
         return policy_status
 
-    def dynamic_sampling(
+    def handle_dynamic_sampling(
         self, generator_output: GeneratorOutput, uids: List[str]
     ) -> Tuple[GeneratorOutput, List[str], bool, bool]:
         """
-        Implement dynamic sampling
+        Handle dynamic sampling for the current batch.
+
+        Accumulates the generator output and UIDs across batches if we are sampling repeatedly
+        and applies the dynamic sampling strategy (i.e. filter, replace) to the current batch.
+        If we hit the limit of max sample batches, we return True for exit_loop, to attempt to
+        exit the training loop gracefully.
 
         Args:
             generator_output: Current batch generator output
@@ -1070,14 +1075,14 @@ class RayPPOTrainer:
             self.dynamic_sampling_state["sample_batch_count"] += 1
 
         # Handle dynamic sampling using utilities
-        processed_output, processed_uids, keep_sampling, updated_state = handle_dynamic_sampling(
+        processed_output, processed_uids, keep_sampling, updated_state = trainer_utils.handle_dynamic_sampling(
             generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
         )
 
         # Check max resample limit, and if we hit it, return true for exit_loop
         if max_sample_batches > 0 and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches:
             logger.warning(
-                f"Hit max resample batches ({max_sample_batches}), but there are still not enough good prompts, stopping sampling"
+                f"Hit max sample batches ({max_sample_batches}), but there are still not enough good prompts, stopping sampling"
             )
             return generator_output, uids, False, True
         # Update state
