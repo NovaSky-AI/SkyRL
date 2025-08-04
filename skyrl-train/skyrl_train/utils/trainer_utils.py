@@ -9,9 +9,10 @@ from loguru import logger
 import glob
 import json
 from skyrl_train.generators.utils import get_metrics_from_generator_output
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
+import numpy as np
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -232,3 +233,35 @@ def dump_per_dataset_eval_results(
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
     print(f"Dumped aggregated eval metrics to {aggregated_filename}")
+
+
+def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
+    """Validate the generator output."""
+    if len(generator_output["response_ids"]) <= 0:
+        raise RuntimeError("No outputs generated")
+
+    assert len(input_batch["prompts"]) == len(
+        generator_output["response_ids"]
+    ), f"generate objects number must be equal to all inputs number, got {len(input_batch['prompts'])} and {len(generator_output['response_ids'])}"
+
+    if np.concatenate(generator_output["loss_masks"]).sum() == 0:
+        logger.info(
+            "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
+        )
+
+    # make sure all batch elements have the same length as response_ids (which should be non-zero)
+    for key in generator_output:
+        if isinstance(generator_output[key], list):
+            assert len(generator_output[key]) == len(
+                generator_output["response_ids"]
+            ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+
+    # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
+    for i in range(len(generator_output["response_ids"])):
+        assert len(generator_output["response_ids"][i]) == len(
+            generator_output["loss_masks"][i]
+        ), f"Response ids and loss masks must have the same length, got {len(generator_output['response_ids'][i])} and {len(generator_output['loss_masks'][i])}"
+        if isinstance(generator_output["rewards"][i], list):
+            assert len(generator_output["rewards"][i]) == len(
+                generator_output["response_ids"][i]
+            ), f"Token rewards and response ids must have the same length, got {len(generator_output['rewards'][i])} and {len(generator_output['response_ids'][i])}"
