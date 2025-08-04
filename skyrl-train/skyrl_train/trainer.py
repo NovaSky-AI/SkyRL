@@ -8,7 +8,6 @@ from pathlib import Path
 import ray
 import uuid
 import torch
-import contextlib
 from loguru import logger
 from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
@@ -39,7 +38,7 @@ from skyrl_train.utils import (
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.weights_manager import InferenceWeightsManager
+from skyrl_train.weights_manager import InferenceWeightsManager, ConditionalWeightsManager
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.trainer_utils import (
@@ -251,8 +250,8 @@ class RayPPOTrainer:
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
 
-                    # if we are continuing sampling, we don't need to manage weights
-                    weights_manager = self.weights_manager if not keep_sampling else contextlib.nullcontext()
+                    # if we are continuing sampling, we don't want to trigger weight management
+                    weights_manager = ConditionalWeightsManager(self.weights_manager, not keep_sampling)
 
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
@@ -262,15 +261,17 @@ class RayPPOTrainer:
                         with Timer("generate", self.all_timings):
                             generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
 
-                    # dynamic sampling
-                    if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                        generator_output, uids, keep_sampling, exit_loop = self.handle_dynamic_sampling(
-                            generator_output, uids
-                        )
-                        if keep_sampling:  # continue sampling
-                            continue
-                        elif exit_loop:  # we want to exit gracefully if we hit the max sample batches
-                            break
+                        # dynamic sampling
+                        if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
+                            generator_output, uids, keep_sampling, exit_loop = self.handle_dynamic_sampling(
+                                generator_output, uids
+                            )
+                            if keep_sampling:  # continue sampling
+                                # update weights manager condition (so we don't trigger sleep if we are continuing sampling)
+                                weights_manager.update_condition(not keep_sampling)
+                                continue
+                            elif exit_loop:  # we want to exit gracefully if we hit the max sample batches
+                                break
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
