@@ -88,9 +88,8 @@ trainer:
     # this adds training batch level normalization to advantages 
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
-    policy_loss_type: "regular" # "regular", "dual_clip", or customizable with PolicyLossRegistry
-    loss_reduction: "token_mean" # "token_mean", "sequence_mean"
-    importance_sampling_level: "token" # "token", "sequence"
+    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
+    loss_reduction: "token_mean" # "token_mean", "sequence_mean" (ignored for GSPO, which uses sequence_mean)
     # GAE parameters
     lambd: 1.0
     gamma: 1.0
