@@ -359,7 +359,7 @@ def test_handle_dynamic_sampling_invalid_strategy():
 
 
 def test_handle_replace_sampling_sufficient_good_samples():
-    """Test replace sampling when there are sufficient good samples (>1/3)."""
+    """Test replace sampling when there are sufficient good samples (>0.3)."""
     # Create test data with some good UIDs (high variance) and some bad UIDs (zero variance)
     generator_output = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12]],
@@ -397,7 +397,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
 
 
 def test_handle_replace_sampling_insufficient_good_samples():
-    """Test replace sampling when there are insufficient good samples (<1/3)."""
+    """Test replace sampling when there are insufficient good samples (<0.3)."""
     generator_output = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
@@ -424,7 +424,7 @@ def test_handle_replace_sampling_single_sample_per_prompt():
     generator_output = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
-        "rewards": [1.0, 1.0],  # Even same rewards should be OK with single sample
+        "rewards": [1.0, 1.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop", "stop"],
         "rollout_metrics": None,
