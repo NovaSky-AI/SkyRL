@@ -50,6 +50,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    validate_generator_output,
     GLOBAL_STEP_PREFIX,
     ResumeMode,
 )
@@ -692,12 +693,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        if len(generator_output["response_ids"]) <= 0:
-            raise RuntimeError("No outputs generated")
-
-        assert len(input_batch["prompts"]) == len(
-            generator_output["response_ids"]
-        ), f"generate objects number must be equal to all inputs number, got {len(input_batch['prompts'])} and {len(generator_output['response_ids'])}"
+        validate_generator_output(input_batch, generator_output)
 
         return generator_output
 

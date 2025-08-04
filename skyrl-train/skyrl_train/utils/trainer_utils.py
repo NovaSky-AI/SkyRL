@@ -11,7 +11,7 @@ import json
 import numpy as np
 from collections import defaultdict
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
 
@@ -483,3 +483,43 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
         filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
 
     return filtered
+
+
+def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
+    """Validate the generator output."""
+    if len(generator_output["response_ids"]) <= 0:
+        raise RuntimeError("No outputs generated")
+
+    # check that input prompts, response ids, and prompt token ids are all the same length
+    num_prompts = len(input_batch["prompts"])
+    num_responses = len(generator_output["response_ids"])
+    num_prompt_tokens = len(generator_output["prompt_token_ids"])
+    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
+    assert (
+        num_responses == num_prompt_tokens
+    ), f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
+
+    # make sure all batch elements have the same length as response_ids (which should be non-zero)
+    for key in generator_output:
+        if isinstance(generator_output[key], list):
+            assert len(generator_output[key]) == len(
+                generator_output["response_ids"]
+            ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+
+    # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
+    for i, (response_ids, loss_masks, rewards) in enumerate(
+        zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
+    ):
+        assert len(response_ids) == len(
+            loss_masks
+        ), f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        if isinstance(rewards, list):
+            assert len(rewards) == len(
+                response_ids
+            ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
+
+    # loss masks should be non-zero for at least one element for trainer
+    if np.concatenate(generator_output["loss_masks"]).sum() == 0:
+        logger.info(
+            "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
+        )
