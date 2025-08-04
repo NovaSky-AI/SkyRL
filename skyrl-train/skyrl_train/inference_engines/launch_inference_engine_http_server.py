@@ -259,6 +259,8 @@ def create_app() -> fastapi.FastAPI:
         return await handle_chat_completion(request, raw_request)
 
     # Health check endpoint
+    # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
+    # we can start receiving requests as soon as the FastAPI server starts
     @app.get("/health")
     async def health_check():
         return {"status": "healthy"}
