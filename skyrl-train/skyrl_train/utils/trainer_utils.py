@@ -240,11 +240,14 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
 
+    # check that input prompts, response ids, and prompt token ids are all the same length
     assert len(input_batch["prompts"]) == len(generator_output["response_ids"]) and len(
         generator_output["prompt_token_ids"]
     ) == len(
         generator_output["response_ids"]
     ), f"generate objects number must be equal to all inputs number, got {len(input_batch['prompts'])} and {len(generator_output['response_ids'])}"
+
+    # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
         logger.info(
             "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
