@@ -320,7 +320,6 @@ def handle_replace_sampling(
         logger.info("============= Dynamic sampling replace ===========")
         logger.info(f"Number of good prompts: {len(good_uids)}")
         logger.info(f"Number of bad prompts: {len(bad_uids)}")
-        logger.info("==================================================")
 
         # Get good uids to replace the bad uids (length of bad uids)
         replacement_uids = get_bad_sample_replacements(good_uids, bad_uids)  # uids to replace the bad uids
@@ -351,6 +350,7 @@ def handle_replace_sampling(
             replaced_uids[bad_idx] = uids[replacement_idx]
 
         logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
+        logger.info("==================================================")
 
         return generator_output, replaced_uids, False
     else:
