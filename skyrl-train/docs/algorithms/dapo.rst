@@ -8,7 +8,7 @@ The `DAPO <https://arxiv.org/abs/2503.14476>`_ (Decoupled Clip and Dynamic Sampl
 - **Token-Level Policy Gradient Loss**: Critical in long-CoT RL scenarios;
 - **Overlong Filtering**: Reduces reward noise and stabilizes training.
 
-In this guide, we walk through how to enable each of these components in SkyRL.
+In this guide, we walk through how to enable each of these components in SkyRL. We provide a simple example script for training DAPO on GSM8K in :code_link:`examples/algorithm/dapo/run_dapo_gsm8k.sh`.
 
 Clip-Higher
 ~~~~~~~~~~~
