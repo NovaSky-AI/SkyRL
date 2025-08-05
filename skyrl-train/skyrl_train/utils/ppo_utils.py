@@ -523,10 +523,12 @@ def gspo_policy_loss(
 
     # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
     # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_probs - sg[log_probs]
-    log_token_impportance_weights = log_importance_weights.detach() + log_probs - log_probs.detach()
+    # note: we put the addition at the end to avoid precision issues,
+    # per https://github.com/volcengine/verl/pull/2775#discussion_r2241500280
+    log_token_importance_weights = log_probs - log_probs.detach() + log_importance_weights.detach()
     # clip to avoid overflow
-    log_token_impportance_weights = torch.clamp(log_token_impportance_weights, max=10)
-    ratio = torch.exp(log_token_impportance_weights)
+    log_token_importance_weights = torch.clamp(log_token_importance_weights, max=10)
+    ratio = torch.exp(log_token_importance_weights)
 
     # Standard PPO surrogate objective with sequence-level importance weights
     surr1 = ratio * advantages
