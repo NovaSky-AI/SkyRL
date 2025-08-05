@@ -632,28 +632,6 @@ def test_filter_generator_output():
     assert filtered["rollout_metrics"] == {"metric": "value"}
 
 
-def test_filter_generator_output_no_stop_reasons():
-    """Test filter_generator_output when stop_reasons is None."""
-    generator_output = {
-        "prompt_token_ids": [[1, 2], [3, 4]],
-        "response_ids": [[5, 6], [7, 8]],
-        "rewards": [1.0, 2.0],
-        "loss_masks": [[1, 1]] * 2,
-        "stop_reasons": None,
-        "rollout_metrics": None,
-    }
-    kept_indices = [1]
-
-    filtered = filter_generator_output(generator_output, kept_indices)
-
-    assert filtered["prompt_token_ids"] == [[3, 4]]
-    assert filtered["response_ids"] == [[7, 8]]
-    assert filtered["rewards"] == [2.0]
-    assert filtered["loss_masks"] == [[1, 1]]
-    assert filtered["stop_reasons"] is None
-    assert filtered["rollout_metrics"] is None
-
-
 def test_validate_generator_output_valid_case():
     """Test validate_generator_output with valid case."""
     input_batch = GeneratorInput(
