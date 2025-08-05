@@ -292,10 +292,12 @@ def handle_replace_sampling(
     min_replace_ratio = sampling_config.get("min_replace_ratio", 0.3)
 
     # Extract rewards and convert to sequence-level if needed
-    rewards = np.array(generator_output["rewards"])
-    if isinstance(rewards[0], list):
+    rewards_list = generator_output["rewards"]
+    if rewards_list and isinstance(rewards_list[0], list):
         # Token-level rewards: sum to get sequence rewards
-        rewards = rewards.sum(axis=-1)
+        rewards = np.array([sum(r) for r in rewards_list])
+    else:
+        rewards = np.array(rewards_list)
 
     # get mapping of uids to list of indices and metrics
     uid2indices = defaultdict(list)
@@ -384,11 +386,12 @@ def handle_filter_sampling(
     n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
 
     # Extract rewards from collected output
-    rewards = np.array(generator_output["rewards"])
-
-    # Convert to sequence-level rewards if needed
-    if isinstance(rewards[0], list):
-        rewards = rewards.sum(axis=-1)
+    rewards_list = generator_output["rewards"]
+    if rewards_list and isinstance(rewards_list[0], list):
+        # Token-level rewards: sum to get sequence rewards
+        rewards = np.array([sum(r) for r in rewards_list])
+    else:
+        rewards = np.array(rewards_list)
 
     # Group by UID and calculate standard deviation
     uid2metric_vals = defaultdict(list)
@@ -460,12 +463,12 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
 
     if num_candidates >= num_replacements:
         perm = np.random.permutation(num_candidates)
-        chosen_replacement_idxs = np.array(list(good_uids))[perm[:num_replacements]]
+        chosen_replacement_uids = np.array(list(good_uids))[perm[:num_replacements]]
     else:
         indices = np.random.randint(low=0, high=num_candidates, size=(num_replacements,))
-        chosen_replacement_idxs = np.array(list(good_uids))[indices]
+        chosen_replacement_uids = np.array(list(good_uids))[indices]
 
-    return chosen_replacement_idxs
+    return chosen_replacement_uids
 
 
 def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) -> GeneratorOutput:

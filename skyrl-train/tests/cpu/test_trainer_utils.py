@@ -449,8 +449,8 @@ def test_handle_replace_sampling_token_level_rewards():
     """Test replace sampling with token-level rewards (should sum to sequence level)."""
     generator_output = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
-        "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
-        "rewards": [[1.0, 2.0], [3.0, 4.0], [1.0, 1.0], [1.0, 1.0]],  # Token-level rewards
+        "response_ids": [[9, 10], [11, 12, 13], [14, 15], [16]],
+        "rewards": [[1.0, 2.0], [3.0, 4.0, 5.0], [1.0, 1.0], [1.0]],  # Token-level rewards
         "loss_masks": [[1, 1]] * 4,
         "stop_reasons": ["stop"] * 4,
         "rollout_metrics": None,

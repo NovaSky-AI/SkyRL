@@ -335,7 +335,7 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (DAPO), ``replace`` (POLARIS/WebSailor), or ``null`` for no dynamic sampling.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
-  
+
 
 Policy Loss Formulation 
 ~~~~~~~~~~~~~~~~~~~~~~~
