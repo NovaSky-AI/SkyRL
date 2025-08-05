@@ -10,15 +10,24 @@ DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
+# DAPO parameters
+EPS_CLIP_LOW=0.2
+EPS_CLIP_HIGH=0.27
+DYNAMIC_SAMPLING_TYPE=filter
+DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
+LOSS_REDUCTION="token_mean"
+APPLY_OVERLONG_FILTERING=true
+
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.eps_clip_high=0.27 \
-  trainer.algorithm.dynamic_sampling.type=filter \
-  trainer.algorithm.dynamic_sampling.max_sample_batches=30 \
-  trainer.algorithm.loss_reduction="token_mean" \
-  generator.apply_overlong_filtering=true \
+  trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
+  trainer.algorithm.eps_clip_high=$EPS_CLIP_HIGH \
+  trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
+  trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
+  trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
