@@ -291,7 +291,7 @@ Algorithm Configuration
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
       policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
-      loss_reduction: "token_mean" # "token_mean", "sequence_mean" (ignored for GSPO)
+      loss_reduction: "token_mean" # "token_mean", "sequence_mean"
 
       # GAE parameters
       lambd: 1.0
@@ -319,7 +319,7 @@ Algorithm Configuration
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
-  - ``gspo``: Group Sequence Policy Optimization with sequence-level importance sampling for improved training stability (`arXiv:2507.18071 <https://arxiv.org/abs/2507.18071>`_)
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options are ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
