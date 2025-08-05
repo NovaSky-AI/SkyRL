@@ -290,7 +290,7 @@ Algorithm Configuration
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      policy_loss_type: "regular" # "regular", "dual_clip", or customizable with PolicyLossRegistry
+      policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
       loss_reduction: "token_mean" # "token_mean", "sequence_mean"
 
       # GAE parameters
@@ -315,8 +315,14 @@ Algorithm Configuration
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.
 - ``algorithm.advantage_batch_normalize``: Whether to normalize advantages by the (global) batch mean and standard deviation.
 - ``algorithm.value_head_prefix``: The name used to identify the value head in the critic model.
-- ``algorithm.policy_loss_type``: Type of PPO loss to use. Currently, we implement ``regular`` and ``dual_clip``, where ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_. Custom policy losses can be registered with the ``PolicyLossRegistry``.
-- ``algorithm.loss_reduction``: Type of PPO loss reduction to use. Currently, we support ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
+- ``algorithm.policy_loss_type``: Type of policy loss to use. Options include:
+
+  - ``regular``: Vanilla PPO loss with token-level importance sampling
+  - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - Custom policy losses can be registered with the ``PolicyLossRegistry``
+
+- ``algorithm.loss_reduction``: Type of loss reduction to use. Options are ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.

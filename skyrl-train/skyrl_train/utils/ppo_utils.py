@@ -397,6 +397,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
 class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
+    GSPO = "gspo"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -480,6 +481,65 @@ def ppo_policy_loss(
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     loss = reduce_loss(loss, loss_mask, loss_reduction)
+    return loss, clip_ratio
+
+
+@register_policy_loss(PolicyLossType.GSPO)
+def gspo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """
+    GSPO (Group Sequence Policy Optimization) policy loss function,
+    as proposed in https://arxiv.org/abs/2507.18071.
+
+    This implements sequence-level importance sampling instead of token-level importance sampling.
+    The key difference is that importance weights are computed at the sequence level and then
+    applied uniformly across all tokens in the sequence. This can lead to more stable training
+    dynamics by reducing the variance in clipping behavior within sequences.
+
+    The variant of GSPO used here is GSPO-token, a generalization which allows for token-level
+    advantages [equations 14 and 15 in the paper].
+    """
+    # GSPO must use sequence_mean reduction
+    loss_reduction = config.loss_reduction
+    if loss_reduction != "sequence_mean":
+        # The GSPO paper uses sequence_mean reduction; there's no reason
+        # why a user couldn't use token_mean reduction, but
+        # it's not clear whether it would be stable or not.
+        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+
+        logger_.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
+
+    # Compute log ratios
+    log_ratio = log_probs - old_log_probs
+
+    # Key GSPO innovation: sequence-level importance sampling
+    # Instead of using per-token ratios, compute sequence-averaged ratios
+    log_importance_weights = masked_mean(log_ratio, loss_mask, dim=-1).unsqueeze(-1)
+
+    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_probs - sg[log_probs]
+    # note: we put the addition at the end to avoid precision issues,
+    # per https://github.com/volcengine/verl/pull/2775#discussion_r2241500280
+    log_token_importance_weights = log_probs - log_probs.detach() + log_importance_weights.detach()
+    # clip to avoid overflow
+    log_token_importance_weights = torch.clamp(log_token_importance_weights, max=10)
+    ratio = torch.exp(log_token_importance_weights)
+
+    # Standard PPO surrogate objective with sequence-level importance weights
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+    loss = -torch.min(surr1, surr2)
+
+    # Compute clipping ratio for monitoring
+    clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+
+    loss = reduce_loss(loss, loss_mask, loss_reduction)
+
     return loss, clip_ratio
 
 
