@@ -279,7 +279,7 @@ def test_gspo_importance_sampling_levels():
         "eps_clip_high": clip_eps_high,
         "clip_ratio_c": 3.0,
         "policy_loss_type": "gspo",
-        "loss_reduction": "token_mean",  # GSPO will override this to sequence_mean
+        "loss_reduction": "sequence_mean",  # GSPO recommended reduction
     })
     gspo_loss_fn = PolicyLossRegistry.get("gspo")
     loss_sequence, _ = gspo_loss_fn(log_probs, old_log_probs, advantages, gspo_config, loss_mask)
@@ -298,10 +298,11 @@ def test_gspo_importance_sampling_levels():
 
     # Manual calculation for sequence-level (GSPO)
     # First compute sequence-level importance weights (key GSPO innovation)
-    log_importance_weights_seq = masked_mean(log_ratio, loss_mask, dim=-1)
-    # Expand to match the shape of log_ratio
-    log_importance_weights_seq = log_importance_weights_seq.unsqueeze(-1).expand_as(log_ratio)
-    ratio_sequence = log_importance_weights_seq.exp()
+    log_importance_weights_seq = masked_mean(log_ratio, loss_mask, dim=-1).unsqueeze(-1)
+    
+    # GSPO uses stop gradients: s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_probs - sg[log_probs]
+    ratio_sequence = torch.exp(log_importance_weights_seq.detach() + log_probs - log_probs.detach())
     surr1_sequence = ratio_sequence * advantages
     surr2_sequence = ratio_sequence.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
     loss_per_token_sequence = -torch.min(surr1_sequence, surr2_sequence)

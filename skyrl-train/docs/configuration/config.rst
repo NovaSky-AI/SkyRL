@@ -322,7 +322,7 @@ Algorithm Configuration
   - ``gspo``: Group Sequence Policy Optimization with sequence-level importance sampling for improved training stability (`arXiv:2507.18071 <https://arxiv.org/abs/2507.18071>`_)
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
-- ``algorithm.loss_reduction``: Type of loss reduction to use. Options are ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch. Note: GSPO automatically uses ``sequence_mean`` regardless of this setting.
+- ``algorithm.loss_reduction``: Type of loss reduction to use. Options are ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.
