@@ -329,7 +329,7 @@ Algorithm Configuration
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
   - ``max_seq_len_normalized_mean``: computes per-sequence avg token loss, then averages over the batch, and normalizes by the max sequence length. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 
-- ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+- ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.
