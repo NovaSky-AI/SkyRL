@@ -256,8 +256,8 @@ def handle_dynamic_sampling(
     generator_output: GeneratorOutput,
     uids: List[str],
     sampling_config: Dict[str, Any],
-    collected_state: DynamicSamplingState,
-) -> Tuple[GeneratorOutput, List[str], bool, DynamicSamplingState]:
+    collected_state: Optional[DynamicSamplingState] = None,
+) -> Tuple[GeneratorOutput, List[str], bool, Optional[DynamicSamplingState]]:
     """
     Handle dynamic sampling with different strategies (filter, replace).
 
@@ -276,7 +276,7 @@ def handle_dynamic_sampling(
     sampling_type = sampling_config.get("type", None)
 
     if sampling_type is None:
-        return generator_output, uids, False, collected_state
+        return generator_output, uids, False, None
 
     if sampling_type == "replace":
         # For "replace" strategy, the collected state is not used.
@@ -472,7 +472,7 @@ def handle_filter_sampling(
             final_output = filter_generator_output(final_output, list(range(max_trajectories)))
             final_uids = final_uids[:max_trajectories]
 
-        return final_output, final_uids, False, collected_state
+        return final_output, final_uids, False, None
 
 
 def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:
