@@ -365,7 +365,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
     """Test replace sampling when there are sufficient good samples (>0.3)."""
     # Create test data with some good UIDs (high variance) and some bad UIDs (zero variance)
     generator_output = {
-        "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12]],
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4], [5, 6], [5, 6]],
         "response_ids": [[13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24]],
         "rewards": [
             1.0,
@@ -402,7 +402,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
 def test_handle_replace_sampling_insufficient_good_samples():
     """Test replace sampling when there are insufficient good samples (<0.3)."""
     generator_output = {
-        "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
         "rewards": [1.0, 1.0, 2.0, 2.0],  # uid1: [1.0, 1.0] (bad), uid2: [2.0, 2.0] (bad)
         "loss_masks": [[1, 1]] * 4,
@@ -448,7 +448,7 @@ def test_handle_replace_sampling_single_sample_per_prompt():
 def test_handle_replace_sampling_token_level_rewards():
     """Test replace sampling with token-level rewards (should sum to sequence level)."""
     generator_output = {
-        "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12, 13], [14, 15], [16]],
         "rewards": [[1.0, 2.0], [3.0, 4.0, 5.0], [1.0, 1.0], [1.0]],  # Token-level rewards
         "loss_masks": [[1, 1]] * 4,
@@ -471,7 +471,7 @@ def test_handle_replace_sampling_token_level_rewards():
 def test_handle_filter_sampling_sufficient_prompts():
     """Test filter sampling when we get sufficient prompts in one batch."""
     generator_output = {
-        "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
         "rewards": [1.0, 2.0, 3.0, 3.0],  # uid1: [1.0, 2.0] (good), uid2: [3.0, 3.0] (bad)
         "loss_masks": [[1, 1]] * 4,
