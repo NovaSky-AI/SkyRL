@@ -325,7 +325,7 @@ Algorithm Configuration
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
 
-  - ``token_mean``: token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_.
+  - ``token_mean``: token-level loss used in `DAPO <https://dapo-sia.github.io/>`_.
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
   - ``max_seq_len_normalized_mean``: computes per-sequence avg token loss, then averages over the batch, and normalizes by the max sequence length. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 

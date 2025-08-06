@@ -67,7 +67,7 @@ def test_compute_grpo_outcome_advantage(advantage_test_data):
 
 
 def test_compute_grpo_outcome_advantage_norm_std_false():
-    """Test GRPO advantage computation with norm_adv_by_std_in_grpo=False."""
+    """Test GRPO advantage computation with grpo_norm_by_std=False."""
     # Two groups: [6.0, 3.0] mean=4.5, [9.0, 12.0] mean=10.5
     token_level_rewards = torch.tensor(
         [
@@ -84,7 +84,7 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
         token_level_rewards=token_level_rewards,
         response_mask=response_mask,
         index=index,
-        norm_adv_by_std_in_grpo=False,
+        grpo_norm_by_std=False,
     )
 
     # Expected: [6.0-4.5, 3.0-4.5, 9.0-10.5, 12.0-10.5] = [1.5, -1.5, -1.5, 1.5]

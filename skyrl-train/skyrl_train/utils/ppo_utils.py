@@ -468,7 +468,8 @@ def ppo_policy_loss(
     assert loss_reduction in [
         "token_mean",
         "sequence_mean",
-    ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
+        "max_seq_len_normalized_mean",
+    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'max_seq_len_normalized_mean'"
 
     ratio = (log_probs - old_log_probs).exp()
     surr1 = ratio * advantages
@@ -614,7 +615,7 @@ def compute_grpo_outcome_advantage(
         - response_mask: Float[torch.Tensor, "batch_size seqlen"]
         - index: np.ndarray (batch_size)
         - epsilon: float
-        - norm_adv_by_std_in_grpo: bool
+        - grpo_norm_by_std: bool
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
