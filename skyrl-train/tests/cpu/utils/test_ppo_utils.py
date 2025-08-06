@@ -7,6 +7,7 @@ import torch
 import math
 import pytest
 from skyrl_train.utils.ppo_utils import (
+    reduce_loss,
     compute_approx_kl,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -166,8 +167,6 @@ def test_compute_gae_advantage_return_lam(advantage_test_data):
 
 def test_reduce_loss():
     """Test the reduce_loss function with different reduction types."""
-    from skyrl_train.utils.ppo_utils import reduce_loss
-
     # Test data: 2x3 loss tensor with different valid token counts per sequence
     loss = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]])  # seq0 has 3 tokens, seq1 has 1 token
