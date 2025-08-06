@@ -623,6 +623,10 @@ class PolicyWorkerBase(Worker):
     def set_actor_loss_fn(self):
         policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         config = OmegaConf.create(self.cfg.trainer.algorithm)
+        # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
+        # per batch can be variable based on the prompt length. This is used to normalize the loss for
+        # max_seq_len_normalized_mean loss reduction. Potentially revisit this if we update to use a
+        # fixed max response budget.
         config.max_seq_len = (
             self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
         )

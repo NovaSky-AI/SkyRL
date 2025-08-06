@@ -285,7 +285,6 @@ def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 
-    breakpoint()
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

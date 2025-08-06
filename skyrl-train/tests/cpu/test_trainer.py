@@ -87,6 +87,7 @@ def dummy_config():
                     "normalize_reward": True,
                     "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
+                    "grpo_norm_by_std": True,
                 },
                 "resume_mode": "none",
             },

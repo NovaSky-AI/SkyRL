@@ -736,7 +736,7 @@ class RayPPOTrainer:
             values=data["values"],
             gamma=self.cfg.trainer.algorithm.gamma,
             lambd=self.cfg.trainer.algorithm.lambd,
-            norm_adv_by_std_in_grpo=self.cfg.trainer.algorithm.norm_adv_by_std_in_grpo,
+            grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
         )
         data["returns"] = returns
         data["advantages"] = advantages

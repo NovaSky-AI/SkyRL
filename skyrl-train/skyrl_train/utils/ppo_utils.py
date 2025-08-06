@@ -603,7 +603,7 @@ def compute_grpo_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: bool = True,
+    grpo_norm_by_std: bool = True,
     **kwargs,
 ):
     """
@@ -641,7 +641,7 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
-            if norm_adv_by_std_in_grpo:
+            if grpo_norm_by_std:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
@@ -656,7 +656,7 @@ def compute_advantages_and_returns(
     index: np.ndarray,
     adv_estimator: AdvantageEstimator,
     values: Optional[torch.Tensor] = None,
-    norm_adv_by_std_in_grpo: bool = True,
+    grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
 ):
@@ -667,7 +667,7 @@ def compute_advantages_and_returns(
         response_mask=response_mask,
         index=index,
         values=values,
-        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        grpo_norm_by_std=grpo_norm_by_std,
         gamma=gamma,
         lambd=lambd,
     )
