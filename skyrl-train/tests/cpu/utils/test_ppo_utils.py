@@ -65,6 +65,35 @@ def test_compute_grpo_outcome_advantage(advantage_test_data):
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
 
 
+def test_compute_grpo_outcome_advantage_norm_std_false():
+    """Test GRPO advantage computation with norm_adv_by_std_in_grpo=False."""
+    # Two groups: [6.0, 3.0] mean=4.5, [9.0, 12.0] mean=10.5
+    token_level_rewards = torch.tensor(
+        [
+            [1.0, 2.0, 3.0],  # sum = 6.0, group 0
+            [1.0, 1.0, 1.0],  # sum = 3.0, group 0
+            [3.0, 3.0, 3.0],  # sum = 9.0, group 1
+            [4.0, 4.0, 4.0],  # sum = 12.0, group 1
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0, 1, 1])
+
+    adv, ret = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        norm_adv_by_std_in_grpo=False,
+    )
+
+    # Expected: [6.0-4.5, 3.0-4.5, 9.0-10.5, 12.0-10.5] = [1.5, -1.5, -1.5, 1.5]
+    expected = torch.tensor([1.5, -1.5, -1.5, 1.5]).unsqueeze(-1) * response_mask
+
+    assert adv.shape == token_level_rewards.shape
+    assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
 def test_compute_gae_advantage_return(advantage_test_data):
     rewards, values, response_mask, index = advantage_test_data
 
@@ -133,6 +162,34 @@ def test_compute_gae_advantage_return_lam(advantage_test_data):
 
     expected_ret = torch.tensor([[3.6250, 4.2500, 3.0000]])
     assert torch.allclose(ret, expected_ret, atol=1e-5)
+
+
+def test_reduce_loss():
+    """Test the reduce_loss function with different reduction types."""
+    from skyrl_train.utils.ppo_utils import reduce_loss
+
+    # Test data: 2x3 loss tensor with different valid token counts per sequence
+    loss = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]])  # seq0 has 3 tokens, seq1 has 1 token
+
+    # Test token_mean: sum all valid losses / count valid tokens
+    # Valid losses: [1.0, 2.0, 3.0, 4.0], mean = 10.0/4 = 2.5
+    result_token = reduce_loss(loss, loss_mask, "token_mean")
+    expected_token = torch.tensor(2.5)
+    assert torch.allclose(result_token, expected_token), f"Expected {expected_token}, got {result_token}"
+
+    # Test sequence_mean: mean of per-sequence means
+    # Seq 0: (1.0 + 2.0 + 3.0) / 3 = 2.0, Seq 1: 4.0 / 1 = 4.0, batch mean = (2.0 + 4.0) / 2 = 3.0
+    result_seq = reduce_loss(loss, loss_mask, "sequence_mean")
+    expected_seq = torch.tensor(3.0)
+    assert torch.allclose(result_seq, expected_seq), f"Expected {expected_seq}, got {result_seq}"
+
+    # Test max_seq_len_normalized_mean: sum per sequence / max_len, then batch mean
+    # Seq 0: (1.0 + 2.0 + 3.0) / 4 = 1.5, Seq 1: 4.0 / 4 = 1.0, batch mean = (1.5 + 1.0) / 2 = 1.25
+    max_seq_len = 4
+    result_max = reduce_loss(loss, loss_mask, "max_seq_len_normalized_mean", max_seq_len)
+    expected_max = torch.tensor(1.25)
+    assert torch.allclose(result_max, expected_max), f"Expected {expected_max}, got {result_max}"
 
 
 def test_adaptive_kl_controller_update():

@@ -28,7 +28,9 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from omegaconf import DictConfig
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry
+from functools import partial
+from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 
 _SET_AFFINITY = False
@@ -617,6 +619,14 @@ class PolicyWorkerBase(Worker):
         self.policy_mini_batch_size_per_gpu = (
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
+
+    def set_actor_loss_fn(self):
+        policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
+        config = OmegaConf.create(self.cfg.trainer.algorithm)
+        config.max_seq_len = (
+            self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
+        )
+        self.actor_loss_fn = partial(policy_loss_func, config=config)
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]

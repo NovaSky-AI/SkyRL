@@ -480,7 +480,7 @@ def ppo_policy_loss(
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-    loss = reduce_loss(loss, loss_mask, loss_reduction)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, clip_ratio
 
 
@@ -538,13 +538,16 @@ def gspo_policy_loss(
     # Compute clipping ratio for monitoring
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
     return loss, clip_ratio
 
 
 def reduce_loss(
-    loss: torch.Tensor, loss_mask: Optional[torch.Tensor], loss_reduction: Literal["token_mean", "sequence_mean"]
+    loss: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+    loss_reduction: Literal["token_mean", "sequence_mean", "max_seq_len_normalized_mean"],
+    max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
@@ -552,6 +555,12 @@ def reduce_loss(
     elif loss_reduction == "sequence_mean":
         # per-sequence token-mean (dim=-1), then batch-mean
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
+    elif loss_reduction == "max_seq_len_normalized_mean":
+        # per-sequence token-sum, normalized by the max sequence length, then batch mean
+        # this is the Dr. GRPO loss reduction to avoid length bias by normalizing by a constant
+        assert max_seq_len is not None, "max_seq_len must be provided for max_seq_len_normalized_mean loss reduction"
+        seq_losses = torch.sum(loss * loss_mask, dim=-1) / max_seq_len
+        loss = torch.mean(seq_losses)
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
     return loss
