@@ -325,10 +325,10 @@ Algorithm Configuration
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
 
-  - ``token_mean``: token-level loss used in `DAPO <https://dapo-sia.github.io/>`_.
+  - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
   - ``max_seq_len_normalized_mean``: computes the sum of token losses for each sequence, normalizes by the max sequence length, and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
-  
+
 - ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
