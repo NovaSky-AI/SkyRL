@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union, Callable, Optional, Tuple
+from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
 from enum import Enum
 import ray
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -236,12 +236,28 @@ def dump_per_dataset_eval_results(
     print(f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
+class DynamicSamplingState(TypedDict, total=False):
+    """Schema for dynamic sampling state dictionary.
+
+    Fields:
+        sample_batch_count: Counter for the number of sample batches processed
+        collected_generator_output: Accumulated generator output (filter strategy only)
+        collected_uids: Accumulated UIDs (filter strategy only)
+        num_prompts_in_batch: Number of prompts collected so far (filter strategy only)
+    """
+
+    sample_batch_count: int
+    collected_generator_output: Optional[GeneratorOutput]
+    collected_uids: Optional[List[str]]
+    num_prompts_in_batch: Optional[int]
+
+
 def handle_dynamic_sampling(
     generator_output: GeneratorOutput,
     uids: List[str],
     sampling_config: Dict[str, Any],
-    collected_state: Optional[Dict[str, Any]] = None,
-) -> Tuple[GeneratorOutput, List[str], bool, Optional[Dict[str, Any]]]:
+    collected_state: DynamicSamplingState,
+) -> Tuple[GeneratorOutput, List[str], bool, DynamicSamplingState]:
     """
     Handle dynamic sampling with different strategies (filter, replace).
 
@@ -260,7 +276,7 @@ def handle_dynamic_sampling(
     sampling_type = sampling_config.get("type", None)
 
     if sampling_type is None:
-        return generator_output, uids, False, None
+        return generator_output, uids, False, collected_state
 
     if sampling_type == "replace":
         # For "replace" strategy, the collected state is not used.
@@ -279,7 +295,9 @@ def handle_replace_sampling(
     generator_output: GeneratorOutput, uids: List[str], sampling_config: Dict[str, Any]
 ) -> Tuple[GeneratorOutput, List[str], bool]:
     """
-    Handle replace sampling strategy based on POLARIS implementation (https://github.com/ChenxinAn-fdu/POLARIS/).
+    Handle replace sampling strategy based on POLARIS implementation
+
+    Reference: https://github.com/ChenxinAn-fdu/POLARIS/blob/8c82adb16b8e45c1a34f6d0e23e35deb66dd1ae7/verl/verl/trainer/ppo/ray_trainer.py#L995-L1022.
 
     Args:
         generator_output: Current batch generator output
@@ -288,8 +306,8 @@ def handle_replace_sampling(
     Returns:
         Tuple of (processed_generator_output, processed_uids, keep_sampling)
     """
-    n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
-    min_replace_ratio = sampling_config.get("min_replace_ratio", 0.3)
+    n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
+    min_replace_ratio = sampling_config["min_replace_ratio"]
 
     # Extract rewards and convert to sequence-level if needed
     rewards_list = generator_output["rewards"]
@@ -368,8 +386,8 @@ def handle_filter_sampling(
     generator_output: GeneratorOutput,
     uids: List[str],
     sampling_config: Dict[str, Any],
-    collected_state: Dict[str, Any],
-) -> Tuple[GeneratorOutput, List[str], bool, Dict[str, Any]]:
+    collected_state: DynamicSamplingState,
+) -> Tuple[GeneratorOutput, List[str], bool, DynamicSamplingState]:
     """
     Handle filter-based sampling strategy (like DAPO).
 
@@ -382,8 +400,8 @@ def handle_filter_sampling(
     Returns:
         Tuple of (processed_generator_output, processed_uids, keep_sampling, updated_state)
     """
-    target_batch_size = sampling_config.get("train_batch_size")
-    n_samples_per_prompt = sampling_config.get("n_samples_per_prompt", 1)
+    target_batch_size = sampling_config["train_batch_size"]
+    n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
 
     # Extract rewards from collected output
     rewards_list = generator_output["rewards"]
@@ -454,7 +472,7 @@ def handle_filter_sampling(
             final_output = filter_generator_output(final_output, list(range(max_trajectories)))
             final_uids = final_uids[:max_trajectories]
 
-        return final_output, final_uids, False, None
+        return final_output, final_uids, False, collected_state
 
 
 def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> List[str]:

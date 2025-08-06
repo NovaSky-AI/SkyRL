@@ -52,6 +52,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_generator_output,
     GLOBAL_STEP_PREFIX,
     ResumeMode,
+    DynamicSamplingState,
 )
 
 
@@ -94,7 +95,7 @@ class RayPPOTrainer:
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
 
-        self.dynamic_sampling_state = None
+        self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -234,7 +235,6 @@ class RayPPOTrainer:
                 self.policy_model.backload_to_gpu()
 
         # setup for dynamic sampling
-        exit_loop = False
         keep_sampling = False
 
         # main training loop
@@ -270,8 +270,11 @@ class RayPPOTrainer:
                             weights_manager.update_condition(not keep_sampling)
                             if keep_sampling:  # continue sampling
                                 continue
-                            elif exit_loop:  # we want to exit gracefully if we hit the max sample batches
-                                break
+                            if exit_loop:
+                                raise RuntimeError(
+                                    f"Exiting training loop due to hitting dynamic sampling limit for {self.cfg.trainer.algorithm.dynamic_sampling.type} strategy with {self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. \
+                                     Please check your data difficulty distribution."
+                                )
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -350,14 +353,6 @@ class RayPPOTrainer:
                 self.global_step += 1
 
                 del training_input, generator_output
-
-            if exit_loop:
-                logger.warning("===================== Warning ====================")
-                logger.warning(
-                    "Exiting training loop due to hitting dynamic sampling limit. Please check your data difficulty distribution."
-                )
-                logger.warning("===================== Warning ====================")
-                break
 
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
                 with Timer("update_ref_with_policy", self.all_timings):
@@ -1061,11 +1056,11 @@ class RayPPOTrainer:
             "max_sample_batches": max_sample_batches,
             "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
             "train_batch_size": self.cfg.trainer.train_batch_size,
-            "n_samples_per_prompt": getattr(self.cfg.generator, "n_samples_per_prompt", 1),
+            "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
         }
 
         if self.dynamic_sampling_state is None:
-            self.dynamic_sampling_state = {
+            self.dynamic_sampling_state: DynamicSamplingState = {
                 "sample_batch_count": 1,
             }
         else:
