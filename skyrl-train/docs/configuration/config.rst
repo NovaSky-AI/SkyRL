@@ -291,7 +291,8 @@ Algorithm Configuration
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
       policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
-      loss_reduction: "token_mean" # "token_mean", "sequence_mean"
+      loss_reduction: "token_mean" # "token_mean", "sequence_mean", "max_seq_len_normalized_mean"
+      grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
 
       # GAE parameters
       lambd: 1.0
@@ -322,7 +323,13 @@ Algorithm Configuration
   - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
-- ``algorithm.loss_reduction``: Type of loss reduction to use. Options are ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
+- ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
+
+  - ``token_mean``: token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_.
+  - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
+  - ``max_seq_len_normalized_mean``: computes per-sequence avg token loss, then averages over the batch, and normalizes by the max sequence length. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+
+- ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.

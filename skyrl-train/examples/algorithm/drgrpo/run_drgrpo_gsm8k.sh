@@ -1,6 +1,6 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
+# Colocated Dr. GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
@@ -52,7 +52,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_dapo" \
+  trainer.run_name="gsm8k_drgrpo" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   $@
