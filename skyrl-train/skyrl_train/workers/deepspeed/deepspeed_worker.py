@@ -18,7 +18,6 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RewardWorkerBase,
     RefWorkerBase,
-    ValueLoss,
 )
 
 
@@ -90,9 +89,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (actor, actor_optim, actor_scheduler),
         )
-
-        # set ppo loss function
-        self.set_actor_loss_fn()
 
         self.use_cuda_ipc = False
         if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
@@ -282,9 +278,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (critic, critic_optim, critic_scheduler),
         )
-
-        # set ppo loss function
-        self.critic_loss_fn = ValueLoss(self.cfg.trainer.algorithm.value_clip)
 
 
 class DeepSpeedRewardWorkerBase(RewardWorkerBase):

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import socket
-from typing import Dict, Optional, Type, List, Any
+from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
 from collections import defaultdict
@@ -28,9 +28,7 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry
-from functools import partial
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from pathlib import Path
 
 _SET_AFFINITY = False
@@ -317,37 +315,6 @@ class Worker(DistributedTorchRayActor):
         raise NotImplementedError()
 
 
-class ValueLoss(nn.Module):
-    """
-    Value Loss for PPO
-    """
-
-    def __init__(self, clip_eps: float = None) -> None:
-        super().__init__()
-        self.clip_eps = clip_eps
-
-    def forward(
-        self,
-        values: torch.Tensor,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
-        loss_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
-        if self.clip_eps is not None:
-            values_clipped = old_values + (values - old_values).clamp(-self.clip_eps, self.clip_eps)
-            surr1 = (values_clipped - returns) ** 2
-            surr2 = (values - returns) ** 2
-            loss = torch.max(surr1, surr2)
-            clipfrac = masked_mean((surr1 > surr2).float(), loss_mask).mean().detach().item()
-        else:
-            clipfrac = None
-            loss = (values - returns) ** 2
-
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        return 0.5 * loss, clipfrac
-
-
 # adapted from OpenReasonerZero: https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero/blob/main/orz/ppo/actors.py
 class PPORayActorGroup:
     """
@@ -378,6 +345,7 @@ class PPORayActorGroup:
         colocate_all: bool = False,
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
+        loss_fn: Optional[Callable] = None,
     ) -> None:
         self.cfg = cfg
         self._num_nodes = num_nodes
@@ -391,6 +359,7 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self.loss_fn = loss_fn
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
@@ -428,6 +397,7 @@ class PPORayActorGroup:
                 master_port=None,
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
+                loss_fn=self.loss_fn,
             )
         else:
             master_actor = self.ray_actor_type.options(
@@ -443,6 +413,7 @@ class PPORayActorGroup:
                 master_port=None,
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
+                loss_fn=self.loss_fn,
             )
         self._actor_handlers = [master_actor]
         # Create worker actors
@@ -469,6 +440,7 @@ class PPORayActorGroup:
                         master_port=master_port,
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
+                        loss_fn=self.loss_fn,
                     )
                 else:
                     worker_actor = self.ray_actor_type.options(
@@ -484,6 +456,7 @@ class PPORayActorGroup:
                         master_port=master_port,
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
+                        loss_fn=self.loss_fn,
                     )
                 self._actor_handlers.append(worker_actor)
 
@@ -598,15 +571,15 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
-    def __init__(self, **kwargs):
+    def __init__(self, loss_fn: Callable, **kwargs):
         super().__init__(**kwargs)
+        self.actor_loss_fn: Callable = loss_fn
         self.model: nn.Module = None
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.actor_loss_fn: nn.Module = None
 
     def _normalize_mini_batch_size(self):
         """
@@ -619,18 +592,6 @@ class PolicyWorkerBase(Worker):
         self.policy_mini_batch_size_per_gpu = (
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
-
-    def set_actor_loss_fn(self):
-        policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-        config = OmegaConf.create(self.cfg.trainer.algorithm)
-        # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-        # per batch can be variable based on the prompt length. This is used to normalize the loss for
-        # max_seq_len_normalized_mean loss reduction. Potentially revisit this if we update to use a
-        # fixed max response budget.
-        config.max_seq_len = (
-            self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
-        )
-        self.actor_loss_fn = partial(policy_loss_func, config=config)
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
@@ -865,15 +826,15 @@ class PolicyWorkerBase(Worker):
 
 class CriticWorkerBase(Worker):
 
-    def __init__(self, **kwargs):
+    def __init__(self, loss_fn: Callable, **kwargs):
         super().__init__(**kwargs)
+        self.critic_loss_fn: Callable = loss_fn
         self.model: nn.Module = None
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.critic_loss_fn: nn.Module = None
 
     def _normalize_mini_batch_size(self):
         """

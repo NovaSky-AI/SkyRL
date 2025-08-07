@@ -20,7 +20,6 @@ from collections import defaultdict
 from enum import StrEnum
 from typing import Callable, List, Tuple, Union, Optional, Literal
 from functools import wraps
-
 import torch
 import numpy as np
 
@@ -158,6 +157,28 @@ def masked_whiten(values, mask, shift_mean=True):
     if not shift_mean:
         whitened += mean
     return whitened
+
+
+def ppo_critic_loss(
+    values: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+
+    if config.value_clip is not None:
+        values_clipped = old_values + (values - old_values).clamp(-config.value_clip, config.value_clip)
+        surr1 = (values_clipped - returns) ** 2
+        surr2 = (values - returns) ** 2
+        loss = torch.max(surr1, surr2)
+        clipfrac = masked_mean((surr1 > surr2).float(), loss_mask).mean().detach().item()
+    else:
+        clipfrac = None
+        loss = (values - returns) ** 2
+
+    loss = masked_mean(loss, loss_mask, dim=-1).mean()
+    return 0.5 * loss, clipfrac
 
 
 # Shared registry actor class for both policy loss and advantage estimator registries
