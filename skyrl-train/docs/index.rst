@@ -81,3 +81,9 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :caption: Troubleshooting
 
    troubleshooting/troubleshooting
+
+.. toctree::
+   :maxdepth: 2
+   :caption: (NEW) SkyAgent
+
+   skyagent/agent-overview 
