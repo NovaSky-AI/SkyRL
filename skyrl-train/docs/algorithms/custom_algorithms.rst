@@ -118,6 +118,5 @@ We show the outline of creating a custom trainer below, and you can find a full 
         initialize_ray(cfg)
         ray.get(skyrl_entrypoint.remote(cfg))
 
-
     if __name__ == "__main__":
         main()
