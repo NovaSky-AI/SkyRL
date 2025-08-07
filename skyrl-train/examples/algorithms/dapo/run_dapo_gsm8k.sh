@@ -18,8 +18,9 @@ DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
 LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
-# apply soft overlong punishment using custom advantage estimator registered in main_dapo.py
-ADV_ESTIMATOR="grpo_with_soft_overlong_punishment"
+# apply soft overlong punishment with custom trainer impl in main_dapo.py
+OVERLONG_BUFFER_LEN=4096
+OVERLONG_BUFFER_PENALTY_FACTOR=1.0
 
 # other DAPO parameters
 USE_KL_LOSS=false
@@ -32,8 +33,10 @@ MAX_RESPONSE_LENGTH=1024
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.algorithm.advantage_estimator=$ADV_ESTIMATOR \
+  trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="dual_clip" \
+  +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
+  +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
   trainer.algorithm.eps_clip_high=$EPS_CLIP_HIGH \
   trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \

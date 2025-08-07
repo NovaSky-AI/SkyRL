@@ -5,64 +5,103 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo
 import ray
 import hydra
 import torch
-import numpy as np
+from typing import List
 from omegaconf import DictConfig
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, compute_grpo_outcome_advantage
+
+from skyrl_train.generators.base import GeneratorOutput, GeneratorInterface
 
 
-# Custom advantage estimator to implement soft overlong punishment for DAPO
-def compute_grpo_with_soft_overlong_punishment(
-    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, **kwargs
-):
+class DAPOTrainer(RayPPOTrainer):
     """
-    Applies soft overlong punishment to the token-level rewards and then computes GRPO advantages.
+    Custom trainer for DAPO.
 
-    Args:
-        token_level_rewards: (batch_size, seqlen) tensor of token-level rewards
-        response_mask: (batch_size, seqlen) tensor of response mask
-        index: (batch_size) tensor of prompt indices
-
-    Returns:
-        advantages: (batch_size, seqlen) tensor of advantages
-        returns: (batch_size, seqlen) tensor of returns
+    Overrides the postprocess_generator_output method to additionally apply soft overlong punishment to rewards.
     """
-    # this assumes response-level rewards
-    scores = token_level_rewards.sum(dim=-1)
 
-    # Overlong punishment params - hardcoded for this script for now
-    # TODO (erictang000): make these configurable (in general for all custom registries)
-    max_resp_length = 1024  # this is generator.sampling_params.max_generate_length in the `run_dapo_gsm8k.sh` script
-    overlong_buffer_len = 512  # overlong buffer is last 512 tokens of the response as an example
-    overlong_penalty_factor = (
-        1.0  # reward penalty increases linearly from 0 to 1.0 as the response length enters the overlong buffer
-    )
+    @torch.no_grad()
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+        """
+        Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 
-    # add soft overlong punishment
-    lengths = response_mask.sum(dim=-1)
-    buffer_start_idx = max_resp_length - overlong_buffer_len
-    # apply penalty
-    penalty_mask = lengths > buffer_start_idx
-    penalty = (lengths[penalty_mask] - buffer_start_idx) / overlong_buffer_len * overlong_penalty_factor
-    scores[penalty_mask] -= penalty
-    # for responses that have length >= max_resp_length, overlong filtering is already applied in the config
-    # by setting apply_overlong_filtering=true
+        Args:
+            generator_output: GeneratorOutput
+            uids: List[str]
 
-    # reconstruct response-level rewards in format expected in compute_grpo_outcome_advantage
-    new_token_level_rewards = torch.zeros_like(token_level_rewards)
-    new_token_level_rewards[:, -1] = scores
+        Returns:
+            GeneratorOutput
+        """
+        # modify rewards here
+        prompt_token_ids = generator_output["prompt_token_ids"]
+        response_ids = generator_output["response_ids"]
+        rewards = generator_output["rewards"]
 
-    # compute GRPO advantages
-    advantages, returns = compute_grpo_outcome_advantage(
-        new_token_level_rewards, response_mask, index, epsilon=1e-6, norm_adv_by_std_in_grpo=True
-    )
+        assert isinstance(rewards[0], float), "DAPO assumes verifiable sequence level rewards"
 
-    return advantages, returns
+        # get the prompt length
+        prompt_lengths = [len(prompt) for prompt in prompt_token_ids]
+
+        # get the response length
+        response_lengths = [len(response) for response in response_ids]
+
+        # get the max context length
+        max_context_length = (
+            self.cfg.trainer.policy.max_input_length + self.cfg.generator.sampling_params.max_generate_length
+        )
+
+        # apply soft overlong punishment
+        for i, (prompt_length, response_length) in enumerate(zip(prompt_lengths, response_lengths)):
+            # max_exceed_length is the beginning of the overlong buffer
+            max_exceed_length = max_context_length - self.cfg.trainer.algorithm.overlong_buffer.len - prompt_length
+            # if the response is within the overlong buffer, apply the penalty
+            if response_length > max_exceed_length and response_length <= max_context_length - prompt_length:
+                exceed_length = response_length - max_exceed_length
+                penalty = exceed_length / max_exceed_length * self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
+
+                rewards[i] -= penalty
+            # if the response is outside the overlong buffer, set the reward to 0
+            elif response_length > max_context_length - prompt_length:
+                # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
+                rewards[i] = 0.0
+
+        generator_output["rewards"] = rewards
+
+        # use base class impl for metrics and per-token reward conversion
+        return super().postprocess_generator_output(generator_output, uids)
 
 
-# Register our custom advantage estimator
-AdvantageEstimatorRegistry.register("grpo_with_soft_overlong_punishment", compute_grpo_with_soft_overlong_punishment)
+class DAPOExp(BasePPOExp):
+    def __init__(self, cfg: DictConfig):
+        super().__init__(cfg)
+
+    def get_trainer(
+        self,
+        cfg,
+        tracker,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        inference_engine_client,
+        generator: GeneratorInterface,
+        colocate_pg,
+    ):
+        """Initializes the trainer.
+
+        Returns:
+            DAPOTrainer: The trainer.
+        """
+        return DAPOTrainer(
+            cfg=cfg,
+            tracker=tracker,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=colocate_pg,
+        )
 
 
 @ray.remote(num_cpus=1)
