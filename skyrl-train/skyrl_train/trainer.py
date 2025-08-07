@@ -263,19 +263,11 @@ class RayPPOTrainer:
 
                         # dynamic sampling
                         if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                            generator_output, uids, keep_sampling, exit_loop = self.handle_dynamic_sampling(
-                                generator_output, uids
-                            )
+                            generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
                             # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
                             weights_manager.update_condition(not keep_sampling)
                             if keep_sampling:  # continue sampling
                                 continue
-                            if exit_loop:
-                                raise RuntimeError(
-                                    f"Exiting training loop due to hitting dynamic sampling limit for {self.cfg.trainer.algorithm.dynamic_sampling.type} strategy \
-                                     with {self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. \
-                                     Please check your data difficulty distribution."
-                                )
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -1031,14 +1023,13 @@ class RayPPOTrainer:
 
     def handle_dynamic_sampling(
         self, generator_output: GeneratorOutput, uids: List[str]
-    ) -> Tuple[GeneratorOutput, List[str], bool, bool]:
+    ) -> Tuple[GeneratorOutput, List[str], bool]:
         """
         Handle dynamic sampling for the current batch.
 
         Accumulates the generator output and UIDs across batches if we are sampling repeatedly
         and applies the dynamic sampling strategy (i.e. filter, replace) to the current batch.
-        If we hit the limit of max sample batches, we return True for exit_loop, to attempt to
-        exit the training loop gracefully.
+        If we hit the limit of max sample batches, we raise an error.
 
         Args:
             generator_output: Current batch generator output
@@ -1048,7 +1039,6 @@ class RayPPOTrainer:
             processed_output: Filtered generator output
             processed_uids: Filtered UIDs
             keep_sampling: Whether to keep sampling
-            exit_loop: Whether to exit the training loop (if we hit the max sample batches)
         """
         # Prepare sampling configuration
         max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
@@ -1072,16 +1062,17 @@ class RayPPOTrainer:
             generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
         )
 
-        # Check max resample limit, and if we hit it, return true for exit_loop
+        # Check max resample limit, and if we hit it, raise an error
         if (
             keep_sampling
             and max_sample_batches > 0
             and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
         ):
-            logger.warning(
-                f"Hit max sample batches ({max_sample_batches}), but there are still not enough good prompts, stopping sampling"
+            raise RuntimeError(
+                f"Exiting training loop due to hitting dynamic sampling limit for {self.cfg.trainer.algorithm.dynamic_sampling.type} strategy \
+                    with {self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. \
+                    Please check your data difficulty distribution."
             )
-            return generator_output, uids, False, True
         # Update state
         self.dynamic_sampling_state = updated_state
 
@@ -1089,7 +1080,7 @@ class RayPPOTrainer:
             # Reset state when sampling is complete
             self.dynamic_sampling_state = None
 
-        return processed_output, processed_uids, keep_sampling, False
+        return processed_output, processed_uids, keep_sampling
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)
