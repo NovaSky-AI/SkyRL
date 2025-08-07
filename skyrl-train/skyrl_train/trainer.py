@@ -238,7 +238,7 @@ class RayPPOTrainer:
         keep_sampling = False
 
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
@@ -267,7 +267,7 @@ class RayPPOTrainer:
                             # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
                             weights_manager.update_condition(not keep_sampling)
                             if keep_sampling:  # continue sampling
-                                # update progress bar for current batch
+                                # update progress bar for current batch (but not global step)
                                 pbar.update(1)
                                 continue
 

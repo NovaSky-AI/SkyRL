@@ -56,7 +56,7 @@ The DAPO paper proposes two methods for overlong reward shaping:
 Overlong Filtering
 ------------------
 
-To enable overlong filtering, which sets loss mask to be all zeros for responses that do not finish with a stop token (i.e. responses that are too long), you can set ``generator.apply_overlong_filtering`` to ``true``.
+To enable overlong filtering, which sets the loss mask to be all zeros for responses that do not finish with a stop token (i.e. responses that are too long), you can set ``generator.apply_overlong_filtering`` to ``true``.
 
 .. code-block:: yaml
 
