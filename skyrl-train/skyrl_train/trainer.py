@@ -14,7 +14,6 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
-import torch.nn as nn
 from functools import partial
 
 from skyrl_train.dataset import PromptDataset
@@ -396,26 +395,26 @@ class RayPPOTrainer:
         uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
         return generator_input, uids
 
-    def get_loss_functions(self) -> Tuple[Callable, nn.Module]:
+    def get_loss_functions(self) -> Tuple[Callable, Callable]:
         """
         Get the policy and critic loss functions.
         """
         # send algorithm config to loss functions
-        config = OmegaConf.create(self.cfg.trainer.algorithm)
+        algorithm_config = OmegaConf.create(self.cfg.trainer.algorithm)
         # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
         # per batch can be variable based on the prompt length. This is used to normalize the loss for
         # max_seq_len_normalized_mean loss reduction. Potentially revisit this if we update to use a
         # fixed max response budget.
-        config.max_seq_len = (
+        algorithm_config.max_seq_len = (
             self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
         )
 
         # policy loss function
         policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-        policy_loss_func = partial(policy_loss_func, config=config)
+        policy_loss_func = partial(policy_loss_func, config=algorithm_config)
 
         # critic loss function
-        critic_loss_func = partial(ppo_critic_loss, config=config)
+        critic_loss_func = partial(ppo_critic_loss, config=algorithm_config)
         return policy_loss_func, critic_loss_func
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
@@ -429,7 +428,6 @@ class RayPPOTrainer:
             raise NotImplementedError("reward models are not supported yet")
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
-        policy_loss_func, critic_loss_func = self.get_loss_functions()
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -451,7 +449,6 @@ class RayPPOTrainer:
                 colocate_all=True,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
                 record_memory=cfg.trainer.policy.record_memory,
-                loss_fn=policy_loss_func,
             )
             if use_ref_model:
                 assert (
@@ -483,7 +480,6 @@ class RayPPOTrainer:
                     num_gpus_per_actor=0.2,
                     colocate_all=True,
                     sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
-                    loss_fn=critic_loss_func,
                 )
             else:
                 critic_model = None
@@ -529,7 +525,6 @@ class RayPPOTrainer:
                 num_gpus_per_actor=0.75 if pg else 1,
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-                loss_fn=policy_loss_func,
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
@@ -573,7 +568,6 @@ class RayPPOTrainer:
                     num_gpus_per_actor=0.75 if pg else 1,
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
-                    loss_fn=critic_loss_func,
                 )
             else:
                 critic_model = None
@@ -617,6 +611,12 @@ class RayPPOTrainer:
             if cfg.trainer.reward.model.path:
                 ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
                 reward_model.offload_to_cpu()
+
+        # set loss functions
+        policy_loss_func, critic_loss_func = self.get_loss_functions()
+        ray.get(policy_model.async_run_ray_method("pass_through", "set_loss_function", policy_loss_func))
+        if cfg.trainer.critic.model.path:
+            ray.get(critic_model.async_run_ray_method("pass_through", "set_loss_function", critic_loss_func))
 
         self.policy_model: PPORayActorGroup = policy_model
         self.critic_model: Optional[PPORayActorGroup] = critic_model
