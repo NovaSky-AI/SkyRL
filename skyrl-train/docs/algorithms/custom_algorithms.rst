@@ -5,6 +5,10 @@ SkyRL-Train provides a registry system for easily implementing custom algorithms
 The API for the registry system can be found in the :doc:`registry API <../api/registry>`.
 Example scripts of using the registry can be found in at :code_link:`examples/algorithm/`.
 
+Additionally for more control, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/entrypoints/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
+This allows you to have full control over the training loop and implementing custom reward functions and output postprocessing.
+We provide an example of this for applying custom reward penalties in our :ref:`DAPO example <dapo-custom-trainer>`.
+
 Registering a Custom Advantage Estimator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -53,8 +57,8 @@ Similarly, you can register custom policy loss functions:
        # return loss and clip ratio
        return loss, 0.0
 
-Ray Distribution
-~~~~~~~~~~~~~~~~
+Registry Ray Distribution
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The registry system handles Ray actor synchronization when Ray is initialized. Functions registered on one process will be available to all Ray actors:
 
@@ -81,5 +85,38 @@ The registry system handles Ray actor synchronization when Ray is initialized. F
         exp = BasePPOExp(cfg)
         exp.run()
 
+Creating a Custom Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+To create a custom trainer for full control of your training loop, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/entrypoints/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
+We show the outline of creating a custom trainer below, and you can find a full running example in our :ref:`DAPO example <dapo-custom-trainer>`.
 
+.. code-block:: python
+
+    class CustomTrainer(RayPPOTrainer):
+        @torch.no_grad()
+        def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+            # apply custom reward penalties
+            ...
+            # use base class impl for metrics and per-token reward conversion
+            return super().postprocess_generator_output(generator_output, uids)
+
+   class CustomExp(BasePPOExp):
+       def get_trainer(self, *args, **kwargs):
+           return CustomTrainer(*args, **kwargs)
+
+    @ray.remote(num_cpus=1)
+    def skyrl_entrypoint(cfg: DictConfig):
+        exp = CustomExp(cfg)
+        exp.run()
+
+    @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+    def main(cfg: DictConfig) -> None:
+        # validate the arguments
+        validate_cfg(cfg)
+
+        initialize_ray(cfg)
+        ray.get(skyrl_entrypoint.remote(cfg))
+
+    if __name__ == "__main__":
+        main()

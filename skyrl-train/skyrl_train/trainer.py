@@ -18,7 +18,6 @@ from functools import partial
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.generators.base import (
     GeneratorInput,
@@ -30,6 +29,7 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train import utils
+from skyrl_train.utils import trainer_utils
 from skyrl_train.utils import (
     Timer,
     compute_approx_kl,
@@ -39,7 +39,7 @@ from skyrl_train.utils import (
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.weights_manager import InferenceWeightsManager
+from skyrl_train.weights_manager import InferenceWeightsManager, ConditionalWeightsManager
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.trainer_utils import (
@@ -52,6 +52,8 @@ from skyrl_train.utils.trainer_utils import (
     dump_per_dataset_eval_results,
     validate_generator_output,
     GLOBAL_STEP_PREFIX,
+    ResumeMode,
+    DynamicSamplingState,
 )
 from skyrl_train.utils.ppo_utils import ppo_critic_loss, PolicyLossRegistry
 
@@ -94,6 +96,8 @@ class RayPPOTrainer:
 
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
+
+        self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -232,8 +236,11 @@ class RayPPOTrainer:
             if self.cfg.trainer.placement.colocate_all:
                 self.policy_model.backload_to_gpu()
 
+        # setup for dynamic sampling
+        keep_sampling = False
+
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
@@ -245,13 +252,26 @@ class RayPPOTrainer:
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
 
+                    # if we are continuing sampling, we don't want to trigger weight management
+                    weights_manager = ConditionalWeightsManager(self.weights_manager, not keep_sampling)
+
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
                     # Policy model stays on cpu because the training loop will carefully backload different models depending on colocation strategy
-                    with self.weights_manager:
+                    with weights_manager:
                         # 1.1 generation phase
                         with Timer("generate", self.all_timings):
                             generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+
+                        # dynamic sampling
+                        if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
+                            generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
+                            # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
+                            weights_manager.update_condition(not keep_sampling)
+                            if keep_sampling:  # continue sampling
+                                # update progress bar for current batch (but not global step)
+                                pbar.update(1)
+                                continue
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -1033,6 +1053,68 @@ class RayPPOTrainer:
         ray.get(empty_cache_refs)
 
         return policy_status
+
+    def handle_dynamic_sampling(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str], bool]:
+        """
+        Handle dynamic sampling for the current batch.
+
+        Accumulates the generator output and UIDs across batches if we are sampling repeatedly
+        and applies the dynamic sampling strategy (i.e. filter, replace) to the current batch.
+        If we hit the limit of max sample batches, we raise an error.
+
+        Args:
+            generator_output: Current batch generator output
+            uids: Current batch UIDs
+
+        Returns:
+            processed_output: Filtered generator output
+            processed_uids: Filtered UIDs
+            keep_sampling: Whether to keep sampling
+        """
+        # Prepare sampling configuration
+        max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
+        dynamic_sampling_config = {
+            "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
+            "max_sample_batches": max_sample_batches,
+            "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
+            "train_batch_size": self.cfg.trainer.train_batch_size,
+            "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
+        }
+
+        if self.dynamic_sampling_state is None:
+            self.dynamic_sampling_state: DynamicSamplingState = {
+                "sample_batch_count": 1,
+            }
+        else:
+            self.dynamic_sampling_state["sample_batch_count"] += 1
+
+        # Handle dynamic sampling using utilities
+        processed_output, processed_uids, keep_sampling, updated_state = trainer_utils.handle_dynamic_sampling(
+            generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
+        )
+
+        # Check max resample limit, and if we hit it, raise an error
+        if (
+            keep_sampling
+            and max_sample_batches > 0
+            and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
+        ):
+            raise RuntimeError(
+                f"Exiting training loop due to hitting dynamic sampling limit for "
+                f"{self.cfg.trainer.algorithm.dynamic_sampling.type} strategy with "
+                f"{self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. "
+                f"Please check your data difficulty distribution."
+            )
+        # Update state
+        self.dynamic_sampling_state = updated_state
+
+        if not keep_sampling:
+            # Reset state when sampling is complete
+            self.dynamic_sampling_state = None
+
+        return processed_output, processed_uids, keep_sampling
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)
