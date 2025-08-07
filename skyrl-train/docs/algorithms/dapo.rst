@@ -52,13 +52,59 @@ The DAPO paper proposes two methods for overlong reward shaping:
 - **Overlong Filtering**: Sets loss mask to be all zeros for responses that exceed the max response length.
 - **Soft Overlong Punishment**: Penalizes responses that exceed the max response length within a punishment interval. Within this interval, the longer the response, the greater the punishment it receives. This penalty is added to the original reward.
 
-To enable overlong filtering, which sets loss mask to be all zeros for responses that do not finish with a stop token (i.e. responses that are too long), you can set ``generator.apply_overlong_filtering`` to ``true``.
+Overlong Filtering
+------------------
 
-To enable soft overlong punishment, you can register a custom advantage estimator, which we show an example of in :code_link:`examples/algorithms/dapo/main_dapo.py`.
+To enable overlong filtering, which sets loss mask to be all zeros for responses that do not finish with a stop token (i.e. responses that are too long), you can set ``generator.apply_overlong_filtering`` to ``true``.
 
 .. code-block:: yaml
 
     generator:
       apply_overlong_filtering: true
 
-An example script with all of the above components enabled can be found at :code_link:`examples/algorithms/dapo/run_dapo_gsm8k.sh`.
+Soft Overlong Punishment
+------------------------
+
+To enable soft overlong punishment, you can create a custom trainer class and override the ``RayPPOTrainer`` ``postprocess_generator_output`` method to additionally apply soft overlong punishment to rewards.
+We provide an example of this in :code_link:`examples/algorithms/dapo/main_dapo.py`, and show an overview of the implementation below:
+
+.. code-block:: python
+  :caption: ``skyrl_train/examples/algorithms/dapo/main_dapo.py``
+
+  class DAPOTrainer(RayPPOTrainer):
+    @torch.no_grad()
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+        # apply soft overlong punishment
+        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
+        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
+        ...
+        # use base class impl for metrics and per-token reward conversion
+        return super().postprocess_generator_output(generator_output, uids)
+
+  class DAPOExp(BasePPOExp):
+    def get_trainer(self, *args, **kwargs):
+        return DAPOTrainer(*args, **kwargs)
+
+  @ray.remote(num_cpus=1)
+  def skyrl_entrypoint(cfg: DictConfig):
+      exp = DAPOExp(cfg)
+      exp.run()
+
+
+
+.. code-block:: bash
+  :caption: ``skyrl_train/examples/algorithms/dapo/run_dapo_gsm8k.sh``
+
+  +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
+  +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
+
+Launching a DAPO Training Run
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An example script with all of the above components enabled for basic GSM8K training can be found at :code_link:`examples/algorithms/dapo/run_dapo_gsm8k.sh`.
+
+.. code-block:: bash
+
+  export WANDB_API_KEY=your_wandb_api_key
+  bash examples/algorithms/dapo/run_dapo_gsm8k.sh
+

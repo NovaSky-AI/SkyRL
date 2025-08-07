@@ -19,7 +19,7 @@ LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment with custom trainer impl in main_dapo.py
-OVERLONG_BUFFER_LEN=4096
+OVERLONG_BUFFER_LEN=512
 OVERLONG_BUFFER_PENALTY_FACTOR=1.0
 
 # other DAPO parameters

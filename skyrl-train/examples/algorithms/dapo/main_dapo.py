@@ -11,7 +11,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 
-from skyrl_train.generators.base import GeneratorOutput, GeneratorInterface
+from skyrl_train.generators.base import GeneratorOutput
 
 
 class DAPOTrainer(RayPPOTrainer):
@@ -33,6 +33,8 @@ class DAPOTrainer(RayPPOTrainer):
         Returns:
             GeneratorOutput
         """
+        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
+        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
         # modify rewards here
         prompt_token_ids = generator_output["prompt_token_ids"]
         response_ids = generator_output["response_ids"]
@@ -48,17 +50,17 @@ class DAPOTrainer(RayPPOTrainer):
 
         # get the max context length
         max_context_length = (
-            self.cfg.trainer.policy.max_input_length + self.cfg.generator.sampling_params.max_generate_length
+            self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
         )
 
         # apply soft overlong punishment
         for i, (prompt_length, response_length) in enumerate(zip(prompt_lengths, response_lengths)):
             # max_exceed_length is the beginning of the overlong buffer
-            max_exceed_length = max_context_length - self.cfg.trainer.algorithm.overlong_buffer.len - prompt_length
+            max_exceed_length = max_context_length - overlong_buffer_len - prompt_length
             # if the response is within the overlong buffer, apply the penalty
             if response_length > max_exceed_length and response_length <= max_context_length - prompt_length:
                 exceed_length = response_length - max_exceed_length
-                penalty = exceed_length / max_exceed_length * self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
+                penalty = exceed_length / max_exceed_length * overlong_buffer_penalty_factor
 
                 rewards[i] -= penalty
             # if the response is outside the overlong buffer, set the reward to 0
@@ -73,40 +75,13 @@ class DAPOTrainer(RayPPOTrainer):
 
 
 class DAPOExp(BasePPOExp):
-    def __init__(self, cfg: DictConfig):
-        super().__init__(cfg)
-
-    def get_trainer(
-        self,
-        cfg,
-        tracker,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        inference_engine_client,
-        generator: GeneratorInterface,
-        colocate_pg,
-    ):
-        """Initializes the trainer.
-
-        Returns:
-            DAPOTrainer: The trainer.
-        """
-        return DAPOTrainer(
-            cfg=cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            generator=generator,
-            colocate_pg=colocate_pg,
-        )
+    def get_trainer(self, *args, **kwargs):
+        return DAPOTrainer(*args, **kwargs)
 
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    exp = BasePPOExp(cfg)
+    exp = DAPOExp(cfg)
     exp.run()
 
 
