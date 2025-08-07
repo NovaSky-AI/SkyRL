@@ -42,12 +42,12 @@ def compute_grpo_with_soft_overlong_punishment(
     # add soft overlong punishment
     lengths = response_mask.sum(dim=-1)
     buffer_start_idx = max_resp_length - overlong_buffer_len
-    for i, length in enumerate(lengths):
-        if length > buffer_start_idx and length <= max_resp_length:
-            penalty = (length - buffer_start_idx) / overlong_buffer_len * overlong_penalty_factor
-            scores[i] = scores[i] - penalty
-        # for responses that have length >= max_resp_length, overlong filtering is already applied in the config
-        # by setting apply_overlong_filtering=true
+    # apply penalty
+    penalty_mask = lengths > buffer_start_idx
+    penalty = (lengths[penalty_mask] - buffer_start_idx) / overlong_buffer_len * overlong_penalty_factor
+    scores[penalty_mask] -= penalty
+    # for responses that have length >= max_resp_length, overlong filtering is already applied in the config
+    # by setting apply_overlong_filtering=true
 
     # reconstruct response-level rewards in format expected in compute_grpo_outcome_advantage
     new_token_level_rewards = torch.zeros_like(token_level_rewards)

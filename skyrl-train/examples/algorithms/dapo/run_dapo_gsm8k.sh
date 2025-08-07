@@ -21,7 +21,7 @@ APPLY_OVERLONG_FILTERING=true
 # apply soft overlong punishment using custom advantage estimator registered in main_dapo.py
 ADV_ESTIMATOR="grpo_with_soft_overlong_punishment"
 
-# other DAPO 
+# other DAPO parameters
 USE_KL_LOSS=false
 TEMPERATURE=1.0
 TOP_P=1.0
