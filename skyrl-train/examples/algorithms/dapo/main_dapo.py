@@ -60,7 +60,7 @@ class DAPOTrainer(RayPPOTrainer):
             # if the response is within the overlong buffer, apply the penalty
             if response_length > max_exceed_length and response_length <= max_context_length - prompt_length:
                 exceed_length = response_length - max_exceed_length
-                penalty = exceed_length / max_exceed_length * overlong_buffer_penalty_factor
+                penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
 
                 rewards[i] -= penalty
             # if the response is outside the overlong buffer, set the reward to 0
