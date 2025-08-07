@@ -63,6 +63,8 @@ To enable overlong filtering, which sets the loss mask to be all zeros for respo
     generator:
       apply_overlong_filtering: true
 
+.. _dapo-custom-trainer:
+
 Soft Overlong Punishment
 ------------------------
 

@@ -7,7 +7,7 @@ Example scripts of using the registry can be found in at :code_link:`examples/al
 
 Additionally for more control, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/entrypoints/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
 This allows you to have full control over the training loop and implementing custom reward functions and output postprocessing.
-We provide an example of this for applying custom reward penalties in our :doc:`DAPO example <dapo>`.
+We provide an example of this for applying custom reward penalties in our :ref:`DAPO example <dapo-custom-trainer>`.
 
 Registering a Custom Advantage Estimator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -89,7 +89,7 @@ Creating a Custom Trainer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To create a custom trainer for full control of your training loop, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/trainer/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
-We show the outline of creating a custom trainer below, and you can find a full running example in our :doc:`DAPO example <dapo>`.
+We show the outline of creating a custom trainer below, and you can find a full running example in our :ref:`DAPO example <dapo-custom-trainer>`.
 
 .. code-block:: python
 
