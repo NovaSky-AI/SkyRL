@@ -88,7 +88,7 @@ The registry system handles Ray actor synchronization when Ray is initialized. F
 Creating a Custom Trainer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To create a custom trainer for full control of your training loop, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/trainer/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
+To create a custom trainer for full control of your training loop, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/entrypoints/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
 We show the outline of creating a custom trainer below, and you can find a full running example in our :ref:`DAPO example <dapo-custom-trainer>`.
 
 .. code-block:: python

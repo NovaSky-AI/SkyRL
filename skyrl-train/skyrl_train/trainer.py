@@ -1071,9 +1071,10 @@ class RayPPOTrainer:
             and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
         ):
             raise RuntimeError(
-                f"Exiting training loop due to hitting dynamic sampling limit for {self.cfg.trainer.algorithm.dynamic_sampling.type} strategy \
-                    with {self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. \
-                    Please check your data difficulty distribution."
+                f"Exiting training loop due to hitting dynamic sampling limit for "
+                f"{self.cfg.trainer.algorithm.dynamic_sampling.type} strategy with "
+                f"{self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. "
+                f"Please check your data difficulty distribution."
             )
         # Update state
         self.dynamic_sampling_state = updated_state
