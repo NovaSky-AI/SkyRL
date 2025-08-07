@@ -8,7 +8,7 @@ The `DAPO <https://arxiv.org/abs/2503.14476>`_ (Decoupled Clip and Dynamic Sampl
 - **Token-Level Policy Gradient Loss**: Critical in long-CoT RL scenarios;
 - **Overlong Reward Shaping**: Reduces reward noise and stabilizes training.
 
-In this guide, we walk through how to enable each of these components in SkyRL. We provide a simple example script for training DAPO on GSM8K in :code_link:`examples/algorithm/dapo/run_dapo_gsm8k.sh`.
+In this guide, we walk through how to enable each of these components in SkyRL. We provide a simple example script for training DAPO on GSM8K in :code_link:`examples/algorithms/dapo/`.
 
 Clip-Higher
 ~~~~~~~~~~~
@@ -51,16 +51,15 @@ Overlong Reward Shaping
 The DAPO paper proposes two methods for overlong reward shaping:
 
 - **Overlong Filtering**: Sets loss mask to be all zeros for responses that exceed the max response length.
-- **Soft Overlong Punishment**: Penalizes responses that exceed the max response length within a punishment interval. Within this interval, the longer the response, the greater the
-punishment it receives. This penalty is added to the original reward.
+- **Soft Overlong Punishment**: Penalizes responses that exceed the max response length within a punishment interval. Within this interval, the longer the response, the greater the punishment it receives. This penalty is added to the original reward.
 
 To enable overlong filtering, which sets loss mask to be all zeros for responses that do not finish with a stop token (i.e. responses that are too long), you can set ``generator.apply_overlong_filtering`` to ``true``.
-Soft overlong punishment is not yet supported in SkyRL-Train.
 
+To enable soft overlong punishment, you can register a custom advantage estimator, which we show an example of in :code_link:`examples/algorithms/dapo/main_dapo.py`.
 
 .. code-block:: yaml
 
     generator:
       apply_overlong_filtering: true
 
-An example script with all of the above components enabled can be found at :code_link:`examples/algorithm/dapo/run_dapo_gsm8k.sh`.
+An example script with all of the above components enabled can be found at :code_link:`examples/algorithms/dapo/run_dapo_gsm8k.sh`.

@@ -18,6 +18,8 @@ DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
 LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
+# apply soft overlong punishment using custom advantage estimator registered in main_dapo.py
+ADV_ESTIMATOR="grpo_with_soft_overlong_punishment"
 
 # other DAPO 
 USE_KL_LOSS=false
@@ -25,11 +27,12 @@ TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
 CLIP_RATIO_C=10.0
+MAX_RESPONSE_LENGTH=1024
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.advantage_estimator=$ADV_ESTIMATOR \
   trainer.algorithm.policy_loss_type="dual_clip" \
   trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
   trainer.algorithm.eps_clip_high=$EPS_CLIP_HIGH \
@@ -51,7 +54,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
+  trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
@@ -60,11 +63,10 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.micro_train_batch_size_per_gpu=64 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
-  generator.sampling_params.max_generate_length=1024 \
+  generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
-  trainer.policy.optimizer_config.num_warmup_steps=10 \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
