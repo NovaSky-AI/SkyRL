@@ -91,7 +91,7 @@ We provide an example of this in :code_link:`examples/algorithms/dapo/main_dapo.
       exp = DAPOExp(cfg)
       exp.run()
 
-
+To add the overlong buffer length and penalty factor parameters to the config, you can add the following lines to the ``run_dapo_gsm8k.sh`` script:
 
 .. code-block:: bash
   :caption: ``skyrl_train/examples/algorithms/dapo/run_dapo_gsm8k.sh``
