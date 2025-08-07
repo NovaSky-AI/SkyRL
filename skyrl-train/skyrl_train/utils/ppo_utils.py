@@ -165,7 +165,7 @@ def ppo_critic_loss(
     returns: torch.Tensor,
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, float]:
+) -> Tuple[torch.Tensor, Optional[float]]:
 
     if config.value_clip is not None:
         values_clipped = old_values + (values - old_values).clamp(-config.value_clip, config.value_clip)
