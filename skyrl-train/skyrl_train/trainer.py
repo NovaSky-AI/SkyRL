@@ -423,7 +423,7 @@ class RayPPOTrainer:
         algorithm_config = OmegaConf.create(self.cfg.trainer.algorithm)
         # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
         # per batch can be variable based on the prompt length. This is used to normalize the loss for
-        # max_seq_len_normalized_mean loss reduction. Potentially revisit this if we update to use a
+        # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
         # fixed max response budget.
         algorithm_config.max_seq_len = (
             self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length

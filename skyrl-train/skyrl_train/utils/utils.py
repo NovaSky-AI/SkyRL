@@ -195,8 +195,8 @@ def validate_cfg(cfg: DictConfig):
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "sequence_mean",
-        "max_seq_len_normalized_mean",
-    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'max_seq_len_normalized_mean']`"
+        "seq_mean_token_sum_norm",
+    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
 
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step

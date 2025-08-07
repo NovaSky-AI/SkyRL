@@ -183,10 +183,10 @@ def test_reduce_loss():
     expected_seq = torch.tensor(3.0)
     assert torch.allclose(result_seq, expected_seq), f"Expected {expected_seq}, got {result_seq}"
 
-    # Test max_seq_len_normalized_mean: sum per sequence / max_len, then batch mean
+    # Test seq_mean_token_sum_norm: sum per sequence / max_len, then batch mean
     # Seq 0: (1.0 + 2.0 + 3.0) / 4 = 1.5, Seq 1: 4.0 / 4 = 1.0, batch mean = (1.5 + 1.0) / 2 = 1.25
     max_seq_len = 4
-    result_max = reduce_loss(loss, loss_mask, "max_seq_len_normalized_mean", max_seq_len)
+    result_max = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", max_seq_len)
     expected_max = torch.tensor(1.25)
     assert torch.allclose(result_max, expected_max), f"Expected {expected_max}, got {result_max}"
 

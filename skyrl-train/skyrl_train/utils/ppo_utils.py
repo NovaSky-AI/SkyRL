@@ -489,8 +489,8 @@ def ppo_policy_loss(
     assert loss_reduction in [
         "token_mean",
         "sequence_mean",
-        "max_seq_len_normalized_mean",
-    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'max_seq_len_normalized_mean'"
+        "seq_mean_token_sum_norm",
+    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
 
     ratio = (log_probs - old_log_probs).exp()
     surr1 = ratio * advantages
@@ -568,7 +568,7 @@ def gspo_policy_loss(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "max_seq_len_normalized_mean"],
+    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
     max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
@@ -577,10 +577,10 @@ def reduce_loss(
     elif loss_reduction == "sequence_mean":
         # per-sequence token-mean (dim=-1), then batch-mean
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
-    elif loss_reduction == "max_seq_len_normalized_mean":
+    elif loss_reduction == "seq_mean_token_sum_norm":
         # per-sequence token-sum, normalized by the max sequence length, then batch mean
         # this is the Dr. GRPO loss reduction to avoid length bias by normalizing by a constant
-        assert max_seq_len is not None, "max_seq_len must be provided for max_seq_len_normalized_mean loss reduction"
+        assert max_seq_len is not None, "max_seq_len must be provided for seq_mean_token_sum_norm loss reduction"
         seq_losses = torch.sum(loss * loss_mask, dim=-1) / max_seq_len
         loss = torch.mean(seq_losses)
     else:

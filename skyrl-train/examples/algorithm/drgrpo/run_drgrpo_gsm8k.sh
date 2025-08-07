@@ -12,7 +12,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 # Dr. GRPO parameters
 
-LOSS_REDUCTION="max_seq_len_normalized_mean"
+LOSS_REDUCTION="seq_mean_token_sum_norm"
 GRPO_NORM_BY_STD=false
 USE_KL_LOSS=false
 
