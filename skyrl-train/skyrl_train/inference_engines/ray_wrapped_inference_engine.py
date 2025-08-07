@@ -1,4 +1,5 @@
 import ray
+from packaging import version
 from ray.actor import ActorHandle
 from typing import Dict, Any, Optional, List
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
@@ -76,7 +77,7 @@ def create_ray_wrapped_inference_engines(
     from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
 
-    assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
+    assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     # NOTE: we use the ray backend for tensor parallel size > 1 to explicitly manage resource allocation

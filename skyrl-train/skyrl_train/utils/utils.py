@@ -22,7 +22,7 @@ class Timer:
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
     async def __aenter__(self):
         self.start_time = time.time()
@@ -32,7 +32,7 @@ class Timer:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
 def validate_batch_sizes(cfg: DictConfig):

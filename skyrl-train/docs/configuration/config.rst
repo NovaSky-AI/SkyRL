@@ -307,6 +307,13 @@ Algorithm Configuration
       value_clip: 0.2
       normalize_reward: true
 
+      # dynamic sampling parameters
+      dynamic_sampling:
+        type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
+        max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
+        min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+
+
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo`` and ``gae``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance.
 - ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation.
@@ -330,6 +337,11 @@ Algorithm Configuration
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
 - ``algorithm.normalize_reward``: Whether to normalize critic model output (i.e., values). When ``true``, the critic model learns the mean and standard deviation of the values during training and normalizes the values during forward pass.
+- ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
+  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
+  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
+  - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+
 
 Policy Loss Formulation 
 ~~~~~~~~~~~~~~~~~~~~~~~
