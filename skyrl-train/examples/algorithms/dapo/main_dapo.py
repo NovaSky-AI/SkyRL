@@ -40,7 +40,7 @@ class DAPOTrainer(RayPPOTrainer):
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
 
-        assert isinstance(rewards[0], float), "DAPO assumes verifiable sequence level rewards"
+        assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
 
         # get the prompt length
         prompt_lengths = [len(prompt) for prompt in prompt_token_ids]

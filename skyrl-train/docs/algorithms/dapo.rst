@@ -27,6 +27,7 @@ In DAPO style dynamic sampling, we sample rollouts until we have a full batch wi
 
 To configure DAPO style dynamic sampling, you can set ``trainer.algorithm.dynamic_sampling.type`` to ``filter`` and configure ``trainer.algorithm.dynamic_sampling.max_sample_batches`` to the maximum number of batches to sample.
 If ``max_sample_batches > 0`` and is exceeded, SkyRL-Train will raise an error. If ``max_sample_batches <= 0``, SkyRL-Train will sample until a full batch with non-zero advantages is accumulated.
+
 .. code-block:: yaml
 
     trainer:
@@ -95,8 +96,8 @@ We provide an example of this in :code_link:`examples/algorithms/dapo/main_dapo.
 .. code-block:: bash
   :caption: ``skyrl_train/examples/algorithms/dapo/run_dapo_gsm8k.sh``
 
-  +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
-  +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
+  +trainer.algorithm.overlong_buffer.len=512 \
+  +trainer.algorithm.overlong_buffer.penalty_factor=1.0 \
 
 Launching a DAPO Training Run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

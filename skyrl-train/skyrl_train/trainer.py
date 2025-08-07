@@ -267,6 +267,8 @@ class RayPPOTrainer:
                             # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
                             weights_manager.update_condition(not keep_sampling)
                             if keep_sampling:  # continue sampling
+                                # update progress bar for current batch
+                                pbar.update(1)
                                 continue
 
                     # 1.2 postprocess rewards
