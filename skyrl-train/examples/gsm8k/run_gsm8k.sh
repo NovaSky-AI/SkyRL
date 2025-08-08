@@ -15,7 +15,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.advantage_estimator="reinforce++" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -47,7 +47,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_test" \
+  trainer.run_name="gsm8k_reinforce++" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   $@

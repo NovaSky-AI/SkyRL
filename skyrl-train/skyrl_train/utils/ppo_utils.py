@@ -131,7 +131,6 @@ def normalize_advantages_dict(data: TrainingInputBatch) -> TrainingInputBatch:
     return data
 
 
-# NOTE (erictang000): below ported from verl
 def masked_var(values, mask, unbiased=True):
     """Compute variance of tensor with masked values."""
     mean = masked_mean(values, mask)
@@ -396,6 +395,9 @@ class BaseFunctionRegistry:
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
+    LOOP = "loop"
+    RLOO = "rloo"
+    REINFORCE_PP = "reinforce++"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -593,6 +595,125 @@ def reduce_loss(
     return loss
 
 
+@register_advantage_estimator(AdvantageEstimator.REINFORCE_PP)
+def compute_reinforce_plus_plus_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    gamma: float,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for REINFORCE++.
+    This implementation is based on the paper: https://arxiv.org/abs/2501.03262
+
+    Args:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    with torch.no_grad():
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            # Reset after EOS
+            running_return = running_return * response_mask[:, t]
+
+        advantages = masked_whiten(returns, response_mask)
+        advantages = advantages * response_mask
+
+    return advantages, returns
+
+
+@register_advantage_estimator(AdvantageEstimator.RLOO)
+def compute_rloo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for RLOO based on https://arxiv.org/abs/2402.14740
+
+    Args:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            response_num = len(id2score[index[i]])
+            if response_num > 1:
+                scores[i] = scores[i] * response_num / (response_num - 1) - id2mean[index[i]] * response_num / (
+                    response_num - 1
+                )
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.LOOP)
+def compute_loop_outcome_advantage(
+    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, **kwargs
+):
+    """
+    Compute advantage for LOOP which is same as GRPO without normalization based on https://arxiv.org/pdf/2502.01600
+    Args:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2samples = defaultdict(list)
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2samples[index[i]].append((i, scores[i]))
+        for group in id2samples.values():
+            group_size = len(group)
+            total_score = sum(score for _, score in group)
+            for i, score in group:  # i is original index
+                loo_baseline = 0
+                if group_size == 1:
+                    print("Cannot compute LOO advantage using 1 sample. 0 baseline is used")
+                else:
+                    loo_baseline = (total_score - score) / (group_size - 1)
+                scores[i] = score - loo_baseline
+
+        scores = scores.unsqueeze(-1) * response_mask
+    return scores, scores
+
+
 @register_advantage_estimator(AdvantageEstimator.GAE)
 def compute_gae_advantage_return(
     token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],
@@ -682,6 +803,7 @@ def compute_advantages_and_returns(
     response_mask: torch.Tensor,
     index: np.ndarray,
     adv_estimator: AdvantageEstimator,
+    config: DictConfig,
     values: Optional[torch.Tensor] = None,
     grpo_norm_by_std: bool = True,
     gamma=1.0,
@@ -697,4 +819,5 @@ def compute_advantages_and_returns(
         grpo_norm_by_std=grpo_norm_by_std,
         gamma=gamma,
         lambd=lambd,
+        config=config,
     )

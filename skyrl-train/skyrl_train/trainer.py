@@ -753,6 +753,7 @@ class RayPPOTrainer:
             response_mask=data["response_mask"],
             index=data.metadata["uids"],
             adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            config=self.cfg.trainer.algorithm,
             values=data["values"],
             gamma=self.cfg.trainer.algorithm.gamma,
             lambd=self.cfg.trainer.algorithm.lambd,
