@@ -4,7 +4,6 @@ import asyncio
 import ray
 import torch
 import torch.distributed
-from functools import partial
 from transformers import AutoModel, AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
@@ -18,7 +17,6 @@ except ImportError:
 from skyrl_train.models import Actor, get_llm_for_sequence_regression
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.workers.worker import (
@@ -26,7 +24,6 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RewardWorkerBase,
     RefWorkerBase,
-    ValueLoss,
 )
 
 
@@ -87,10 +84,6 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         assert (
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
-
-        # set ppo loss function
-        policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-        self.actor_loss_fn = partial(policy_loss_func, config=self.cfg.trainer.algorithm)
 
         self.use_cuda_ipc = False
         if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
@@ -266,9 +259,6 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
             (critic, None, None),
         )
         assert self.optimizer is not None
-
-        # set ppo loss function
-        self.critic_loss_fn = ValueLoss(self.cfg.trainer.algorithm.value_clip)
 
     def forward(
         self,

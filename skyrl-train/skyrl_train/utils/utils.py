@@ -4,7 +4,7 @@ import time
 import ray
 import torch
 from loguru import logger
-from omegaconf.dictconfig import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
 from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 
@@ -195,7 +195,18 @@ def validate_cfg(cfg: DictConfig):
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "sequence_mean",
-    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean']`"
+        "seq_mean_token_sum_norm",
+    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+
+    # add field to algorithm config needed for loss functions
+    # create a new config to make it modifiable
+    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
+    # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
+    # per batch can be variable based on the prompt length. This is used to normalize the loss for
+    # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
+    # fixed max response budget.
+    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    cfg.trainer.algorithm = algorithm_config
 
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step

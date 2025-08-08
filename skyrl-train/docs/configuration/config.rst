@@ -291,7 +291,8 @@ Algorithm Configuration
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
       policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
-      loss_reduction: "token_mean" # "token_mean", "sequence_mean"
+      loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+      grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
 
       # GAE parameters
       lambd: 1.0
@@ -329,7 +330,13 @@ Algorithm Configuration
   - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
-- ``algorithm.loss_reduction``: Type of loss reduction to use. Options are ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
+- ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
+
+  - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
+  - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
+  - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+
+- ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.

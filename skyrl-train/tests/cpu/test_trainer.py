@@ -87,6 +87,7 @@ def dummy_config():
                     "normalize_reward": True,
                     "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
+                    "grpo_norm_by_std": True,
                 },
                 "resume_mode": "none",
             },
@@ -254,6 +255,9 @@ def test_normalize_mini_batch_size():
                     "train_batch_size": train_batch_size,
                     "policy_mini_batch_size": policy_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
+                    "algorithm": {
+                        "policy_loss_type": "regular",
+                    },
                 },
                 "generator": {
                     "n_samples_per_prompt": n_samples_per_prompt,
@@ -565,6 +569,9 @@ def test_ppo_train_batch_calculations():
             "trainer": {
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
+                "algorithm": {
+                    "policy_loss_type": "regular",
+                },
             },
             "generator": {
                 "sampling_params": {
