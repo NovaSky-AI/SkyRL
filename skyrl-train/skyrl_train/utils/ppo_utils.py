@@ -581,6 +581,7 @@ def reduce_loss(
         # per-sequence token-sum, normalized by the max sequence length, then batch mean
         # this is the Dr. GRPO loss reduction to avoid length bias by normalizing by a constant
         assert max_seq_len is not None, "max_seq_len must be provided for seq_mean_token_sum_norm loss reduction"
+        # NOTE: max_seq_len is computed as cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length by default
         if loss_mask is not None:
             seq_losses = torch.sum(loss * loss_mask, dim=-1) / max_seq_len
         else:
