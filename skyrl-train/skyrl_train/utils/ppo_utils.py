@@ -679,7 +679,7 @@ def compute_rloo_outcome_advantage(
 @register_advantage_estimator(AdvantageEstimator.LOOP)
 def compute_loop_outcome_advantage(
     token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, **kwargs
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for LOOP which is same as GRPO without normalization based on https://arxiv.org/pdf/2502.01600
     Args:
@@ -753,7 +753,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     grpo_norm_by_std: bool = True,
     **kwargs,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
 
@@ -808,7 +808,7 @@ def compute_advantages_and_returns(
     grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
 
     return estimator_func(
