@@ -1,4 +1,5 @@
 import ray
+from packaging import version
 from ray.actor import ActorHandle
 from typing import Dict, Any, Optional, List
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
@@ -79,12 +80,13 @@ def create_ray_wrapped_inference_engines(
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
 
-        assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
+        assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
     elif backend == "sglang":
         # We import SGLang later to avoid importing vllm. See `get_sglang_engine` for more.
         pass
     else:
         raise ValueError(f"Unsupported backend: {backend}")
+
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     # NOTE: we use the ray backend for tensor parallel size > 1 to explicitly manage resource allocation

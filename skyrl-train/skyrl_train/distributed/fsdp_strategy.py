@@ -1,9 +1,12 @@
 import os
+import copy
 import random
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
+import gc
+import json
 
 import numpy as np
 import torch
@@ -372,6 +375,7 @@ class FSDPStrategy(DistributedStrategy):
         scheduler=None,
         client_state={},
         tag=None,
+        tokenizer=None,
     ):
         """Save model checkpoint for FSDP"""
         import warnings
@@ -384,9 +388,10 @@ class FSDPStrategy(DistributedStrategy):
         dist.barrier()
 
         # Extract the actual model for saving
-        save_model = model
         if isinstance(model, Actor):
             save_model = model.model
+        else:
+            save_model = model
 
         if self.fsdp_strategy not in ("fsdp", "fsdp2"):
             raise ValueError(f"Unsupported FSDP strategy: {self.fsdp_strategy}")
@@ -439,11 +444,21 @@ class FSDPStrategy(DistributedStrategy):
                 self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
                 torch.save(extra_state_dict, extra_path)
 
-        # Wait for all ranks to finish saving
-        dist.barrier()
+                # Garbage collect temporary buffers from materializing the state dicts
+                gc.collect()
+
+        if self.is_rank_0():
+            config_save_model = self._unwrap_model(model)
+            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
+
+            # Also save runtime FSDP config
+            fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
+            with open(fsdp_config_path, "w") as f:
+                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
+        torch.cuda.synchronize()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_ckpt(
@@ -589,8 +604,28 @@ class FSDPStrategy(DistributedStrategy):
                 output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs  # Always use safetensors
             )
 
-            # Save config
-            model_to_save.config.save_pretrained(output_dir)
+            # Determine which config to save
+            config_to_save = model_to_save.config
+
+            # Fix architecture name by removing FSDP prefix if present
+            if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+                # Create a copy of the config to avoid modifying the original
+                config_to_save = copy.deepcopy(config_to_save)
+
+                # Fix architecture names to remove FSDP prefix
+                fixed_architectures = []
+                for arch in config_to_save.architectures:
+                    fixed_arch = arch
+                    if arch.startswith("FSDP"):
+                        # Remove "FSDP" prefix (for fsdp2)
+                        fixed_arch = arch[len("FSDP") :]
+                        self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                    fixed_architectures.append(fixed_arch)
+
+                config_to_save.architectures = fixed_architectures
+
+            # Save the config
+            config_to_save.save_pretrained(output_dir)
 
             # Save tokenizer if provided
             if tokenizer is not None:

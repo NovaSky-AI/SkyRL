@@ -24,8 +24,6 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RewardWorkerBase,
     RefWorkerBase,
-    PolicyLoss,
-    ValueLoss,
 )
 
 
@@ -86,14 +84,6 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         assert (
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
-
-        # set ppo loss function
-        self.actor_loss_fn = PolicyLoss(
-            self.cfg.trainer.algorithm.eps_clip_low,
-            self.cfg.trainer.algorithm.eps_clip_high,
-            self.cfg.trainer.algorithm.clip_ratio_c,
-            loss_type=self.cfg.trainer.algorithm.ppo_loss_type,
-        )
 
         self.use_cuda_ipc = False
         if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
@@ -269,9 +259,6 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
             (critic, None, None),
         )
         assert self.optimizer is not None
-
-        # set ppo loss function
-        self.critic_loss_fn = ValueLoss(self.cfg.trainer.algorithm.value_clip)
 
     def forward(
         self,

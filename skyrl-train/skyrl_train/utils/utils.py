@@ -4,8 +4,9 @@ import time
 import ray
 import torch
 from loguru import logger
-from omegaconf.dictconfig import DictConfig
-from ray.util.placement_group import PlacementGroup
+from omegaconf import DictConfig, OmegaConf
+from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
+from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 
 
 class Timer:
@@ -21,7 +22,7 @@ class Timer:
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
     async def __aenter__(self):
         self.start_time = time.time()
@@ -31,7 +32,7 @@ class Timer:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
-            self.update_dict[self.message] = time.time() - self.start_time
+            self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
 def validate_batch_sizes(cfg: DictConfig):
@@ -138,10 +139,6 @@ def validate_cfg(cfg: DictConfig):
         cfg.trainer.sequence_parallel_backend == "ulysses"
     ), f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
 
-    assert cfg.trainer.algorithm.advantage_estimator in (
-        "gae",
-        "grpo",
-    ), f"invalid advantage estimator: {cfg.trainer.algorithm.advantage_estimator}"
     # if advantage estimator is GAE, then critic path should be provided
     if cfg.trainer.algorithm.advantage_estimator == "gae":
         assert (
@@ -185,10 +182,29 @@ def validate_cfg(cfg: DictConfig):
             # for local engines or sglang, we disable
             cfg.generator.override_existing_update_group = "disable"
 
-    assert cfg.trainer.algorithm.ppo_loss_type in (
-        "regular",
-        "dual_clip",
-    ), f"invalid loss type: {cfg.trainer.algorithm.ppo_loss_type}. Must be one of `['regular', 'dual_clip']`"
+    assert (
+        cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
+
+    assert (
+        cfg.trainer.algorithm.advantage_estimator in AdvantageEstimatorRegistry.list_available()
+    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {AdvantageEstimatorRegistry.list_available()}"
+
+    assert cfg.trainer.algorithm.loss_reduction in (
+        "token_mean",
+        "sequence_mean",
+        "seq_mean_token_sum_norm",
+    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+
+    # add field to algorithm config needed for loss functions
+    # create a new config to make it modifiable
+    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
+    # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
+    # per batch can be variable based on the prompt length. This is used to normalize the loss for
+    # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
+    # fixed max response budget.
+    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    cfg.trainer.algorithm = algorithm_config
 
     # TODO: fix once we support these features with SGLang
     if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
@@ -248,16 +264,18 @@ def get_physical_gpu_id():
 
 
 def initialize_ray(cfg: DictConfig):
-    # TODO(tgriggs): Are all of these env vars necessary?
-    env_vars = {
-        "NCCL_CUMEM_ENABLE": "0",
-        "NCCL_P2P_DISABLE": "0",
-        "CUDA_LAUNCH_BLOCKING": "1",
-    }
+    # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
+    env_vars = {}
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+        # NOTE (sumanthrh): In vLLM >= 0.9.0, we've observed compilatiion failures with torch compile. removing the compilation directory and trying
+        # again does not fix the issue. Temporarily we disable compilation cache, which seems to fix the issue.
+        # This should not have any effect on performance - compilation will still happen, it's just not cached
+        # TODO (sumanthrh): remove this once vLLM fixes the issue
+        env_vars["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
         if not os.environ.get("VLLM_USE_V1", False):
             logger.info(
@@ -265,6 +283,19 @@ def initialize_ray(cfg: DictConfig):
             )
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+    max_num_gpus_per_node = max(
+        [
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg.trainer.placement.critic_num_gpus_per_node,
+            cfg.trainer.placement.ref_num_gpus_per_node,
+            cfg.trainer.placement.reward_num_gpus_per_node,
+        ]
+    )
+    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
+        logger.info("Peer access is not supported on this node type, disabling P2P and SHM")
+        env_vars["NCCL_P2P_DISABLE"] = "1"
+        env_vars["NCCL_SHM_DISABLE"] = "1"
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
@@ -278,6 +309,9 @@ def initialize_ray(cfg: DictConfig):
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     ray.init(runtime_env={"env_vars": env_vars})
+
+    # create the named ray actors for the registries to make available to all workers
+    sync_registries()
 
 
 def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
@@ -333,3 +367,41 @@ def print_mem(tag: str, mem: dict):
         f"Free: {format_gib(mem['free'])}, "
         f"Total: {format_gib(mem['total'])}"
     )
+
+
+def run_p2p_access_check():
+    device_count = torch.cuda.device_count()
+    if device_count < 2:
+        return False
+
+    # Check P2P access between all GPU pairs
+    for i in range(device_count):
+        for j in range(device_count):
+            if i != j:
+                # This checks if device i can access device j's memory
+                can_access = torch.cuda.can_device_access_peer(i, j)
+                if not can_access:
+                    return False
+
+    return True
+
+
+def peer_access_supported(max_num_gpus_per_node: int):
+    # whatever the max num gpus per node is, we can check p2p access if there are at least 2 GPUs
+    # if max is 1, p2p access is not supported
+    if max_num_gpus_per_node <= 1:
+        return False
+
+    if not torch.cuda.is_available():
+        # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
+        ray.init()
+        pg = ray.get(placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK").ready(), timeout=120)
+        result = ray.get(
+            ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
+                run_p2p_access_check
+            ).remote()
+        )
+        ray.shutdown()
+        return result
+    else:
+        return run_p2p_access_check()

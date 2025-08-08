@@ -121,7 +121,7 @@ Logging and Debugging Configuration
     dump_data_batch: false
     dump_eval_results: true
 
-- ``logger``: Logger to use. Currently, we support ``wandb`` and ``console``. ``console`` will simply log metrics to the console. 
+- ``logger``: Logger to use. Currently, we support ``wandb``, ``mlflow``, and ``console``. ``console`` will simply log metrics to the console. 
 - ``project_name``: Name of the project in WandB.
 - ``run_name``: Name of the run in WandB.
 - ``dump_data_batch``: Whether to dump the data batch to a file. This is useful for debugging. When ``true``, the data batch will be dumped to a file in the ``export_path`` directory. The training batch at global step ``N`` is saved to ``self.cfg.trainer.export_path / "dumped_data" / global_step_N_training_input``
@@ -280,7 +280,7 @@ Algorithm Configuration
 .. code-block:: yaml
   
     algorithm:
-      advantage_estimator: "grpo"
+      advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
       use_kl_estimator_k3: true
       use_abs_kl: false
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
@@ -290,7 +290,9 @@ Algorithm Configuration
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      ppo_loss_type: "regular" # "regular", "dual_clip"
+      policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
+      loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+      grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
 
       # GAE parameters
       lambd: 1.0
@@ -306,7 +308,14 @@ Algorithm Configuration
       value_clip: 0.2
       normalize_reward: true
 
-- ``algorithm.advantage_estimator``: Advantage estimator to use. Currently, we support ``grpo`` and ``gae``.
+      # dynamic sampling parameters
+      dynamic_sampling:
+        type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
+        max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
+        min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+
+
+- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo`` and ``gae``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance.
 - ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation.
 - ``algorithm.use_kl_in_reward``: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as ``rewards - kl * kl_loss_coef``.
@@ -314,7 +323,20 @@ Algorithm Configuration
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.
 - ``algorithm.advantage_batch_normalize``: Whether to normalize advantages by the (global) batch mean and standard deviation.
 - ``algorithm.value_head_prefix``: The name used to identify the value head in the critic model.
-- ``algorithm.ppo_loss_type``: Type of PPO loss to use. Currently, we support ``regular`` and ``dual_clip``. ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_.
+- ``algorithm.policy_loss_type``: Type of policy loss to use. Options include:
+
+  - ``regular``: Vanilla PPO loss with token-level importance sampling
+  - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - Custom policy losses can be registered with the ``PolicyLossRegistry``
+
+- ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
+
+  - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
+  - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
+  - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+
+- ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.
@@ -322,37 +344,40 @@ Algorithm Configuration
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
 - ``algorithm.normalize_reward``: Whether to normalize critic model output (i.e., values). When ``true``, the critic model learns the mean and standard deviation of the values during training and normalizes the values during forward pass.
+- ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
+  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
+  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
+  - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+
 
 Policy Loss Formulation 
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``PolicyLoss`` class.
+It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``ppo_policy_loss`` function. 
 
 .. code-block:: python
 
-  class PolicyLoss(nn.Module):
-    ...
-    def forward(
-        self,
-        log_probs: torch.Tensor,
-        old_log_probs: torch.Tensor,
-        advantages: torch.Tensor,
-        loss_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+  def ppo_policy_loss(
+      log_probs: torch.Tensor,
+      old_log_probs: torch.Tensor,
+      advantages: torch.Tensor,
+      config: DictConfig, # trainer.algorithm config
+      loss_mask: Optional[torch.Tensor] = None,
+  ) -> torch.Tensor:
 
-        ratio = (log_probs - old_log_probs).exp()
-        surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
-        loss = -torch.min(surr1, surr2)
-        clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
-        clip_pg_losses1 = loss
-        if self.loss_type == "dual_clip":
-            pg_losses3 = -advantages * self.clip_ratio_c
-            clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-            loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        return loss, clip_ratio
-  
+      ratio = (log_probs - old_log_probs).exp()
+      surr1 = ratio * advantages
+      surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+      loss = -torch.min(surr1, surr2)
+      clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+      clip_pg_losses1 = loss
+      if config.policy_loss_type == "dual_clip":
+        pg_losses3 = -advantages * config.clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+      loss = reduce_loss(loss, loss_mask, config.loss_reduction)
+      return loss, clip_ratio
+
 
 Generator Configuration
 -----------------------
@@ -402,6 +427,8 @@ Generator Configuration
     eval_n_samples_per_prompt: 1
 
     zero_reward_on_non_stop: false 
+
+    apply_overlong_filtering: false
 
 
 Inference Engine Placement Configuration
@@ -456,3 +483,4 @@ Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
+- ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.

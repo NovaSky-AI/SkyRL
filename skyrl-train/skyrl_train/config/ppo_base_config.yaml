@@ -76,7 +76,7 @@ trainer:
       fsdp_size: -1
     sequence_parallel_size: 1
   algorithm:
-    advantage_estimator: "grpo"
+    advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
     kl_target: null
     init_kl_coef: 0.0
     use_kl_estimator_k3: true
@@ -88,7 +88,9 @@ trainer:
     # this adds training batch level normalization to advantages 
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
-    ppo_loss_type: "regular" # "regular", "dual_clip"
+    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
+    loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+    grpo_norm_by_std: true # set to false to disable normalization by std in GRPO
     # GAE parameters
     lambd: 1.0
     gamma: 1.0
@@ -101,6 +103,10 @@ trainer:
     # value loss parameters
     value_clip: 0.2
     normalize_reward: true
+    dynamic_sampling:
+      type: null # filter, replace, or null
+      max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
+      min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -192,6 +198,11 @@ generator:
   # This is a general setting for all environments.
   # TODO (erictang000): Show clear ablations for benefits of this on GSM8K or SQL.
   zero_reward_on_non_stop: false 
+
+  # Whether to apply DAPO Overlong Filtering to the loss masks.
+  # For each trajectory that exceeds the max length (i.e., truncated and does not end with an 
+  # EOS token), this masks out every token in the loss mask.
+  apply_overlong_filtering: false
 
 environment:
   env_class: "gsm8k"

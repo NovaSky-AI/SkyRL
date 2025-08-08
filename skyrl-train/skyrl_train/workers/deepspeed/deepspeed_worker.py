@@ -6,8 +6,8 @@ import torch
 import torch.distributed
 from loguru import logger
 from transformers import AutoModel
-
 from transformers.trainer import get_scheduler
+
 
 from skyrl_train.models import get_llm_for_sequence_regression, Actor
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
@@ -18,8 +18,6 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RewardWorkerBase,
     RefWorkerBase,
-    PolicyLoss,
-    ValueLoss,
 )
 
 
@@ -90,14 +88,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         # prepare models/optimizers...
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (actor, actor_optim, actor_scheduler),
-        )
-
-        # set ppo loss function
-        self.actor_loss_fn = PolicyLoss(
-            self.cfg.trainer.algorithm.eps_clip_low,
-            self.cfg.trainer.algorithm.eps_clip_high,
-            self.cfg.trainer.algorithm.clip_ratio_c,
-            loss_type=self.cfg.trainer.algorithm.ppo_loss_type,
         )
 
         self.use_cuda_ipc = False
@@ -288,9 +278,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (critic, critic_optim, critic_scheduler),
         )
-
-        # set ppo loss function
-        self.critic_loss_fn = ValueLoss(self.cfg.trainer.algorithm.value_clip)
 
 
 class DeepSpeedRewardWorkerBase(RewardWorkerBase):
