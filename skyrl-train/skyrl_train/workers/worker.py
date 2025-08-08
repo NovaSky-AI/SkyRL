@@ -24,6 +24,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -573,10 +574,7 @@ class PolicyWorkerBase(Worker):
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.policy_loss_fn: Callable = None
-
-    def set_loss_function(self, loss_fn: Callable):
-        self.policy_loss_fn = loss_fn
+        self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
 
     def _normalize_mini_batch_size(self):
         """
@@ -704,6 +702,7 @@ class PolicyWorkerBase(Worker):
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
+                config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
         # entropy
@@ -831,10 +830,7 @@ class CriticWorkerBase(Worker):
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.critic_loss_fn: Callable = None
-
-    def set_loss_function(self, loss_fn: Callable):
-        self.critic_loss_fn = loss_fn
+        self.critic_loss_fn: Callable = ppo_critic_loss
 
     def _normalize_mini_batch_size(self):
         """
@@ -953,6 +949,7 @@ class CriticWorkerBase(Worker):
                 values,
                 old_values,
                 returns,
+                config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
         loss = loss / accumulation_steps

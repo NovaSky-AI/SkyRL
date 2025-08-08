@@ -2,19 +2,18 @@ import asyncio
 import math
 import os
 import shutil
-from typing import Any, List, Optional, Dict, Tuple, Union, Callable
+from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
 import uuid
 import torch
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
-from functools import partial
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
@@ -55,7 +54,6 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
     DynamicSamplingState,
 )
-from skyrl_train.utils.ppo_utils import ppo_critic_loss, PolicyLossRegistry
 
 
 class RayPPOTrainer:
@@ -415,28 +413,6 @@ class RayPPOTrainer:
         uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
         return generator_input, uids
 
-    def get_loss_functions(self) -> Tuple[Callable, Callable]:
-        """
-        Get the policy and critic loss functions.
-        """
-        # send algorithm config to loss functions
-        algorithm_config = OmegaConf.create(self.cfg.trainer.algorithm)
-        # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-        # per batch can be variable based on the prompt length. This is used to normalize the loss for
-        # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
-        # fixed max response budget.
-        algorithm_config.max_seq_len = (
-            self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
-        )
-
-        # policy loss function
-        policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-        policy_loss_func = partial(policy_loss_func, config=algorithm_config)
-
-        # critic loss function
-        critic_loss_func = partial(ppo_critic_loss, config=algorithm_config)
-        return policy_loss_func, critic_loss_func
-
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
         """
         Initialize the actors for training, and handle colocation logic
@@ -631,12 +607,6 @@ class RayPPOTrainer:
             if cfg.trainer.reward.model.path:
                 ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
                 reward_model.offload_to_cpu()
-
-        # set loss functions
-        policy_loss_func, critic_loss_func = self.get_loss_functions()
-        ray.get(policy_model.async_run_ray_method("pass_through", "set_loss_function", policy_loss_func))
-        if cfg.trainer.critic.model.path:
-            ray.get(critic_model.async_run_ray_method("pass_through", "set_loss_function", critic_loss_func))
 
         self.policy_model: PPORayActorGroup = policy_model
         self.critic_model: Optional[PPORayActorGroup] = critic_model
