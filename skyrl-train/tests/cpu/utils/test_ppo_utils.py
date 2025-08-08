@@ -283,7 +283,7 @@ def test_advantage_estimator_registry_specific():
     index = np.array(["0", "0", "0"])
 
     adv, ret = compute_advantages_and_returns(
-        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="test_decorator"
+        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="test_decorator", config={}
     )
 
     assert torch.allclose(adv, torch.ones_like(rewards))

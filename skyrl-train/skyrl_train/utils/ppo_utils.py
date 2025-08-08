@@ -595,6 +595,7 @@ def reduce_loss(
     return loss
 
 
+# NOTE (erictang000): below ported from verl
 @register_advantage_estimator(AdvantageEstimator.REINFORCE_PP)
 def compute_reinforce_plus_plus_outcome_advantage(
     token_level_rewards: torch.Tensor,
@@ -663,14 +664,11 @@ def compute_rloo_outcome_advantage(
                 id2mean[idx] = torch.tensor(0.0)
             elif len(id2score[idx]) > 1:
                 id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
-            else:
-                raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             response_num = len(id2score[index[i]])
             if response_num > 1:
-                scores[i] = scores[i] * response_num / (response_num - 1) - id2mean[index[i]] * response_num / (
-                    response_num - 1
-                )
+                factor = response_num / (response_num - 1)
+                scores[i] = (scores[i] - id2mean[index[i]]) * factor
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
@@ -705,7 +703,9 @@ def compute_loop_outcome_advantage(
             for i, score in group:  # i is original index
                 loo_baseline = 0
                 if group_size == 1:
-                    print("Cannot compute LOO advantage using 1 sample. 0 baseline is used")
+                    from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+
+                    logger_.warning("Cannot compute LOO advantage using 1 sample. 0 baseline is used")
                 else:
                     loo_baseline = (total_score - score) / (group_size - 1)
                 scores[i] = score - loo_baseline
