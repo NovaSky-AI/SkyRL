@@ -982,7 +982,7 @@ class RayPPOTrainer:
 
         # update the kl controller
         if self.reward_kl_controller is not None:
-            self.reward_kl_controller.update(current_kl=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
+            self.reward_kl_controller.update(current=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
 

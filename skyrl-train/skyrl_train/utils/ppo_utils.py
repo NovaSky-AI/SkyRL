@@ -415,8 +415,8 @@ class BaseFunctionRegistry:
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
-    LOOP = "loop"
     RLOO = "rloo"
+    LOOP = "loop"
     REINFORCE_PP = "reinforce++"
 
 
@@ -651,6 +651,7 @@ def compute_reinforce_plus_plus_outcome_advantage(
     return advantages, returns
 
 
+@register_advantage_estimator(AdvantageEstimator.LOOP)
 @register_advantage_estimator(AdvantageEstimator.RLOO)
 def compute_rloo_outcome_advantage(
     token_level_rewards: torch.Tensor,
@@ -693,6 +694,12 @@ def compute_rloo_outcome_advantage(
             if response_num > 1:
                 factor = response_num / (response_num - 1)
                 scores[i] = (scores[i] - id2mean[index[i]]) * factor
+            else:
+                # if there's only one response, set the advantage to 0
+                from loguru import logger as logger_
+
+                logger_.warning(f"Only one response for prompt index {index[i]}, setting advantage to 0")
+                scores[i] = 0.0
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores

@@ -102,17 +102,19 @@ def test_compute_reinforce_plus_plus_outcome_advantage_gamma():
 
 def test_compute_rloo_outcome_advantage_basic():
     """RLOO should produce leave-one-out centered scores per group, broadcast across tokens."""
-    # Two groups: [6.0, 3.0] -> [3.0, -3.0], [9.0, 12.0] -> [-3.0, 3.0]
+    # Three groups: [6.0, 3.0] -> [3.0, -3.0], [9.0, 12.0] -> [-3.0, 3.0]
+    # [1.0] -> [0.0] (since there's only one response, the advantage is 0)
     token_level_rewards = torch.tensor(
         [
             [0.0, 0.0, 6.0],  # sum = 6.0, group 0
             [0.0, 0.0, 3.0],  # sum = 3.0, group 0
             [0.0, 0.0, 9.0],  # sum = 9.0, group 1
             [0.0, 0.0, 12.0],  # sum = 12.0, group 1
+            [0.0, 0.0, 1.0],  # sum = 0.0, group 2
         ]
     )
     response_mask = torch.ones_like(token_level_rewards)
-    index = np.array([0, 0, 1, 1])
+    index = np.array([0, 0, 1, 1, 2])
 
     adv, ret = compute_rloo_outcome_advantage(
         token_level_rewards=token_level_rewards,
@@ -120,7 +122,7 @@ def test_compute_rloo_outcome_advantage_basic():
         index=index,
     )
 
-    expected = torch.tensor([3.0, -3.0, -3.0, 3.0]).unsqueeze(-1) * response_mask
+    expected = torch.tensor([3.0, -3.0, -3.0, 3.0, 0.0]).unsqueeze(-1) * response_mask
 
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with RLOO"
