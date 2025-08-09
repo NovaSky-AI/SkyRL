@@ -281,13 +281,22 @@ Algorithm Configuration
   
     algorithm:
       advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
+
+      # KL Penalty Parameters
+      kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
+        type: "fixed" # "fixed" or "adaptive"
+        kl_target: 0.1 # target KL divergence for adaptive KL controller
+        horizon: 10000 # controls the update rate of the adaptive KL controller
+  
       kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-      use_kl_estimator_k3: true # to be deprecated, use kl_estimator_type="k3" instead
+      use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
       use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
+
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
       use_kl_in_reward: false # apply kl loss to rewards
       use_kl_loss: true # used in policy model
       kl_loss_coef: 0.001
+
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"

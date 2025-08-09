@@ -68,6 +68,20 @@ class FixedKLController:
         pass
 
 
+def get_kl_controller(algorithm_cfg):
+    if algorithm_cfg.kl_ctrl.type == "fixed":
+        return FixedKLController(kl_coef=algorithm_cfg.kl_loss_coef)
+    elif algorithm_cfg.kl_ctrl.type == "adaptive":
+        assert algorithm_cfg.kl_ctrl.horizon > 0, f"horizon must be larger than 0. Got {algorithm_cfg.kl_ctrl.horizon}"
+        return AdaptiveKLController(
+            init_kl_coef=algorithm_cfg.kl_loss_coef,
+            target_kl=algorithm_cfg.kl_ctrl.target_kl,
+            horizon=algorithm_cfg.kl_ctrl.horizon,
+        )
+    else:
+        raise ValueError(f"Invalid KL controller type: {algorithm_cfg.kl_ctrl.type}")
+
+
 def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optional[int] = None) -> torch.Tensor:
     if mask is None:
         return tensor.mean(axis=dim)
@@ -92,15 +106,15 @@ def compute_approx_kl(
     """
     log_ratio = log_probs - log_probs_base
 
-    if kl_estimator_type in ("kl", "k1"):
+    if kl_estimator_type == "k1":
         kld = log_ratio
     elif kl_estimator_type == "abs":
         kld = log_ratio.abs()
-    elif kl_estimator_type in ("mse", "k2"):
+    elif kl_estimator_type == "k2":
         kld = 0.5 * log_ratio.square()
     # J. Schulman. Approximating kl divergence, 2020.
     # URL http://joschu.net/blog/kl-approx.html.
-    elif kl_estimator_type in ("low_var_kl", "k3"):
+    elif kl_estimator_type == "k3":
         kl = -log_ratio
         # For numerical stability
         kl = torch.clamp(kl, min=-20, max=20)

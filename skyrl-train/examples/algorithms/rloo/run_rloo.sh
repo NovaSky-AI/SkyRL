@@ -1,6 +1,6 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
+# Colocated RLOO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>

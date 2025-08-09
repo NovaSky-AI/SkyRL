@@ -1,6 +1,6 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
+# Colocated REINFORCE++ training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
@@ -14,6 +14,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 # REINFORCE++ with 
 ADV_ESTIMATOR="reinforce++"
 USE_KL_IN_REWARD=true
+KL_ESTIMATOR_TYPE="k2"
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -21,7 +22,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="$ADV_ESTIMATOR" \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
-  trainer.algorithm.kl_estimator_type="k2" \
+  trainer.algorithm.kl_estimator_type=$KL_ESTIMATOR_TYPE \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
