@@ -76,7 +76,7 @@ def get_kl_controller(algorithm_cfg):
             raise ValueError(f"horizon must be larger than 0. Got {algorithm_cfg.kl_ctrl.horizon}")
         return AdaptiveKLController(
             init_kl_coef=algorithm_cfg.kl_loss_coef,
-            target_kl=algorithm_cfg.kl_ctrl.target_kl,
+            target=algorithm_cfg.kl_ctrl.kl_target,
             horizon=algorithm_cfg.kl_ctrl.horizon,
         )
     else:
