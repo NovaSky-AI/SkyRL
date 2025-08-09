@@ -162,6 +162,8 @@ class RayPPOTrainer:
 
         # Extract data_sources from env_extras
         concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
+        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+        print("Eval output example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
         eval_metrics = calculate_per_dataset_metrics(
@@ -208,8 +210,14 @@ class RayPPOTrainer:
         self.weights_manager = InferenceWeightsManager(
             self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all
         )
+        # NOTE(Charlie): sglang's engine needs to sync weights after wake up. see https://github.com/sgl-project/sglang/issues/7939
+        # Change it to True after sglang fixes the issue.
+        sync_before_eval = self.cfg.trainer.placement.colocate_all and self.cfg.generator.backend == "sglang"
         self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=True
+            self.policy_model,
+            self.inference_engine_client,
+            self.cfg.trainer.placement.colocate_all,
+            no_sync=not sync_before_eval,
         )
 
         # Load checkpoint state if resumption is enabled

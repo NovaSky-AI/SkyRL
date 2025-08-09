@@ -51,12 +51,13 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         max_model_len=cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length,
         shared_pg=colocate_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        vllm_enable_sleep=cfg.trainer.placement.colocate_all,
+        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
         async_engine=cfg.generator.async_engine,
         max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
         max_num_seqs=cfg.generator.max_num_seqs,
         sampling_params=get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params),
         tokenizer=tokenizer,
+        backend=cfg.generator.backend,
     )
 
 

@@ -130,12 +130,10 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.remote_inference_engine_urls
         ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
 
-    if not cfg.generator.async_engine:
+    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
         assert (
             cfg.generator.batched
-        ), "if we are using the offline engine, we need to put generator in batched mode for faster generation"
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        raise ValueError("SGLang backend currently does not support local engines")
+        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -207,6 +205,13 @@ def validate_cfg(cfg: DictConfig):
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
     cfg.trainer.algorithm = algorithm_config
+
+    # TODO: fix once we support these features with SGLang
+    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
+        assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
+            "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
+            "Please set `inference_engine_tensor_parallel_size` to 1."
+        )
 
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
