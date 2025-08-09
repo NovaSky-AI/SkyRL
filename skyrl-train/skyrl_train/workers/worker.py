@@ -24,7 +24,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -719,11 +719,12 @@ class PolicyWorkerBase(Worker):
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
-            kl_loss = action_log_probs - base_action_log_probs
-            if self.cfg.trainer.algorithm.use_kl_estimator_k3:
-                kl_loss = -kl_loss
-                r = kl_loss.exp()
-                kl_loss = r - 1.0 - kl_loss
+            kl_loss = compute_approx_kl(
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_mask,
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
             kl_loss = torch.tensor(0.0)

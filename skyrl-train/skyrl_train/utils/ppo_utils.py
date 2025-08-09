@@ -79,8 +79,7 @@ def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
-    use_kl_estimator_k3: bool = False,
-    use_abs_kl: bool = False,
+    kl_estimator_type: str = "k3",
 ) -> torch.Tensor:
     """
     Compute the approximate KL divergence between two distributions.
@@ -91,23 +90,29 @@ def compute_approx_kl(
         log_probs_base: Log probabilities of the base distribution.
         action_mask: Mask for actions.
     """
-
     log_ratio = log_probs - log_probs_base
 
-    # The k3 estimator is the non negative kl approximation in
-    # http://joschu.net/blog/kl-approx.html
-    # Besides non negative, it is also unbiased and have lower variance.
-    if use_kl_estimator_k3:
-        log_ratio = -log_ratio
-        log_ratio = log_ratio.exp() - 1 - log_ratio
-
-    if use_abs_kl:
-        log_ratio = log_ratio.abs()
+    if kl_estimator_type in ("kl", "k1"):
+        kld = log_ratio
+    elif kl_estimator_type == "abs":
+        kld = log_ratio.abs()
+    elif kl_estimator_type in ("mse", "k2"):
+        kld = 0.5 * log_ratio.square()
+    # J. Schulman. Approximating kl divergence, 2020.
+    # URL http://joschu.net/blog/kl-approx.html.
+    elif kl_estimator_type in ("low_var_kl", "k3"):
+        kl = -log_ratio
+        # For numerical stability
+        kl = torch.clamp(kl, min=-20, max=20)
+        ratio = torch.exp(kl)
+        kld = (ratio - kl - 1).contiguous()
+        kld = torch.clamp(kld, min=-10, max=10)
+    else:
+        raise ValueError(f"Invalid KL estimator type: {kl_estimator_type}")
 
     if loss_mask is not None:
-        log_ratio = log_ratio * loss_mask
-
-    return log_ratio
+        kld = kld * loss_mask
+    return kld
 
 
 @torch.no_grad()
@@ -641,6 +646,10 @@ def compute_rloo_outcome_advantage(
     """
     Compute advantage for RLOO based on https://arxiv.org/abs/2402.14740
 
+    This advantage estimator is also used in LOOP (https://arxiv.org/pdf/2502.01600),
+    and was originally introduced in "Buy 4 REINFORCE Samples, Get a Baseline for Free!"
+    (https://openreview.net/pdf?id=r1lgTGL5DE).
+
     Args:
         - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
         - response_mask: Float[torch.Tensor, "batch_size seqlen"]
@@ -671,46 +680,6 @@ def compute_rloo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) * factor
         scores = scores.unsqueeze(-1) * response_mask
 
-    return scores, scores
-
-
-@register_advantage_estimator(AdvantageEstimator.LOOP)
-def compute_loop_outcome_advantage(
-    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: np.ndarray, **kwargs
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute advantage for LOOP which is same as GRPO without normalization based on https://arxiv.org/pdf/2502.01600
-    Args:
-        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
-        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
-        - index: np.ndarray (batch_size)
-
-    Returns:
-        - advantages: Float[torch.Tensor, "batch_size seqlen"]
-        - returns: Float[torch.Tensor, "batch_size seqlen"]
-    """
-    scores = token_level_rewards.sum(dim=-1)
-
-    id2samples = defaultdict(list)
-
-    with torch.no_grad():
-        bsz = scores.shape[0]
-        for i in range(bsz):
-            id2samples[index[i]].append((i, scores[i]))
-        for group in id2samples.values():
-            group_size = len(group)
-            total_score = sum(score for _, score in group)
-            for i, score in group:  # i is original index
-                loo_baseline = 0
-                if group_size == 1:
-                    from loguru import logger as logger_  # have to do lazy import to avoid pickling error
-
-                    logger_.warning("Cannot compute LOO advantage using 1 sample. 0 baseline is used")
-                else:
-                    loo_baseline = (total_score - score) / (group_size - 1)
-                scores[i] = score - loo_baseline
-
-        scores = scores.unsqueeze(-1) * response_mask
     return scores, scores
 
 

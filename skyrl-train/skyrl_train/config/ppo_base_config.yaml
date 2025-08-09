@@ -79,8 +79,9 @@ trainer:
     advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
     kl_target: null
     init_kl_coef: 0.0
-    use_kl_estimator_k3: true
-    use_abs_kl: false
+    kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
+    use_kl_estimator_k3: true # to be deprecated, use kl_estimator_type="k3" instead
+    use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
     # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model

@@ -12,11 +12,14 @@ NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
 ADV_ESTIMATOR="rloo"
+USE_KL_IN_REWARD=true
 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="$ADV_ESTIMATOR" \
+  trainer.algorithm.use_kl_loss=false \
+  trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -37,7 +40,6 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  trainer.algorithm.use_kl_loss=true \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
