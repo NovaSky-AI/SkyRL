@@ -1,6 +1,8 @@
 import asyncio
+import collections
 import traceback
 import sys
+import random
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from tqdm import tqdm
@@ -26,6 +28,21 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         self.global_step = 0
+        self.policy_version = 0
+
+        # Off-policy replay settings (optional; safe defaults if block absent)
+        offp_cfg = getattr(self.cfg.trainer, "off_policy", None)
+        self._offpolicy_enable = bool(getattr(offp_cfg, "enable", False)) if offp_cfg is not None else False
+        self._offpolicy_buffer_capacity = (
+            int(getattr(offp_cfg, "buffer_capacity", 64)) if offp_cfg is not None else 64
+        )
+        self._offpolicy_max_staleness = (
+            int(getattr(offp_cfg, "max_staleness_steps", 1)) if offp_cfg is not None else 1
+        )
+        self._offpolicy_sampling = (
+            str(getattr(offp_cfg, "sampling", "prefer_recent")) if offp_cfg is not None else "prefer_recent"
+        )
+        self.replay = collections.deque(maxlen=self._offpolicy_buffer_capacity)
 
         # Load checkpoint state if resumption is enabled
         if self.resume_mode != ResumeMode.NONE:
@@ -70,6 +87,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                     # sync weights
                     async with Timer("sync_weights", self.all_timings):
                         await self.weights_manager.async_sync_policy_weights_to_inference_engines()
+                    # After a successful sync, advance the policy version used for future generations
+                    self.policy_version += 1
 
                     self.sync_finished.set()
                     self.generation_ack.clear()
@@ -120,7 +139,12 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, generation_buffer):
         # Get a generation future and await on the object
-        generator_output, uids = await generation_buffer.get()  # GeneratorOutput, List[str]
+        item = await generation_buffer.get()
+        if isinstance(item, tuple) and len(item) == 3:
+            generator_output, uids, behavior_version = item  # GeneratorOutput, List[str], int
+        else:
+            generator_output, uids = item  # fallback for backward compatibility
+            behavior_version = self.policy_version
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -128,6 +152,10 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         with Timer("convert_to_training_input", self.all_timings):
             training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
+            # Tag with behavior policy version
+            if training_input.metadata is None:
+                training_input.metadata = {}
+            training_input.metadata["behavior_version"] = behavior_version
 
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -154,9 +182,26 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("dump_data_batch"):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
+        # Optionally enqueue and sample from replay (whole-batch sampling)
+        selected_batch = training_input
+        if self._offpolicy_enable:
+            self.replay.append(training_input)
+            cur_ver = self.policy_version
+            candidates = [
+                b for b in self.replay
+                if cur_ver - int(b.metadata.get("behavior_version", cur_ver)) <= self._offpolicy_max_staleness
+            ]
+            if candidates:
+                if self._offpolicy_sampling == "fifo":
+                    selected_batch = candidates[0]
+                elif self._offpolicy_sampling == "random":
+                    selected_batch = random.choice(candidates)
+                else:  # prefer_recent
+                    selected_batch = candidates[-1]
+
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings):
-            status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+            status = await asyncio.to_thread(self.train_critic_and_policy, selected_batch)
 
         return status
 
@@ -171,11 +216,13 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
                 # generation phase
                 async with Timer("generate", self.all_timings):
+                    # Capture policy version for this generation
+                    version_for_batch = self.policy_version
                     generator_output: GeneratorOutput = await self.generate(generator_input)
                     generator_output = self.postprocess_generator_output(generator_output, uids)
 
-                # Add to generation buffer
-                await generation_buffer.put((generator_output, uids))
+                # Add to generation buffer with behavior version
+                await generation_buffer.put((generator_output, uids, version_for_batch))
 
                 # If the buffer is full, start weight sync
                 # Don't weight sync in the first step, because we let the generator run one step ahead

@@ -106,6 +106,11 @@ trainer:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
       min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+  off_policy:
+    enable: false # whether to enable or disable off-policy training
+    buffer_capacity: 64    # optional, if you add replay
+    max_staleness_steps: 1    # 0 = strictly on-policy, >=1 = off-policy
+    prefer_recent: true       # optional, bias sampler to fresher item
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
