@@ -206,6 +206,14 @@ def validate_cfg(cfg: DictConfig):
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+
+    # TODO (erictang000): remove these after deprecation period
+    if cfg.trainer.algorithm.use_abs_kl:
+        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
+        cfg.trainer.algorithm.kl_estimator_type = "abs"
+    elif cfg.trainer.algorithm.use_kl_estimator_k3:
+        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
+        cfg.trainer.algorithm.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
     if cfg.trainer.strategy == "deepspeed" and not (

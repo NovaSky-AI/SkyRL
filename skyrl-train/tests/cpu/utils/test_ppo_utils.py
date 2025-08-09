@@ -18,6 +18,8 @@ from skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     PolicyLossRegistry,
     register_policy_loss,
+    compute_reinforce_plus_plus_outcome_advantage,
+    compute_rloo_outcome_advantage,
 )
 import numpy as np
 
@@ -41,15 +43,90 @@ def advantage_test_data():
 
 def test_compute_approx_kl(dummy_data):
     log_probs, log_probs_base, mask = dummy_data
-    kl = compute_approx_kl(log_probs, log_probs_base, mask)
+    kl = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type="k1")
 
     expected_kl = (log_probs - log_probs_base) * mask
     assert torch.allclose(kl, expected_kl), "KL approximation should be log-prob diff masked"
 
-    kl_k3 = compute_approx_kl(log_probs, log_probs_base, mask, use_kl_estimator_k3=True)
+    kl_abs = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type="abs")
+    expected_abs = (log_probs - log_probs_base).abs() * mask
+    assert torch.allclose(kl_abs, expected_abs), "KL approximation should be abs(log-prob diff) masked"
+
+    kl_k2 = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type="k2")
+    expected_k2 = 0.5 * (log_probs - log_probs_base).square() * mask
+    assert torch.allclose(kl_k2, expected_k2, atol=1e-4), "k2 estimator is not correct"
+
+    kl_k3 = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type="k3")
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+
+
+def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():
+    """REINFORCE++ returns should be discounted sums with reset after EOS; advantages masked."""
+    token_level_rewards = torch.tensor([[1.0, 2.0, 3.0]])
+    response_mask = torch.tensor([[1.0, 1.0, 0.0]])  # EOS after second token
+
+    adv, ret = compute_reinforce_plus_plus_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        gamma=1.0,
+    )
+
+    expected_ret = torch.tensor([[3.0, 2.0, 3.0]])
+
+    assert ret.shape == token_level_rewards.shape
+    assert torch.allclose(ret, expected_ret, atol=1e-5)
+    # advantages are whitened and then masked; masked positions should be zero
+    assert adv.shape == token_level_rewards.shape
+    assert torch.allclose(adv * (1 - response_mask), torch.zeros_like(adv))
+
+
+def test_compute_reinforce_plus_plus_outcome_advantage_gamma():
+    """REINFORCE++ returns should reflect gamma discounting."""
+    token_level_rewards = torch.tensor([[1.0, 2.0, 3.0]])
+    response_mask = torch.ones_like(token_level_rewards)
+
+    adv, ret = compute_reinforce_plus_plus_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        gamma=0.5,
+    )
+
+    expected_ret = torch.tensor([[2.75, 3.50, 3.00]])
+
+    assert ret.shape == token_level_rewards.shape
+    assert torch.allclose(ret, expected_ret, atol=1e-5)
+    assert adv.shape == token_level_rewards.shape
+
+
+def test_compute_rloo_outcome_advantage_basic():
+    """RLOO should produce leave-one-out centered scores per group, broadcast across tokens."""
+    # Three groups: [6.0, 3.0] -> [3.0, -3.0], [9.0, 12.0] -> [-3.0, 3.0]
+    # [1.0] -> [0.0] (since there's only one response, the advantage is 0)
+    token_level_rewards = torch.tensor(
+        [
+            [0.0, 0.0, 6.0],  # sum = 6.0, group 0
+            [0.0, 0.0, 3.0],  # sum = 3.0, group 0
+            [0.0, 0.0, 9.0],  # sum = 9.0, group 1
+            [0.0, 0.0, 12.0],  # sum = 12.0, group 1
+            [0.0, 0.0, 1.0],  # sum = 0.0, group 2
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0, 1, 1, 2])
+
+    adv, ret = compute_rloo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    expected = torch.tensor([3.0, -3.0, -3.0, 3.0, 0.0]).unsqueeze(-1) * response_mask
+
+    assert adv.shape == token_level_rewards.shape
+    assert torch.allclose(adv, ret), "Advantages and returns should be equal with RLOO"
+    assert torch.allclose(adv, expected, atol=1e-5)
 
 
 def test_compute_grpo_outcome_advantage(advantage_test_data):
@@ -283,7 +360,7 @@ def test_advantage_estimator_registry_specific():
     index = np.array(["0", "0", "0"])
 
     adv, ret = compute_advantages_and_returns(
-        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="test_decorator"
+        token_level_rewards=rewards, response_mask=response_mask, index=index, adv_estimator="test_decorator", config={}
     )
 
     assert torch.allclose(adv, torch.ones_like(rewards))
