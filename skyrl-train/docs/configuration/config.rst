@@ -325,7 +325,7 @@ Algorithm Configuration
         min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
 
 
-- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``loop``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
+- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
 
  - ``type``: Type of KL controller to use. Options include: ``fixed`` or ``adaptive``. 

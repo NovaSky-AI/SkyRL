@@ -76,7 +76,7 @@ trainer:
       fsdp_size: -1
     sequence_parallel_size: 1
   algorithm:
-    advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
+    advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
     kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
       type: "fixed" # "fixed" or "adaptive"
       kl_target: 0.1 # target KL divergence for adaptive KL controller
