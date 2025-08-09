@@ -972,7 +972,7 @@ class RayPPOTrainer:
         kl_loss_coef = (
             self.reward_kl_controller.value
             if self.reward_kl_controller is not None
-            else max(0, self.cfg.trainer.algorithm.kl_loss_coef)
+            else self.cfg.trainer.algorithm.kl_loss_coef
         )
         custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
         data["custom_rewards"] = custom_rewards
@@ -981,7 +981,8 @@ class RayPPOTrainer:
         avg_kl_max: float = kl_max.mean().item()
 
         # update the kl controller
-        self.reward_kl_controller.update(current_kl=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
+        if self.reward_kl_controller is not None:
+            self.reward_kl_controller.update(current_kl=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
 
