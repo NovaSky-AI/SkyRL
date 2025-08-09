@@ -289,7 +289,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             mininterval=5,
         )
 
-        responses, rewards, stop_reasons, loss_masks, prompt_token_ids = map(list, zip(*all_outputs))
+        if not all_outputs:
+            responses, rewards, stop_reasons, loss_masks, prompt_token_ids = [], [], [], [], []
+        else:
+            responses, rewards, stop_reasons, loss_masks, prompt_token_ids = map(list, zip(*all_outputs))
 
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
