@@ -18,7 +18,7 @@ from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
-from skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl_train.distributed.utils import ModelOrModelOptimPair, create_optimizer
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -269,11 +269,9 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            actor_optimizer = optim.AdamW(
-                fsdp_module.parameters(),
-                lr=optim_config.lr,
-                betas=optim_config.adam_betas,
-                weight_decay=optim_config.weight_decay,
+            optimizer_type = getattr(optim_config, "optimizer_type", "adamw")
+            actor_optimizer = create_optimizer(
+                optimizer_type=optimizer_type, model_parameters=fsdp_module.parameters(), config=optim_config
             )
 
             #  TODO(csy): add other schedulers, add more to config
