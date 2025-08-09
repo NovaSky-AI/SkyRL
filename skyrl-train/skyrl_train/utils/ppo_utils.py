@@ -416,7 +416,6 @@ class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
     RLOO = "rloo"
-    LOOP = "loop"
     REINFORCE_PP = "reinforce++"
 
 
@@ -651,7 +650,6 @@ def compute_reinforce_plus_plus_outcome_advantage(
     return advantages, returns
 
 
-@register_advantage_estimator(AdvantageEstimator.LOOP)
 @register_advantage_estimator(AdvantageEstimator.RLOO)
 def compute_rloo_outcome_advantage(
     token_level_rewards: torch.Tensor,
