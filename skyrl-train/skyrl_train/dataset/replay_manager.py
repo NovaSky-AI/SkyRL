@@ -98,7 +98,7 @@ class TrainingBatchReplay:
         if sampling == "fifo":
             picked = candidates[:k]
         elif sampling == "random":
-            # torch.random for deterministic control if needed
+            # torch.random for determinism based on seed
             idx = torch.randperm(len(candidates))[:k].tolist()
             picked = [candidates[i] for i in idx]
         else:  # prefer_recent
