@@ -140,12 +140,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, generation_buffer):
         # Get a generation future and await on the object
-        item = await generation_buffer.get()
-        if isinstance(item, tuple) and len(item) == 3:
-            generator_output, uids, behavior_version = item  # GeneratorOutput, List[str], int
-        else:
-            generator_output, uids = item  # fallback for backward compatibility
-            behavior_version = self.policy_version
+        generator_output, uids, behavior_version = await generation_buffer.get()  # GeneratorOutput, List[str], int
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
