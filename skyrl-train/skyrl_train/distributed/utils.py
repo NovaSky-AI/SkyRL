@@ -30,6 +30,7 @@ from torch.distributed.distributed_c10d import (
 from torch.multiprocessing.reductions import rebuild_cuda_tensor
 import torch.nn as nn
 from torch.optim import Optimizer
+import torch.optim as optim
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
 ModelOrModelOptimPair = Union[nn.Module, ModelOptimPair]
@@ -124,6 +125,148 @@ def get_optimizer_grouped_parameters(
         },
     ]
     return optimizer_grouped_parameters
+
+
+# Optimizer Registry Pattern
+OPTIMIZER_REGISTRY = {}
+
+
+def register_optimizer(name: str):
+    """Decorator to register optimizer classes.
+
+    Usage:
+        @register_optimizer("my_optimizer")
+        class GetOptimizerMyOptimizer:
+            @staticmethod
+            def create_optimizer(model_parameters, config):
+                # Your optimizer creation logic here
+                return my_optimizer_instance
+
+    Args:
+        name: The name to register the optimizer under (used in config files)
+
+    Returns:
+        Decorator function that registers the class
+    """
+
+    def decorator(cls):
+        OPTIMIZER_REGISTRY[name] = cls
+        return cls
+
+    return decorator
+
+
+@register_optimizer("adamw")
+class GetOptimizerAdamW:
+    """AdamW optimizer implementation."""
+
+    @staticmethod
+    def create_optimizer(model_parameters, config):
+        """Create AdamW optimizer.
+
+        Args:
+            model_parameters: Model parameters to optimize
+            config: Configuration object with optimizer settings
+
+        Returns:
+            torch.optim.AdamW instance
+        """
+        return optim.AdamW(
+            model_parameters,
+            lr=config.lr,
+            betas=config.adam_betas,
+            weight_decay=config.weight_decay,
+        )
+
+
+@register_optimizer("muon")
+class GetOptimizerMuon:
+    """Muon optimizer implementation with automatic parameter separation."""
+
+    @staticmethod
+    def create_optimizer(model_parameters, config):
+        """Create Muon optimizer with parameter separation.
+
+        Automatically separates 2D+ parameters for Muon optimization and
+        scalar/vector parameters for AdamW optimization.
+
+        Args:
+            model_parameters: Model parameters to optimize
+            config: Configuration object with optimizer settings
+
+        Returns:
+            MuonWithAuxAdam instance with properly separated parameter groups
+        """
+        try:
+            from muon import MuonWithAuxAdam
+        except ImportError:
+            raise ImportError("Muon optimizer not found. Install with: uv sync --extra muon")
+
+        # Convert parameters to list for filtering
+        param_list = list(model_parameters)
+
+        # Separate parameters for Muon (2D+) vs AdamW (scalars/vectors)
+        hidden_weights = [p for p in param_list if p.ndim >= 2]
+        other_params = [p for p in param_list if p.ndim < 2]
+
+        param_groups = []
+
+        # Add Muon parameter group if we have 2D+ parameters
+        if hidden_weights:
+            param_groups.append(
+                dict(
+                    params=hidden_weights,
+                    use_muon=True,
+                    lr=getattr(config, "muon_lr", 0.02),
+                    weight_decay=config.weight_decay,
+                )
+            )
+
+        # Add AdamW parameter group if we have scalar/vector parameters
+        if other_params:
+            param_groups.append(
+                dict(
+                    params=other_params,
+                    use_muon=False,
+                    lr=config.lr,
+                    betas=config.adam_betas,
+                    weight_decay=config.weight_decay,
+                )
+            )
+
+        if not param_groups:
+            raise ValueError("No parameters found for optimization")
+
+        return MuonWithAuxAdam(param_groups)
+
+
+def create_optimizer(optimizer_type: str, model_parameters, config):
+    """Factory function to create optimizers based on registered type.
+
+    This function looks up the optimizer type in the registry and creates
+    the appropriate optimizer instance.
+
+    Args:
+        optimizer_type: Type of optimizer (must be registered)
+        model_parameters: Model parameters to optimize
+        config: Configuration object with optimizer settings
+
+    Returns:
+        Configured optimizer instance
+
+    Raises:
+        ValueError: If optimizer_type is not registered
+    """
+    if optimizer_type not in OPTIMIZER_REGISTRY:
+        available_optimizers = list(OPTIMIZER_REGISTRY.keys())
+        raise ValueError(
+            f"Unknown optimizer type: {optimizer_type}. "
+            f"Available optimizers: {available_optimizers}. "
+            f"Register custom optimizers using @register_optimizer decorator."
+        )
+
+    optimizer_class = OPTIMIZER_REGISTRY[optimizer_type]
+    return optimizer_class.create_optimizer(model_parameters, config)
 
 
 class CUDAIPCHandle:
