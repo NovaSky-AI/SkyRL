@@ -1,8 +1,6 @@
 import asyncio
-import collections
 import traceback
 import sys
-import random
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from tqdm import tqdm
@@ -11,6 +9,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.weights_manager import InferenceWeightsManager
+from skyrl_train.dataset.replay_manager import TrainingBatchReplay
 
 
 class AsyncRayPPOTrainer(RayPPOTrainer):
@@ -30,19 +29,21 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step = 0
         self.policy_version = 0
 
-        # Off-policy replay settings (optional; safe defaults if block absent)
-        offp_cfg = getattr(self.cfg.trainer, "off_policy", None)
-        self._offpolicy_enable = bool(getattr(offp_cfg, "enable", False)) if offp_cfg is not None else False
-        self._offpolicy_buffer_capacity = (
-            int(getattr(offp_cfg, "buffer_capacity", 64)) if offp_cfg is not None else 64
-        )
-        self._offpolicy_max_staleness = (
-            int(getattr(offp_cfg, "max_staleness_steps", 1)) if offp_cfg is not None else 1
-        )
-        self._offpolicy_sampling = (
-            str(getattr(offp_cfg, "sampling", "prefer_recent")) if offp_cfg is not None else "prefer_recent"
-        )
-        self.replay = collections.deque(maxlen=self._offpolicy_buffer_capacity)
+        # Replay settings (optional; safe defaults if block absent)
+        replay_cfg = getattr(self.cfg.trainer, "replay", None)
+        self._replay_enable = bool(getattr(replay_cfg, "enable", False)) if replay_cfg is not None else False
+        self._replay_buffer_capacity = int(getattr(replay_cfg, "buffer_capacity", 64)) if replay_cfg is not None else 64
+        self._replay_max_staleness = int(getattr(replay_cfg, "max_staleness_steps", 1)) if replay_cfg is not None else 1
+        self._replay_sampling = str(getattr(replay_cfg, "sampling", "prefer_recent")) if replay_cfg is not None else "prefer_recent"
+        # Replay manager (trajectory-level) if enabled
+        self.replay_mgr: TrainingBatchReplay = None
+        if self._replay_enable:
+            sample_bs = int(getattr(replay_cfg, "sample_batch_size", self.cfg.trainer.train_batch_size))
+            self.replay_mgr = TrainingBatchReplay(
+                sample_batch_size=sample_bs,
+                capacity=self._replay_buffer_capacity,
+                cpu_offload=True,
+            )
 
         # Load checkpoint state if resumption is enabled
         if self.resume_mode != ResumeMode.NONE:
@@ -184,20 +185,17 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         # Optionally enqueue and sample from replay (whole-batch sampling)
         selected_batch = training_input
-        if self._offpolicy_enable:
-            self.replay.append(training_input)
-            cur_ver = self.policy_version
-            candidates = [
-                b for b in self.replay
-                if cur_ver - int(b.metadata.get("behavior_version", cur_ver)) <= self._offpolicy_max_staleness
-            ]
-            if candidates:
-                if self._offpolicy_sampling == "fifo":
-                    selected_batch = candidates[0]
-                elif self._offpolicy_sampling == "random":
-                    selected_batch = random.choice(candidates)
-                else:  # prefer_recent
-                    selected_batch = candidates[-1]
+        if self._replay_enable and self.replay_mgr is not None:
+            # Append current batch (evicts as needed)
+            self.replay_mgr.append(training_input, behavior_version)
+            # Sample respecting staleness bound
+            sampled = self.replay_mgr.sample(
+                current_policy_version=self.policy_version,
+                max_staleness_steps=self._replay_max_staleness,
+                sampling=self._replay_sampling,
+            )
+            if sampled is not None:
+                selected_batch = sampled
 
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings):
