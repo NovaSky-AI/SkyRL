@@ -32,6 +32,7 @@ def test_policy_loss_dual_clip():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "dual_clip",
             "loss_reduction": "token_mean",
+            "max_seq_len": 4,
         }
     )
 
@@ -104,6 +105,7 @@ def test_policy_loss_reduction_modes():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
+            "max_seq_len": 4,
         }
     )
 
@@ -114,6 +116,7 @@ def test_policy_loss_reduction_modes():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
+            "max_seq_len": 4,
         }
     )
 
@@ -185,6 +188,7 @@ def test_policy_loss_reduction_edge_cases():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
+            "max_seq_len": 4,
         }
     )
 
@@ -195,6 +199,7 @@ def test_policy_loss_reduction_edge_cases():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
+            "max_seq_len": 4,
         }
     )
 
@@ -279,6 +284,7 @@ def test_gspo_importance_sampling_levels():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
+            "max_seq_len": 4,
         }
     )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
@@ -292,6 +298,7 @@ def test_gspo_importance_sampling_levels():
             "clip_ratio_c": 3.0,
             "policy_loss_type": "gspo",
             "loss_reduction": "sequence_mean",  # GSPO recommended reduction
+            "max_seq_len": 4,
         }
     )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")

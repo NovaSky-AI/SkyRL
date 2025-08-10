@@ -20,7 +20,6 @@ from collections import defaultdict
 from enum import StrEnum
 from typing import Callable, List, Tuple, Union, Optional, Literal
 from functools import wraps
-
 import torch
 import numpy as np
 
@@ -158,6 +157,28 @@ def masked_whiten(values, mask, shift_mean=True):
     if not shift_mean:
         whitened += mean
     return whitened
+
+
+def ppo_critic_loss(
+    values: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Optional[float]]:
+
+    if config.value_clip is not None:
+        values_clipped = old_values + (values - old_values).clamp(-config.value_clip, config.value_clip)
+        surr1 = (values_clipped - returns) ** 2
+        surr2 = (values - returns) ** 2
+        loss = torch.max(surr1, surr2)
+        clipfrac = masked_mean((surr1 > surr2).float(), loss_mask).mean().detach().item()
+    else:
+        clipfrac = None
+        loss = (values - returns) ** 2
+
+    loss = masked_mean(loss, loss_mask, dim=-1).mean()
+    return 0.5 * loss, clipfrac
 
 
 # Shared registry actor class for both policy loss and advantage estimator registries
@@ -468,7 +489,8 @@ def ppo_policy_loss(
     assert loss_reduction in [
         "token_mean",
         "sequence_mean",
-    ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
+        "seq_mean_token_sum_norm",
+    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
 
     ratio = (log_probs - old_log_probs).exp()
     surr1 = ratio * advantages
@@ -480,7 +502,7 @@ def ppo_policy_loss(
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-    loss = reduce_loss(loss, loss_mask, loss_reduction)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, clip_ratio
 
 
@@ -538,13 +560,16 @@ def gspo_policy_loss(
     # Compute clipping ratio for monitoring
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
     return loss, clip_ratio
 
 
 def reduce_loss(
-    loss: torch.Tensor, loss_mask: Optional[torch.Tensor], loss_reduction: Literal["token_mean", "sequence_mean"]
+    loss: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
+    max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
@@ -552,6 +577,17 @@ def reduce_loss(
     elif loss_reduction == "sequence_mean":
         # per-sequence token-mean (dim=-1), then batch-mean
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
+    elif loss_reduction == "seq_mean_token_sum_norm":
+        # per-sequence token-sum, normalized by the max sequence length, then batch mean
+        # this is the Dr. GRPO loss reduction to avoid length bias by normalizing by a constant
+        assert max_seq_len is not None, "max_seq_len must be provided for seq_mean_token_sum_norm loss reduction"
+        # NOTE: max_seq_len is computed as cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length by default
+        if loss_mask is not None:
+            seq_losses = torch.sum(loss * loss_mask, dim=-1) / max_seq_len
+        else:
+            # If no mask, assume all tokens are valid
+            seq_losses = torch.sum(loss, dim=-1) / max_seq_len
+        loss = torch.mean(seq_losses)
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
     return loss
@@ -594,7 +630,7 @@ def compute_grpo_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: bool = True,
+    grpo_norm_by_std: bool = True,
     **kwargs,
 ):
     """
@@ -605,7 +641,7 @@ def compute_grpo_outcome_advantage(
         - response_mask: Float[torch.Tensor, "batch_size seqlen"]
         - index: np.ndarray (batch_size)
         - epsilon: float
-        - norm_adv_by_std_in_grpo: bool
+        - grpo_norm_by_std: bool
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
@@ -632,7 +668,7 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
-            if norm_adv_by_std_in_grpo:
+            if grpo_norm_by_std:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
@@ -647,7 +683,7 @@ def compute_advantages_and_returns(
     index: np.ndarray,
     adv_estimator: AdvantageEstimator,
     values: Optional[torch.Tensor] = None,
-    norm_adv_by_std_in_grpo: bool = True,
+    grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
 ):
@@ -658,7 +694,7 @@ def compute_advantages_and_returns(
         response_mask=response_mask,
         index=index,
         values=values,
-        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        grpo_norm_by_std=grpo_norm_by_std,
         gamma=gamma,
         lambd=lambd,
     )

@@ -4,10 +4,8 @@ import deepspeed
 import ray
 import torch
 import torch.distributed
-from functools import partial
 from loguru import logger
 from transformers import AutoModel
-
 from transformers.trainer import get_scheduler
 
 
@@ -15,13 +13,11 @@ from skyrl_train.models import get_llm_for_sequence_regression, Actor
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
 from skyrl_train.utils import get_physical_gpu_id
 from skyrl_train.utils.utils import str_to_torch_dtype
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     CriticWorkerBase,
     RewardWorkerBase,
     RefWorkerBase,
-    ValueLoss,
 )
 
 
@@ -93,10 +89,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (actor, actor_optim, actor_scheduler),
         )
-
-        # set ppo loss function
-        policy_loss_func = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-        self.actor_loss_fn = partial(policy_loss_func, config=self.cfg.trainer.algorithm)
 
         self.use_cuda_ipc = False
         if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
@@ -286,9 +278,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (critic, critic_optim, critic_scheduler),
         )
-
-        # set ppo loss function
-        self.critic_loss_fn = ValueLoss(self.cfg.trainer.algorithm.value_clip)
 
 
 class DeepSpeedRewardWorkerBase(RewardWorkerBase):
