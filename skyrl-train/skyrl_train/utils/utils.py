@@ -303,6 +303,14 @@ def initialize_ray(cfg: DictConfig):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
+    if os.environ.get("MLFLOW_TRACKING_URI"):
+        logger.info("Exporting mlflow tracking uri to ray runtime env")
+        env_vars["MLFLOW_TRACKING_URI"] = os.environ["MLFLOW_TRACKING_URI"]
+
+    if os.environ.get("MLFLOW_TRACKING_TOKEN"):
+        logger.info("Exporting mlflow tracking token to ray runtime env")
+        env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
+
     if os.environ.get("SKYRL_LD_LIBRARY_PATH_EXPORT"):
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
