@@ -8,6 +8,7 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/test_engine_genera
 
 import pytest
 import ray
+import hydra
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -20,10 +21,19 @@ from transformers import AutoTokenizer
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
+from skyrl_train.entrypoints.main_base import config_dir
 from typing import Tuple
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
+def get_test_actor_config() -> DictConfig:
+    """Get base config with test-specific overrides."""
+    with hydra.initialize_config_dir(config_dir=config_dir):
+        cfg = hydra.compose(config_name="ppo_base_config")
+
+        cfg.trainer.policy.model.path = MODEL
+
+        return cfg
 
 def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()
@@ -214,7 +224,9 @@ def test_inference_engines_generation(backend: str, tp_size: int):
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
     try:
-        initialize_ray(DictConfig({"generator": {"backend": backend}}))
+        cfg = get_test_actor_config()
+        cfg.generator.backend = backend
+        initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL)
 
@@ -302,7 +314,9 @@ def test_token_based_generation(backend: str, tp_size: int):
     """Test generation using prompt_token_ids for the specified backend."""
 
     try:
-        initialize_ray(DictConfig({"generator": {"backend": backend}}))
+        cfg = get_test_actor_config()
+        cfg.generator.backend = backend
+        initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL, 3)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)

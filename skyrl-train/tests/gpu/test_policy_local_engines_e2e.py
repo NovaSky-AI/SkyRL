@@ -50,7 +50,7 @@ async def run_inference(client, prompts):
 def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, backend):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
-    initialize_ray(DictConfig({"generator": {"backend": backend}}))
+    initialize_ray(cfg)
     if colocate_all:
         pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
