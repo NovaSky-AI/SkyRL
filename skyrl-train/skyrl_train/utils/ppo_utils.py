@@ -385,7 +385,8 @@ class BaseFunctionRegistry:
         """Resets the registry (useful for testing purposes)."""
         if ray.is_initialized() and cls._ray_actor is not None:
             try:
-                ray.kill(cls._ray_actor)
+                actor = ray.get_actor(cls._actor_name)  # this raises exception if the actor is stale
+                ray.kill(actor)
             except Exception:
                 pass  # Actor may already be gone
         cls._functions.clear()
@@ -464,6 +465,12 @@ def register_policy_loss(name: Union[str, PolicyLossType]):
         return wrapper
 
     return decorator
+
+
+def reset_registries():
+    """Reset the registries."""
+    PolicyLossRegistry.reset()
+    AdvantageEstimatorRegistry.reset()
 
 
 def sync_registries():
