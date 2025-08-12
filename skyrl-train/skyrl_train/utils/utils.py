@@ -284,6 +284,11 @@ def initialize_ray(cfg: DictConfig):
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+        # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+        # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+        if cfg.generator.weight_sync_backend == "nccl":
+            env_vars["NCCL_CUMEM_ENABLE"] = "0"
+
     max_num_gpus_per_node = max(
         [
             cfg.trainer.placement.policy_num_gpus_per_node,
