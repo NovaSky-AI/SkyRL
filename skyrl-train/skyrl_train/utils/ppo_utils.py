@@ -387,7 +387,7 @@ class BaseFunctionRegistry:
             try:
                 actor = ray.get_actor(cls._actor_name)  # this raises exception if the actor is stale
                 ray.kill(actor)
-            except Exception:
+            except ValueError:
                 pass  # Actor may already be gone
         cls._functions.clear()
         cls._ray_actor = None
