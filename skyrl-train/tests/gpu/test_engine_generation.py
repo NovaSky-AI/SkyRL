@@ -26,6 +26,7 @@ from typing import Tuple
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
+
 def get_test_actor_config() -> DictConfig:
     """Get base config with test-specific overrides."""
     with hydra.initialize_config_dir(config_dir=config_dir):
@@ -34,6 +35,7 @@ def get_test_actor_config() -> DictConfig:
         cfg.trainer.policy.model.path = MODEL
 
         return cfg
+
 
 def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()

@@ -20,6 +20,7 @@ from typing import Any, Dict
 import hydra
 from skyrl_train.entrypoints.main_base import config_dir
 
+
 def get_test_actor_config() -> DictConfig:
     """Get base config with test-specific overrides."""
     with hydra.initialize_config_dir(config_dir=config_dir):
@@ -27,6 +28,7 @@ def get_test_actor_config() -> DictConfig:
         cfg.generator.backend = "vllm"
 
         return cfg
+
 
 # Setup for formatting tests
 class TestEnv(BaseTextEnv):
