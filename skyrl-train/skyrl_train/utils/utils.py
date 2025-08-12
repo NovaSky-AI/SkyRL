@@ -130,12 +130,10 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.remote_inference_engine_urls
         ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
 
-    if not cfg.generator.async_engine:
+    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
         assert (
             cfg.generator.batched
-        ), "if we are using the offline engine, we need to put generator in batched mode for faster generation"
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        raise ValueError("SGLang backend currently does not support local engines")
+        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -208,6 +206,13 @@ def validate_cfg(cfg: DictConfig):
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
     cfg.trainer.algorithm = algorithm_config
 
+    # TODO: fix once we support these features with SGLang
+    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
+        assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
+            "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
+            "Please set `inference_engine_tensor_parallel_size` to 1."
+        )
+
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
         and cfg.trainer.critic.optimizer_config.offload_after_step
@@ -261,6 +266,13 @@ def get_physical_gpu_id():
 def initialize_ray(cfg: DictConfig):
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+
+    # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+    # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+    # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
+    if cfg.generator.weight_sync_backend == "nccl":
+        env_vars["NCCL_CUMEM_ENABLE"] = "0"
+
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
@@ -278,11 +290,6 @@ def initialize_ray(cfg: DictConfig):
             )
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
-        # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
-        # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-        if cfg.generator.weight_sync_backend == "nccl":
-            env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     max_num_gpus_per_node = max(
         [
