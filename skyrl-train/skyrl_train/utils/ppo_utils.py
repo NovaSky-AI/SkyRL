@@ -256,6 +256,16 @@ class BaseFunctionRegistry:
         if not ray.is_initialized():
             raise Exception("Ray is not initialized, cannot sync with actor")
 
+        # First check if the actor is still alive
+        # NOTE(Charlie): This is mainly for unit tests, where we run multiple unit tests in the
+        # same Python process, and each unit test has ray init/shutdown. This makes cls's attributes
+        # outdated (e.g. the _ray_actor points to a stale actor in the previous ray session).
+        try:
+            _ = ray.get_actor(cls._actor_name)  # this raises exception if the actor is stale
+        except ValueError:
+            cls._ray_actor = None
+            cls._synced_to_actor = False
+
         # First, sync our local functions to the actor
         cls._sync_local_to_actor()
 
@@ -465,12 +475,6 @@ def register_policy_loss(name: Union[str, PolicyLossType]):
         return wrapper
 
     return decorator
-
-
-def reset_registries():
-    """Reset the registries."""
-    PolicyLossRegistry.reset()
-    AdvantageEstimatorRegistry.reset()
 
 
 def sync_registries():

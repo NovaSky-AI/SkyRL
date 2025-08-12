@@ -9,7 +9,6 @@ from ray.util.placement_group import placement_group, PlacementGroupSchedulingSt
 from skyrl_train.utils.ppo_utils import (
     AdvantageEstimatorRegistry,
     PolicyLossRegistry,
-    reset_registries,
     sync_registries,
 )
 
@@ -331,7 +330,6 @@ def initialize_ray(cfg: DictConfig):
     ray.init(runtime_env={"env_vars": env_vars})
 
     # create the named ray actors for the registries to make available to all workers
-    reset_registries()
     sync_registries()
 
 
