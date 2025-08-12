@@ -31,10 +31,17 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         # Replay settings (optional; safe defaults if block absent)
         replay_cfg = getattr(self.cfg.trainer, "replay", None)
-        self._replay_enable = bool(getattr(replay_cfg, "enable", False)) if replay_cfg is not None else False
-        self._replay_buffer_capacity = int(getattr(replay_cfg, "buffer_capacity", 64)) if replay_cfg is not None else 64
-        self._replay_max_staleness = int(getattr(replay_cfg, "max_staleness_steps", 1)) if replay_cfg is not None else 1
-        self._replay_sampling = str(getattr(replay_cfg, "sampling", "prefer_recent")) if replay_cfg is not None else "prefer_recent"
+        if replay_cfg:
+            self._replay_enable = bool(getattr(replay_cfg, "enable", False))
+            self._replay_buffer_capacity = int(getattr(replay_cfg, "buffer_capacity", 64))
+            self._replay_max_staleness = int(getattr(replay_cfg, "max_staleness_steps", 1))
+            self._replay_sampling = str(getattr(replay_cfg, "sampling", "prefer_recent"))
+        else:
+            self._replay_enable = False
+            self._replay_buffer_capacity = 64
+            self._replay_max_staleness = 1
+            self._replay_sampling = "prefer_recent"
+            
         # Replay manager (trajectory-level) if enabled
         self.replay_mgr: TrainingBatchReplay = None
         if self._replay_enable:
@@ -149,8 +156,6 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("convert_to_training_input", self.all_timings):
             training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
             # Tag with behavior policy version
-            if training_input.metadata is None:
-                training_input.metadata = {}
             training_input.metadata["behavior_version"] = behavior_version
 
         # inference and calculate values, log probs, rewards, kl divergence

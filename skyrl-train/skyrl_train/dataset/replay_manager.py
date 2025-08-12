@@ -85,11 +85,11 @@ class TrainingBatchReplay:
             return None
 
         # Filter by staleness bound
-        candidates = []
-        for it in self.buffer.items:
-            bv = int(it.info.get("behavior_version", 0)) if it.info is not None else 0
-            if current_policy_version - bv <= max_staleness_steps:
-                candidates.append(it)
+        candidates = [
+            it
+            for it in self.buffer.items
+            if current_policy_version - int(it.info.get("behavior_version", 0)) <= max_staleness_steps
+        ]
 
         if not candidates:
             return None
