@@ -105,18 +105,16 @@ def compute_approx_kl(
         log_probs_base: Log probabilities of the base distribution.
         action_mask: Mask for actions.
     """
-    log_ratio = log_probs - log_probs_base
-
     if kl_estimator_type == "k1":
-        kld = log_ratio
+        kld = log_probs - log_probs_base
     elif kl_estimator_type == "abs":
-        kld = log_ratio.abs()
+        kld = (log_probs - log_probs_base).abs()
     elif kl_estimator_type == "k2":
-        kld = 0.5 * log_ratio.square()
+        kld = 0.5 * (log_probs - log_probs_base).square()
     # J. Schulman. Approximating kl divergence, 2020.
     # URL http://joschu.net/blog/kl-approx.html.
     elif kl_estimator_type == "k3":
-        kl = -log_ratio
+        kl = log_probs_base - log_probs
         # For numerical stability
         kl = torch.clamp(kl, min=-20, max=20)
         ratio = torch.exp(kl)
