@@ -28,7 +28,8 @@ TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
 CLIP_RATIO_C=10.0
-MAX_RESPONSE_LENGTH=1024
+MAX_PROMPT_LENGTH=$((1024 * 2))
+MAX_RESPONSE_LENGTH=$((1024 * 20))
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -65,7 +66,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.micro_forward_batch_size_per_gpu=64 \
   trainer.micro_train_batch_size_per_gpu=64 \
   trainer.ckpt_interval=10 \
-  trainer.max_prompt_length=512 \
+  trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
