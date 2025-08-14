@@ -74,7 +74,7 @@ def dummy_config():
                     "advantage_estimator": "grpo",
                     "use_kl_estimator_k3": False,
                     "use_abs_kl": False,
-                    "init_kl_coef": 0.2,
+                    "kl_estimator_type": "k1",
                     "reward_clip_range": 5.0,
                     "use_kl_loss": True,
                     "kl_loss_coef": 0.0,

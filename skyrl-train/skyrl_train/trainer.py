@@ -35,6 +35,9 @@ from skyrl_train.utils import (
     masked_mean,
     normalize_advantages_dict,
     get_ray_pg_ready_with_timeout,
+    get_kl_controller,
+    FixedKLController,
+    AdaptiveKLController,
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -96,6 +99,8 @@ class RayPPOTrainer:
         self.eval_weights_manager: InferenceWeightsManager = None
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
+
+        self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -244,6 +249,10 @@ class RayPPOTrainer:
 
         # setup for dynamic sampling
         keep_sampling = False
+
+        # initialize kl controller
+        if self.cfg.trainer.algorithm.use_kl_in_reward:
+            self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
@@ -761,6 +770,7 @@ class RayPPOTrainer:
             response_mask=data["response_mask"],
             index=data.metadata["uids"],
             adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            config=self.cfg.trainer.algorithm,
             values=data["values"],
             gamma=self.cfg.trainer.algorithm.gamma,
             lambd=self.cfg.trainer.algorithm.lambd,
@@ -961,18 +971,26 @@ class RayPPOTrainer:
             action_log_probs,
             base_action_log_probs,
             loss_mask=loss_masks_all,
-            use_kl_estimator_k3=self.cfg.trainer.algorithm.use_kl_estimator_k3,
-            use_abs_kl=self.cfg.trainer.algorithm.use_abs_kl,
+            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
         )
         kl_max: Float[torch.Tensor, "batch_size"] = torch.max(kl.abs(), dim=-1)[0]  # noqa: F821
         kl_mean: Float[torch.Tensor, "batch_size"] = masked_mean(kl, loss_masks_all, dim=-1)  # noqa: F821
 
         # NOTE (erictang000): only supporting custom rewards currently
-        custom_rewards = custom_rewards - kl * max(0, self.cfg.trainer.algorithm.kl_loss_coef)
+        kl_loss_coef = (
+            self.reward_kl_controller.value
+            if self.reward_kl_controller is not None
+            else self.cfg.trainer.algorithm.kl_loss_coef
+        )
+        custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
         data["custom_rewards"] = custom_rewards
 
         avg_kl: float = kl_mean.mean().item()
         avg_kl_max: float = kl_max.mean().item()
+
+        # update the kl controller
+        if self.reward_kl_controller is not None:
+            self.reward_kl_controller.update(current=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
 
@@ -980,6 +998,7 @@ class RayPPOTrainer:
             {
                 "avg_kl": avg_kl,
                 "avg_kl_max": avg_kl_max,
+                "kl_loss_coef": kl_loss_coef,
             }
         )
 
@@ -987,6 +1006,7 @@ class RayPPOTrainer:
             {
                 "loss/avg_kl": avg_kl,
                 "loss/avg_kl_max": avg_kl_max,
+                "loss/kl_loss_coef": kl_loss_coef,
             }
         )
 

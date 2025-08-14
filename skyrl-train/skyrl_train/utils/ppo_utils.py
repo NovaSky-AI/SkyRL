@@ -68,6 +68,21 @@ class FixedKLController:
         pass
 
 
+def get_kl_controller(algorithm_cfg: DictConfig):
+    if algorithm_cfg.kl_ctrl.type == "fixed":
+        return FixedKLController(kl_coef=algorithm_cfg.kl_loss_coef)
+    elif algorithm_cfg.kl_ctrl.type == "adaptive":
+        if algorithm_cfg.kl_ctrl.horizon <= 0:
+            raise ValueError(f"horizon must be larger than 0. Got {algorithm_cfg.kl_ctrl.horizon}")
+        return AdaptiveKLController(
+            init_kl_coef=algorithm_cfg.kl_loss_coef,
+            target=algorithm_cfg.kl_ctrl.kl_target,
+            horizon=algorithm_cfg.kl_ctrl.horizon,
+        )
+    else:
+        raise ValueError(f"Invalid KL controller type: {algorithm_cfg.kl_ctrl.type}")
+
+
 def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optional[int] = None) -> torch.Tensor:
     if mask is None:
         return tensor.mean(axis=dim)
@@ -79,8 +94,7 @@ def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
-    use_kl_estimator_k3: bool = False,
-    use_abs_kl: bool = False,
+    kl_estimator_type: str = "k3",
 ) -> torch.Tensor:
     """
     Compute the approximate KL divergence between two distributions.
@@ -91,23 +105,27 @@ def compute_approx_kl(
         log_probs_base: Log probabilities of the base distribution.
         action_mask: Mask for actions.
     """
-
-    log_ratio = log_probs - log_probs_base
-
-    # The k3 estimator is the non negative kl approximation in
-    # http://joschu.net/blog/kl-approx.html
-    # Besides non negative, it is also unbiased and have lower variance.
-    if use_kl_estimator_k3:
-        log_ratio = -log_ratio
-        log_ratio = log_ratio.exp() - 1 - log_ratio
-
-    if use_abs_kl:
-        log_ratio = log_ratio.abs()
+    if kl_estimator_type == "k1":
+        kld = log_probs - log_probs_base
+    elif kl_estimator_type == "abs":
+        kld = (log_probs - log_probs_base).abs()
+    elif kl_estimator_type == "k2":
+        kld = 0.5 * (log_probs - log_probs_base).square()
+    # J. Schulman. Approximating kl divergence, 2020.
+    # URL http://joschu.net/blog/kl-approx.html.
+    elif kl_estimator_type == "k3":
+        kl = log_probs_base - log_probs
+        # For numerical stability
+        kl = torch.clamp(kl, min=-20, max=20)
+        ratio = torch.exp(kl)
+        kld = (ratio - kl - 1).contiguous()
+        kld = torch.clamp(kld, min=-10, max=10)
+    else:
+        raise ValueError(f"Invalid KL estimator type: {kl_estimator_type}")
 
     if loss_mask is not None:
-        log_ratio = log_ratio * loss_mask
-
-    return log_ratio
+        kld = kld * loss_mask
+    return kld
 
 
 @torch.no_grad()
@@ -131,7 +149,6 @@ def normalize_advantages_dict(data: TrainingInputBatch) -> TrainingInputBatch:
     return data
 
 
-# NOTE (erictang000): below ported from verl
 def masked_var(values, mask, unbiased=True):
     """Compute variance of tensor with masked values."""
     mean = masked_mean(values, mask)
@@ -396,6 +413,8 @@ class BaseFunctionRegistry:
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
     GRPO = "grpo"
+    RLOO = "rloo"
+    REINFORCE_PP = "reinforce++"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -593,6 +612,95 @@ def reduce_loss(
     return loss
 
 
+# NOTE (erictang000): below ported from verl
+@register_advantage_estimator(AdvantageEstimator.REINFORCE_PP)
+def compute_reinforce_plus_plus_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    gamma: float,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for REINFORCE++.
+    This implementation is based on the paper: https://arxiv.org/abs/2501.03262
+
+    Args:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    with torch.no_grad():
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            # Reset after EOS
+            running_return = running_return * response_mask[:, t]
+
+        advantages = masked_whiten(returns, response_mask)
+        advantages = advantages * response_mask
+
+    return advantages, returns
+
+
+@register_advantage_estimator(AdvantageEstimator.RLOO)
+def compute_rloo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for RLOO based on https://arxiv.org/abs/2402.14740
+
+    This advantage estimator is also used in LOOP (https://arxiv.org/pdf/2502.01600),
+    and was originally introduced in "Buy 4 REINFORCE Samples, Get a Baseline for Free!"
+    (https://openreview.net/pdf?id=r1lgTGL5DE).
+
+    Args:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+    from loguru import logger as logger_
+
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0, device=scores.device)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
+        for i in range(bsz):
+            response_num = len(id2score[index[i]])
+            if response_num > 1:
+                factor = response_num / (response_num - 1)
+                scores[i] = (scores[i] - id2mean[index[i]]) * factor
+            else:
+                # if there's only one response, set the advantage to 0
+                logger_.warning(f"Only one response for prompt index {index[i]}, setting advantage to 0")
+                scores[i] = 0.0
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
+
+
 @register_advantage_estimator(AdvantageEstimator.GAE)
 def compute_gae_advantage_return(
     token_level_rewards: Float[torch.Tensor, "batch_size seqlen"],
@@ -632,7 +740,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     grpo_norm_by_std: bool = True,
     **kwargs,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
 
@@ -682,11 +790,12 @@ def compute_advantages_and_returns(
     response_mask: torch.Tensor,
     index: np.ndarray,
     adv_estimator: AdvantageEstimator,
+    config: DictConfig,
     values: Optional[torch.Tensor] = None,
     grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
 
     return estimator_func(
@@ -697,4 +806,5 @@ def compute_advantages_and_returns(
         grpo_norm_by_std=grpo_norm_by_std,
         gamma=gamma,
         lambd=lambd,
+        config=config,
     )
