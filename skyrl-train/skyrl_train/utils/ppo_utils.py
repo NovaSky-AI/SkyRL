@@ -68,7 +68,7 @@ class FixedKLController:
         pass
 
 
-def get_kl_controller(algorithm_cfg):
+def get_kl_controller(algorithm_cfg: DictConfig):
     if algorithm_cfg.kl_ctrl.type == "fixed":
         return FixedKLController(kl_coef=algorithm_cfg.kl_loss_coef)
     elif algorithm_cfg.kl_ctrl.type == "adaptive":

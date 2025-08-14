@@ -11,7 +11,7 @@ DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
-# REINFORCE++ with 
+# REINFORCE++ with
 ADV_ESTIMATOR="reinforce++"
 USE_KL_IN_REWARD=true
 KL_ESTIMATOR_TYPE="k2"
