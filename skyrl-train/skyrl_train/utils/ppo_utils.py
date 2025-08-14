@@ -671,6 +671,8 @@ def compute_rloo_outcome_advantage(
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
         - returns: Float[torch.Tensor, "batch_size seqlen"]
     """
+    from loguru import logger as logger_
+
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
@@ -682,7 +684,7 @@ def compute_rloo_outcome_advantage(
             id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
+                id2mean[idx] = torch.tensor(0.0, device=scores.device)
             elif len(id2score[idx]) > 1:
                 id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
         for i in range(bsz):
@@ -692,8 +694,6 @@ def compute_rloo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) * factor
             else:
                 # if there's only one response, set the advantage to 0
-                from loguru import logger as logger_
-
                 logger_.warning(f"Only one response for prompt index {index[i]}, setting advantage to 0")
                 scores[i] = 0.0
         scores = scores.unsqueeze(-1) * response_mask
