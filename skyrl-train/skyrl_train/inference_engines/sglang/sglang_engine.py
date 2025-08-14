@@ -185,6 +185,11 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Add custom weight loader
         kwargs["custom_weight_loader"] = CUSTOM_WEIGHT_LOADER_PATH
 
+        # Always use token-in-token-out SGLang engine
+        # NOTE(Charlie): unlike vLLM, SGLang cannot do token-in-token-out and
+        # token-in-text-out in the same engine config.
+        kwargs["skip_tokenizer_init"] = True
+
         # Create the SGLang engine (signal handler issue is now fixed by patching)
         self.engine = Engine(**kwargs)
         print(f"Created SGLang engine with kwargs: {kwargs}")
@@ -220,14 +225,16 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """Process SGLang outputs to match expected format."""
         responses: List[str] = []
         stop_reasons: List[str] = []
+        response_token_ids: List[List[int]] = []
 
         for output in outputs:
-            responses.append(output["text"])
             stop_reasons.append(output["meta_info"]["finish_reason"]["type"])
-
+            response_token_ids.append(output["output_ids"])
+            responses.append(self.tokenizer.decode(output["output_ids"]))
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
+            response_token_ids=response_token_ids,
         )
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:

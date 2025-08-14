@@ -47,10 +47,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             # Split evenly across engines
             return await self._generate_batched(prompts, prompt_token_ids, sampling_params)
 
-    async def _generate_with_trajectory_routing(self, prompts, prompt_token_ids, trajectory_ids, sampling_params):
+    async def _generate_with_trajectory_routing(
+        self, prompts, prompt_token_ids, trajectory_ids, sampling_params
+    ) -> InferenceEngineOutput:
         """
         Route prompts to engines based on trajectory_ids and return results in the original order of the prompts.
         """
+        print("CHARLIE: _generate_with_trajectory_routing")
         # Group prompts by engine
         engine_groups: dict[int, dict[str, list]] = {}
         prompts_or_tokens = prompts if prompts is not None else prompt_token_ids
@@ -79,18 +82,21 @@ class InferenceEngineClient(InferenceEngineInterface):
         n = len(prompts_or_tokens)
         responses: list[str] = [""] * n
         stop_reasons: list[str] = [""] * n
-
+        response_token_ids: list[list[int]] = [[]] * n
         for indices, result in zip(indices_list, results):
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
+                response_token_ids[original_idx] = result["response_token_ids"][local_idx]
+        return InferenceEngineOutput(
+            responses=responses, response_token_ids=response_token_ids, stop_reasons=stop_reasons
+        )
 
-        return InferenceEngineOutput(responses=responses, stop_reasons=stop_reasons)
-
-    async def _generate_batched(self, prompts, prompt_token_ids, sampling_params):
+    async def _generate_batched(self, prompts, prompt_token_ids, sampling_params) -> InferenceEngineOutput:
         """
         Split prompts evenly across engines and return results in the original order of the prompts.
         """
+        print("CHARLIE: _generate_batched")
         num_inference_engines = len(self.engines)
         prompts_or_tokens = prompts if prompts is not None else prompt_token_ids
         dp_item_size = (len(prompts_or_tokens) + num_inference_engines - 1) // num_inference_engines
@@ -115,12 +121,16 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # Flatten results
         responses = []
+        response_token_ids = []
         stop_reasons = []
         for output in all_outputs:
             responses.extend(output["responses"])
+            response_token_ids.extend(output["response_token_ids"])
             stop_reasons.extend(output["stop_reasons"])
 
-        return InferenceEngineOutput(responses=responses, stop_reasons=stop_reasons)
+        return InferenceEngineOutput(
+            responses=responses, response_token_ids=response_token_ids, stop_reasons=stop_reasons
+        )
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("wake_up", *args, **kwargs)

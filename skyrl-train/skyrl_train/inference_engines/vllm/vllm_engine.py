@@ -184,6 +184,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Common output processing logic."""
         responses: List[str] = []
         stop_reasons: List[str] = []
+        response_token_ids: List[List[int]] = []
         for output in outputs:
             # TODO(tgriggs): Support n>1 sampling.
             assert (
@@ -192,10 +193,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             resp = output.outputs[0]
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
+            response_token_ids.append(resp.token_ids)
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
+            response_token_ids=response_token_ids,
         )
 
     def _get_engine(self):

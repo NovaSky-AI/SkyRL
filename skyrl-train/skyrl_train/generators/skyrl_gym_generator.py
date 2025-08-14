@@ -206,23 +206,26 @@ class SkyRLGymGenerator(GeneratorInterface):
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
         responses = engine_output["responses"]
+        response_token_ids_list = engine_output["response_token_ids"]
         stop_reasons = engine_output["stop_reasons"]
         truncated_responses = []
         rewards = []
         loss_masks = []
 
-        for response, env in zip(responses, envs):
+        for response, response_token_ids, env in zip(responses, response_token_ids_list, envs):
             # step on function and compute reward
+            assert self.tokenizer.decode(response_token_ids) == response
+            print("'CHARLIE PASSED THE ASSERTION")
+
             env_step_output: BaseTextEnvStepOutput = env.step(response)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
             # if batched then always single turn
-            response_ids = self.tokenizer(response)["input_ids"]
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
+            if len(response_token_ids) > max_tokens:
+                response_token_ids = response_token_ids[:max_tokens]
+            loss_masks.append([1] * len(response_token_ids))
+            truncated_responses.append(response_token_ids)
 
             env.close()
 

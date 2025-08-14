@@ -14,7 +14,14 @@ class InferenceEngineInput(TypedDict):
 
 
 class InferenceEngineOutput(TypedDict):
+    # We always return both tokens and text outputs. The tokens are the outputs
+    # of inference engine, and the text is the decoded text output. Therefore,
+    # it is guaranteed that tokenizer.decode(response_token_ids) == responses,
+    # but the reverse is not guaranteed, since there are multiple ways to
+    # represent the same text with tokens. Therefore, for multi-turn generation,
+    # please use token-in-token-out to ensure correctness.
     responses: List[str]
+    response_token_ids: List[List[int]]
     stop_reasons: List[str]
 
 
