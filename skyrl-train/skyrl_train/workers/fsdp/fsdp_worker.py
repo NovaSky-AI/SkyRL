@@ -35,7 +35,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking)
 
-    def init_model(self, model_path):
+    def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
@@ -44,6 +44,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
             train_batch_size=self.cfg.trainer.train_batch_size,
+            num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
         self.strategy = strategy
@@ -209,7 +210,7 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking)
 
-    def init_model(self, model_path):
+    def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.critic.fsdp_config,
@@ -218,6 +219,7 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
             train_batch_size=self.cfg.trainer.train_batch_size,
+            num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
         self.strategy = strategy

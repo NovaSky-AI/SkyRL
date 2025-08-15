@@ -27,9 +27,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 from transformers.trainer_pt_utils import get_module_class_from_name
-from torch.optim import Optimizer
 from torch.distributed.device_mesh import init_device_mesh
-from torch.optim.lr_scheduler import LambdaLR
 
 from packaging import version
 
@@ -416,19 +414,6 @@ def get_sharding_strategy(device_mesh):
     else:
         raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
     return sharding_strategy
-
-
-def get_constant_schedule_with_warmup(
-    optimizer: Optimizer,
-    num_warmup_steps: int,
-    last_epoch: int = -1,
-):
-    def lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1.0, num_warmup_steps))
-        return 1.0
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 """

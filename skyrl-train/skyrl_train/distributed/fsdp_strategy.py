@@ -30,7 +30,6 @@ from skyrl_train.distributed.fsdp_utils import (
     fsdp2_get_full_state_dict,
     apply_fsdp2,
     get_sharding_strategy,
-    get_constant_schedule_with_warmup,
     offload_fsdp_model_to_cpu,
     load_fsdp_model_to_gpu,
     offload_fsdp_optimizer,
@@ -39,6 +38,7 @@ from skyrl_train.distributed.fsdp_utils import (
     fsdp_version,
     fsdp2_load_full_state_dict,
 )
+from transformers.trainer import get_scheduler
 
 from packaging import version
 
@@ -63,6 +63,7 @@ class FSDPStrategy(DistributedStrategy):
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
         train_batch_size=1,
+        num_training_steps: Optional[int] = None,
     ) -> None:
         super().__init__()
         assert fsdp_strategy in ("fsdp", "fsdp2"), f"Unsupported FSDP strategy: {fsdp_strategy}"
@@ -74,6 +75,7 @@ class FSDPStrategy(DistributedStrategy):
         self.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         self.seed = seed
         self.device_mesh = None
+        self.total_training_steps: Optional[int] = num_training_steps
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
@@ -276,9 +278,11 @@ class FSDPStrategy(DistributedStrategy):
                 weight_decay=optim_config.weight_decay,
             )
 
-            #  TODO(csy): add other schedulers, add more to config
-            actor_lr_scheduler = get_constant_schedule_with_warmup(
-                optimizer=actor_optimizer, num_warmup_steps=optim_config.num_warmup_steps
+            actor_lr_scheduler = get_scheduler(
+                optim_config.scheduler,
+                actor_optimizer,
+                num_warmup_steps=optim_config.num_warmup_steps,
+                num_training_steps=self.total_training_steps,
             )
         else:
             actor_optimizer = None
