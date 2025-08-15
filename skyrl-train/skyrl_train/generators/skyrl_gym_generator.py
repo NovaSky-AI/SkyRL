@@ -306,11 +306,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             mininterval=5,
         )
 
-        responses = sum([[output[0]] for output in all_outputs], [])
-        rewards = sum([[output[1]] for output in all_outputs], [])
-        stop_reasons = sum([[output[2]] for output in all_outputs], [])
-        loss_masks = sum([[output[3]] for output in all_outputs], [])
-        prompt_token_ids = sum([[output[4]] for output in all_outputs], [])
+        if not all_outputs:
+            responses, rewards, stop_reasons, loss_masks, prompt_token_ids = [], [], [], [], []
+        else:
+            responses, rewards, stop_reasons, loss_masks, prompt_token_ids = map(list, zip(*all_outputs))
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
