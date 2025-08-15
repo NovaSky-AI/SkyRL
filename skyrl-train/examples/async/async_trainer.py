@@ -9,6 +9,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.weights_manager import InferenceWeightsManager
+from skyrl_train.dataset.replay_manager import TrainingBatchReplay
 
 
 class AsyncRayPPOTrainer(RayPPOTrainer):
@@ -26,6 +27,30 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         self.global_step = 0
+        self.policy_version = 0
+
+        # Replay settings (optional; safe defaults if block absent)
+        replay_cfg = getattr(self.cfg.trainer, "replay", None)
+        if replay_cfg:
+            self._replay_enable = bool(getattr(replay_cfg, "enable", False))
+            self._replay_buffer_capacity = int(getattr(replay_cfg, "buffer_capacity", 64))
+            self._replay_max_staleness = int(getattr(replay_cfg, "max_staleness_steps", 1))
+            self._replay_sampling = str(getattr(replay_cfg, "sampling", "prefer_recent"))
+        else:
+            self._replay_enable = False
+            self._replay_buffer_capacity = 64
+            self._replay_max_staleness = 1
+            self._replay_sampling = "prefer_recent"
+            
+        # Replay manager (trajectory-level) if enabled
+        self.replay_mgr: TrainingBatchReplay = None
+        if self._replay_enable:
+            sample_bs = int(getattr(replay_cfg, "sample_batch_size", self.cfg.trainer.train_batch_size))
+            self.replay_mgr = TrainingBatchReplay(
+                sample_batch_size=sample_bs,
+                capacity=self._replay_buffer_capacity,
+                cpu_offload=True,
+            )
 
         # Load checkpoint state if resumption is enabled
         if self.resume_mode != ResumeMode.NONE:
@@ -70,6 +95,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                     # sync weights
                     async with Timer("sync_weights", self.all_timings):
                         await self.weights_manager.async_sync_policy_weights_to_inference_engines()
+                    # After a successful sync, advance the policy version used for future generations
+                    self.policy_version += 1
 
                     self.sync_finished.set()
                     self.generation_ack.clear()
@@ -120,7 +147,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, generation_buffer):
         # Get a generation future and await on the object
-        generator_output, uids = await generation_buffer.get()  # GeneratorOutput, List[str]
+        generator_output, uids, behavior_version = await generation_buffer.get()  # GeneratorOutput, List[str], int
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -128,6 +155,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         with Timer("convert_to_training_input", self.all_timings):
             training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
+            # Tag with behavior policy version
+            training_input.metadata["behavior_version"] = behavior_version
 
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -154,9 +183,23 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("dump_data_batch"):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
+        # Optionally enqueue and sample from replay (whole-batch sampling)
+        selected_batch = training_input
+        if self._replay_enable and self.replay_mgr is not None:
+            # Append current batch (evicts as needed)
+            self.replay_mgr.append(training_input, behavior_version)
+            # Sample respecting staleness bound
+            sampled = self.replay_mgr.sample(
+                current_policy_version=self.policy_version,
+                max_staleness_steps=self._replay_max_staleness,
+                sampling=self._replay_sampling,
+            )
+            if sampled is not None:
+                selected_batch = sampled
+
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings):
-            status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+            status = await asyncio.to_thread(self.train_critic_and_policy, selected_batch)
 
         return status
 
@@ -171,11 +214,13 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
                 # generation phase
                 async with Timer("generate", self.all_timings):
+                    # Capture policy version for this generation
+                    version_for_batch = self.policy_version
                     generator_output: GeneratorOutput = await self.generate(generator_input)
                     generator_output = self.postprocess_generator_output(generator_output, uids)
 
-                # Add to generation buffer
-                await generation_buffer.put((generator_output, uids))
+                # Add to generation buffer with behavior version
+                await generation_buffer.put((generator_output, uids, version_for_batch))
 
                 # If the buffer is full, start weight sync
                 # Don't weight sync in the first step, because we let the generator run one step ahead
