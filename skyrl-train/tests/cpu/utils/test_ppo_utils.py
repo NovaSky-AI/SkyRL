@@ -515,3 +515,43 @@ def test_registry_named_actor_creation():
 
     finally:
         AdvantageEstimatorRegistry.reset()
+
+
+def test_registry_reset_after_ray_shutdown():
+    """
+    Test that the registry resets properly after ray is shutdown.
+
+    This mimics when we run multiple unit tests in a row with ray inits and shutdowns.
+    """
+
+    def _register_func_and_verify():
+        """Register a function and verify it works."""
+
+        def test_func(**kwargs):
+            rewards = kwargs["token_level_rewards"]
+            return rewards * 2, rewards * 3
+
+        AdvantageEstimatorRegistry.register("named_actor_test", test_func)
+        retrieved = AdvantageEstimatorRegistry.get("named_actor_test")
+        assert retrieved == test_func
+        actor = ray.get_actor("advantage_estimator_registry")
+        assert actor is not None
+
+    try:
+        import ray
+
+        # 1. Initialize ray and register function
+        if not ray.is_initialized():
+            ray.init()
+        _register_func_and_verify()
+
+        # 2. Shutdown ray
+        ray.shutdown()
+
+        # 3. Initialize ray, reset registry, and register function
+        ray.init()
+        AdvantageEstimatorRegistry.reset()
+        _register_func_and_verify()
+
+    finally:
+        ray.shutdown()
