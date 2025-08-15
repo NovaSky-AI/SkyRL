@@ -232,6 +232,41 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
+    if cfg.trainer.algorithm.use_tis:
+        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
+            raise ValueError(
+                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
+            )
+        if cfg.generator.sampling_params.logprobs is None:
+            logger.warning(
+                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`. Setting `logprobs` to `True`."
+            )
+            # just set to 0 for better user exp
+            cfg.generator.sampling_params.logprobs = 0
+
+        if cfg.generator.backend == "sglang":
+            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
+
+        if not cfg.generator.batched:
+            raise ValueError(
+                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
+            )
+
+    if cfg.generator.sampling_params.logprobs is not None:
+        assert isinstance(cfg.generator.sampling_params.logprobs, int)
+
+        if cfg.generator.sampling_params.logprobs > 0:
+            raise ValueError(
+                f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
+            )
+        if not cfg.generator.batched:
+            raise NotImplementedError(
+                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
+            )
+
+        if not cfg.generator.run_engines_locally:
+            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
+
 
 @ray.remote
 def get_all_env_variables():

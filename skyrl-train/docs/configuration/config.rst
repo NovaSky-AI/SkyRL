@@ -323,6 +323,10 @@ Algorithm Configuration
         type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
         max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
         min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+      
+      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+      use_tis: false 
+      tis_imp_ratio_cap: -1.0
 
 
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
@@ -365,6 +369,8 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
+- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
 
 
 Policy Loss Formulation 

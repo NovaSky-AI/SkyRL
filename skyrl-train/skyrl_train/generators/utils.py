@@ -84,11 +84,21 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     `rollout_metrics` are not concatenated because they are already aggregated.
     """
     assert len(generator_outputs) > 0
+    has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
+    if any(has_rollout_logprobs) and not all(has_rollout_logprobs):
+        raise ValueError(
+            "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
+        )
     result: GeneratorOutput = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
         "rewards": sum([output["rewards"] for output in generator_outputs], []),
         "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "rollout_logprobs": (
+            sum([output["rollout_logprobs"] for output in generator_outputs], [])
+            if generator_outputs[0]["rollout_logprobs"]
+            else None
+        ),
     }
     if "stop_reasons" in generator_outputs[0]:
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])

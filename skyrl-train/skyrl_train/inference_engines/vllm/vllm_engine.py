@@ -1,5 +1,6 @@
 import os
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
+from dataclasses import dataclass
 import ray
 import torch
 import asyncio
@@ -17,6 +18,13 @@ from skyrl_train.inference_engines.base import (
     NamedWeightUpdateRequest,
 )
 from skyrl_train.utils import str_to_torch_dtype
+
+
+@dataclass
+class Logprob:
+    logprob: float
+    rank: int
+    token_id: str
 
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
@@ -184,6 +192,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Common output processing logic."""
         responses: List[str] = []
         stop_reasons: List[str] = []
+        response_ids: List[List[int]] = []
+        response_logprobs: Optional[List[List[float]]] = []
+
         for output in outputs:
             # TODO(tgriggs): Support n>1 sampling.
             assert (
@@ -192,10 +203,26 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             resp = output.outputs[0]
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
+            response_ids.append(resp.token_ids)
+            _logprobs = None
+            if resp.logprobs:
+                _logprobs = []
+                for i, token_logprobs in enumerate(resp.logprobs):
+                    token_logprobs: Dict[str, Logprob]
+                    token_id = resp.token_ids[i]
+                    logprob = token_logprobs[token_id].logprob
+                    _logprobs.append(logprob)
+                    del token_logprobs
+            response_logprobs.append(_logprobs)
+
+        if len(response_logprobs) and response_logprobs[0] is None:
+            response_logprobs = None  # hack: assume uniform sampling params
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
+            response_ids=response_ids,
+            response_logprobs=response_logprobs,
         )
 
     def _get_engine(self):

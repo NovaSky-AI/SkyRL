@@ -170,7 +170,11 @@ def calculate_per_dataset_metrics(
     # Calculate metrics for each data source
     for data_source, indices in data_source_indices.items():
         # Extract subset for this data source
-        subset_generator_output = {key: [value[i] for i in indices] for key, value in concat_generator_outputs.items()}
+        subset_generator_output = {
+            key: [value[i] for i in indices]
+            for key, value in concat_generator_outputs.items()
+            if isinstance(value, list)
+        }
         subset_uids = [concat_uids[i] for i in indices]
 
         # Calculate metrics for this subset
@@ -364,6 +368,9 @@ def handle_replace_sampling(
             if generator_output["stop_reasons"]:
                 generator_output["stop_reasons"][bad_idx] = generator_output["stop_reasons"][replacement_idx]
 
+            if generator_output["rollout_logprobs"]:
+                generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
+
         # Update UIDs accordingly
         replaced_uids = uids.copy()
         for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
@@ -498,6 +505,9 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
         "loss_masks": [output["loss_masks"][i] for i in kept_indices],
         "stop_reasons": None,
         "rollout_metrics": output.get("rollout_metrics"),
+        "rollout_logprobs": (
+            [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
+        ),
     }
 
     if output.get("stop_reasons"):
@@ -522,7 +532,12 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
 
     # make sure all batch elements have the same length as response_ids (which should be non-zero)
     for key in generator_output:
-        if isinstance(generator_output[key], list):
+        if isinstance(generator_output[key], list) and key in [
+            "response_ids",
+            "loss_masks",
+            "rewards",
+            "rollout_logprobs",
+        ]:
             assert len(generator_output[key]) == len(
                 generator_output["response_ids"]
             ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
@@ -538,6 +553,11 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
             assert len(rewards) == len(
                 response_ids
             ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
+
+        if generator_output["rollout_logprobs"]:
+            assert len(response_ids) == len(
+                generator_output["rollout_logprobs"][i]
+            ), f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
 
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:

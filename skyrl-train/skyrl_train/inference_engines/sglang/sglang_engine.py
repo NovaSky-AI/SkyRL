@@ -227,6 +227,8 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
         return InferenceEngineOutput(
             responses=responses,
+            # not supported with sglang yet
+            response_ids=None,
             stop_reasons=stop_reasons,
         )
 

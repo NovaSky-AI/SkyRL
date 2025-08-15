@@ -650,19 +650,29 @@ class RayPPOTrainer:
         custom_rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
+        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+
         (
             sequences_tensor,
             attention_masks_tensor,
             response_masks_tensor,
             custom_rewards_tensor,
             loss_masks_tensor,
+            rollout_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
             response_ids,
             custom_rewards,
             loss_masks,
+            logprobs,
         )
+        # sanity check for tis
+        if self.cfg.trainer.algorithm.use_tis:
+            assert (
+                rollout_logprobs_tensor is not None
+            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -670,6 +680,7 @@ class RayPPOTrainer:
                 "response_mask": response_masks_tensor,
                 "custom_rewards": custom_rewards_tensor,
                 "loss_mask": loss_masks_tensor,
+                "rollout_logprobs": rollout_logprobs_tensor,
             },
         )
         training_input.metadata = {
@@ -954,6 +965,18 @@ class RayPPOTrainer:
         training_input["values"] = values
         # rewards from the reward model
         training_input["rm_rewards"] = rewards  # `None` or torch.Tensor
+
+        if self.cfg.generator.sampling_params.logprobs is not None:
+            # calculates the difference in probs between inference and trainer components
+            prob_diff = (training_input["rollout_logprobs"].exp() - action_log_probs.exp()).abs()
+            prob_diff_mean = prob_diff.mean().item()
+            prob_diff_std = prob_diff.std().item()
+            self.all_metrics.update(
+                {
+                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
+                    "policy/rollout_train_prob_diff_std": prob_diff_std,
+                }
+            )
         return training_input
 
     def apply_reward_kl_penalty(

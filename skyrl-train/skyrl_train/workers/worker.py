@@ -684,6 +684,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
+        rollout_action_logprobs = experience.rollout_logprobs
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -704,6 +705,7 @@ class PolicyWorkerBase(Worker):
                 advantages,
                 config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
             )
         # entropy
         with torch.no_grad():

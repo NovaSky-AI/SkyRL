@@ -502,6 +502,7 @@ def ppo_policy_loss(
     advantages: torch.Tensor,
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
     assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
     loss_reduction = config.loss_reduction
@@ -521,6 +522,16 @@ def ppo_policy_loss(
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+
+    if config.use_tis:
+        from loguru import logger as logger_
+
+        logger_.debug(f"Using TIS with dtype: {rollout_logprobs.dtype}")
+        # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
+        tis_imp_ratio = torch.exp(old_log_probs - rollout_logprobs)
+        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
+        loss = loss * tis_imp_ratio
+
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, clip_ratio
 
@@ -532,6 +543,7 @@ def gspo_policy_loss(
     advantages: torch.Tensor,
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
     """
     GSPO (Group Sequence Policy Optimization) policy loss function,

@@ -66,7 +66,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                     text = choice.get("message", {}).get("content", "")
                     outputs.append(text)
                     finish_reasons.append(choice.get("finish_reason"))
-        return InferenceEngineOutput(responses=outputs, stop_reasons=finish_reasons)
+        return InferenceEngineOutput(
+            responses=outputs, stop_reasons=finish_reasons, response_ids=None, response_logprobs=None
+        )
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:

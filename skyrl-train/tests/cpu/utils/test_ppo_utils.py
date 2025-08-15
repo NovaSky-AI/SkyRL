@@ -375,7 +375,7 @@ def test_policy_loss_registry_specific():
     from omegaconf import DictConfig
 
     @register_policy_loss("test_policy_decorator")
-    def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+    def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
         return torch.tensor(1.5), 0.3
 
     # Test decorator worked

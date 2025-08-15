@@ -147,6 +147,8 @@ def create_ray_wrapped_inference_engines(
                 max_num_seqs=max_num_seqs,
                 sampling_params=sampling_params,
                 tokenizer=tokenizer,
+                # only need the logprobs for the chosen token if any
+                max_logprobs=1,
             )
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
