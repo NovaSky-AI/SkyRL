@@ -1,4 +1,4 @@
-
+#!/bin/bash
 
 module purge
 module load gcc/14.2.0
