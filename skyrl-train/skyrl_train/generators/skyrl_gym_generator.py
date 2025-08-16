@@ -499,9 +499,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
-            observation_ids = self.tokenizer.apply_chat_template(
-                new_obs, add_generation_prompt=True, tokenize=True
-            )
+            observation_ids = self.tokenizer.apply_chat_template(new_obs, add_generation_prompt=True, tokenize=True)
             observation_ids = observation_ids[len(self.system_prompt_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
