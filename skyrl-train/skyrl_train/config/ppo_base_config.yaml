@@ -76,11 +76,14 @@ trainer:
       fsdp_size: -1
     sequence_parallel_size: 1
   algorithm:
-    advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
-    kl_target: null
-    init_kl_coef: 0.0
-    use_kl_estimator_k3: true
-    use_abs_kl: false
+    advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
+    kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
+      type: "fixed" # "fixed" or "adaptive"
+      kl_target: 0.1 # target KL divergence for adaptive KL controller
+      horizon: 10000 # controls the update rate of the adaptive KL controller
+    kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
+    use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
+    use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
     # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
@@ -99,6 +102,9 @@ trainer:
     eps_clip_high: 0.2
     # dual clip parameters
     clip_ratio_c: 3.0
+    # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+    tis_imp_ratio_cap: -1.0
+    use_tis: false
 
     # value loss parameters
     value_clip: 0.2
@@ -174,6 +180,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
+    logprobs: null
 
   # whether to use a conversation based format for multi-turn generations
   # if false, append multi-turn model responses and env observations to the original assistant response
@@ -187,6 +194,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
+    logprobs: null
 
   # number of samples per prompt for evaluation
   eval_n_samples_per_prompt: 1

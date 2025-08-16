@@ -51,7 +51,7 @@ Similarly, you can register custom policy loss functions:
    from skyrl_train.utils.ppo_utils import register_policy_loss, PolicyLossRegistry
 
    @register_policy_loss("reinforce")
-   def compute_reinforce_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
+   def compute_reinforce_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
        # Your custom policy loss implementation (like REINFORCE)
        loss = (-log_probs * advantages).mean()
        # return loss and clip ratio

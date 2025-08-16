@@ -281,12 +281,22 @@ Algorithm Configuration
   
     algorithm:
       advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
-      use_kl_estimator_k3: true
-      use_abs_kl: false
+
+      # KL Penalty Parameters
+      kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
+        type: "fixed" # "fixed" or "adaptive"
+        kl_target: 0.1 # target KL divergence for adaptive KL controller
+        horizon: 10000 # controls the update rate of the adaptive KL controller
+  
+      kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
+      use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
+      use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
+
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
       use_kl_in_reward: false # apply kl loss to rewards
       use_kl_loss: true # used in policy model
       kl_loss_coef: 0.001
+
       # this adds training batch level normalization to advantages 
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
@@ -313,11 +323,22 @@ Algorithm Configuration
         type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
         max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
         min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+      
+      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+      use_tis: false 
+      tis_imp_ratio_cap: -1.0
 
 
-- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo`` and ``gae``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
-- ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance.
-- ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation.
+- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
+- ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
+
+ - ``type``: Type of KL controller to use. Options include: ``fixed`` or ``adaptive``. 
+ - ``kl_target``: Target KL divergence for adaptive KL controller.
+ - ``horizon``: Controls the update rate of the adaptive KL controller.
+
+- ``algorithm.kl_estimator_type``: KL estimator type to use. Options include: ``k1``, ``k2``, ``k3``, ``abs``. See `this blog post <http://joschu.net/blog/kl-approx.html>`_ for details. We use ``k3`` as the default.
+- ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance. This flag is to be deprecated, use ``kl_estimator_type="k3"`` instead.
+- ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation. This flag is to be deprecated, use ``kl_estimator_type="abs"`` instead.
 - ``algorithm.use_kl_in_reward``: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as ``rewards - kl * kl_loss_coef``.
 - ``algorithm.use_kl_loss``: Whether to add a KL divergence loss to the policy model. The policy loss will be computed as ``policy_loss + kl * kl_loss_coef``.
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.
@@ -348,6 +369,8 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
+- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
 
 
 Policy Loss Formulation 
