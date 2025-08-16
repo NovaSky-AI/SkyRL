@@ -49,14 +49,15 @@ export VLLM_USE_V1=1
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 ray start --head || true
 
+# Use the following commands to setup the dataset and launch training:
 
 # Note: This constructs a GSM8k dataset, and you can optionally specify the output directory with: --output_dir
-python examples/gsm8k/gsm8k_dataset.py
+# python examples/gsm8k/gsm8k_dataset.py
 
 
 # IMPT: 
 # 1) update the shell file with the correct number of available GPUs (and any other training configuration updates)
 # 2) Update the shell file’s uv command to the following in order to avoid picking up x86 deps: uv run --active --no-project --no-sync -m skyrl_train.entrypoints.main_base \
-bash examples/gsm8k/run_gsm8k.sh
+# bash examples/gsm8k/run_gsm8k.sh
 
 
