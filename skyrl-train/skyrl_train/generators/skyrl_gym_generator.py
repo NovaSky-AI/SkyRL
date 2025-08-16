@@ -38,6 +38,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
+        # This is used to format observation in the chat template.
+        # See https://github.com/volcengine/verl/blob/6bbbff13a131dac9f29411f180ccabe2fe64e786/verl/experimental/agent_loop/tool_agent_loop.py#L196
+        self.system_prompt_ids = tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
+
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
         # get generation prompt ids for the tokenizer if needed
@@ -64,6 +68,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         Multi-turn generation loop that executes a single trajectory.
 
+        Note:
+            We ensure token-in-token-out generation. With two exceptions:
+            - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
+              This will likely be deprecated soon.
+            - When custom_chat_template = True and use_conversation_multi_turn = True. We always
+              re-tokenize the entire chat history every turn and at the end. This is used for cases
+              like removing Qwen3 thinking tokens in non-last-round assistant message.
+
         Args:
             prompt: ConversationType
             env_extras: List[Dict[str, Any]]
@@ -78,6 +90,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
+        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
+
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
@@ -86,6 +100,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         trajectory_id = uuid4().hex
         done = False
 
+        # Instantiate chat_history and chat_end_index, which are only used for retokenize_chat_history.
         # need copy here since the prompt is a list of messages and we are going to modify it
         chat_history = copy.deepcopy(prompt)
         chat_end_index = len(chat_history)
@@ -94,17 +109,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history, _ = env.init(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
-            # if we are keeping the chat history in token ids, we have to add the generation prompt to the original prompt
-            add_generation_prompt=not self.use_conversation_multi_turn,
+            add_generation_prompt=True,
             tokenize=True,
         )
 
         initial_prompt_length = len(input_ids)
-        loss_mask = []
+        loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
 
         while not done:
-            if self.use_conversation_multi_turn:
+            # 1. Generate output
+            if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
@@ -114,8 +129,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
+            output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
 
+            # 2. Environment step
             if self.env_executor is not None:
                 loop = asyncio.get_running_loop()
                 env_step_output: BaseTextEnvStepOutput = await loop.run_in_executor(self.env_executor, env.step, output)
@@ -126,15 +143,32 @@ class SkyRLGymGenerator(GeneratorInterface):
             done = env_step_output["done"]
 
             if env_step_output.get("postprocessed_action", None) is not None:
+                # TODO(Charlie): come back to this, we should deprecate postprocessed action
+                print(
+                    "WARNING: postprocessed action may violate token-in-token-out. Ideally you "
+                    "post-process it in the token space rather than string space, and you can do "
+                    "it in SkyRLGymGenerator."
+                )
                 output = env_step_output["postprocessed_action"]
+                output_ids = self.tokenizer.encode(output, add_special_tokens=False)
 
-            if self.use_conversation_multi_turn:
-                chat_history, chat_end_index, loss_mask, input_ids = self._update_engine_input_chat_history(
-                    chat_history, chat_end_index, loss_mask, input_ids, output, new_obs
+            # 3. Update states: input ids, loss_mask, chat_history, etc.
+            # Three ways of managing input
+            if retokenize_chat_history:
+                # 1. We always re-tokenize the entire chat history every turn and at the end.
+                chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
+                    chat_history, chat_end_index, output, new_obs
+                )
+            elif self.use_conversation_multi_turn:
+                # 2. Token-in-token-out is ensured. Follow multi-turn chat history format.
+                input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
+                    input_ids, loss_mask, output_ids, new_obs
                 )
             else:
-                loss_mask, input_ids, rollout_logprobs = self._update_engine_input_token_ids(
-                    output, new_obs, loss_mask, input_ids, rollout_logprobs
+                # 3. Token-in-token-out is ensured. Each step of the assistant is appended to the
+                # same single assistant message.
+                loss_mask, input_ids, rollout_logprobs = self._get_next_input_ids_with_single_turn_chat_template(
+                    output_ids, new_obs, loss_mask, input_ids, rollout_logprobs
                 )
 
             if len(input_ids) > max_input_length:
@@ -144,7 +178,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         env.close()  # does nothing for now
 
         prompt_ids = input_ids[:initial_prompt_length]
-        if self.custom_chat_template and self.use_conversation_multi_turn:
+        if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
                 chat_history[len(prompt) :],
                 chat_template=self.custom_chat_template,
@@ -163,6 +197,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
+
+        # TODO(Charlie): do we need to truncate generation_prompt_ids of the last round?
 
         # need to truncate loss mask correctly for responses that go to max length
         if self.max_turns > 1:
@@ -210,6 +246,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             init_prompts.append(init_prompt)
             envs.append(env)
 
+        # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
         responses = engine_output["responses"]
@@ -222,24 +259,19 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_masks = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
-        for i, (response, env) in enumerate(zip(responses, envs)):
+        for i, (response, response_ids, env) in enumerate(zip(responses, all_response_ids, envs)):
             # step on function and compute reward
+            assert self.tokenizer.decode(response_ids) == response  # TODO(Charlie): remove this
             env_step_output: BaseTextEnvStepOutput = env.step(response)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            # NOTE (sumanthrh): We add a guard since response_ids is `None` with remote inference engine
-            if all_response_ids is not None:
-                sample_response_ids = all_response_ids[i]
-            else:
-                sample_response_ids = self.tokenizer.encode(response)
-
-            if len(sample_response_ids) > max_tokens:
-                sample_response_ids = sample_response_ids[:max_tokens]
-            loss_masks.append([1] * len(sample_response_ids))
-            truncated_responses.append(sample_response_ids)
+            if len(response_ids) > max_tokens:
+                response_ids = response_ids[:max_tokens]
+            loss_masks.append([1] * len(response_ids))
+            truncated_responses.append(response_ids)
             if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(sample_response_ids)]
+                sample_logprobs = logprobs[i][: len(response_ids)]
                 truncated_logprobs.append(sample_logprobs)
 
             env.close()
@@ -379,13 +411,44 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rewards[i] = 0.0
         return rewards
 
-    def _update_engine_input_chat_history(
+    def _get_next_input_ids_by_retokenizing_chat_history(
         self,
         chat_history: ConversationType,
         chat_end_index: int,
-        loss_mask: List[int],
-        input_ids: List[int],
         output: str,
+        new_obs: ConversationType,
+    ):
+        """
+        Update the chat history, loss mask, and input ids given a new model response and observation.
+
+        loss_mask is not maintained because we get it at the end of the trajectory with
+        `response_encodings["assistant_masks"]`.
+        """
+        assert self.use_conversation_multi_turn and self.custom_chat_template
+        # remove eos token from end of output if it exists, since it will be reapplied by the chat template
+        if output.endswith(self.tokenizer.eos_token):
+            output = output[: -len(self.tokenizer.eos_token)]
+
+        # Add assistant response to chat history
+        chat_history += [{"role": "assistant", "content": output}]
+        chat_end_index += 1
+
+        # Add observations to chat history
+        if len(new_obs) > 0:
+            chat_history += new_obs
+            chat_end_index += len(new_obs)
+
+        # re-apply whole chat template so length check is correct
+        input_ids = self.tokenizer.apply_chat_template(
+            chat_history[:chat_end_index], add_generation_prompt=False, tokenize=True
+        )
+        return chat_history, chat_end_index, input_ids
+
+    def _get_next_input_ids_with_multiturn_chat_template(
+        self,
+        input_ids: List[int],
+        loss_mask: List[int],
+        output_ids: List[int],
         new_obs: ConversationType,
     ):
         """
@@ -428,71 +491,29 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask: List[int]
             input_ids: List[int]
         """
-        # get number of output tokens - only this many tokens should be loss masked to 1
-        num_output_tokens = len(self.tokenizer.encode(output, add_special_tokens=False))
-        # remove eos token from end of output if it exists, since it will be reapplied by the chat template
-        if output.endswith(self.tokenizer.eos_token):
-            output = output[: -len(self.tokenizer.eos_token)]
+        assert self.use_conversation_multi_turn and not self.custom_chat_template
 
-        # Add assistant response to chat history
-        chat_history += [{"role": "assistant", "content": output}]
+        # 1. Directly append generated output
+        input_ids += output_ids
+        loss_mask += [1] * len(output_ids)
 
-        if self.custom_chat_template:
-            chat_end_index += 1
-            if len(new_obs) > 0:
-                chat_history += new_obs
-                chat_end_index += len(new_obs)
-            # re-apply whole chat template so length check is correct
-            input_ids = self.tokenizer.apply_chat_template(
-                chat_history[:chat_end_index], add_generation_prompt=False, tokenize=True
-            )
-            return chat_history, chat_end_index, loss_mask, input_ids
-
-        # apply chat template without tokenization
-        prev = self.tokenizer.apply_chat_template(
-            chat_history[:chat_end_index], add_generation_prompt=False, tokenize=False
-        )
-        curr = self.tokenizer.apply_chat_template(
-            chat_history[: chat_end_index + 1], add_generation_prompt=False, tokenize=False
-        )
-
-        # entire response including chat template tokens
-        new_resp_tokens = self.tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
-
-        # make sure that only the original output tokens are loss masked to 1
-        new_loss_mask = [0] * len(self.generation_prompt_ids)  # 0 for generation prompt tokens
-        new_loss_mask += [1] * num_output_tokens  # 1 for output tokens generated by model
-        new_loss_mask += [0] * (
-            len(new_resp_tokens) - len(self.generation_prompt_ids) - num_output_tokens
-        )  # 0 for rest of response
-        loss_mask += new_loss_mask
-
-        input_ids += new_resp_tokens
-        chat_end_index += 1
-
-        # Add observations to chat history
+        # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
-            chat_history += new_obs
+            observation_ids = self.tokenizer.apply_chat_template(
+                new_obs, add_generation_prompt=True, tokenize=True
+            )
+            observation_ids = observation_ids[len(self.system_prompt_ids) :]
+            input_ids += observation_ids
+            loss_mask += [0] * len(observation_ids)
+        else:
+            input_ids += self.generation_prompt_ids
+            loss_mask += [0] * len(self.generation_prompt_ids)
 
-            # Directly encode the observation content
-            for _ in range(len(new_obs)):
-                prev = self.tokenizer.apply_chat_template(
-                    chat_history[:chat_end_index], add_generation_prompt=False, tokenize=False
-                )
-                curr = self.tokenizer.apply_chat_template(
-                    chat_history[: chat_end_index + 1], add_generation_prompt=False, tokenize=False
-                )
-                obs_tokens = self.tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
-                loss_mask += [0] * len(obs_tokens)
-                input_ids += obs_tokens
+        return input_ids, loss_mask
 
-                chat_end_index += 1
-
-        return chat_history, chat_end_index, loss_mask, input_ids
-
-    def _update_engine_input_token_ids(
+    def _get_next_input_ids_with_single_turn_chat_template(
         self,
-        output: str,
+        output_ids: List[int],
         new_obs: ConversationType,
         loss_mask: List[int],
         input_ids: List[int],
@@ -523,16 +544,17 @@ class SkyRLGymGenerator(GeneratorInterface):
                             <think>... </think>
                             ...
         Args:
-            output: str
+            output_ids: List[int]
             new_obs: ConversationType
             loss_mask: List[int]
             input_ids: List[int]
         Returns:
             loss_mask: List[int]
             input_ids: List[int]
+            logprobs: Optional[List[int]]
         """
         # just update raw tokens and loss mask
-        new_resp_tokens = self.tokenizer.encode(output, add_special_tokens=False)
+        new_resp_tokens = output_ids.copy()
         if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
             # remove the eos token since we are continuing the current assistant message
             new_resp_tokens = new_resp_tokens[:-1]
