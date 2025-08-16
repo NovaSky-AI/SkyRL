@@ -1,0 +1,16 @@
+hydra-core==1.3.2 
+accelerate 
+torchdata 
+omegaconf 
+ray==2.48.0 
+peft 
+debugpy==1.8.0 
+hf_transfer 
+wandb 
+datasets 
+tensordict 
+jaxtyping 
+loguru 
+tqdm 
+tensorboard 
+func_timeout

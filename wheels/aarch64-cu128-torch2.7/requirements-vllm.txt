@@ -1,0 +1,59 @@
+aiohttp
+blake3
+boto3; extra == "runai"
+cachetools
+cloudpickle
+compressed-tensors==0.10.2
+datasets; extra == "bench"
+depyf==0.18.0
+einops
+fastapi[standard]>=0.115.0
+fastsafetensors>=0.1.10; extra == "fastsafetensors"
+filelock>=3.16.1
+gguf>=0.13.0
+huggingface-hub[hf_xet]>=0.33.0
+importlib_metadata; python_version < "3.10"
+lark==1.2.2
+librosa; extra == "audio"
+llguidance<0.8.0,>=0.7.11; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64"
+lm-format-enforcer<0.11,>=0.10.11
+mistral_common[opencv]>=1.6.2
+msgspec
+ninja
+numba==0.60.0; python_version == "3.9"
+numba==0.61.2; python_version > "3.9"
+numpy
+openai<=1.90.0,>=1.52.0
+opencv-python-headless>=4.11.0
+outlines==0.1.11
+pandas; extra == "bench"
+partial-json-parser
+pillow
+prometheus-fastapi-instrumentator>=7.0.0
+prometheus_client>=0.18.0
+protobuf
+psutil
+py-cpuinfo
+pybase64
+pydantic>=2.10
+python-json-logger
+pyyaml
+pyzmq>=25.0.0
+ray[cgraph]!=2.44.*,>=2.43.0
+regex
+requests>=2.26.0
+runai-model-streamer-s3; extra == "runai"
+runai-model-streamer; extra == "runai"
+scipy
+sentencepiece
+setuptools<80,>=77.0.3; python_version > "3.11"
+six>=1.16.0; python_version > "3.11"
+soundfile; extra == "audio"
+tensorizer>=2.9.0; extra == "tensorizer"
+tiktoken>=0.6.0
+tokenizers>=0.21.1
+tqdm
+transformers==4.51
+typing_extensions>=4.10
+watchfiles
+xgrammar==0.1.19; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64"
