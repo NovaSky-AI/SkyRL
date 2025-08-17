@@ -96,6 +96,8 @@ def agent_loop(prompt: str, base_url: str):
             model=f"openai/{MODEL}",  # Add openai/ prefix for custom endpoints
             messages=chat_history,
             api_base=base_url,
+            # Otherwise runs into: litellm.llms.openai.common_utils.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable
+            api_key="DUMMY_KEY",
             temperature=0.7,
             max_tokens=100,
             # NOTE(Charlie): this is needed for better trajectory routing for prefix cache reuse
