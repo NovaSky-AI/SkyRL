@@ -245,7 +245,7 @@ async def test_agent_loop_single_turn(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
@@ -272,7 +272,7 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, m
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompts = [[{"role": "user", "content": "What is 3 + 5?"}]]
     env_extras = [{"answer": "8"}]
@@ -376,7 +376,7 @@ async def test_generate_interface_compliance(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # Create test data based on batched mode
     if batched:
@@ -498,7 +498,7 @@ async def test_length_limit_exceeded_during_conversation(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "Start conversation"}]
     extras = {"test": "value"}
@@ -588,7 +588,7 @@ async def test_multi_turn_response_truncation(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
@@ -670,7 +670,7 @@ async def test_postprocessed_action_used(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
@@ -729,7 +729,7 @@ async def test_apply_overlong_filtering_non_batched(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
     mock_llm.generate = AsyncMock(
@@ -841,7 +841,7 @@ async def test_apply_overlong_filtering_batched(
         tokenizer=mock_tokenizer,
         model_name="test_model",
     )
-    generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # Test batched mode with response that doesn't end with eos token
     prompts = [[{"role": "user", "content": "Test prompt"}]]

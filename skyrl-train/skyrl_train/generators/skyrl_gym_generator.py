@@ -39,8 +39,27 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
         # This is used to format observation in the chat template.
-        # See https://github.com/volcengine/verl/blob/6bbbff13a131dac9f29411f180ccabe2fe64e786/verl/experimental/agent_loop/tool_agent_loop.py#L196
-        self.system_prompt_ids = tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
+        # Similar to https://github.com/volcengine/verl/blob/6bbbff13a131dac9f29411f180ccabe2fe64e786/verl/experimental/agent_loop/tool_agent_loop.py#L196
+        self.base_conversation = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "I am a user."},
+            {"role": "assistant", "content": "I am an assistant."},
+        ]
+        self.base_conversation_token_ids = tokenizer.apply_chat_template(
+            self.base_conversation,
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+        # We cut before the last eos token in base_conversation_token_ids so that the tokens after
+        # the assistant eos token can be included as part of the observation_ids.
+        # In Qwen, there is an extra \n after the eos token that we want to capture in observation_ids.
+        if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
+            last_eos_token_index = (
+                len(self.base_conversation_token_ids)
+                - 1
+                - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
+            )
+            self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
@@ -109,7 +128,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history, _ = env.init(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
-            add_generation_prompt=True,
+            # otherwise the prompt_ids and response_ids will both include the generation prompt
+            # when retokenize_chat_history is True, due to how `response_encodings["input_ids"]` works.
+            add_generation_prompt=not retokenize_chat_history,
             tokenize=True,
         )
 
@@ -177,6 +198,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         env.close()  # does nothing for now
 
+        # TODO(Charlie): this makes the prompt_ids include the generation prompt, is this what we want?
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
@@ -504,8 +526,13 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
-            observation_ids = self.tokenizer.apply_chat_template(new_obs, add_generation_prompt=True, tokenize=True)
-            observation_ids = observation_ids[len(self.system_prompt_ids) :]
+            # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the first `\n`
+            # is generated due to `self.base_conversation_token_ids[: last_eos_token_index + 1]` in `__init__()`.
+            observation_ids = self.tokenizer.apply_chat_template(
+                [*self.base_conversation, *new_obs],
+                add_generation_prompt=True,
+                tokenize=True,
+            )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
         else:
