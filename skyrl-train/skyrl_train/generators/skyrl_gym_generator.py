@@ -124,6 +124,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
             else:
+                # Token-in-token-out.
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
@@ -155,18 +156,17 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # Three ways of managing input
             if retokenize_chat_history:
-                # 1. We always re-tokenize the entire chat history every turn and at the end.
+                # a. We always re-tokenize the entire chat history every turn and at the end.
                 chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
                     chat_history, chat_end_index, output, new_obs
                 )
             elif self.use_conversation_multi_turn:
-                # 2. Token-in-token-out is ensured. Follow multi-turn chat history format.
+                # b. Token-in-token-out. Follow multi-turn chat history format.
                 input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
-                    input_ids, loss_mask, output_ids, new_obs
+                    input_ids, loss_mask, output_ids, new_obs, done
                 )
             else:
-                # 3. Token-in-token-out is ensured. Each step of the assistant is appended to the
-                # same single assistant message.
+                # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
                 loss_mask, input_ids, rollout_logprobs = self._get_next_input_ids_with_single_turn_chat_template(
                     output_ids, new_obs, loss_mask, input_ids, rollout_logprobs
                 )
@@ -191,6 +191,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             response_ids = response_encodings["input_ids"]
         else:
             response_ids = input_ids[initial_prompt_length:]
+            assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         if not self.use_conversation_multi_turn:
             # we might need to add the eos token to the response ids
@@ -261,7 +262,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         for i, (response, response_ids, env) in enumerate(zip(responses, all_response_ids, envs)):
             # step on function and compute reward
-            assert self.tokenizer.decode(response_ids) == response  # TODO(Charlie): remove this
+            # assert self.tokenizer.decode(response_ids) == response  # TODO(Charlie): remove this
             env_step_output: BaseTextEnvStepOutput = env.step(response)
             reward = env_step_output["reward"]
             rewards.append(reward)
@@ -411,6 +412,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rewards[i] = 0.0
         return rewards
 
+    # ----------------------------------------------------------------------------
+    # Three methods of managing chat history and input ids in `agent_loop()`
+    # ----------------------------------------------------------------------------
     def _get_next_input_ids_by_retokenizing_chat_history(
         self,
         chat_history: ConversationType,
@@ -450,6 +454,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask: List[int],
         output_ids: List[int],
         new_obs: ConversationType,
+        done: bool,
     ):
         """
         Update the chat history, loss mask, and input ids given a new model response and observation.
@@ -504,8 +509,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
         else:
-            input_ids += self.generation_prompt_ids
-            loss_mask += [0] * len(self.generation_prompt_ids)
+            # TODO(Charlie): or assert done? i.e. can we still prompt another turn if no observation?
+            if not done:
+                input_ids += self.generation_prompt_ids
+                loss_mask += [0] * len(self.generation_prompt_ids)
 
         return input_ids, loss_mask
 
