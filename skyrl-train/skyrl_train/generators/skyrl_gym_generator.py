@@ -6,14 +6,13 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
-from skyrl_train.inference_engines.launch_inference_engine_http_server import generate_with_http_server
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType, InferenceEngineOutput
+from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids
+from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids, apply_overlong_filtering
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -35,29 +34,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
-        self.model_name = model_name
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-
-        self.use_http_server_inference_engine_client = generator_cfg.get(
-            "use_http_server_inference_engine_client", False
-        )
-        self.http_server_inference_engine_client_host = generator_cfg.get(
-            "http_server_inference_engine_client_host", "127.0.0.1"
-        )
-        self.http_server_inference_engine_client_port = generator_cfg.get(
-            "http_server_inference_engine_client_port", 8000
-        )
-
-        if self.use_http_server_inference_engine_client:
-            assert (
-                self.use_conversation_multi_turn
-            ), "HTTP server inference engine client in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
-            # Store the base URL for direct HTTP requests
-            self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
-        else:
-            self.base_url = None
 
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
@@ -70,16 +49,77 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             self.env_executor = None
 
-    async def _generate_with_inference_engine_client(self, engine_input: InferenceEngineInput) -> InferenceEngineOutput:
-        """Helper to dispatch generation to either HTTP server or direct client."""
-        if self.use_http_server_inference_engine_client:
-            return await generate_with_http_server(
-                base_url=self.base_url,
-                model_name=self.model_name,
-                input_batch=engine_input,
-            )
-        return await self.inference_engine_client.generate(engine_input)
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        """
+        Generate trajectories for the input batch.
 
+        Returns outputs in the same order as the input batch.
+        Args:
+            input_batch: GeneratorInput
+        Returns:
+            GeneratorOutput
+        """
+        prompts = input_batch["prompts"]
+        env_classes = input_batch["env_classes"]
+        env_extras = input_batch["env_extras"]
+        sampling_params = input_batch.get("sampling_params", None)
+        max_tokens = self.generator_cfg.sampling_params.max_generate_length
+        max_input_length = self.generator_cfg.max_input_length
+
+        if self.batched:
+            return await self.generate_batched(
+                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
+            )
+
+        # Async agent loop to generate trajectories in parallel.
+        tasks = []
+        for i in range(len(prompts)):
+            tasks.append(
+                self.agent_loop(
+                    prompts[i],
+                    env_classes[i],
+                    env_extras[i],
+                    max_tokens,
+                    max_input_length,
+                    sampling_params=sampling_params,
+                )
+            )
+
+        # TODO (erictang000): this is still synchronous RL - come back to this
+        # for supporting fully async RL
+        all_outputs = await tqdm.gather(
+            *tasks,
+            desc="Generating Trajectories",
+            miniters=max(1, len(tasks) // 10),
+            mininterval=5,
+        )
+
+        responses = sum([[output[0]] for output in all_outputs], [])
+        rewards = sum([[output[1]] for output in all_outputs], [])
+        stop_reasons = sum([[output[2]] for output in all_outputs], [])
+        loss_masks = sum([[output[3]] for output in all_outputs], [])
+        prompt_token_ids = sum([[output[4]] for output in all_outputs], [])
+
+        rollout_metrics = self._rollout_metrics(responses, rewards)
+
+        if self.generator_cfg.zero_reward_on_non_stop:
+            # set reward to 0 if the stop reason is not "stop"
+            rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
+
+        if self.generator_cfg.apply_overlong_filtering:
+            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
+
+        generator_output: GeneratorOutput = {
+            "prompt_token_ids": prompt_token_ids,
+            "response_ids": responses,
+            "rewards": rewards,
+            "loss_masks": loss_masks,
+            "stop_reasons": stop_reasons,
+            "rollout_metrics": rollout_metrics,
+        }
+
+        return generator_output
+        
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -105,7 +145,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask: List[int]
             prompt_token_ids: List[int]
         """
-
+        print("HWEREWRWERWERWER")
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
@@ -139,7 +179,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
-            engine_output = await self._generate_with_inference_engine_client(engine_input)
+            engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             stop_reason = engine_output["stop_reasons"][0]
             if self.env_executor is not None:
@@ -202,6 +242,28 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return response_ids, reward, stop_reason, loss_mask, prompt_ids
 
+    def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]):
+        num_tokens_arr = np.array([len(response) for response in responses])
+        non_zero_rewards_arr = np.array([reward > 0.0 for reward in rewards])
+        zero_rewards_arr = np.array([reward == 0.0 for reward in rewards])
+        # average tokens for non zero rewards
+        avg_tokens_non_zero_rewards = (
+            np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
+        )
+        # average tokens for zero rewards
+        avg_tokens_zero_rewards = (
+            np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
+        )
+
+        return {
+            "generate/min_num_tokens": np.min(num_tokens_arr).item(),
+            "generate/max_num_tokens": np.max(num_tokens_arr).item(),
+            "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
+            "generate/std_num_tokens": np.std(num_tokens_arr).item(),
+            "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
+            "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
+        }
+        
     async def generate_batched(
         self,
         prompts: List[ConversationType],
@@ -235,7 +297,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             envs.append(env)
 
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        engine_output = await self._generate_with_inference_engine_client(engine_input)
+        engine_output = await self.inference_engine_client.generate(engine_input)
         responses = engine_output["responses"]
         stop_reasons = engine_output["stop_reasons"]
         truncated_responses = []
@@ -261,72 +323,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         responses = truncated_responses
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
-        generator_output: GeneratorOutput = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-        }
-
-        return generator_output
-
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        """
-        Generate trajectories for the input batch.
-
-        Returns outputs in the same order as the input batch.
-        Args:
-            input_batch: GeneratorInput
-        Returns:
-            GeneratorOutput
-        """
-        prompts = input_batch["prompts"]
-        env_classes = input_batch["env_classes"]
-        env_extras = input_batch["env_extras"]
-        sampling_params = input_batch.get("sampling_params", None)
-        max_tokens = self.generator_cfg.sampling_params.max_generate_length
-        max_input_length = self.generator_cfg.max_input_length
-
-        if self.batched:
-            return await self.generate_batched(
-                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
-            )
-
-        # Async agent loop to generate trajectories in parallel.
-        tasks = []
-        for i in range(len(prompts)):
-            tasks.append(
-                self.agent_loop(
-                    prompts[i],
-                    env_classes[i],
-                    env_extras[i],
-                    max_tokens,
-                    max_input_length,
-                    sampling_params=sampling_params,
-                )
-            )
-
-        # TODO (erictang000): this is still synchronous RL - come back to this
-        # for supporting fully async RL
-        all_outputs = await tqdm.gather(
-            *tasks,
-            desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
-            mininterval=5,
-        )
-
-        responses = sum([[output[0]] for output in all_outputs], [])
-        rewards = sum([[output[1]] for output in all_outputs], [])
-        stop_reasons = sum([[output[2]] for output in all_outputs], [])
-        loss_masks = sum([[output[3]] for output in all_outputs], [])
-        prompt_token_ids = sum([[output[4]] for output in all_outputs], [])
-
-        rollout_metrics = self._rollout_metrics(responses, rewards)
-        if self.generator_cfg.zero_reward_on_non_stop:
-            # set reward to 0 if the stop reason is not "stop"
-            rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
+        if self.generator_cfg.apply_overlong_filtering:
+            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
@@ -338,28 +336,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         }
 
         return generator_output
-
-    def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]):
-        num_tokens_arr = np.array([len(response) for response in responses])
-        non_zero_rewards_arr = np.array([reward > 0.0 for reward in rewards])
-        zero_rewards_arr = np.array([reward == 0.0 for reward in rewards])
-        # average tokens for non zero rewards
-        avg_tokens_non_zero_rewards = (
-            np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
-        )
-        # average tokens for zero rewards
-        avg_tokens_zero_rewards = (
-            np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
-        )
-
-        return {
-            "generate/min_num_tokens": np.min(num_tokens_arr).item(),
-            "generate/max_num_tokens": np.max(num_tokens_arr).item(),
-            "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
-            "generate/std_num_tokens": np.std(num_tokens_arr).item(),
-            "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
-            "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
-        }
 
     def _zero_reward_if_not_stop(self, rewards: List[float], stop_reasons: List[str]):
         """Sets the reward to 0 if the stop reason is not "stop".
