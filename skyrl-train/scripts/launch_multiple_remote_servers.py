@@ -191,7 +191,7 @@ def main():
     bundles = [[{"GPU": args.tp_size, "CPU": 1}] for _ in range(args.num_replicas)]
     placement_groups = [placement_group(bundle) for bundle in bundles]
     for pg in placement_groups:
-        print(f"Waiting for Ray placement group to be ready...")
+        print("Waiting for Ray placement group to be ready...")
         get_ray_pg_ready_with_timeout(pg, timeout=180)
 
     # Launch servers
