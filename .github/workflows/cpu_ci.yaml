@@ -58,7 +58,7 @@ jobs:
         with:
           activate-environment: true
       - name: Install skyrl-train
-        run:  uv sync --frozen --extra dev # installs from lock file
+        run:  uv sync --frozen --extra dev --extra muon # installs from lock file
       - name: Run cpu tests
         run:  uv run --frozen pytest tests/cpu/
   
