@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple
+from typing import List, Tuple, Union, Optional
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
@@ -49,21 +49,30 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
+def get_metrics_from_generator_output(
+    generator_output: GeneratorOutput, uids: List[str]
+) -> Tuple[float, Optional[float]]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
     """
-    rewards: List[float] = generator_output["rewards"]
+    rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
+    if not len(rewards):
+        raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    # Compute pass@N metrics
-    pass_at_n_dict = defaultdict(list)
-    for i, reward in enumerate(rewards):
-        pass_at_n_dict[uids[i]].append(reward)
+    if isinstance(rewards[0], list):
+        # We just compute mean over sequence reward.
+        # TODO: We should make metrics customizable by the environment
+        mean_raw_reward = float(np.mean([sum(seq_rewards) for seq_rewards in rewards]))
+        pass_at_n = None  # not computed for token-level rewards since it's ill-defined
+    else:
+        mean_raw_reward = float(np.mean(rewards))
+        # Compute pass@N metrics
+        pass_at_n_dict = defaultdict(list)
+        for i, reward in enumerate(rewards):
+            pass_at_n_dict[uids[i]].append(reward)
 
-    mean_raw_reward = np.mean(rewards)
-
-    # pass@N metric
-    pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
+        # pass@N metric
+        pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
 
     return mean_raw_reward, pass_at_n
 
@@ -85,3 +94,22 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     return result
+
+
+def apply_overlong_filtering(
+    loss_masks: List[List[int]],
+    response_ids: List[List[int]],
+    eos_token_id: int,
+) -> List[List[int]]:
+    """
+    Implements DAPO Overlong Filtering: zero-out every token's mask whenever
+    the response does not end with the eos token id (i.e. truncated).
+
+    Returns:
+        - The loss masks with tokens zeroed out for truncated responses
+    """
+    assert len(loss_masks) == len(response_ids), "loss_masks and response_ids must have the same length"
+    return [
+        [0] * len(mask) if not response or response[-1] != eos_token_id else mask
+        for mask, response in zip(loss_masks, response_ids)
+    ]

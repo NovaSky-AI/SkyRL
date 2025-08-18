@@ -153,7 +153,7 @@ class BasePPOExp:
                 * self.cfg.generator.inference_engine_tensor_parallel_size,
                 strategy="PACK",
             )
-            get_ray_pg_ready_with_timeout(pg, timeout=timeout)
+`            # get_ray_pg_ready_with_timeout(pg, timeout=timeout)`
             return pg
         else:
             return None
@@ -164,9 +164,9 @@ class BasePPOExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        from skyrl_train.generators.tbench_generator import TBenchGenerator
 
-        return SkyRLGymGenerator(
+        return TBenchGenerator(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,

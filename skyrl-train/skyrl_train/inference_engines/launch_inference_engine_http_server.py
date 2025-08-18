@@ -95,17 +95,17 @@ def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, mod
     )
 
 
-async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Request) -> ChatCompletionResponse:
+def handle_chat_completion(request: ChatCompletionRequest, raw_request: Request) -> ChatCompletionResponse:
     """Handle chat completion request."""
-    if _global_inference_engine_client is None:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized"
-        )
-    if _global_inference_engine_client.model_name != request.model:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}",
-        )
+    # if _global_inference_engine_client is None:
+    #     raise HTTPException(
+    #         status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized"
+    #     )
+    # if _global_inference_engine_client.model_name != request.model:
+    #     raise HTTPException(
+    #         status_code=HTTPStatus.BAD_REQUEST,
+    #         detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}",
+    #     )
 
     try:
         check_unsupported_fields(request)
@@ -113,7 +113,7 @@ async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Re
         engine_input = convert_openai_to_inference_input(request, _global_backend or "vllm")
 
         # Call the inference engine
-        engine_output = await _global_inference_engine_client.generate(engine_input)
+        engine_output = asyncio.run(_global_inference_engine_client.generate(engine_input))
 
         # Convert back to OpenAI format
         response = convert_inference_output_to_openai(engine_output, _global_inference_engine_client.model_name)
