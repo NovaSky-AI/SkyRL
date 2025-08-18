@@ -19,6 +19,7 @@ from torch.distributed.fsdp import CPUOffload, MixedPrecision
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl_train.utils import io
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -382,7 +383,7 @@ class FSDPStrategy(DistributedStrategy):
         from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig, StateDictType
 
         if node_local_rank == 0:
-            os.makedirs(ckpt_dir, exist_ok=True)
+            io.makedirs(ckpt_dir, exist_ok=True)
 
         # Wait for checkpoint directory to be created.
         dist.barrier()
@@ -413,15 +414,15 @@ class FSDPStrategy(DistributedStrategy):
             with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 # Get and save model state dict
                 model_state_dict = save_model.state_dict()
-                self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
-                torch.save(model_state_dict, model_path)
+                self.print(f"[rank-{rank}]: Saving model to {model_path}")
+                io.save_file(model_state_dict, model_path)
 
                 # Get and save optimizer state dict if optimizer is provided
                 optimizer_state_dict = {}
                 if optimizer is not None:
                     optimizer_state_dict = optimizer.state_dict()
-                self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
-                torch.save(optimizer_state_dict, optim_path)
+                self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
+                io.save_file(optimizer_state_dict, optim_path)
 
                 # Get scheduler state dict if scheduler is provided
                 lr_scheduler_state_dict = {}
@@ -441,8 +442,8 @@ class FSDPStrategy(DistributedStrategy):
                 }
 
                 # Save extra state
-                self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
-                torch.save(extra_state_dict, extra_path)
+                self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
+                io.save_file(extra_state_dict, extra_path)
 
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
@@ -453,8 +454,7 @@ class FSDPStrategy(DistributedStrategy):
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
-            with open(fsdp_config_path, "w") as f:
-                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+            io.save_json({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, fsdp_config_path)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
@@ -479,7 +479,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if ckpt_dir is None:
             raise ValueError("ckpt_dir cannot be None")
-        elif not os.path.exists(ckpt_dir):
+        elif not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
 
         # Extract the actual model for loading
@@ -495,26 +495,26 @@ class FSDPStrategy(DistributedStrategy):
         extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
         # Check if checkpoint files exist
-        if not os.path.exists(model_path):
+        if not io.exists(model_path):
             raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-        if not os.path.exists(extra_path):
+        if not io.exists(extra_path):
             raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
 
         # Optimizer path is optional since we may not save optimizer states initially
-        optim_exists = os.path.exists(optim_path)
+        optim_exists = io.exists(optim_path)
 
-        self.print(f"[rank-{rank}]: Loading model from {os.path.abspath(model_path)}")
-        self.print(f"[rank-{rank}]: Loading extra_state from {os.path.abspath(extra_path)}")
+        self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
         if optim_exists:
-            self.print(f"[rank-{rank}]: Loading optim from {os.path.abspath(optim_path)}")
+            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
         # Load state dictionaries from disk
-        model_state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
-        extra_state_dict = torch.load(extra_path, map_location="cpu", weights_only=False)
+        model_state_dict = io.load_file(model_path, map_location="cpu", weights_only=False)
+        extra_state_dict = io.load_file(extra_path, map_location="cpu", weights_only=False)
 
         optimizer_state_dict = {}
         if optim_exists and load_optimizer_states and not load_module_only:
-            optimizer_state_dict = torch.load(optim_path, map_location="cpu", weights_only=False)
+            optimizer_state_dict = io.load_file(optim_path, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
@@ -569,7 +569,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 1: Create output directory (rank 0 only)
         if self.is_rank_0():
-            os.makedirs(output_dir, exist_ok=True)
+            io.makedirs(output_dir, exist_ok=True)
             self.print(f"[rank-0]: Created output directory: {output_dir}")
 
         # Step 2: Extract models - get both the model for saving metadata and the FSDP model for state dict
@@ -599,37 +599,76 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
-            # Save the model in HuggingFace format using safetensors
-            model_to_save.save_pretrained(
-                output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs  # Always use safetensors
-            )
+            if io.is_cloud_path(output_dir):
+                # For cloud paths, use temporary directory then upload
+                with io.temp_local_dir() as temp_dir:
+                    # Save the model in HuggingFace format using safetensors
+                    model_to_save.save_pretrained(
+                        temp_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs
+                    )
 
-            # Determine which config to save
-            config_to_save = model_to_save.config
+                    # Determine which config to save
+                    config_to_save = model_to_save.config
 
-            # Fix architecture name by removing FSDP prefix if present
-            if hasattr(config_to_save, "architectures") and config_to_save.architectures:
-                # Create a copy of the config to avoid modifying the original
-                config_to_save = copy.deepcopy(config_to_save)
+                    # Fix architecture name by removing FSDP prefix if present
+                    if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+                        # Create a copy of the config to avoid modifying the original
+                        config_to_save = copy.deepcopy(config_to_save)
 
-                # Fix architecture names to remove FSDP prefix
-                fixed_architectures = []
-                for arch in config_to_save.architectures:
-                    fixed_arch = arch
-                    if arch.startswith("FSDP"):
-                        # Remove "FSDP" prefix (for fsdp2)
-                        fixed_arch = arch[len("FSDP") :]
-                        self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
-                    fixed_architectures.append(fixed_arch)
+                        # Fix architecture names to remove FSDP prefix
+                        fixed_architectures = []
+                        for arch in config_to_save.architectures:
+                            fixed_arch = arch
+                            if arch.startswith("FSDP"):
+                                # Remove "FSDP" prefix (for fsdp2)
+                                fixed_arch = arch[len("FSDP") :]
+                                self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                            fixed_architectures.append(fixed_arch)
 
-                config_to_save.architectures = fixed_architectures
+                        config_to_save.architectures = fixed_architectures
 
-            # Save the config
-            config_to_save.save_pretrained(output_dir)
+                    # Save the config
+                    config_to_save.save_pretrained(temp_dir)
 
-            # Save tokenizer if provided
-            if tokenizer is not None:
-                tokenizer.save_pretrained(output_dir)
+                    # Save tokenizer if provided
+                    if tokenizer is not None:
+                        tokenizer.save_pretrained(temp_dir)
+
+                    # Copy to cloud storage
+                    io.copy_tree(temp_dir, output_dir)
+            else:
+                # Save directly for local paths
+                # Save the model in HuggingFace format using safetensors
+                model_to_save.save_pretrained(
+                    output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs
+                )
+
+                # Determine which config to save
+                config_to_save = model_to_save.config
+
+                # Fix architecture name by removing FSDP prefix if present
+                if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+                    # Create a copy of the config to avoid modifying the original
+                    config_to_save = copy.deepcopy(config_to_save)
+
+                    # Fix architecture names to remove FSDP prefix
+                    fixed_architectures = []
+                    for arch in config_to_save.architectures:
+                        fixed_arch = arch
+                        if arch.startswith("FSDP"):
+                            # Remove "FSDP" prefix (for fsdp2)
+                            fixed_arch = arch[len("FSDP") :]
+                            self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                        fixed_architectures.append(fixed_arch)
+
+                    config_to_save.architectures = fixed_architectures
+
+                # Save the config
+                config_to_save.save_pretrained(output_dir)
+
+                # Save tokenizer if provided
+                if tokenizer is not None:
+                    tokenizer.save_pretrained(output_dir)
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 

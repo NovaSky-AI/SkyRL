@@ -14,6 +14,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, conc
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
+from skyrl_train.utils import io
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -88,37 +89,6 @@ def extract_step_from_path(path: str) -> int:
     return -1
 
 
-def cleanup_old_checkpoints(ckpt_path: str, max_ckpts_to_keep: int, current_global_step: int):
-    """Remove old global_step directories, keeping only the most recent max_ckpts_to_keep"""
-
-    if max_ckpts_to_keep < 0:
-        return
-
-    # Find all global_step directories
-    pattern = os.path.join(ckpt_path, f"{GLOBAL_STEP_PREFIX}*")
-    checkpoint_dirs = glob.glob(pattern)
-
-    # track only valid checkpoints - id <= current_global_step
-    checkpoint_dirs = [dir for dir in checkpoint_dirs if extract_step_from_path(dir) <= current_global_step]
-
-    if len(checkpoint_dirs) <= max_ckpts_to_keep:
-        logger.info(f"Only {len(checkpoint_dirs)} checkpoints found for the current run, no need to cleanup")
-        return
-
-    checkpoint_dirs.sort(key=extract_step_from_path, reverse=True)
-
-    logger.info(
-        f"Found {len(checkpoint_dirs)} checkpoints for the current run, keeping only the most recent {max_ckpts_to_keep}"
-    )
-
-    # Remove old checkpoints
-    for old_dir in checkpoint_dirs[max_ckpts_to_keep:]:
-        try:
-            shutil.rmtree(old_dir)
-            logger.info(f"Removed old checkpoint: {old_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to remove old checkpoint {old_dir}: {e}")
-
 
 def validate_consistency_for_latest_checkpoint(
     root_ckpt_folder: str, ckpt_iteration: int, checkpoint_path: str, latest_checkpoint_file: str, save_interval: int
@@ -128,18 +98,19 @@ def validate_consistency_for_latest_checkpoint(
     Asserts that the folder with the highest global step is the latest checkpoint tracked by `latest_checkpoint_file`.
     Otherwise, the folder state is inconsistent and the user should delete other checkpoints.
     """
-    global_step_values = [
-        extract_step_from_path(p) for p in os.listdir(root_ckpt_folder) if p.startswith(GLOBAL_STEP_PREFIX)
-    ]
-    max_global_step_in_folder = max(global_step_values)
-    # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
-    if max_global_step_in_folder - ckpt_iteration > save_interval:
-        max_global_step_in_folder_path = os.path.join(
-            root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
-        )
-        raise ValueError(
-            f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to {ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps {max_global_step_in_folder_path}. This is likely because checkpoint {max_global_step_in_folder_path} was created in a previous run while the latest run is at {checkpoint_path}. Please delete/move checkpoints from older runs and try again."
-        )
+    if io.exists(root_ckpt_folder):
+        checkpoint_dirs = io.list_checkpoint_dirs(root_ckpt_folder)
+        if checkpoint_dirs:
+            global_step_values = [extract_step_from_path(d) for d in checkpoint_dirs]
+            max_global_step_in_folder = max(global_step_values)
+            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
+            if max_global_step_in_folder - ckpt_iteration > save_interval:
+                max_global_step_in_folder_path = os.path.join(
+                    root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
+                )
+                raise ValueError(
+                    f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to {ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps {max_global_step_in_folder_path}. This is likely because checkpoint {max_global_step_in_folder_path} was created in a previous run while the latest run is at {checkpoint_path}. Please delete/move checkpoints from older runs and try again."
+                )
 
 
 def sanitize_data_source(data_source: str) -> str:
