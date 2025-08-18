@@ -34,6 +34,7 @@ trainer:
       max_grad_norm: 1.0 # gradient clipping
       offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
       num_warmup_steps: 0
+      scheduler: "constant_with_warmup"
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
       reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
@@ -41,9 +42,9 @@ trainer:
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
     use_torch_compile: false
-    # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz 
+    # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
-  ref: 
+  ref:
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
@@ -61,6 +62,7 @@ trainer:
       max_grad_norm: 1.0 # gradient clipping
       offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
       num_warmup_steps: 0
+      scheduler: "constant_with_warmup"
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true
@@ -88,7 +90,7 @@ trainer:
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
     kl_loss_coef: 0.001
-    # this adds training batch level normalization to advantages 
+    # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
     policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
@@ -130,8 +132,8 @@ trainer:
   train_batch_size: 1024  # See `utils/utils.py::validate_batch_sizes` for train, mini, and micro batch size constraints.
   policy_mini_batch_size: 256
   critic_mini_batch_size: 256
-  micro_train_batch_size_per_gpu: 1 
-  micro_forward_batch_size_per_gpu: 1  
+  micro_train_batch_size_per_gpu: 1
+  micro_forward_batch_size_per_gpu: 1
   update_ref_every_epoch: false
   use_sample_packing: true
   eval_batch_size: 1024
@@ -170,12 +172,12 @@ generator:
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
-  max_turns: 1 
+  max_turns: 1
 
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:
-    max_generate_length: 1024 
+    max_generate_length: 1024
     temperature: 1.0
     top_p: 1.0
     min_p: 0.0
@@ -189,7 +191,7 @@ generator:
 
   # sampling params for evaluation
   eval_sampling_params:
-    max_generate_length: ${generator.sampling_params.max_generate_length} 
+    max_generate_length: ${generator.sampling_params.max_generate_length}
     temperature: 0.0
     top_p: 1.0
     min_p: 0.0
@@ -200,15 +202,15 @@ generator:
   eval_n_samples_per_prompt: 1
 
   # NOTE (sumanthrh): This flag sets the reward to 0 if the `stop_reason` is not `stop`.
-  # This is useful in cases where the LLM generation was truncated or aborted. 
+  # This is useful in cases where the LLM generation was truncated or aborted.
   # Cases where this is useful: Often, we have format rewards for the LLM to follow,
   # but in cases where the LLM didn't finish the response, we typically don't want to reward it.
   # This is a general setting for all environments.
   # TODO (erictang000): Show clear ablations for benefits of this on GSM8K or SQL.
-  zero_reward_on_non_stop: false 
+  zero_reward_on_non_stop: false
 
   # Whether to apply DAPO Overlong Filtering to the loss masks.
-  # For each trajectory that exceeds the max length (i.e., truncated and does not end with an 
+  # For each trajectory that exceeds the max length (i.e., truncated and does not end with an
   # EOS token), this masks out every token in the loss mask.
   apply_overlong_filtering: false
 

@@ -30,7 +30,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, non_blocking)
 
-    def init_model(self, model_id_or_path):
+    def init_model(self, model_id_or_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("deepspeed")
         self.zero_stage = self.cfg.trainer.policy.deepspeed_config.zero_optimization.stage
         if self.cfg.trainer.policy.optimizer_config.max_grad_norm > 0:
@@ -73,9 +73,10 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         )
 
         actor_scheduler = get_scheduler(
-            "constant_with_warmup",
+            self.cfg.trainer.policy.optimizer_config.scheduler,
             actor_optim,
             num_warmup_steps=self.cfg.trainer.policy.optimizer_config.num_warmup_steps,
+            num_training_steps=num_training_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:
@@ -218,7 +219,7 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, non_blocking)
 
-    def init_model(self, model_id_or_path):
+    def init_model(self, model_id_or_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("deepspeed")
         self.zero_stage = self.cfg.trainer.critic.deepspeed_config.zero_optimization.stage
         strategy = DeepspeedStrategy(
@@ -262,9 +263,10 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
 
         # configure scheduler
         critic_scheduler = get_scheduler(
-            "constant_with_warmup",
+            self.cfg.trainer.critic.optimizer_config.scheduler,
             critic_optim,
             num_warmup_steps=self.cfg.trainer.critic.optimizer_config.num_warmup_steps,
+            num_training_steps=num_training_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:

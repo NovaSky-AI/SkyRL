@@ -604,9 +604,19 @@ class RayPPOTrainer:
             refs = []
             if ref_model is not None:
                 refs.extend(ref_model.async_init_model(cfg.trainer.policy.model.path))
-            refs.extend(policy_model.async_init_model(cfg.trainer.policy.model.path))
+            refs.extend(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=self.total_training_steps,
+                )
+            )
             if cfg.trainer.critic.model.path:
-                refs.extend(critic_model.async_init_model(cfg.trainer.critic.model.path))
+                refs.extend(
+                    critic_model.async_init_model(
+                        cfg.trainer.critic.model.path,
+                        num_training_steps=self.total_training_steps,
+                    )
+                )
             if cfg.trainer.reward.model.path:
                 refs.extend(reward_model.async_init_model(cfg.trainer.reward.model.path))
             ray.get(refs)
@@ -615,11 +625,21 @@ class RayPPOTrainer:
             if ref_model is not None:
                 ray.get(ref_model.async_init_model(cfg.trainer.policy.model.path))
                 ref_model.offload_to_cpu()
-            ray.get(policy_model.async_init_model(cfg.trainer.policy.model.path))
+            ray.get(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=self.total_training_steps,
+                )
+            )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                ray.get(critic_model.async_init_model(cfg.trainer.critic.model.path))
+                ray.get(
+                    critic_model.async_init_model(
+                        cfg.trainer.critic.model.path,
+                        num_training_steps=self.total_training_steps,
+                    )
+                )
                 critic_model.offload_to_cpu()
             if cfg.trainer.reward.model.path:
                 ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
