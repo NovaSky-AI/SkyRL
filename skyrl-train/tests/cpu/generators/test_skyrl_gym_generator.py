@@ -15,6 +15,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 MOCK_LLM_OUTPUT_IDS = [1, 10, 12, 4]
 MOCK_TOKENIZER_ENCODED_IDS = [1, 2, 3, 4]
 
+
 # TODO (erictang000): clean up the mocking for tests in this file
 @pytest.fixture
 def mock_tokenizer():
@@ -469,11 +470,18 @@ async def test_length_limit_exceeded_during_conversation(
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
         if turns_to_exceed == 1:
             mock_llm_output_ids = [1] * 20  # Enough to exceed limit immediately (4 + 20 + 4 = 28 > 20)
-            assert len(MOCK_TOKENIZER_ENCODED_IDS) + len(mock_llm_output_ids) + len(MOCK_TOKENIZER_ENCODED_IDS) > max_input_length
+            assert (
+                len(MOCK_TOKENIZER_ENCODED_IDS) + len(mock_llm_output_ids) + len(MOCK_TOKENIZER_ENCODED_IDS)
+                > max_input_length
+            )
         else:
             assert turns_to_exceed == 3
             mock_llm_output_ids = [1] * 2  # Enough to exceed limit after 3 turns (4 + (2 + 4) * 3 = 22 > 20)
-            assert len(MOCK_TOKENIZER_ENCODED_IDS) + (len(mock_llm_output_ids) + len(MOCK_TOKENIZER_ENCODED_IDS)) * turns_to_exceed > max_input_length
+            assert (
+                len(MOCK_TOKENIZER_ENCODED_IDS)
+                + (len(mock_llm_output_ids) + len(MOCK_TOKENIZER_ENCODED_IDS)) * turns_to_exceed
+                > max_input_length
+            )
         return {
             "responses": ["mocked output"] * num_prompts,
             "stop_reasons": ["stop"] * num_prompts,
@@ -724,11 +732,13 @@ async def test_apply_overlong_filtering_non_batched(
     generator.system_prompt_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
-    mock_llm.generate = AsyncMock(return_value={
-        "responses": ["truncated response"],
-        "stop_reasons": ["length"],
-        "response_ids": [[10, 11, 12, 13, 14, 15, 16, 17, 18, 19]],  # 10 tokens, will be truncated
-    })
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["truncated response"],
+            "stop_reasons": ["length"],
+            "response_ids": [[10, 11, 12, 13, 14, 15, 16, 17, 18, 19]],  # 10 tokens, will be truncated
+        }
+    )
 
     input_batch_truncated: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "Test prompt"}]],
@@ -753,11 +763,13 @@ async def test_apply_overlong_filtering_non_batched(
     # Second test: response that ends with eos token (should not be filtered)
     # Reset the environment init to ensure clean state
     mock_env.init.return_value = ([{"role": "user", "content": "Fresh input"}], {})
-    mock_llm.generate = AsyncMock(return_value={
-        "responses": ["truncated response"],
-        "stop_reasons": ["length"],
-        "response_ids": [[20, 21, 4]],  # 3 tokens, ends with eos token 4
-    })
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["truncated response"],
+            "stop_reasons": ["length"],
+            "response_ids": [[20, 21, 4]],  # 3 tokens, ends with eos token 4
+        }
+    )
 
     input_batch_normal: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "Another test prompt"}]],
