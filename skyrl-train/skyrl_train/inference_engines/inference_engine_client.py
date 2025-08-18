@@ -33,9 +33,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
 
         if self.use_http_server_inference_engine_client:
-            assert generator_config.get("async_engine"), (
-                "In your config, generator.async_engine must be True when " "using http server inference engine client."
-            )
             self._spin_up_http_server()
 
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")

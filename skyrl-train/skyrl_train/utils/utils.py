@@ -208,6 +208,11 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
+    if cfg.generator.use_http_server_inference_engine_client and not cfg.generator.async_engine:
+        raise ValueError(
+            "In your config, generator.async_engine must be True when "
+            "using http server inference engine client."
+        )
 
 @ray.remote
 def get_all_env_variables():
