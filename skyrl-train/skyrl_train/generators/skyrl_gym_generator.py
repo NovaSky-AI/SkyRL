@@ -38,29 +38,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
-        # This is used to format observation in the chat template.
-        # Similar to https://github.com/volcengine/verl/blob/6bbbff13a131dac9f29411f180ccabe2fe64e786/verl/experimental/agent_loop/tool_agent_loop.py#L196
-        self.base_conversation = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "I am a user."},
-            {"role": "assistant", "content": "I am an assistant."},
-        ]
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
-            self.base_conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-        )
-        # We cut before the last eos token in base_conversation_token_ids so that the tokens after
-        # the assistant eos token can be included as part of the observation_ids.
-        # In Qwen, there is an extra \n after the eos token that we want to capture in observation_ids.
-        if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
-            last_eos_token_index = (
-                len(self.base_conversation_token_ids)
-                - 1
-                - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
-            )
-            self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
-
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
         # get generation prompt ids for the tokenizer if needed
@@ -74,6 +51,40 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
+
+        # Code below is only for use_conversation_multi_turn==True and custom_chat_template==None
+        # This is used to format observation in `_get_next_input_ids_with_multiturn_chat_template()`.
+        # Similar to https://github.com/volcengine/verl/blob/6bbbff13a131dac9f29411f180ccabe2fe64e786/verl/experimental/agent_loop/tool_agent_loop.py#L196
+        # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+        self.base_conversation = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "I am a user."},
+            {"role": "assistant", "content": "I am an assistant."},
+        ]
+        self.base_conversation_token_ids = tokenizer.apply_chat_template(
+            self.base_conversation,
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+        # For Qwen2.5 and Qwen3, the above would generate
+        # <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
+        # <|im_start|>user\nI am a user.<|im_end|>\n
+        # <|im_start|>assistant\nI am an assistant.<|im_end|>\n
+
+        # Note that there is a `\n` in assistant's line before next user's messsage starts.
+        # If we do token-in-token-out, there is no way for LLM engine to generate `\n` since the
+        # EOS token is `<|im_end|>`. Therefore, we need to add it during `observation_ids`.
+        # By cutting `\n` out in `base_conversation_token_ids`, `observation_ids` in
+        # `_get_next_input_ids_with_multiturn_chat_template()` will be `\n<|im_start|>user\nObservation here<|im_end|>\n`.
+        # Note the `\n` at the final assistant turn will still be missing, but this is fine.
+        # See tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py for more details.
+        if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
+            last_eos_token_index = (
+                len(self.base_conversation_token_ids)
+                - 1
+                - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
+            )
+            self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
     async def agent_loop(
         self,
