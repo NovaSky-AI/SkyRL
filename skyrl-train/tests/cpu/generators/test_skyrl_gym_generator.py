@@ -230,7 +230,7 @@ async def test_agent_loop_single_turn(
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
-    response_text, reward, stop_reason, loss_mask, input_prompt, rollout_logprobs = await generator.agent_loop(
+    response_text, reward, stop_reason, loss_mask, input_prompt, rollout_logprobs, env_metrics = await generator.agent_loop(
         prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
     )
 
@@ -238,6 +238,7 @@ async def test_agent_loop_single_turn(
     assert reward == 1.0
     assert stop_reason == "stop"
     assert loss_mask == [1, 1, 1, 1]
+    assert env_metrics == {}
 
 
 @pytest.mark.asyncio
@@ -283,6 +284,7 @@ def test_generator_output_concatenation():
         "stop_reasons",
         "rollout_metrics",
         "rollout_logprobs",
+        "env_metrics",
     ]
     assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
         "GeneratorOutput fields are not what we expect. "
@@ -562,7 +564,7 @@ async def test_multi_turn_response_truncation(
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
 
-    response_ids, _, stop_reason, loss_mask, _, _ = await generator.agent_loop(
+    response_ids, _, stop_reason, loss_mask, _, _, _ = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
     )
 
