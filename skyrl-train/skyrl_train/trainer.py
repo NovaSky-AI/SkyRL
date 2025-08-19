@@ -14,6 +14,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
+from collections import defaultdict
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
@@ -183,8 +184,6 @@ class RayPPOTrainer:
         # 4. Aggregate environment metrics for logging
         env_aggregated_metrics = {}
         if concat_all_env_metrics:
-            from collections import defaultdict
-
             metric_sums = defaultdict(float)
             metric_counts = defaultdict(int)
 
