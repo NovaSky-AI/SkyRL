@@ -644,14 +644,36 @@ requires-dist = [
 
 [[package]]
 name = "flashinfer-python"
-version = "0.2.6.post1+cu128torch2.7"
-source = { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" }
+version = "0.2.6.post1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine != 'aarch64' and sys_platform == 'linux'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "sys_platform != 'linux'",
+]
 dependencies = [
     { name = "ninja" },
     { name = "numpy" },
     { name = "requests" },
-    { name = "torch", version = "2.7.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'extra-11-skyrl-train-vllm'" },
-    { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'extra-11-skyrl-train-sglang'" },
+    { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/34/26/3c6f12ffaefbfa0c453030d6e15941269b3a4ffcd267daec32d1a10dda96/flashinfer_python-0.2.6.post1.tar.gz", hash = "sha256:0cb5b346024b75deb08bd09a1cc6273ceb23f1f5f0d7e40dbe594abc6a67be69", size = 3137122, upload-time = "2025-06-07T04:11:25.672Z" }
+
+[[package]]
+name = "flashinfer-python"
+version = "0.2.6.post1+cu128torch2.7"
+source = { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" }
+resolution-markers = [
+    "platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "platform_machine != 'aarch64' and sys_platform == 'linux'",
+    "sys_platform == 'darwin'",
+    "sys_platform != 'darwin' and sys_platform != 'linux'",
+]
+dependencies = [
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "requests" },
+    { name = "torch", version = "2.7.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
 ]
 wheels = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", hash = "sha256:47b6db5e7bdcaff1f44d97166aa780627c9c244567c667b959359d862d3d5335" },
@@ -2656,7 +2678,7 @@ srt = [
     { name = "datasets" },
     { name = "einops" },
     { name = "fastapi" },
-    { name = "flashinfer-python" },
+    { name = "flashinfer-python", version = "0.2.6.post1", source = { registry = "https://pypi.org/simple" } },
     { name = "hf-transfer" },
     { name = "huggingface-hub" },
     { name = "interegular" },
@@ -2778,14 +2800,13 @@ docs = [
     { name = "sphinx-rtd-theme" },
 ]
 sglang = [
-    { name = "flashinfer-python" },
     { name = "sglang", extra = ["openai", "srt", "torch-memory-saver"], marker = "extra == 'extra-11-skyrl-train-sglang'" },
     { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "torchvision", version = "0.22.1", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-sglang') or (platform_machine != 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "torchvision", version = "0.22.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine != 'aarch64' and extra == 'extra-11-skyrl-train-sglang') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 vllm = [
-    { name = "flashinfer-python" },
+    { name = "flashinfer-python", version = "0.2.6.post1+cu128torch2.7", source = { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" } },
     { name = "torch", version = "2.7.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "torchvision", version = "0.22.0", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-11-skyrl-train-vllm') or (platform_machine != 'aarch64' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
     { name = "torchvision", version = "0.22.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine != 'aarch64' and extra == 'extra-11-skyrl-train-vllm') or (sys_platform != 'linux' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
@@ -2800,7 +2821,8 @@ requires-dist = [
     { name = "debugpy", specifier = "==1.8.0" },
     { name = "deepspeed", marker = "extra == 'deepspeed'", specifier = "==0.16.5" },
     { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
-    { name = "flashinfer-python", marker = "extra == 'sglang'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
+    { name = "flashinfer-python", marker = "extra == 'sglang' and extra == 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
+    { name = "flashinfer-python", marker = "extra == 'sglang' and extra != 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
     { name = "func-timeout" },
     { name = "hf-transfer" },
