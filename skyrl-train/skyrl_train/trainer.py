@@ -1195,7 +1195,8 @@ class RayPPOTrainer:
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
         try:
             dataloader_state_dict = self.train_dataloader.state_dict()
-            io.save_file(dataloader_state_dict, dataloader_save_path)
+            with io.open_file(dataloader_save_path, 'wb') as f:
+                torch.save(dataloader_state_dict, f)
             logger.info(f"Saved dataloader state to {dataloader_save_path}")
         except Exception as e:
             logger.warning(f"Failed to save dataloader state: {e}")
@@ -1206,12 +1207,14 @@ class RayPPOTrainer:
             "config": self.cfg,
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
-        io.save_file(trainer_state, trainer_state_path)
+        with io.open_file(trainer_state_path, 'wb') as f:
+            torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
         # Atomic tracking - write this last after all saves succeed
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
-        io.write_text(latest_checkpoint_file, str(self.global_step))
+        with io.open_file(latest_checkpoint_file, 'w') as f:
+            f.write(str(self.global_step))
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
 
@@ -1249,7 +1252,8 @@ class RayPPOTrainer:
             if not io.exists(latest_checkpoint_file):
                 logger.info("No checkpoint found, starting training from scratch")
                 return 0
-            ckpt_iteration = int(io.read_text(latest_checkpoint_file).strip())
+            with io.open_file(latest_checkpoint_file, 'r') as f:
+                ckpt_iteration = int(f.read().strip())
             checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_iteration}")
             # Run validation: Make sure ckpt folder is consistent with latest_ckpt_global_step.txt
             validate_consistency_for_latest_checkpoint(
@@ -1295,7 +1299,8 @@ class RayPPOTrainer:
             raise FileNotFoundError(f"Trainer state file not found: {trainer_state_path}")
 
         # 1. Load and validate trainer state
-        trainer_state = io.load_file(trainer_state_path, map_location="cpu", weights_only=False)
+        with io.open_file(trainer_state_path, 'rb') as f:
+            trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
@@ -1304,7 +1309,8 @@ class RayPPOTrainer:
         # 2. Load dataloader state if available
         if io.exists(dataloader_state_path):
             try:
-                dataloader_state = io.load_file(dataloader_state_path, map_location="cpu", weights_only=False)
+                with io.open_file(dataloader_state_path, 'rb') as f:
+                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
                 self.train_dataloader.load_state_dict(dataloader_state)
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:

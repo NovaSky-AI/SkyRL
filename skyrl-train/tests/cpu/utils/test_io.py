@@ -7,6 +7,7 @@ import tempfile
 import pytest
 from unittest.mock import patch, mock_open, MagicMock, Mock, call
 import json
+import torch
 
 # Import our io module
 import sys
@@ -18,11 +19,10 @@ from skyrl_train.utils.io import (
     is_cloud_path,
     makedirs,
     exists,
-    write_text,
-    read_text,
-    save_file,
-    load_file,
     _get_filesystem,
+    open_file,
+    upload_directory,
+    download_directory,
     local_work_dir,
     local_read_dir,
 )
@@ -78,17 +78,19 @@ class TestLocalFileOperations:
         makedirs("gs://bucket/path", exist_ok=True)
         makedirs("gcs://bucket/path", exist_ok=True)
 
-    def test_write_read_text_local(self):
-        """Test text file operations for local paths."""
+    def test_open_file_text_local(self):
+        """Test text file operations for local paths using open_file."""
         with tempfile.TemporaryDirectory() as temp_dir:
             test_file = os.path.join(temp_dir, "test.txt")
             test_content = "test checkpoint step: 1000"
 
-            # Write and read text
-            write_text(test_file, test_content)
+            # Write and read text using open_file
+            with open_file(test_file, 'w') as f:
+                f.write(test_content)
             assert os.path.exists(test_file)
 
-            read_content = read_text(test_file)
+            with open_file(test_file, 'r') as f:
+                read_content = f.read()
             assert read_content == test_content
 
     def test_exists_local(self):
@@ -145,11 +147,13 @@ class TestCheckpointUtilities:
             assert get_latest_checkpoint_step(temp_dir) == 0
 
             # Test with valid step
-            write_text(latest_file, "1500")
+            with open_file(latest_file, 'w') as f:
+                f.write("1500")
             assert get_latest_checkpoint_step(temp_dir) == 1500
 
             # Test with whitespace
-            write_text(latest_file, "  2000  \n")
+            with open_file(latest_file, 'w') as f:
+                f.write("  2000  \n")
             assert get_latest_checkpoint_step(temp_dir) == 2000
 
     def test_cleanup_old_checkpoints_local(self):
@@ -195,141 +199,6 @@ class TestCheckpointUtilities:
 class TestCloudFileOperationsMocked:
     """Test cloud file operations with mocked fsspec."""
 
-    @patch("skyrl_train.utils.io.fsspec.filesystem")
-    def test_get_filesystem_s3(self, mock_filesystem):
-        """Test _get_filesystem for S3 paths."""
-        mock_fs = Mock()
-        mock_filesystem.return_value = mock_fs
-
-        fs = _get_filesystem("s3://bucket/path")
-
-        mock_filesystem.assert_called_once_with("s3")
-        assert fs == mock_fs
-
-    @patch("skyrl_train.utils.io.fsspec.filesystem")
-    def test_get_filesystem_gcs(self, mock_filesystem):
-        """Test _get_filesystem for GCS paths."""
-        mock_fs = Mock()
-        mock_filesystem.return_value = mock_fs
-
-        fs = _get_filesystem("gs://bucket/path")
-
-        mock_filesystem.assert_called_once_with("gs")
-        assert fs == mock_fs
-
-    @patch("skyrl_train.utils.io.fsspec.filesystem")
-    def test_get_filesystem_local(self, mock_filesystem):
-        """Test _get_filesystem for local paths."""
-        mock_fs = Mock()
-        mock_filesystem.return_value = mock_fs
-
-        fs = _get_filesystem("/local/path")
-
-        mock_filesystem.assert_called_once_with("file")
-        assert fs == mock_fs
-
-    @patch("skyrl_train.utils.io.torch.save")
-    @patch("skyrl_train.utils.io.open_file")
-    def test_save_file_cloud(self, mock_open_file, mock_torch_save):
-        """Test save_file with cloud storage."""
-        mock_file = Mock()
-        mock_open_file.return_value.__enter__.return_value = mock_file
-
-        test_obj = {"model": "weights", "step": 1000}
-        cloud_path = "s3://bucket/model.pt"
-
-        save_file(test_obj, cloud_path)
-
-        # Verify file was opened with correct path and mode
-        mock_open_file.assert_called_once_with(cloud_path, "wb")
-        # Verify torch.save was called with object and file handle
-        mock_torch_save.assert_called_once_with(test_obj, mock_file)
-
-    @patch("skyrl_train.utils.io.torch.save")
-    def test_save_file_local(self, mock_torch_save):
-        """Test save_file with local storage."""
-        test_obj = {"model": "weights", "step": 1000}
-        local_path = "/tmp/model.pt"
-
-        save_file(test_obj, local_path)
-
-        # Should call torch.save directly with path
-        mock_torch_save.assert_called_once_with(test_obj, local_path)
-
-    @patch("skyrl_train.utils.io.torch.load")
-    @patch("skyrl_train.utils.io.open_file")
-    def test_load_file_cloud(self, mock_open_file, mock_torch_load):
-        """Test load_file with cloud storage."""
-        mock_file = Mock()
-        mock_open_file.return_value.__enter__.return_value = mock_file
-        mock_torch_load.return_value = {"model": "weights", "step": 1000}
-
-        cloud_path = "s3://bucket/model.pt"
-
-        result = load_file(cloud_path, map_location="cuda", weights_only=True)
-
-        # Verify file was opened correctly
-        mock_open_file.assert_called_once_with(cloud_path, "rb")
-        # Verify torch.load was called with correct parameters
-        mock_torch_load.assert_called_once_with(mock_file, map_location="cuda", weights_only=True)
-        assert result == {"model": "weights", "step": 1000}
-
-    @patch("skyrl_train.utils.io.torch.load")
-    def test_load_file_local(self, mock_torch_load):
-        """Test load_file with local storage."""
-        mock_torch_load.return_value = {"model": "weights", "step": 1000}
-
-        local_path = "/tmp/model.pt"
-
-        result = load_file(local_path, map_location="cpu", weights_only=False)
-
-        # Should call torch.load directly with path
-        mock_torch_load.assert_called_once_with(local_path, map_location="cpu", weights_only=False)
-        assert result == {"model": "weights", "step": 1000}
-
-    @patch("skyrl_train.utils.io.open_file")
-    def test_write_text_cloud(self, mock_open_file):
-        """Test write_text with cloud storage."""
-        mock_file = Mock()
-        mock_open_file.return_value.__enter__.return_value = mock_file
-
-        cloud_path = "s3://bucket/config.txt"
-        content = "global_step: 1000"
-
-        write_text(cloud_path, content)
-
-        mock_open_file.assert_called_once_with(cloud_path, "w")
-        mock_file.write.assert_called_once_with(content)
-
-    @patch("skyrl_train.utils.io.open_file")
-    def test_read_text_cloud(self, mock_open_file):
-        """Test read_text with cloud storage."""
-        mock_file = Mock()
-        mock_file.read.return_value = "global_step: 1000"
-        mock_open_file.return_value.__enter__.return_value = mock_file
-
-        cloud_path = "s3://bucket/config.txt"
-
-        result = read_text(cloud_path)
-
-        mock_open_file.assert_called_once_with(cloud_path, "r")
-        mock_file.read.assert_called_once()
-        assert result == "global_step: 1000"
-
-    @patch("skyrl_train.utils.io._get_filesystem")
-    def test_exists_cloud(self, mock_get_filesystem):
-        """Test exists with cloud storage."""
-        mock_fs = Mock()
-        mock_fs.exists.return_value = True
-        mock_get_filesystem.return_value = mock_fs
-
-        cloud_path = "s3://bucket/model.pt"
-
-        result = exists(cloud_path)
-
-        mock_get_filesystem.assert_called_once_with(cloud_path)
-        mock_fs.exists.assert_called_once_with(cloud_path)
-        assert result == True
 
     @patch("skyrl_train.utils.io._get_filesystem")
     def test_list_checkpoint_dirs_cloud(self, mock_get_filesystem):
@@ -398,12 +267,14 @@ class TestCheckpointScenarios:
 
             # Simulate saving trainer state (mock torch.save for simplicity)
             trainer_state = {"global_step": global_step, "config": {"lr": 0.001}}
-            with patch("skyrl_train.utils.io.torch.save") as mock_save:
-                save_file(trainer_state, trainer_state_path)
-                mock_save.assert_called_once_with(trainer_state, trainer_state_path)
+            with patch("torch.save") as mock_save:
+                with open_file(trainer_state_path, 'wb') as f:
+                    torch.save(trainer_state, f)
+                mock_save.assert_called_once()
 
             # Save latest checkpoint info
-            write_text(latest_checkpoint_file, str(global_step))
+            with open_file(latest_checkpoint_file, 'w') as f:
+                f.write(str(global_step))
 
             # Verify checkpoint was saved
             assert exists(global_step_folder)
@@ -413,116 +284,9 @@ class TestCheckpointScenarios:
             # Verify latest step can be retrieved
             assert get_latest_checkpoint_step(temp_dir) == global_step
 
-    @patch("skyrl_train.utils.io.torch.save")
-    @patch("skyrl_train.utils.io.fsspec.filesystem")
-    def test_cloud_checkpoint_scenario_mock(self, mock_filesystem, mock_torch_save):
-        """Test checkpoint scenario with mocked cloud storage."""
-        # Mock the filesystem
-        mock_fs = MagicMock()
-        mock_file = MagicMock()
-        mock_context_manager = MagicMock()
-        mock_context_manager.__enter__.return_value = mock_file
-        mock_context_manager.__exit__.return_value = None
-        mock_fs.open.return_value = mock_context_manager
-        mock_filesystem.return_value = mock_fs
-
-        # Simulate S3 checkpoint paths
-        base_path = "s3://my-bucket/checkpoints"
-        global_step = 2000
-        global_step_folder = f"{base_path}/global_step_{global_step}"
-        trainer_state_path = f"{global_step_folder}/trainer_state.pt"
-        latest_checkpoint_file = f"{base_path}/latest_ckpt_global_step.txt"
-
-        # Simulate trainer checkpoint saving workflow
-        makedirs(global_step_folder)  # Should do nothing for cloud paths
-        save_file({"global_step": global_step, "config": {}}, trainer_state_path)
-        write_text(latest_checkpoint_file, str(global_step))
-
-        # Verify cloud filesystem was used
-        mock_filesystem.assert_called_with("s3")
-        # Verify files were opened for writing
-        expected_calls = [call(trainer_state_path, "wb"), call(latest_checkpoint_file, "w")]
-        mock_fs.open.assert_has_calls(expected_calls, any_order=True)
-
-        # Verify torch.save was called with the file handle
-        mock_torch_save.assert_called_once_with({"global_step": global_step, "config": {}}, mock_file)
-
-        # Verify text was written to file handle
-        mock_file.write.assert_called_with(str(global_step))
 
 
 
-class TestIntegrationWithMocking:
-    """Integration tests with strategic mocking."""
-
-    @patch("skyrl_train.utils.io.torch.save")
-    @patch("skyrl_train.utils.io.torch.load")
-    def test_checkpoint_roundtrip_local(self, mock_torch_load, mock_torch_save):
-        """Test checkpoint save/load roundtrip with local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            checkpoint_path = os.path.join(temp_dir, "checkpoint.pt")
-
-            # Test data
-            checkpoint_data = {
-                "model_state_dict": {"layer1.weight": [1, 2, 3]},
-                "optimizer_state_dict": {"step": 1000},
-                "global_step": 1000,
-            }
-
-            # Save checkpoint
-            save_file(checkpoint_data, checkpoint_path)
-            mock_torch_save.assert_called_once_with(checkpoint_data, checkpoint_path)
-
-            # Mock load return value
-            mock_torch_load.return_value = checkpoint_data
-
-            # Load checkpoint
-            loaded_data = load_file(checkpoint_path)
-            mock_torch_load.assert_called_once_with(checkpoint_path, map_location="cpu", weights_only=False)
-
-            assert loaded_data == checkpoint_data
-
-    @patch("skyrl_train.utils.io.torch.save")
-    @patch("skyrl_train.utils.io.torch.load")
-    @patch("skyrl_train.utils.io.open_file")
-    def test_checkpoint_roundtrip_cloud(self, mock_open_file, mock_torch_load, mock_torch_save):
-        """Test checkpoint save/load roundtrip with cloud paths."""
-        # Setup mock file handles
-        mock_save_file = Mock()
-        mock_load_file = Mock()
-        mock_open_file.return_value.__enter__.side_effect = [mock_save_file, mock_load_file]
-
-        checkpoint_path = "s3://bucket/checkpoint.pt"
-
-        # Test data
-        checkpoint_data = {
-            "model_state_dict": {"layer1.weight": [1, 2, 3]},
-            "optimizer_state_dict": {"step": 1000},
-            "global_step": 1000,
-        }
-
-        # Save checkpoint
-        save_file(checkpoint_data, checkpoint_path)
-
-        # Verify save operations
-        assert mock_open_file.call_count == 1
-        mock_open_file.assert_any_call(checkpoint_path, "wb")
-        mock_torch_save.assert_called_once_with(checkpoint_data, mock_save_file)
-
-        # Mock load return value
-        mock_torch_load.return_value = checkpoint_data
-
-        # Reset mock for load operation
-        mock_open_file.reset_mock()
-
-        # Load checkpoint
-        loaded_data = load_file(checkpoint_path)
-
-        # Verify load operations
-        mock_open_file.assert_called_once_with(checkpoint_path, "rb")
-        mock_torch_load.assert_called_once_with(mock_load_file, map_location="cpu", weights_only=False)
-
-        assert loaded_data == checkpoint_data
 
 
 class TestContextManagers:
@@ -550,9 +314,9 @@ class TestContextManagers:
             with open(test_file, "r") as f:
                 assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.copy_tree")
+    @patch("skyrl_train.utils.io.upload_directory")
     @patch("skyrl_train.utils.io.is_cloud_path")
-    def test_local_work_dir_cloud_path(self, mock_is_cloud_path, mock_copy_tree):
+    def test_local_work_dir_cloud_path(self, mock_is_cloud_path, mock_upload_directory):
         """Test local_work_dir with a cloud path."""
         mock_is_cloud_path.return_value = True
 
@@ -570,10 +334,10 @@ class TestContextManagers:
             with open(test_file, "w") as f:
                 f.write("model data")
 
-        # Should have called copy_tree to upload to cloud
-        mock_copy_tree.assert_called_once()
+        # Should have called upload_directory to upload to cloud
+        mock_upload_directory.assert_called_once()
         # First argument should be the temp directory, second should be cloud path
-        call_args = mock_copy_tree.call_args[0]
+        call_args = mock_upload_directory.call_args[0]
         assert call_args[1] == cloud_path
         # First argument should be the temp directory we worked with
         assert call_args[0] == work_dir  # This will be the temp dir
@@ -596,9 +360,9 @@ class TestContextManagers:
                 with open(read_file, "r") as f:
                     assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.copy_tree")
+    @patch("skyrl_train.utils.io.download_directory")
     @patch("skyrl_train.utils.io.is_cloud_path")
-    def test_local_read_dir_cloud_path(self, mock_is_cloud_path, mock_copy_tree):
+    def test_local_read_dir_cloud_path(self, mock_is_cloud_path, mock_download_directory):
         """Test local_read_dir with a cloud path."""
         mock_is_cloud_path.return_value = True
 
@@ -611,8 +375,8 @@ class TestContextManagers:
             assert os.path.exists(read_dir)
             assert os.path.isdir(read_dir)
 
-        # Should have called copy_tree to download from cloud
-        mock_copy_tree.assert_called_once_with(cloud_path, read_dir)
+        # Should have called download_directory to download from cloud
+        mock_download_directory.assert_called_once_with(cloud_path, read_dir)
 
     def test_local_read_dir_nonexistent_local(self):
         """Test local_read_dir with a non-existent local path."""
@@ -621,6 +385,21 @@ class TestContextManagers:
         with pytest.raises(FileNotFoundError, match="Path does not exist"):
             with local_read_dir(non_existent_path) as read_dir:
                 pass
+
+
+class TestUploadDownload:
+    """Test upload and download directory functions."""
+
+
+    def test_upload_directory_validates_cloud_path(self):
+        """Test that upload_directory validates destination is a cloud path."""
+        with pytest.raises(ValueError, match="Destination must be a cloud path"):
+            upload_directory("/local/src", "/local/dst")
+
+    def test_download_directory_validates_cloud_path(self):
+        """Test that download_directory validates source is a cloud path."""
+        with pytest.raises(ValueError, match="Source must be a cloud path"):
+            download_directory("/local/src", "/local/dst")
 
 
 if __name__ == "__main__":

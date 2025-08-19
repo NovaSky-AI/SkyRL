@@ -440,14 +440,16 @@ class FSDPStrategy(DistributedStrategy):
                 # Get and save model state dict
                 model_state_dict = save_model.state_dict()
                 self.print(f"[rank-{rank}]: Saving model to {model_path}")
-                io.save_file(model_state_dict, model_path)
+                with io.open_file(model_path, 'wb') as f:
+                    torch.save(model_state_dict, f)
 
                 # Get and save optimizer state dict if optimizer is provided
                 optimizer_state_dict = {}
                 if optimizer is not None:
                     optimizer_state_dict = optimizer.state_dict()
                 self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
-                io.save_file(optimizer_state_dict, optim_path)
+                with io.open_file(optim_path, 'wb') as f:
+                    torch.save(optimizer_state_dict, f)
 
                 # Get scheduler state dict if scheduler is provided
                 lr_scheduler_state_dict = {}
@@ -468,7 +470,8 @@ class FSDPStrategy(DistributedStrategy):
 
                 # Save extra state
                 self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
-                io.save_file(extra_state_dict, extra_path)
+                with io.open_file(extra_path, 'wb') as f:
+                    torch.save(extra_state_dict, f)
 
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
@@ -479,7 +482,8 @@ class FSDPStrategy(DistributedStrategy):
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
-            io.save_json({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, fsdp_config_path)
+            with io.open_file(fsdp_config_path, 'w') as f:
+                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
@@ -534,12 +538,15 @@ class FSDPStrategy(DistributedStrategy):
             self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
         # Load state dictionaries from disk
-        model_state_dict = io.load_file(model_path, map_location="cpu", weights_only=False)
-        extra_state_dict = io.load_file(extra_path, map_location="cpu", weights_only=False)
+        with io.open_file(model_path, 'rb') as f:
+            model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+        with io.open_file(extra_path, 'rb') as f:
+            extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         optimizer_state_dict = {}
         if optim_exists and load_optimizer_states and not load_module_only:
-            optimizer_state_dict = io.load_file(optim_path, map_location="cpu", weights_only=False)
+            with io.open_file(optim_path, 'rb') as f:
+                optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})

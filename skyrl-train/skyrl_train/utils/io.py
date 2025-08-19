@@ -11,12 +11,8 @@ Uses fsspec for cloud storage abstraction.
 
 import os
 import tempfile
-import shutil
-import json
-from pathlib import Path
-from typing import Any, Union, BinaryIO, TextIO, cast
+from typing import Any
 from contextlib import contextmanager
-import torch
 import fsspec
 from loguru import logger
 
@@ -34,28 +30,11 @@ def _get_filesystem(path: str):
         return fsspec.filesystem("file")
 
 
-def open_file(path: str, mode: str = "rb") -> Union[BinaryIO, TextIO]:
+def open_file(path: str, mode: str = "rb"):
     """Open a file using fsspec, works with both local and cloud paths."""
-    fs = _get_filesystem(path)
-    return fs.open(path, mode)
+    return fsspec.open(path, mode)
 
 
-def save_file(obj: Any, path: str) -> None:
-    """Save a PyTorch object to local or cloud path using torch.save."""
-    if is_cloud_path(path):
-        with open_file(path, "wb") as f:
-            torch.save(obj, cast(BinaryIO, f))
-    else:
-        torch.save(obj, path)
-
-
-def load_file(path: str, map_location: str = "cpu", weights_only: bool = False) -> Any:
-    """Load a PyTorch object from local or cloud path using torch.load."""
-    if is_cloud_path(path):
-        with open_file(path, "rb") as f:
-            return torch.load(cast(BinaryIO, f), map_location=map_location, weights_only=weights_only)
-    else:
-        return torch.load(path, map_location=map_location, weights_only=weights_only)
 
 
 def makedirs(path: str, exist_ok: bool = True) -> None:
@@ -91,77 +70,26 @@ def remove(path: str) -> None:
         fs.rm(path)
 
 
-def copy_tree(src: str, dst: str) -> None:
-    """Copy directory tree from src to dst. Handles local-to-cloud, cloud-to-local, and cloud-to-cloud."""
-    src_fs = _get_filesystem(src)
-    dst_fs = _get_filesystem(dst)
-
-    if not src_fs.isdir(src):
-        raise ValueError(f"Source path is not a directory: {src}")
-
-    # Create destination directory
-    if not is_cloud_path(dst):
-        makedirs(dst, exist_ok=True)
-
-    # Copy all files recursively
-    for src_file in src_fs.find(src):
-        # Calculate relative path from src
-        rel_path = os.path.relpath(src_file, src)
-        dst_file = os.path.join(dst, rel_path).replace("\\", "/")  # Normalize path separators
-
-        # Create parent directory for destination file
-        dst_parent = os.path.dirname(dst_file)
-        if not is_cloud_path(dst):
-            makedirs(dst_parent, exist_ok=True)
-
-        # Copy the file
-        with src_fs.open(src_file, "rb") as src_f:
-            with dst_fs.open(dst_file, "wb") as dst_f:
-                shutil.copyfileobj(src_f, dst_f)
+def upload_directory(local_path: str, cloud_path: str) -> None:
+    """Upload a local directory to cloud storage."""
+    if not is_cloud_path(cloud_path):
+        raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
+    
+    fs = _get_filesystem(cloud_path)
+    fs.put(local_path, cloud_path, recursive=True)
+    logger.info(f"Uploaded {local_path} to {cloud_path}")
 
 
-def write_text(path: str, content: str) -> None:
-    """Write text content to a file."""
-    if is_cloud_path(path):
-        with open_file(path, "w") as f:
-            cast(TextIO, f).write(content)
-    else:
-        with open(path, "w") as f:
-            f.write(content)
+def download_directory(cloud_path: str, local_path: str) -> None:
+    """Download a cloud directory to local storage."""
+    if not is_cloud_path(cloud_path):
+        raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
+    
+    fs = _get_filesystem(cloud_path)
+    fs.get(cloud_path, local_path, recursive=True)
+    logger.info(f"Downloaded {cloud_path} to {local_path}")
 
 
-def read_text(path: str) -> str:
-    """Read text content from a file."""
-    if is_cloud_path(path):
-        with open_file(path, "r") as f:
-            return cast(TextIO, f).read()
-    else:
-        with open(path, "r") as f:
-            return f.read()
-
-
-
-
-def save_json(obj: Any, path: str) -> None:
-    """Save a JSON-serializable object to a file."""
-
-    if is_cloud_path(path):
-        with open_file(path, "w") as f:
-            json.dump(obj, cast(TextIO, f), indent=4)
-    else:
-        with open(path, "w") as f:
-            json.dump(obj, f, indent=4)
-
-
-def load_json(path: str) -> Any:
-    """Load a JSON object from a file."""
-
-    if is_cloud_path(path):
-        with open_file(path, "r") as f:
-            return json.load(f)
-    else:
-        with open(path, "r") as f:
-            return json.load(f)
 
 
 
@@ -191,7 +119,7 @@ def local_work_dir(output_path: str):
                 yield temp_dir
             finally:
                 # Upload everything from temp_dir to cloud path
-                copy_tree(temp_dir, output_path)
+                upload_directory(temp_dir, output_path)
                 logger.info(f"Uploaded directory contents to {output_path}")
     else:
         # For local paths, ensure directory exists and use it directly
@@ -221,7 +149,7 @@ def local_read_dir(input_path: str):
     if is_cloud_path(input_path):
         with tempfile.TemporaryDirectory() as temp_dir:
             # Download everything from cloud path to temp_dir
-            copy_tree(input_path, temp_dir)
+            download_directory(input_path, temp_dir)
             logger.info(f"Downloaded directory contents from {input_path}")
             yield temp_dir
     else:
