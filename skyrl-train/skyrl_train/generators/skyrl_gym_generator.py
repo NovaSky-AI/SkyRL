@@ -93,7 +93,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_tokens: int,
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[float]]]:
+    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[float]], Optional[Dict[str, Any]]]:
         """
         Multi-turn generation loop that executes a single trajectory.
 
@@ -118,6 +118,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask: List[int]
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
+            env_metrics: Optional[Dict[str, Any]]
         """
         retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
 
