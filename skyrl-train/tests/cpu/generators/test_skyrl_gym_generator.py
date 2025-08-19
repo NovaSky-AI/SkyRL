@@ -839,19 +839,14 @@ async def test_env_metrics_collection_and_aggregation(
     """
     Test that environment metrics are properly collected from environments
     and included in GeneratorOutput for both batched and non-batched modes.
-    
-    This tests the env_metrics functionality added in the PR:
-    1. Environment returns metrics in step output
-    2. Generator collects and includes them in GeneratorOutput
-    3. Metrics have correct structure and values
     """
     mock_make.return_value = mock_env
     mock_generator_cfg.batched = False  # Test non-batched mode first
     mock_generator_cfg.max_turns = 1
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    # Mock environment to return metrics in step output
     def mock_step_with_metrics(action):
+        print(f"DEBUG: action received = '{action}', length = {len(action)}")  # Debug line
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": "next"}],
             reward=1.0,
@@ -1101,7 +1096,7 @@ def test_env_metrics_in_generator_output_schema():
         {"metric1": 10.0, "metric2": "test2"}
     ]
     
-    assert "env_metrics" in concatenated_output, f"env_metrics should be in concatenated output, instead got {concatenated_output["env_metrics"]}"
+    assert "env_metrics" in concatenated_output, "env_metrics should be in concatenated output"
     
     assert concatenated_output["env_metrics"] == expected_env_metrics, (
         f"env_metrics concatenation failed. Expected {expected_env_metrics}, "
