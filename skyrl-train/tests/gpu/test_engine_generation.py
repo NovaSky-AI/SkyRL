@@ -17,7 +17,7 @@ import asyncio
 import subprocess
 import os
 from tests.gpu.utils import get_available_gpus, wait_for_server, are_responses_similar, get_test_prompts
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
@@ -37,7 +37,9 @@ def get_test_actor_config() -> DictConfig:
         return cfg
 
 
-def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[InferenceEngineClient, subprocess.Popen]:
+def init_remote_inference_servers(
+    tp_size: int, backend: str, tokenizer: PreTrainedTokenizerBase
+) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()
     assert (
         len(available_gpus) >= tp_size
@@ -71,10 +73,14 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
             "--model",
             MODEL,
             "--enforce-eager",
+            "--gpu-memory-utilization",
+            "0.8",
             "--tensor-parallel-size",
             str(tp_size),
+            # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
+            # For standalone server, we use mp for now.
             "--distributed-executor-backend",
-            "ray",
+            "mp",
             "--dtype",
             "bfloat16",
             "--host",
@@ -124,11 +130,21 @@ def init_remote_inference_servers(tp_size: int, backend: str) -> Tuple[Inference
     engines = create_remote_inference_engines(
         urls=[f"localhost:{engine_port}"],
         model_name=MODEL,
+        tokenizer=tokenizer,
         engine_backend=backend,
         tensor_parallel_size=tp_size,
         sampling_params=get_sampling_params_for_backend(
             backend,
-            DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0}),
+            DictConfig(
+                {
+                    "temperature": 0.0,
+                    "top_p": 1,
+                    "top_k": -1,
+                    "max_generate_length": 1024,
+                    "min_p": 0.0,
+                    "logprobs": None,
+                }
+            ),
         ),
     )
 
@@ -155,7 +171,16 @@ def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineCli
         max_num_seqs=1024,
         sampling_params=get_sampling_params_for_backend(
             backend,
-            DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0}),
+            DictConfig(
+                {
+                    "temperature": 0.0,
+                    "top_p": 1,
+                    "top_k": -1,
+                    "max_generate_length": 1024,
+                    "min_p": 0.0,
+                    "logprobs": None,
+                }
+            ),
         ),
         tokenizer=AutoTokenizer.from_pretrained(MODEL),
         backend=backend,
@@ -231,9 +256,10 @@ def test_inference_engines_generation(backend: str, tp_size: int):
         initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         try:
-            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend)
+            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer)
 
             # Batched generation
             remote_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))

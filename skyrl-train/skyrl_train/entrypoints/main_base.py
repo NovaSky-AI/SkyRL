@@ -61,12 +61,13 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     )
 
 
-def create_remote_inference_engines_from_config(cfg: DictConfig):
+def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer):
     # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
         model_name=cfg.trainer.policy.model.path,
         engine_backend=cfg.generator.backend,
+        tokenizer=tokenizer,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
         sampling_params=get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params),
     )
@@ -247,7 +248,7 @@ class BasePPOExp:
         if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
         else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg)
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
 
         inference_engine_client = InferenceEngineClient(inference_engines)
 

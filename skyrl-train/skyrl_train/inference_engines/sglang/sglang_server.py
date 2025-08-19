@@ -18,6 +18,10 @@ class SGLangServer:
 
 
 if __name__ == "__main__":
-    server_args = prepare_server_args(sys.argv[1:])
+    args = sys.argv[1:]
+    # SGLang requires `skip-tokenizer-init` to do token-in-token-out with `/generate` endpoint
+    if "--skip-tokenizer-init" not in args:
+        args.append("--skip-tokenizer-init")
+    server_args = prepare_server_args(args)
     sglang_server = SGLangServer(server_args)
     sglang_server.run_server()
