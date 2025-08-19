@@ -53,8 +53,14 @@ skyrl-gym = { path = "./skyrl-gym" , editable = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 flash-attn = {url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl"}
-flashinfer-python = [{url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker="extra =='vllm'"}, {url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker="extra == 'sglang' and extra != 'vllm'"}]
-
+# NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
+# The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime which is slow.
+# additionally, different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
+flashinfer-python = [
+    {url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'"}, 
+    {url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'"}
+]
+ 
 [project.optional-dependencies]
 deepspeed = [
     "deepspeed==0.16.5"
