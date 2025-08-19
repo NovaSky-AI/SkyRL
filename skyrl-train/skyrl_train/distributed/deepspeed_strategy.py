@@ -4,6 +4,7 @@
 import os
 import random
 import shutil
+import tempfile
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
@@ -279,7 +280,7 @@ class DeepspeedStrategy(DistributedStrategy):
 
         if io.is_cloud_path(ckpt_dir):
             # For cloud paths, save to temp directory first, then upload
-            with io.temp_local_dir() as temp_dir:
+            with tempfile.TemporaryDirectory() as temp_dir:
                 model.save_checkpoint(temp_dir, tag=tag, client_state=extra_state_dict)
                 # Upload the entire checkpoint directory to cloud
                 io.copy_tree(temp_dir, ckpt_dir)
@@ -310,7 +311,7 @@ class DeepspeedStrategy(DistributedStrategy):
         
         if io.is_cloud_path(ckpt_dir):
             # For cloud paths, download to temp directory first
-            with io.temp_local_dir() as temp_dir:
+            with tempfile.TemporaryDirectory() as temp_dir:
                 io.copy_tree(ckpt_dir, temp_dir)
                 load_path, states = model.load_checkpoint(
                     temp_dir,
@@ -360,7 +361,7 @@ class DeepspeedStrategy(DistributedStrategy):
 
         if io.is_cloud_path(output_dir):
             # For cloud paths, use a temporary directory for the entire process
-            with io.temp_local_dir() as temp_output_dir:
+            with tempfile.TemporaryDirectory() as temp_output_dir:
                 # Create a temporary DS checkpoint folder (only on rank 0)
                 temp_ckpt_dir = os.path.join(temp_output_dir, "temp_deepspeed_ckpt")
                 if rank == 0:

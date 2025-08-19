@@ -448,7 +448,7 @@ class TestCheckpointScenarios:
         # Verify text was written to file handle  
         mock_file.write.assert_called_with(str(global_step))
     
-    @patch('skyrl_train.utils.io.temp_local_dir')
+    @patch('tempfile.TemporaryDirectory')
     @patch('skyrl_train.utils.io.copy_tree')
     def test_huggingface_model_cloud_save(self, mock_copy_tree, mock_temp_dir):
         """Test HuggingFace model saving to cloud storage."""

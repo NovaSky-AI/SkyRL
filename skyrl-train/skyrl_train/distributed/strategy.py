@@ -1,5 +1,6 @@
 import random
 import os
+import tempfile
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -95,7 +96,7 @@ class DistributedStrategy(ABC):
                 generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
                 if io.is_cloud_path(hf_config_tokenizer_path):
                     # For cloud paths, use a temporary directory for save_pretrained
-                    with io.temp_local_dir() as temp_dir:
+                    with tempfile.TemporaryDirectory() as temp_dir:
                         generation_config.save_pretrained(temp_dir)
                         io.copy_tree(temp_dir, hf_config_tokenizer_path)
                 else:
@@ -107,7 +108,7 @@ class DistributedStrategy(ABC):
 
         if io.is_cloud_path(hf_config_tokenizer_path):
             # For cloud paths, use a temporary directory for save_pretrained
-            with io.temp_local_dir() as temp_dir:
+            with tempfile.TemporaryDirectory() as temp_dir:
                 model_config.save_pretrained(temp_dir)
                 if tokenizer is not None:
                     tokenizer.save_pretrained(temp_dir)

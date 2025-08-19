@@ -14,7 +14,6 @@ import tempfile
 import shutil
 from pathlib import Path
 from typing import Any, Union, BinaryIO, TextIO
-from contextlib import contextmanager
 import torch
 import fsspec
 from loguru import logger
@@ -139,14 +138,6 @@ def read_text(path: str) -> str:
             return f.read()
 
 
-@contextmanager
-def temp_local_dir():
-    """Context manager that provides a temporary local directory."""
-    temp_dir = tempfile.mkdtemp()
-    try:
-        yield temp_dir
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def save_hf_model_to_cloud(model, temp_dir: str, cloud_path: str, tokenizer=None, **kwargs) -> None:

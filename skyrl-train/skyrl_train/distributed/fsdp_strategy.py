@@ -1,6 +1,7 @@
 import os
 import copy
 import random
+import tempfile
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
@@ -601,7 +602,7 @@ class FSDPStrategy(DistributedStrategy):
         if self.is_rank_0():
             if io.is_cloud_path(output_dir):
                 # For cloud paths, use temporary directory then upload
-                with io.temp_local_dir() as temp_dir:
+                with tempfile.TemporaryDirectory() as temp_dir:
                     # Save the model in HuggingFace format using safetensors
                     model_to_save.save_pretrained(
                         temp_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs
