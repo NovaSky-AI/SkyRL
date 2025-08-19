@@ -5,13 +5,11 @@ Unit tests for cloud storage I/O utilities.
 import os
 import tempfile
 import pytest
-from unittest.mock import patch, mock_open, MagicMock, Mock, call
-import json
+from unittest.mock import patch, Mock
 import torch
 
 # Import our io module
 import sys
-import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../.."))
 
@@ -19,7 +17,6 @@ from skyrl_train.utils.io import (
     is_cloud_path,
     makedirs,
     exists,
-    _get_filesystem,
     open_file,
     upload_directory,
     download_directory,
@@ -38,20 +35,20 @@ class TestCloudPathDetection:
 
     def test_is_cloud_path_s3(self):
         """Test S3 path detection."""
-        assert is_cloud_path("s3://bucket/path/file.pt") == True
-        assert is_cloud_path("s3://my-bucket/checkpoints/global_step_1000/model.pt") == True
+        assert is_cloud_path("s3://bucket/path/file.pt")
+        assert is_cloud_path("s3://my-bucket/checkpoints/global_step_1000/model.pt")
 
     def test_is_cloud_path_gcs(self):
         """Test GCS path detection."""
-        assert is_cloud_path("gs://bucket/path/file.pt") == True
-        assert is_cloud_path("gcs://bucket/path/file.pt") == True
+        assert is_cloud_path("gs://bucket/path/file.pt")
+        assert is_cloud_path("gcs://bucket/path/file.pt")
 
     def test_is_local_path(self):
         """Test local path detection."""
-        assert is_cloud_path("/local/path/file.pt") == False
-        assert is_cloud_path("./relative/path/file.pt") == False
-        assert is_cloud_path("relative/path/file.pt") == False
-        assert is_cloud_path("C:\\Windows\\path\\file.pt") == False
+        assert not is_cloud_path("/local/path/file.pt")
+        assert not is_cloud_path("./relative/path/file.pt")
+        assert not is_cloud_path("relative/path/file.pt")
+        assert not is_cloud_path("C:\\Windows\\path\\file.pt")
 
 
 class TestLocalFileOperations:
@@ -103,9 +100,9 @@ class TestLocalFileOperations:
             with open(existing_file, "w") as f:
                 f.write("test")
 
-            assert exists(existing_file) == True
-            assert exists(non_existing_file) == False
-            assert exists(temp_dir) == True
+            assert exists(existing_file)
+            assert not exists(non_existing_file)
+            assert exists(temp_dir)
 
 
 class TestCheckpointUtilities:
@@ -378,7 +375,7 @@ class TestContextManagers:
         non_existent_path = "/non/existent/path/12345"
 
         with pytest.raises(FileNotFoundError, match="Path does not exist"):
-            with local_read_dir(non_existent_path) as read_dir:
+            with local_read_dir(non_existent_path):
                 pass
 
 

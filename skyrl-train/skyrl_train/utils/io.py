@@ -11,7 +11,6 @@ Uses fsspec for cloud storage abstraction.
 
 import os
 import tempfile
-from typing import Any
 from contextlib import contextmanager
 import fsspec
 from loguru import logger

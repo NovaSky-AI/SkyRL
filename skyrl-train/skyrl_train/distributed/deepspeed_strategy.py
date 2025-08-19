@@ -4,7 +4,6 @@
 import os
 import random
 import shutil
-import tempfile
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
