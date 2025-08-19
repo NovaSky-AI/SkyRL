@@ -94,29 +94,17 @@ class DistributedStrategy(ABC):
                 # Some model's name_or_path is empty if not initialized from pretrained,
                 # in this cases, we don't save generation config.
                 generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
-                if io.is_cloud_path(hf_config_tokenizer_path):
-                    # For cloud paths, use a temporary directory for save_pretrained
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        generation_config.save_pretrained(temp_dir)
-                        io.copy_tree(temp_dir, hf_config_tokenizer_path)
-                else:
-                    generation_config.save_pretrained(hf_config_tokenizer_path)
+                with io.local_work_dir(hf_config_tokenizer_path) as work_dir:
+                    generation_config.save_pretrained(work_dir)
             except Exception as e:
                 # if the generation config isn't available, we don't save it
                 print(f"Warning: Could not save generation config for '{model_config.name_or_path}'. Error: {e}")
                 pass
 
-        if io.is_cloud_path(hf_config_tokenizer_path):
-            # For cloud paths, use a temporary directory for save_pretrained
-            with tempfile.TemporaryDirectory() as temp_dir:
-                model_config.save_pretrained(temp_dir)
-                if tokenizer is not None:
-                    tokenizer.save_pretrained(temp_dir)
-                io.copy_tree(temp_dir, hf_config_tokenizer_path)
-        else:
-            model_config.save_pretrained(hf_config_tokenizer_path)
+        with io.local_work_dir(hf_config_tokenizer_path) as work_dir:
+            model_config.save_pretrained(work_dir)
             if tokenizer is not None:
-                tokenizer.save_pretrained(hf_config_tokenizer_path)
+                tokenizer.save_pretrained(work_dir)
 
     @staticmethod
     def get_rng_state():

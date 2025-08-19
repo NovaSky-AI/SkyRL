@@ -278,14 +278,9 @@ class DeepspeedStrategy(DistributedStrategy):
             "rng": self.get_rng_state(),  # Add RNG state for reproducibility
         }
 
-        if io.is_cloud_path(ckpt_dir):
-            # For cloud paths, save to temp directory first, then upload
-            with tempfile.TemporaryDirectory() as temp_dir:
-                model.save_checkpoint(temp_dir, tag=tag, client_state=extra_state_dict)
-                # Upload the entire checkpoint directory to cloud
-                io.copy_tree(temp_dir, ckpt_dir)
-        else:
-            model.save_checkpoint(ckpt_dir, tag=tag, client_state=extra_state_dict)
+        # Use context manager to handle local vs cloud paths
+        with io.local_work_dir(ckpt_dir) as work_dir:
+            model.save_checkpoint(work_dir, tag=tag, client_state=extra_state_dict)
 
         # Save HuggingFace config and tokenizer
         if self.is_rank_0():
@@ -308,29 +303,18 @@ class DeepspeedStrategy(DistributedStrategy):
             model = model.model
 
         assert isinstance(model, deepspeed.DeepSpeedEngine)
-        
-        if io.is_cloud_path(ckpt_dir):
-            # For cloud paths, download to temp directory first
-            with tempfile.TemporaryDirectory() as temp_dir:
-                io.copy_tree(ckpt_dir, temp_dir)
-                load_path, states = model.load_checkpoint(
-                    temp_dir,
-                    tag,
-                    load_module_strict=load_module_strict,
-                    load_optimizer_states=load_optimizer_states,
-                    load_lr_scheduler_states=load_lr_scheduler_states,  # DeepSpeed handles this automatically
-                    load_module_only=load_module_only,
-                )
-        else:
+
+        # Use context manager to handle local vs cloud paths
+        with io.local_read_dir(ckpt_dir) as read_dir:
             load_path, states = model.load_checkpoint(
-                ckpt_dir,
+                read_dir,
                 tag,
                 load_module_strict=load_module_strict,
                 load_optimizer_states=load_optimizer_states,
                 load_lr_scheduler_states=load_lr_scheduler_states,  # DeepSpeed handles this automatically
                 load_module_only=load_module_only,
             )
-            
+
         if load_path is None:
             raise Exception(f"[deepspeed] failed to resume from checkpoint {ckpt_dir}")
 
@@ -354,65 +338,17 @@ class DeepspeedStrategy(DistributedStrategy):
 
         # Rank 0 makes directories or writes files
         rank = dist.get_rank() if dist.is_initialized() else 0
-        if rank == 0:
-            io.makedirs(output_dir, exist_ok=True)
-        if dist.is_initialized():
-            dist.barrier()
 
-        if io.is_cloud_path(output_dir):
-            # For cloud paths, use a temporary directory for the entire process
-            with tempfile.TemporaryDirectory() as temp_output_dir:
-                # Create a temporary DS checkpoint folder (only on rank 0)
-                temp_ckpt_dir = os.path.join(temp_output_dir, "temp_deepspeed_ckpt")
-                if rank == 0:
-                    os.makedirs(temp_ckpt_dir, exist_ok=True)
-                if dist.is_initialized():
-                    dist.barrier()
-
-                # Use DeepSpeed to write a ZeRO checkpoint
-                model.save_checkpoint(temp_ckpt_dir, tag="model_conversion")
-                if dist.is_initialized():
-                    dist.barrier()
-
-                if rank == 0:
-                    # Gather all shards from that DS checkpoint into one CPU FP32 state_dict
-                    fp32_state_dict = get_fp32_state_dict_from_zero_checkpoint(temp_ckpt_dir, tag="model_conversion")
-
-                    # Handle tied embeddings if needed (e.g. Qwen2‐0.5B)
-                    unwrapped_model = self._unwrap_model(model)
-                    if getattr(unwrapped_model.config, "tie_word_embeddings", False) and "lm_head.weight" in fp32_state_dict:
-                        fp32_state_dict.pop("lm_head.weight", None)
-
-                    # Write the single-file safetensors
-                    safetensors_path = os.path.join(temp_output_dir, "model.safetensors")
-                    save_file(fp32_state_dict, safetensors_path)
-
-                    # Save the config.json so we can re-create the same architecture later
-                    unwrapped_model.config.save_pretrained(temp_output_dir)
-
-                    # If a tokenizer was passed, save it here too
-                    if tokenizer is not None:
-                        tokenizer.save_pretrained(temp_output_dir)
-
-                    # Clean up the temporary checkpoint folder
-                    shutil.rmtree(temp_ckpt_dir, ignore_errors=True)
-
-                    # Copy to cloud storage
-                    io.copy_tree(temp_output_dir, output_dir)
-
-                if dist.is_initialized():
-                    dist.barrier()
-        else:
-            # For local paths, use the original logic
+        # Use our context manager to handle local vs cloud paths
+        with io.local_work_dir(output_dir) as work_dir:
             # Create a temporary DS checkpoint folder (only on rank 0)
-            temp_ckpt_dir = os.path.join(output_dir, "temp_deepspeed_ckpt")
+            temp_ckpt_dir = os.path.join(work_dir, "temp_deepspeed_ckpt")
             if rank == 0:
                 os.makedirs(temp_ckpt_dir, exist_ok=True)
             if dist.is_initialized():
                 dist.barrier()
 
-            # Use DeepSpeed to write a ZeRO checkpoint. The parameter shards will land
-            # under temp_ckpt_dir/model_conversion/mp_rank_XX/…
+            # Use DeepSpeed to write a ZeRO checkpoint
             model.save_checkpoint(temp_ckpt_dir, tag="model_conversion")
             if dist.is_initialized():
                 dist.barrier()
@@ -423,25 +359,29 @@ class DeepspeedStrategy(DistributedStrategy):
 
                 # Handle tied embeddings if needed (e.g. Qwen2‐0.5B)
                 unwrapped_model = self._unwrap_model(model)
-                if getattr(unwrapped_model.config, "tie_word_embeddings", False) and "lm_head.weight" in fp32_state_dict:
+                if (
+                    getattr(unwrapped_model.config, "tie_word_embeddings", False)
+                    and "lm_head.weight" in fp32_state_dict
+                ):
                     fp32_state_dict.pop("lm_head.weight", None)
 
                 # Write the single-file safetensors
-                safetensors_path = os.path.join(output_dir, "model.safetensors")
+                safetensors_path = os.path.join(work_dir, "model.safetensors")
                 save_file(fp32_state_dict, safetensors_path)
 
                 # Save the config.json so we can re-create the same architecture later
-                unwrapped_model.config.save_pretrained(output_dir)
+                unwrapped_model.config.save_pretrained(work_dir)
 
                 # If a tokenizer was passed, save it here too
                 if tokenizer is not None:
-                    tokenizer.save_pretrained(output_dir)
+                    tokenizer.save_pretrained(work_dir)
 
                 # Clean up the temporary checkpoint folder
                 shutil.rmtree(temp_ckpt_dir, ignore_errors=True)
 
             if dist.is_initialized():
                 dist.barrier()
+            # Context manager automatically handles upload to cloud if needed
 
     def get_ds_train_config(self):
         ds_config = OmegaConf.to_container(self.deepspeed_config)

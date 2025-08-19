@@ -367,6 +367,30 @@ class FSDPStrategy(DistributedStrategy):
         # If no unwrapping needed, return the original model
         return model
 
+    def _fix_fsdp_config(self, config):
+        """Fix architecture names by removing FSDP prefix if present"""
+        # Determine which config to save
+        config_to_save = config
+
+        # Fix architecture name by removing FSDP prefix if present
+        if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+            # Create a copy of the config to avoid modifying the original
+            config_to_save = copy.deepcopy(config_to_save)
+
+            # Fix architecture names to remove FSDP prefix
+            fixed_architectures = []
+            for arch in config_to_save.architectures:
+                fixed_arch = arch
+                if arch.startswith("FSDP"):
+                    # Remove "FSDP" prefix (for fsdp2)
+                    fixed_arch = arch[len("FSDP") :]
+                    self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                fixed_architectures.append(fixed_arch)
+
+            config_to_save.architectures = fixed_architectures
+
+        return config_to_save
+
     def save_ckpt(
         self,
         model,
@@ -600,76 +624,17 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
-            if io.is_cloud_path(output_dir):
-                # For cloud paths, use temporary directory then upload
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    # Save the model in HuggingFace format using safetensors
-                    model_to_save.save_pretrained(
-                        temp_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs
-                    )
-
-                    # Determine which config to save
-                    config_to_save = model_to_save.config
-
-                    # Fix architecture name by removing FSDP prefix if present
-                    if hasattr(config_to_save, "architectures") and config_to_save.architectures:
-                        # Create a copy of the config to avoid modifying the original
-                        config_to_save = copy.deepcopy(config_to_save)
-
-                        # Fix architecture names to remove FSDP prefix
-                        fixed_architectures = []
-                        for arch in config_to_save.architectures:
-                            fixed_arch = arch
-                            if arch.startswith("FSDP"):
-                                # Remove "FSDP" prefix (for fsdp2)
-                                fixed_arch = arch[len("FSDP") :]
-                                self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
-                            fixed_architectures.append(fixed_arch)
-
-                        config_to_save.architectures = fixed_architectures
-
-                    # Save the config
-                    config_to_save.save_pretrained(temp_dir)
-
-                    # Save tokenizer if provided
-                    if tokenizer is not None:
-                        tokenizer.save_pretrained(temp_dir)
-
-                    # Copy to cloud storage
-                    io.copy_tree(temp_dir, output_dir)
-            else:
-                # Save directly for local paths
+            with io.local_work_dir(output_dir) as work_dir:
                 # Save the model in HuggingFace format using safetensors
-                model_to_save.save_pretrained(
-                    output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs
-                )
+                model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
 
-                # Determine which config to save
-                config_to_save = model_to_save.config
-
-                # Fix architecture name by removing FSDP prefix if present
-                if hasattr(config_to_save, "architectures") and config_to_save.architectures:
-                    # Create a copy of the config to avoid modifying the original
-                    config_to_save = copy.deepcopy(config_to_save)
-
-                    # Fix architecture names to remove FSDP prefix
-                    fixed_architectures = []
-                    for arch in config_to_save.architectures:
-                        fixed_arch = arch
-                        if arch.startswith("FSDP"):
-                            # Remove "FSDP" prefix (for fsdp2)
-                            fixed_arch = arch[len("FSDP") :]
-                            self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
-                        fixed_architectures.append(fixed_arch)
-
-                    config_to_save.architectures = fixed_architectures
-
-                # Save the config
-                config_to_save.save_pretrained(output_dir)
+                # Fix and save the config
+                config_to_save = self._fix_fsdp_config(model_to_save.config)
+                config_to_save.save_pretrained(work_dir)
 
                 # Save tokenizer if provided
                 if tokenizer is not None:
-                    tokenizer.save_pretrained(output_dir)
+                    tokenizer.save_pretrained(work_dir)
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 
