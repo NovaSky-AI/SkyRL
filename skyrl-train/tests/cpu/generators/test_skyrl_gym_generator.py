@@ -846,7 +846,6 @@ async def test_env_metrics_collection_and_aggregation(
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     def mock_step_with_metrics(action):
-        print(f"DEBUG: action received = '{action}', length = {len(action)}")  # Debug line
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": "next"}],
             reward=1.0,
@@ -896,7 +895,7 @@ async def test_env_metrics_collection_and_aggregation(
     assert isinstance(metrics_dict, dict), "Each env_metrics entry should be a dict"
     
     expected_metrics = {
-        "response_length": 12,  # Length of "mocked output"
+        "response_length": 13,  # Length of "mocked output"
         "word_count": 2,        # "mocked" and "output"
         "answer_accuracy": 1.0,
         "custom_metric": 42.5
