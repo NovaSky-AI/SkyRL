@@ -6,12 +6,12 @@ from omegaconf import DictConfig
 @pytest.mark.parametrize(
     "output, ground_truth, expected",
     [
-        ("The answer is \\boxed{42}", "42", 1.0),
-        ("The answer is 42", "42", 1.0),
-        ("The answer is \\boxed{43}", "42", -1.0),
-        ("The answer is \\boxed{\\frac{1}{2}}", "\\frac{1}{2}", 1.0),
-        ("The answer is \\boxed{0.5}", "\\frac{1}{2}", -1.0),
-        ("The answer is \\boxed{\\text{forty-two}}", "42", -1.0),
+        ("Answer: \\boxed{42}", "42", 1.0),
+        ("Answer: 42", "42", 1.0),
+        ("Answer: \\boxed{43}", "42", -1.0),
+        ("Answer: \\boxed{\\frac{1}{2}}", "\\frac{1}{2}", 1.0),
+        ("Answer: \\boxed{0.5}", "\\frac{1}{2}", -1.0),
+        ("Answer: \\boxed{\\text{forty-two}}", "42", -1.0),
     ],
 )
 def test_compute_score(output, ground_truth, expected):
