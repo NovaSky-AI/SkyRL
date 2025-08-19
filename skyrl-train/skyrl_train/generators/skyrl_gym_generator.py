@@ -124,6 +124,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             new_obs = env_step_output["observations"]
             reward = env_step_output["reward"]
             done = env_step_output["done"]
+            env_metrics = env_step_output.get("metrics", {})
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 output = env_step_output["postprocessed_action"]
@@ -176,7 +177,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 
-        return response_ids, reward, stop_reason, loss_mask, prompt_ids, rollout_logprobs
+        return response_ids, reward, stop_reason, loss_mask, prompt_ids, rollout_logprobs, env_metrics
 
     async def generate_batched(
         self,
@@ -220,6 +221,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         truncated_responses = []
         rewards = []
         loss_masks = []
+        env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
         for i, (response, env) in enumerate(zip(responses, envs)):
@@ -227,6 +229,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_step_output: BaseTextEnvStepOutput = env.step(response)
             reward = env_step_output["reward"]
             rewards.append(reward)
+            env_metrics.append(env_step_output.get("metrics", {}))
 
             # NOTE (sumanthrh): We add a guard since response_ids is `None` with remote inference engine
             if all_response_ids is not None:
@@ -259,6 +262,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
+            "env_metrics": env_metrics,
         }
 
         return generator_output
@@ -283,10 +287,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.batched:
             return await self.generate_batched(
                 prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
-            )
+            )  # Calls for single-turn parallel generation
 
         # Async agent loop to generate trajectories in parallel.
-        tasks = []
+        tasks = []  # Use agent_loop() for multi-turn sequential generation
         for i in range(len(prompts)):
             tasks.append(
                 self.agent_loop(
@@ -311,6 +315,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         stop_reasons = [output[2] for output in all_outputs]
         loss_masks = [output[3] for output in all_outputs]
         prompt_token_ids = [output[4] for output in all_outputs]
+        env_metrics = [output[6] for output in all_outputs]
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -341,11 +346,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
+            "env_metrics": env_metrics,
         }
 
         return generator_output
 
-    def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]):
+    def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]) -> Dict[str, float]:
         num_tokens_arr = np.array([len(response) for response in responses])
         non_zero_rewards_arr = np.array([reward > 0.0 for reward in rewards])
         zero_rewards_arr = np.array([reward == 0.0 for reward in rewards])
