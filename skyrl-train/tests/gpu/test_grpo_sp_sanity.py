@@ -12,7 +12,8 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.trainer import RayPPOTrainer
 import ray
 from tqdm import tqdm
-from skyrl_train.utils import Timer, normalize_advantages_dict
+from skyrl_train.utils import Timer
+from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 
 
 import asyncio

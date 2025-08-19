@@ -6,11 +6,6 @@ import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
-from skyrl_train.utils.ppo_utils import (
-    AdvantageEstimatorRegistry,
-    PolicyLossRegistry,
-    sync_registries,
-)
 
 
 class Timer:
@@ -120,6 +115,8 @@ def validate_batch_sizes(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
+    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
+
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -397,6 +394,10 @@ def initialize_ray(cfg: DictConfig):
     Args:
         cfg: Training config
     """
+    from .ppo_utils import (
+        sync_registries,
+    )
+
     env_vars = prepare_runtime_environment(cfg)
     ray.init(runtime_env={"env_vars": env_vars})
 

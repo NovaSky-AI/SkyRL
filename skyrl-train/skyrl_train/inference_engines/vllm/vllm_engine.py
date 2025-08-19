@@ -15,7 +15,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightUpdateRequest,
+    NamedWeightsUpdateRequest,
 )
 from skyrl_train.utils import str_to_torch_dtype
 
@@ -95,37 +95,49 @@ class WorkerWrap:
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
 
-    def update_weight(self, name: str, dtype: str, shape: List[int]):
+    def update_weights(self, names: List[str], dtypes: List[str], shapes: List[List[int]]):
         """Broadcast weight to all vllm workers from source rank 0 (actor model)"""
-        dtype = str_to_torch_dtype(dtype)
-        assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-        weight = torch.empty(shape, dtype=dtype, device="cuda")
-        torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+        weight_list = []
+        for name, dtype, shape in zip(names, dtypes, shapes):
+            dtype = str_to_torch_dtype(dtype)
+            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+            weight = torch.empty(shape, dtype=dtype, device="cuda")
+            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+            weight_list.append((name, weight))
 
-        self.model_runner.model.load_weights(weights=[(name, weight)])
+        self.model_runner.model.load_weights(weights=weight_list)
+        for weight in weight_list:
+            del weight
 
-        del weight
+    def update_weights_cuda_ipc(
+        self, names: List[str], dtypes: List[str], shapes: List[int], ipc_handles: List[Dict[str, Any]]
+    ):
 
-    def update_weight_cuda_ipc(self, name: str, dtype: str, shape: List[int], ipc_handles: Dict[str, Any]):
+        weight_list = []
+        for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
 
-        dtype = str_to_torch_dtype(dtype)
-        device = torch.cuda.current_device()
-        props = torch.cuda.get_device_properties(device)
-        physical_gpu_id = str(props.uuid)
+            dtype = str_to_torch_dtype(dtype)
+            device = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(device)
+            physical_gpu_id = str(props.uuid)
 
-        assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
 
-        handle = ipc_handles[physical_gpu_id]
+            handle = ipc_handle[physical_gpu_id]
 
-        device_id = self.device.index
-        func, args = handle
-        list_args = list(args)
-        # the key is to change device id to the current device id
-        # in case two processes have different CUDA_VISIBLE_DEVICES
-        list_args[6] = device_id
-        weight = func(*list_args)
-        self.model_runner.model.load_weights(weights=[(name, weight)])
-        torch.cuda.synchronize()
+            device_id = self.device.index
+            func, args = handle
+            list_args = list(args)
+            # the key is to change device id to the current device id
+            # in case two processes have different CUDA_VISIBLE_DEVICES
+            list_args[6] = device_id
+            weight = func(*list_args)
+            weight_list.append((name, weight))
+
+        self.model_runner.model.load_weights(weights=weight_list)
+
+        for weight in weight_list:
+            del weight
 
     # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
     def destroy_weights_update_group(self):
@@ -267,23 +279,32 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
 
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+        if "names" not in request:
+            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
+
+        if not len(request["names"]):
+            raise ValueError("Update weight request should have atleast one entry in 'names'")
+
         engine = self._get_engine()
         # Use IPC if handles are provided
-        if request.get("extras") and "ipc_handles" in request["extras"]:
+        if request.get("extras") and "ipc_handles" in request["extras"][0]:
             return await asyncio.to_thread(
                 engine.collective_rpc,
-                "update_weight_cuda_ipc",
+                "update_weights_cuda_ipc",
                 args=(
-                    request["name"],
-                    request["dtype"],
-                    request["shape"],
-                    request["extras"]["ipc_handles"],
+                    request["names"],
+                    request["dtypes"],
+                    request["shapes"],
+                    [extra["ipc_handles"] for extra in request["extras"]],
                 ),
             )
         else:
+            assert (
+                len(request["names"]) == 1
+            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
             return await asyncio.to_thread(
-                engine.collective_rpc, "update_weight", args=(request["name"], request["dtype"], request["shape"])
+                engine.collective_rpc, "update_weights", args=(request["names"], request["dtypes"], request["shapes"])
             )
 
     async def teardown(self):
@@ -350,22 +371,39 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
 
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+        if "names" not in request:
+            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
+
+        if not len(request["names"]):
+            raise ValueError("Update weight request should have atleast one entry in 'names'")
+
         engine = self._get_engine()
         # Use IPC if handles are provided
-        if request.get("extras") and "ipc_handles" in request["extras"]:
+
+        is_ipc = request.get("extras") and "ipc_handles" in request["extras"][0]
+
+        if is_ipc:
             return await engine.collective_rpc(
-                "update_weight_cuda_ipc",
+                "update_weights_cuda_ipc",
                 args=(
-                    request["name"],
-                    request["dtype"],
-                    request["shape"],
-                    request["extras"]["ipc_handles"],
+                    request["names"],
+                    request["dtypes"],
+                    request["shapes"],
+                    [extra["ipc_handles"] for extra in request["extras"]],
                 ),
             )
         else:
+            assert (
+                len(request["names"]) == 1
+            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
             return await engine.collective_rpc(
-                "update_weight", args=(request["name"], request["dtype"], request["shape"])
+                "update_weights",
+                args=(
+                    request["names"],
+                    request["dtypes"],
+                    request["shapes"],
+                ),
             )
 
     async def teardown(self):

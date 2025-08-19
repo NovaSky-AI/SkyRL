@@ -20,11 +20,11 @@ class InferenceEngineOutput(TypedDict):
     response_logprobs: Optional[List[List[float]]]
 
 
-class NamedWeightUpdateRequest(TypedDict):
-    name: str
-    dtype: str
-    shape: List[int]
-    extras: Optional[Dict[str, Any]]
+class NamedWeightsUpdateRequest(TypedDict):
+    names: List[str]
+    dtypes: List[str]
+    shapes: List[List[int]]
+    extras: Optional[List[Dict[str, Any]]]
 
 
 class InferenceEngineInterface(ABC):
@@ -48,7 +48,7 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         raise NotImplementedError()
 
     @abstractmethod
