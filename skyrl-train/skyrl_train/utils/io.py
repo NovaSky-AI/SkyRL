@@ -35,8 +35,6 @@ def open_file(path: str, mode: str = "rb"):
     return fsspec.open(path, mode)
 
 
-
-
 def makedirs(path: str, exist_ok: bool = True) -> None:
     """Create directories. Only applies to local filesystem paths."""
     if not is_cloud_path(path):
@@ -74,7 +72,7 @@ def upload_directory(local_path: str, cloud_path: str) -> None:
     """Upload a local directory to cloud storage."""
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Destination must be a cloud path, got: {cloud_path}")
-    
+
     fs = _get_filesystem(cloud_path)
     fs.put(local_path, cloud_path, recursive=True)
     logger.info(f"Uploaded {local_path} to {cloud_path}")
@@ -84,13 +82,10 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     """Download a cloud directory to local storage."""
     if not is_cloud_path(cloud_path):
         raise ValueError(f"Source must be a cloud path, got: {cloud_path}")
-    
+
     fs = _get_filesystem(cloud_path)
     fs.get(cloud_path, local_path, recursive=True)
     logger.info(f"Downloaded {cloud_path} to {local_path}")
-
-
-
 
 
 @contextmanager

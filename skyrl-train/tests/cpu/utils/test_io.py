@@ -85,11 +85,11 @@ class TestLocalFileOperations:
             test_content = "test checkpoint step: 1000"
 
             # Write and read text using open_file
-            with open_file(test_file, 'w') as f:
+            with open_file(test_file, "w") as f:
                 f.write(test_content)
             assert os.path.exists(test_file)
 
-            with open_file(test_file, 'r') as f:
+            with open_file(test_file, "r") as f:
                 read_content = f.read()
             assert read_content == test_content
 
@@ -147,12 +147,12 @@ class TestCheckpointUtilities:
             assert get_latest_checkpoint_step(temp_dir) == 0
 
             # Test with valid step
-            with open_file(latest_file, 'w') as f:
+            with open_file(latest_file, "w") as f:
                 f.write("1500")
             assert get_latest_checkpoint_step(temp_dir) == 1500
 
             # Test with whitespace
-            with open_file(latest_file, 'w') as f:
+            with open_file(latest_file, "w") as f:
                 f.write("  2000  \n")
             assert get_latest_checkpoint_step(temp_dir) == 2000
 
@@ -198,7 +198,6 @@ class TestCheckpointUtilities:
 
 class TestCloudFileOperationsMocked:
     """Test cloud file operations with mocked fsspec."""
-
 
     @patch("skyrl_train.utils.io._get_filesystem")
     def test_list_checkpoint_dirs_cloud(self, mock_get_filesystem):
@@ -268,12 +267,12 @@ class TestCheckpointScenarios:
             # Simulate saving trainer state (mock torch.save for simplicity)
             trainer_state = {"global_step": global_step, "config": {"lr": 0.001}}
             with patch("torch.save") as mock_save:
-                with open_file(trainer_state_path, 'wb') as f:
+                with open_file(trainer_state_path, "wb") as f:
                     torch.save(trainer_state, f)
                 mock_save.assert_called_once()
 
             # Save latest checkpoint info
-            with open_file(latest_checkpoint_file, 'w') as f:
+            with open_file(latest_checkpoint_file, "w") as f:
                 f.write(str(global_step))
 
             # Verify checkpoint was saved
@@ -283,10 +282,6 @@ class TestCheckpointScenarios:
 
             # Verify latest step can be retrieved
             assert get_latest_checkpoint_step(temp_dir) == global_step
-
-
-
-
 
 
 class TestContextManagers:
@@ -389,7 +384,6 @@ class TestContextManagers:
 
 class TestUploadDownload:
     """Test upload and download directory functions."""
-
 
     def test_upload_directory_validates_cloud_path(self):
         """Test that upload_directory validates destination is a cloud path."""

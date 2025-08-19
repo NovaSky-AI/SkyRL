@@ -105,7 +105,7 @@ def get_latest_checkpoint_step(checkpoint_base_path: str) -> int:
         return 0
 
     try:
-        with io.open_file(latest_file_path, 'r') as f:
+        with io.open_file(latest_file_path, "r") as f:
             content = f.read().strip()
         return int(content)
     except (ValueError, IOError) as e:
