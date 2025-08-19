@@ -64,8 +64,8 @@ Installation and Setup
 
    .. code-block:: bash
 
-      export OPENAI_API_KEY=your_openai_api_key
-      export WANDB_API_KEY=your_wandb_api_key # optional
+      OPENAI_API_KEY=your_openai_api_key
+      WANDB_API_KEY=your_wandb_api_key # optional
 
 2. **Verify Dataset**: Make sure your dataset is properly prepared:
 
