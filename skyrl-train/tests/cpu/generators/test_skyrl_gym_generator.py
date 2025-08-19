@@ -868,6 +868,7 @@ async def test_apply_overlong_filtering_batched(
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
 
+
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_env_metrics_collection_and_aggregation(
@@ -946,10 +947,10 @@ async def test_env_metrics_collection_and_aggregation(
     
     for key, expected_value in expected_metrics.items():
         assert key in metrics_dict, f"Metric '{key}' should be present"
-        assert metrics_dict[key] == expected_value, f"Metric '{key}' should have value {expected_value}"
+        assert metrics_dict[key] == expected_value, f"Metric '{key}' should have value {expected_value}, got {metrics_dict[key]}"
 
 
-@pytest.mark.asyncio  
+@pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_env_metrics_batched_mode(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
@@ -1092,7 +1093,7 @@ def test_env_metrics_in_generator_output_schema():
         "stop_reasons",
         "rollout_metrics",
         "rollout_logprobs",
-        "env_metrics",  # This should be present
+        "env_metrics", 
     ]
     
     actual_fields = list(GeneratorOutput.__annotations__.keys())
@@ -1138,7 +1139,8 @@ def test_env_metrics_in_generator_output_schema():
         {"metric1": 10.0, "metric2": "test2"}
     ]
     
-    assert "env_metrics" in concatenated_output, "env_metrics should be in concatenated output"
+    assert "env_metrics" in concatenated_output, f"env_metrics should be in concatenated output, instead is {concatenated_output}"
+    
     assert concatenated_output["env_metrics"] == expected_env_metrics, (
         f"env_metrics concatenation failed. Expected {expected_env_metrics}, "
         f"got {concatenated_output['env_metrics']}"
