@@ -1224,14 +1224,14 @@ class RayPPOTrainer:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
         run_on_each_node(
             self._node_ids,
-            io.cleanup_old_checkpoints,
+            cleanup_old_checkpoints,
             self.cfg.trainer.ckpt_path,
             self.cfg.trainer.max_ckpts_to_keep,
             self.global_step,
         )
         # run on driver as well
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
-        io.cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep, self.global_step)
+        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep, self.global_step)
 
     def load_checkpoints(self) -> int:
         """

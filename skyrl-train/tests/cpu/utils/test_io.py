@@ -20,14 +20,16 @@ from skyrl_train.utils.io import (
     exists,
     write_text,
     read_text,
-    list_checkpoint_dirs,
-    cleanup_old_checkpoints,
-    get_latest_checkpoint_step,
     save_file,
     load_file,
     _get_filesystem,
     local_work_dir,
     local_read_dir,
+)
+from skyrl_train.utils.trainer_utils import (
+    get_latest_checkpoint_step,
+    list_checkpoint_dirs,
+    cleanup_old_checkpoints,
 )
 
 
