@@ -505,7 +505,7 @@ async def test_length_limit_exceeded_during_conversation(
     prompt = [{"role": "user", "content": "Start conversation"}]
     extras = {"test": "value"}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length
     )
 
@@ -677,7 +677,7 @@ async def test_postprocessed_action_used(
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, _, _ = await generator.agent_loop(
         prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
     )
 
