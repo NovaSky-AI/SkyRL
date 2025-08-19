@@ -196,7 +196,6 @@ class RayPPOTrainer:
                     except (ValueError, TypeError):
                         logger.warning(f"Skipping non-numeric environment metric '{key}' with value '{value}'"
                                        f" - only numeric metrics are aggregated for logging")
-                        pass
             
             for key in metric_sums:
                 if metric_counts[key] > 0:
