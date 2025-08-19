@@ -7,7 +7,6 @@ from skyrl_train.inference_engines.base import (
 )
 from typing import List, Optional, Dict, Any
 import json
-import asyncio
 from transformers import PreTrainedTokenizerBase
 
 
@@ -52,19 +51,24 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             )["input_ids"]
 
         sampling_params = request_sampling_params if request_sampling_params is not None else self.sampling_params
+        if "n" in sampling_params and sampling_params["n"] > 1:
+            raise ValueError(
+                "n is not supported yet for remote inference engines. "
+                "You can set `config.generator.n_samples_per_prompt` instead."
+            )
 
-        # 2. Send requests to servers
-        output_tasks = []
+        # 2. Send a batched request to the server
+        response = None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             headers = {"Content-Type": "application/json"}
-
+            payload = {}
+            request_url = ""
             if self.engine_backend == "vllm":
-                # vLLM does not support /generate, use /completions instead
+                # vLLM does not support /generate, use /completions instead. It supports batch generation.
                 payload = sampling_params.copy()
                 payload["model"] = self.model_name
-                for p_ids in prompt_token_ids:
-                    payload["prompt"] = p_ids
-                    output_tasks.append(session.post(f"{self.url}/v1/completions", json=payload, headers=headers))
+                payload["prompt"] = prompt_token_ids
+                request_url = f"{self.url}/v1/completions"
             elif self.engine_backend == "sglang":
                 # SGLang supports /generate, works exactly like its Python `async_generate()` method
                 # and can do batch generation.
@@ -72,43 +76,39 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                     "input_ids": prompt_token_ids,
                     "sampling_params": sampling_params,
                 }
-                output_tasks.append(session.post(f"{self.url}/generate", json=payload, headers=headers))
+                request_url = f"{self.url}/generate"
             else:
                 raise ValueError(f"Invalid engine backend: {self.engine_backend}")
+            async with session.post(request_url, json=payload, headers=headers) as resp:
+                response = await resp.json()
 
-            request_outputs = await asyncio.gather(*output_tasks)
+        # 3. Parse outputs
+        outputs = []
+        output_ids = []
+        finish_reasons = []
 
-            # 3. Parse outputs
-            outputs = []
-            output_ids = []
-            finish_reasons = []
-
-            if self.engine_backend == "vllm":
-                # TODO (sumanthrh): This is creating a flattened list of outputs. If sampling n > 1, we should fix this.
-                for request_output in request_outputs:
-                    response = await request_output.json()
-                    for choice in response.get("choices", []):
-                        text = choice["text"]
-                        outputs.append(text)
-                        finish_reasons.append(choice["finish_reason"])
-                        # TODO(Charlie): this is not token-in-token-out because vLLM does not support
-                        # returning token IDs via HTTP requests. Fix after this vLLM PR is merged:
-                        # https://github.com/vllm-project/vllm/pull/22587
-                        output_ids.append(self.tokenizer.encode(text, add_special_tokens=False))
-            elif self.engine_backend == "sglang":
-                assert len(request_outputs) == 1, "Expect a single asyncio task for SGLang"
-                request_output = request_outputs[0]
-                response = await request_output.json()
-                # since prompt_token_ids is a list of lists, response is a list of dicts
-                for output in response:
-                    cur_output_ids = output["output_ids"]
-                    output_ids.append(cur_output_ids)
-                    # SGLang only returns tokens not text when skip_tokenizer_init is True, so
-                    # we manually decode it.
-                    outputs.append(self.tokenizer.decode(cur_output_ids))
-                    finish_reasons.append(output["meta_info"]["finish_reason"]["type"])
-            else:
-                raise ValueError(f"Invalid engine backend: {self.engine_backend}")
+        if self.engine_backend == "vllm":
+            for i, choice in enumerate(response.get("choices", [])):
+                # Since n=1, so choice of index i represents the output of `pompt[i]`
+                assert choice["index"] == i, "Expect the choices to be ordered by index."
+                text = choice["text"]
+                outputs.append(text)
+                finish_reasons.append(choice["finish_reason"])
+                # TODO(Charlie): this is not token-in-token-out because vLLM does not support
+                # returning token IDs via HTTP requests. Fix after this vLLM PR is merged:
+                # https://github.com/vllm-project/vllm/pull/22587
+                output_ids.append(self.tokenizer.encode(text, add_special_tokens=False))
+        elif self.engine_backend == "sglang":
+            # since prompt_token_ids is a list of lists, response is a list of dicts
+            for output in response:
+                cur_output_ids = output["output_ids"]
+                output_ids.append(cur_output_ids)
+                # SGLang only returns tokens not text when skip_tokenizer_init is True, so
+                # we manually decode it.
+                outputs.append(self.tokenizer.decode(cur_output_ids))
+                finish_reasons.append(output["meta_info"]["finish_reason"]["type"])
+        else:
+            raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
         return InferenceEngineOutput(
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=None

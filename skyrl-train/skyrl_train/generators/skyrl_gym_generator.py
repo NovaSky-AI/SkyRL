@@ -460,6 +460,12 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         loss_mask is not maintained because we get it at the end of the trajectory with
         `response_encodings["assistant_masks"]`.
+
+        Returns:
+            chat_history: The updated chat history.
+            chat_end_index: The updated chat end index.
+            input_ids: The new input IDs after tokenizing the chat history, mainly used to check if
+              the input length is too long for next turn.
         """
         assert self.use_conversation_multi_turn and self.custom_chat_template
         # remove eos token from end of output if it exists, since it will be reapplied by the chat template
@@ -594,7 +600,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             loss_mask: List[int]
             input_ids: List[int]
-            logprobs: Optional[List[int]]
+            logprobs: Optional[List[float]]
         """
         # just update raw tokens and loss mask
         new_resp_tokens = output_ids.copy()
