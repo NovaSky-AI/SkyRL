@@ -448,29 +448,6 @@ class TestCheckpointScenarios:
         # Verify text was written to file handle
         mock_file.write.assert_called_with(str(global_step))
 
-    @patch("tempfile.TemporaryDirectory")
-    @patch("skyrl_train.utils.io.copy_tree")
-    def test_huggingface_model_cloud_save(self, mock_copy_tree, mock_temp_dir):
-        """Test HuggingFace model saving to cloud storage."""
-        from skyrl_train.utils.io import save_hf_model_to_cloud
-
-        # Mock temp directory
-        mock_temp_dir.return_value.__enter__.return_value = "/tmp/temp_model_dir"
-
-        # Mock model with save_pretrained
-        mock_model = Mock()
-        mock_tokenizer = Mock()
-
-        cloud_path = "s3://bucket/model"
-
-        save_hf_model_to_cloud(mock_model, "/tmp/temp_model_dir", cloud_path, tokenizer=mock_tokenizer)
-
-        # Verify model and tokenizer were saved locally first
-        mock_model.save_pretrained.assert_called_once_with("/tmp/temp_model_dir")
-        mock_tokenizer.save_pretrained.assert_called_once_with("/tmp/temp_model_dir")
-
-        # Verify directory was copied to cloud
-        mock_copy_tree.assert_called_once_with("/tmp/temp_model_dir", cloud_path)
 
 
 class TestIntegrationWithMocking:

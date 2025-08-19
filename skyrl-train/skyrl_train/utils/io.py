@@ -12,8 +12,9 @@ Uses fsspec for cloud storage abstraction.
 import os
 import tempfile
 import shutil
+import json
 from pathlib import Path
-from typing import Any, Union, BinaryIO, TextIO
+from typing import Any, Union, BinaryIO, TextIO, cast
 from contextlib import contextmanager
 import torch
 import fsspec
@@ -43,7 +44,7 @@ def save_file(obj: Any, path: str) -> None:
     """Save a PyTorch object to local or cloud path using torch.save."""
     if is_cloud_path(path):
         with open_file(path, "wb") as f:
-            torch.save(obj, f)
+            torch.save(obj, cast(BinaryIO, f))
     else:
         torch.save(obj, path)
 
@@ -52,7 +53,7 @@ def load_file(path: str, map_location: str = "cpu", weights_only: bool = False) 
     """Load a PyTorch object from local or cloud path using torch.load."""
     if is_cloud_path(path):
         with open_file(path, "rb") as f:
-            return torch.load(f, map_location=map_location, weights_only=weights_only)
+            return torch.load(cast(BinaryIO, f), map_location=map_location, weights_only=weights_only)
     else:
         return torch.load(path, map_location=map_location, weights_only=weights_only)
 
@@ -123,7 +124,7 @@ def write_text(path: str, content: str) -> None:
     """Write text content to a file."""
     if is_cloud_path(path):
         with open_file(path, "w") as f:
-            f.write(content)
+            cast(TextIO, f).write(content)
     else:
         with open(path, "w") as f:
             f.write(content)
@@ -133,59 +134,20 @@ def read_text(path: str) -> str:
     """Read text content from a file."""
     if is_cloud_path(path):
         with open_file(path, "r") as f:
-            return f.read()
+            return cast(TextIO, f).read()
     else:
         with open(path, "r") as f:
             return f.read()
 
 
-def save_hf_model_to_cloud(model, temp_dir: str, cloud_path: str, tokenizer=None, **kwargs) -> None:
-    """
-    Save a HuggingFace model to cloud storage.
-
-    Args:
-        model: HuggingFace model with save_pretrained method
-        temp_dir: Local temporary directory for intermediate storage
-        cloud_path: Cloud destination path
-        tokenizer: Optional tokenizer to save
-        **kwargs: Additional arguments for save_pretrained
-    """
-    # Save to temporary directory first
-    model.save_pretrained(temp_dir, **kwargs)
-
-    # Save tokenizer if provided
-    if tokenizer is not None:
-        tokenizer.save_pretrained(temp_dir)
-
-    # Copy entire directory to cloud
-    copy_tree(temp_dir, cloud_path)
-    logger.info(f"Successfully saved HuggingFace model to {cloud_path}")
-
-
-def load_hf_model_from_cloud(cloud_path: str, temp_dir: str) -> str:
-    """
-    Load a HuggingFace model from cloud storage to a local temporary directory.
-
-    Args:
-        cloud_path: Cloud source path
-        temp_dir: Local temporary directory
-
-    Returns:
-        str: Path to the local temporary directory containing the model
-    """
-    # Copy from cloud to temporary directory
-    copy_tree(cloud_path, temp_dir)
-    logger.info(f"Successfully downloaded HuggingFace model from {cloud_path} to {temp_dir}")
-    return temp_dir
 
 
 def save_json(obj: Any, path: str) -> None:
     """Save a JSON-serializable object to a file."""
-    import json
 
     if is_cloud_path(path):
         with open_file(path, "w") as f:
-            json.dump(obj, f, indent=4)
+            json.dump(obj, cast(TextIO, f), indent=4)
     else:
         with open(path, "w") as f:
             json.dump(obj, f, indent=4)
@@ -193,7 +155,6 @@ def save_json(obj: Any, path: str) -> None:
 
 def load_json(path: str) -> Any:
     """Load a JSON object from a file."""
-    import json
 
     if is_cloud_path(path):
         with open_file(path, "r") as f:
