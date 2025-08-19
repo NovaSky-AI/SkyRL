@@ -1139,7 +1139,10 @@ def test_env_metrics_in_generator_output_schema():
         {"metric1": 10.0, "metric2": "test2"}
     ]
     
-    assert "env_metrics" in concatenated_output, f"env_metrics should be in concatenated output, instead is {concatenated_output}"
+    assert "env_metrics" in concatenated_output, "env_metrics should be in concatenated output"
+
+    for key, value in concatenated_output.items(): 
+        print(f"Key: {key}, Value: {value}")
     
     assert concatenated_output["env_metrics"] == expected_env_metrics, (
         f"env_metrics concatenation failed. Expected {expected_env_metrics}, "
