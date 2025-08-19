@@ -182,21 +182,26 @@ class RayPPOTrainer:
         # 4. Aggregate environment metrics for logging
         env_aggregated_metrics = {}
         if concat_all_env_metrics:
-            # Get all unique metric keys across all environments
-            all_metric_keys = set()
+            from collections import defaultdict
+
+            metric_sums = defaultdict(float)
+            metric_counts = defaultdict(int)
+
             for metrics_dict in concat_all_env_metrics:
-                if metrics_dict:
-                    all_metric_keys.update(metrics_dict.keys())
+                if not metrics_dict:
+                    continue
+                for key, value in metrics_dict.items():
+                    try:
+                        metric_sums[key] += float(value)
+                        metric_counts[key] += 1
+                    except (ValueError, TypeError):
+                        # Non-numeric metric values are ignored.
+                        # Consider adding a log warning if this is unexpected.
+                        pass
             
-            # Calculate mean for each metric across all samples
-            for metric_key in all_metric_keys:
-                values = []
-                for metrics_dict in concat_all_env_metrics:
-                    if metrics_dict and metric_key in metrics_dict:
-                        values.append(float(metrics_dict[metric_key]))
-                
-                if values:  # Only add if we have values
-                    env_aggregated_metrics[f"env/{metric_key}"] = sum(values) / len(values)
+            for key in metric_sums:
+                if metric_counts[key] > 0:
+                    env_aggregated_metrics[f"env/{key}"] = metric_sums[key] / metric_counts[key]
 
         eval_metrics.update(
             {
