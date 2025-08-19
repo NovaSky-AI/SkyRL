@@ -158,7 +158,7 @@ class RayPPOTrainer:
             generator_input, uids = self._prepare_generator_input(
                 self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
             )
-            generator_output: GeneratorOutput = await self.generate(generator_input)  # {"env/metrics": ____}
+            generator_output: GeneratorOutput = await self.generate(generator_input)
             generator_outputs.append(generator_output)
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])
