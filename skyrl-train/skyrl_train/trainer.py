@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import shutil
+from collections import defaultdict
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -14,7 +15,6 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
-from collections import defaultdict
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
@@ -194,8 +194,8 @@ class RayPPOTrainer:
                         metric_sums[key] += float(value)
                         metric_counts[key] += 1
                     except (ValueError, TypeError):
-                        # Non-numeric metric values are ignored.
-                        # Consider adding a log warning if this is unexpected.
+                        logger.warning(f"Skipping non-numeric environment metric '{key}' with value '{value}'"
+                                       f" - only numeric metrics are aggregated for logging")
                         pass
             
             for key in metric_sums:
