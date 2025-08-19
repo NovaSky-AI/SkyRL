@@ -19,7 +19,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
     "loguru",
     "tqdm",
     "tensorboard",
@@ -38,6 +37,7 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
+    "flash-attn==2.8.0.post2",
 ]
 
 [tool.uv]
@@ -52,6 +52,8 @@ conflicts = [
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
+flash-attn = {url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl"}
+flashinfer-python = [{url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker="extra =='vllm'"}, {url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker="extra == 'sglang' and extra != 'vllm'"}]
 
 [project.optional-dependencies]
 deepspeed = [
@@ -74,17 +76,13 @@ docs = [
 ]
 vllm = [
     "vllm==0.9.2",
-    # NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
-    # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime (terribly slow).
-    "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
     "torch==2.7.0",
+    "flashinfer-python==0.2.6.post1",
     "torchvision"
 ]
 sglang = [
     "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
-    # The version is pinned to 0.2.5 because sglang requires this
-    # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
-    "flashinfer-python@https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl",
+    "flashinfer-python==0.2.6.post1",
     "torch==2.7.1",
     "torchvision",
 ]
