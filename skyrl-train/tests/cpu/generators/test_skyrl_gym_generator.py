@@ -867,3 +867,279 @@ async def test_apply_overlong_filtering_batched(
         0,
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_env_metrics_collection_and_aggregation(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that environment metrics are properly collected from environments
+    and included in GeneratorOutput for both batched and non-batched modes.
+    
+    This tests the env_metrics functionality added in the PR:
+    1. Environment returns metrics in step output
+    2. Generator collects and includes them in GeneratorOutput
+    3. Metrics have correct structure and values
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = False  # Test non-batched mode first
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Mock environment to return metrics in step output
+    def mock_step_with_metrics(action):
+        return BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "next"}],
+            reward=1.0,
+            done=True,
+            metadata={},
+            metrics={
+                "response_length": len(action),
+                "word_count": len(action.split()),
+                "answer_accuracy": 1.0,
+                "custom_metric": 42.5
+            }
+        )
+
+    mock_env.step.side_effect = mock_step_with_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    # Test with single prompt
+    prompts = [[{"role": "user", "content": "What is 2 + 2?"}]]
+    env_extras = [{"answer": "4"}]
+    env_classes = [mock_env_cfg.env_class]
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # Verify env_metrics is present in output
+    assert "env_metrics" in generator_output, "env_metrics should be present in GeneratorOutput"
+    
+    # Verify structure: List[Dict[str, Any]]
+    env_metrics = generator_output["env_metrics"]
+    assert isinstance(env_metrics, list), "env_metrics should be a list"
+    assert len(env_metrics) == 1, "Should have one metrics dict per trajectory"
+    
+    # Verify metrics content
+    metrics_dict = env_metrics[0]
+    assert isinstance(metrics_dict, dict), "Each env_metrics entry should be a dict"
+    
+    expected_metrics = {
+        "response_length": 12,  # Length of "mocked output"
+        "word_count": 2,        # "mocked" and "output"
+        "answer_accuracy": 1.0,
+        "custom_metric": 42.5
+    }
+    
+    for key, expected_value in expected_metrics.items():
+        assert key in metrics_dict, f"Metric '{key}' should be present"
+        assert metrics_dict[key] == expected_value, f"Metric '{key}' should have value {expected_value}"
+
+
+@pytest.mark.asyncio  
+@patch("skyrl_gym.make")
+async def test_env_metrics_batched_mode(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that environment metrics work correctly in batched mode with multiple trajectories.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = True  # Test batched mode
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Track which response we're processing to return different metrics
+    step_call_count = 0
+    
+    def mock_step_with_varying_metrics(action):
+        nonlocal step_call_count
+        step_call_count += 1
+        
+        # Return different metrics for each trajectory
+        if step_call_count == 1:
+            metrics = {"accuracy": 1.0, "length": 10}
+        elif step_call_count == 2:
+            metrics = {"accuracy": 0.0, "length": 5}
+        else:
+            metrics = {"accuracy": 0.5, "length": 8}
+            
+        return BaseTextEnvStepOutput(
+            observations=[],
+            reward=1.0,
+            done=True,
+            metadata={},
+            metrics=metrics
+        )
+
+    mock_env.step.side_effect = mock_step_with_varying_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    # Test with multiple prompts
+    prompts = [
+        [{"role": "user", "content": "Problem 1"}],
+        [{"role": "user", "content": "Problem 2"}],
+        [{"role": "user", "content": "Problem 3"}]
+    ]
+    env_extras = [{"answer": "1"}, {"answer": "2"}, {"answer": "3"}]
+    env_classes = [mock_env_cfg.env_class] * 3
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # Verify env_metrics structure for multiple trajectories
+    env_metrics = generator_output["env_metrics"]
+    assert len(env_metrics) == 3, "Should have metrics for all 3 trajectories"
+    
+    # Verify each trajectory has different metrics
+    expected_metrics = [
+        {"accuracy": 1.0, "length": 10},
+        {"accuracy": 0.0, "length": 5}, 
+        {"accuracy": 0.5, "length": 8}
+    ]
+    
+    for i, (actual, expected) in enumerate(zip(env_metrics, expected_metrics)):
+        assert actual == expected, f"Trajectory {i} metrics should match expected values"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make") 
+async def test_env_metrics_empty_when_no_metrics(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that env_metrics handles cases where environment doesn't return metrics.
+    Should return empty dict as default.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = False
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Mock environment that doesn't return metrics (old style)
+    def mock_step_no_metrics(action):
+        return BaseTextEnvStepOutput(
+            observations=[],
+            reward=1.0,
+            done=True,
+            metadata={}
+            # No metrics field
+        )
+
+    mock_env.step.side_effect = mock_step_no_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    prompts = [[{"role": "user", "content": "Test"}]]
+    env_extras = [{}]
+    env_classes = [mock_env_cfg.env_class]
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # Verify env_metrics contains empty dict when no metrics provided
+    env_metrics = generator_output["env_metrics"]
+    assert len(env_metrics) == 1, "Should have one entry per trajectory"
+    assert env_metrics[0] == {}, "Should be empty dict when no metrics provided"
+
+
+def test_env_metrics_in_generator_output_schema():
+    """
+    Test that env_metrics field is properly defined in GeneratorOutput TypedDict
+    and included in concatenation operations.
+    """
+    # Verify env_metrics is in GeneratorOutput schema
+    expected_fields = [
+        "prompt_token_ids",
+        "response_ids", 
+        "rewards",
+        "loss_masks",
+        "stop_reasons",
+        "rollout_metrics",
+        "rollout_logprobs",
+        "env_metrics",  # This should be present
+    ]
+    
+    actual_fields = list(GeneratorOutput.__annotations__.keys())
+    assert set(actual_fields) == set(expected_fields), (
+        f"GeneratorOutput fields mismatch. Expected {expected_fields}, got {actual_fields}"
+    )
+    
+    # Verify env_metrics type annotation
+    env_metrics_type = GeneratorOutput.__annotations__["env_metrics"]
+    assert "Optional" in str(env_metrics_type), "env_metrics should be Optional"
+    assert "List" in str(env_metrics_type), "env_metrics should be List type"
+    assert "Dict" in str(env_metrics_type), "env_metrics should contain Dict elements"
+
+    # Test concatenation includes env_metrics
+    generator_output_1: GeneratorOutput = {
+        "prompt_token_ids": [[1, 2]],
+        "response_ids": [[3, 4]],
+        "rewards": [1.0],
+        "loss_masks": [[1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": [[0.1, 0.2]],
+        "rollout_metrics": {"test": 1.0},
+        "env_metrics": [{"metric1": 5.0, "metric2": "test"}]
+    }
+
+    generator_output_2: GeneratorOutput = {
+        "prompt_token_ids": [[5, 6]],
+        "response_ids": [[7, 8]], 
+        "rewards": [2.0],
+        "loss_masks": [[1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": [[0.3, 0.4]],
+        "rollout_metrics": {"test": 2.0},
+        "env_metrics": [{"metric1": 10.0, "metric2": "test2"}]
+    }
+
+    generator_outputs = [generator_output_1, generator_output_2]
+    concatenated_output = concatenate_generator_outputs(generator_outputs)
+
+    # Verify env_metrics are properly concatenated
+    expected_env_metrics = [
+        {"metric1": 5.0, "metric2": "test"},
+        {"metric1": 10.0, "metric2": "test2"}
+    ]
+    
+    assert "env_metrics" in concatenated_output, "env_metrics should be in concatenated output"
+    assert concatenated_output["env_metrics"] == expected_env_metrics, (
+        f"env_metrics concatenation failed. Expected {expected_env_metrics}, "
+        f"got {concatenated_output['env_metrics']}"
+    )
