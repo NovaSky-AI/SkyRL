@@ -15,7 +15,7 @@
 # https://github.com/volcengine/verl/blob/1a62568f801ba35ac1f5387e27232a2df7eac488/verl/utils/reward_score/math_dapo.py
 
 import re
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 def last_boxed_only_string(string: str) -> Optional[str]:
@@ -245,7 +245,7 @@ def compute_score(
     ground_truth: str,
     strict_box_verify: bool = False,
     pause_tokens_index: Optional[list[int]] = None,
-) -> float:
+) -> Dict[str, Any]:
     """Compute the reward score for a solution.
 
     Args:
@@ -256,6 +256,7 @@ def compute_score(
 
     Returns:
         Reward score (1.0 for correct, -1.0 for incorrect)
+        and other information
     """
     # Limit solution length for efficiency
     solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
