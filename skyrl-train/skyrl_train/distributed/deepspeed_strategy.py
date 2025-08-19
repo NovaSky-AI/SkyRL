@@ -379,9 +379,9 @@ class DeepspeedStrategy(DistributedStrategy):
                 # Clean up the temporary checkpoint folder
                 shutil.rmtree(temp_ckpt_dir, ignore_errors=True)
 
-            if dist.is_initialized():
-                dist.barrier()
-            # Context manager automatically handles upload to cloud if needed
+        # Ensure all ranks finish before any cloud upload happens
+        if dist.is_initialized():
+            dist.barrier()
 
     def get_ds_train_config(self):
         ds_config = OmegaConf.to_container(self.deepspeed_config)
