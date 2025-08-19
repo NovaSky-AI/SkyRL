@@ -349,10 +349,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         if self.batched:
             return await self.generate_batched(
                 prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
-            )  # Calls for single-turn parallel generation
+            )
 
         # Async agent loop to generate trajectories in parallel.
-        tasks = []  # Use agent_loop() for multi-turn sequential generation
+        tasks = []
         for i in range(len(prompts)):
             tasks.append(
                 self.agent_loop(
