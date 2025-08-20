@@ -1,4 +1,4 @@
-LLM as a Judge for GSM8K with GRPO
+LLM as a Judge for GSM8K
 =========================================
 
 This example demonstrates how to train a model using LLM as a judge for reward computation on the GSM8K dataset. Instead of using rule-based reward functions, this approach leverages an LLM (like GPT-4o-mini) to evaluate the quality of generated solutions.
