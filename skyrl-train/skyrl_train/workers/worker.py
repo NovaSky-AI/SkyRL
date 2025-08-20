@@ -300,13 +300,26 @@ class Worker(DistributedTorchRayActor):
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
         """
-        # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
-        # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        
+        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
+        
+        dynamic_bsz = getattr(self.cfg.trainer, 'use_dynamic_batching', False)
+        
+        dataloader = BatchIterator(
+            data, 
+            cfg=self.cfg, 
+            dp_size=self.mesh_rank.dp_size if hasattr(self, 'mesh_rank') else 1,
+            drop_last=False, 
+            dp_group=dp_group, 
+            dynamic_bsz=dynamic_bsz,
+            for_inference=True,
+            mini_batch_size_per_gpu=data.batch_size
+        )
 
         outputs = []
-        for micro_batch in micro_batches:
+        for micro_batch in dataloader.micro_batches:
             outputs.append(self._forward_micro_batch(micro_batch))
+        
         output = TrainingOutputBatch.cat(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
@@ -590,15 +603,25 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
+
+        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
+
+        dynamic_bsz = getattr(self.cfg.trainer, 'use_dynamic_batching', False)
         dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+            train_data, cfg=self.cfg, dp_size=self.mesh_rank.dp_size, drop_last=False, dp_group=dp_group, dynamic_bsz=dynamic_bsz,
+            mini_batch_size_per_gpu=self.policy_mini_batch_size_per_gpu
         )
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
+        if dynamic_bsz:
+            logger.info(
+                f"Data {len(train_data)} | Dynamic Batching | Max Tokens per GPU {self.cfg.trainer.max_token_len_per_gpu} | Num Micro Batches {len(dataloader)}"
+            )
+        else:
+            logger.info(
+                f"Data {len(train_data)} | Mini Batch Size per GPU {self.policy_mini_batch_size_per_gpu} | Micro Bsz {self.cfg.trainer.micro_train_batch_size_per_gpu} | Grad Accumulation Steps {dataloader.micro_batches_per_mini_batch}"
+            )
+        if not dynamic_bsz:
+            assert dataloader.micro_batches_per_mini_batch <= len(dataloader), f"Accumulation Steps {dataloader.micro_batches_per_mini_batch} cannot be less than number of micro batches in total {len(dataloader)}"
 
         status_list = []
         all_metrics = defaultdict(list)
@@ -610,14 +633,15 @@ class PolicyWorkerBase(Worker):
                 desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
+            for local_step, (experience, should_step) in enumerate(pbar):
                 status = self.training_step(
                     experience,
                     global_step,
                     local_step,
-                    accumulation_steps,
+                    should_step
                 )
-                policy_update_steps += 1
+                if should_step:
+                    policy_update_steps += 1
 
                 # for DP
                 # TODO (sumanthrh): this assumes all workers are data parallel.
@@ -661,14 +685,14 @@ class PolicyWorkerBase(Worker):
         all_metrics.pop("response_length", None)
 
         status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps / accumulation_steps
+        status_mean["policy_update_steps"] = policy_update_steps
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
         return output
 
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+    def training_step(self, experience: Experience, global_step, local_step, should_step) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
@@ -685,6 +709,9 @@ class PolicyWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        accumulation_weight = len(experience) / self.policy_mini_batch_size_per_gpu
+
+        print(f"Accumulation weight: {accumulation_weight}")
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -732,11 +759,14 @@ class PolicyWorkerBase(Worker):
             kl_loss = torch.tensor(0.0)
 
         loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
-        loss = loss / accumulation_steps
+
+        logger.info(f"Update: Loss: {loss.item()} | Accumulation weight: {accumulation_weight} | new loss: {loss * accumulation_weight}")
+        print(f"Update: Loss: {loss.item()} | Accumulation weight: {accumulation_weight} | new loss: {loss * accumulation_weight}")
+        loss = loss * accumulation_weight
         self.strategy.backward(loss, self.model, self.optimizer)
 
         grad_norm = None
-        if (local_step + 1) % accumulation_steps == 0:
+        if should_step:
             grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
@@ -882,18 +912,18 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
+        # Get the dp group for synchronization
+        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
+        # Check if dynamic batching is enabled
+        dynamic_bsz = getattr(self.cfg.trainer, 'use_dynamic_batching', False)
         dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+            train_data, cfg=self.cfg, dp_size=self.mesh_rank.dp_size, drop_last=False, worker_type="critic", dp_group=dp_group, dynamic_bsz=dynamic_bsz,
+            mini_batch_size_per_gpu=self.critic_mini_batch_size_per_gpu
         )
 
         torch.cuda.empty_cache()
         self.model.train()
 
-        micro_batches_per_mini_batch = (
-            self.critic_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
 
         all_metrics = defaultdict(list)
         critic_update_steps = 0
@@ -903,9 +933,10 @@ class CriticWorkerBase(Worker):
                 desc=f"Critic Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
-                status = self.training_step(experience, global_step, local_step, accumulation_steps)
-                critic_update_steps += 1
+            for local_step, (experience, should_step) in enumerate(pbar):
+                status = self.training_step(experience, global_step, local_step, should_step)
+                if should_step:
+                    critic_update_steps += 1
 
                 # for DP
                 # TODO (sumanthrh): this assumes all workers are data parallel.
@@ -920,13 +951,13 @@ class CriticWorkerBase(Worker):
         torch.distributed.barrier()
 
         status_mean = reduce_metrics(all_metrics)
-        status_mean["critic_update_steps"] = critic_update_steps / accumulation_steps
+        status_mean["critic_update_steps"] = critic_update_steps 
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
         return output
 
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+    def training_step(self, experience: Experience, global_step, local_step, should_step) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
@@ -938,6 +969,7 @@ class CriticWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
+        accumulation_weight = len(experience) / self.critic_mini_batch_size_per_gpu
 
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # critic loss
@@ -955,10 +987,12 @@ class CriticWorkerBase(Worker):
                 config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
-        loss = loss / accumulation_steps
+
+
+        loss = loss * accumulation_weight
         self.strategy.backward(loss, self.model, self.optimizer)
         grad_norm = None
-        if (local_step + 1) % accumulation_steps == 0:
+        if should_step:
             grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
