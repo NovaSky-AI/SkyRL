@@ -6,7 +6,6 @@ import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
-from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
 
 
 class Timer:
@@ -116,6 +115,8 @@ def validate_batch_sizes(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
+    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
+
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -204,6 +205,14 @@ def validate_cfg(cfg: DictConfig):
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+
+    # TODO (erictang000): remove these after deprecation period
+    if algorithm_config.use_abs_kl:
+        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
+        algorithm_config.kl_estimator_type = "abs"
+    elif algorithm_config.use_kl_estimator_k3:
+        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
+        algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
     # TODO: fix once we support these features with SGLang
@@ -223,6 +232,41 @@ def validate_cfg(cfg: DictConfig):
 
     if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
+
+    if cfg.trainer.algorithm.use_tis:
+        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
+            raise ValueError(
+                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
+            )
+        if cfg.generator.sampling_params.logprobs is None:
+            logger.warning(
+                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`. Setting `logprobs` to `True`."
+            )
+            # just set to 0 for better user exp
+            cfg.generator.sampling_params.logprobs = 0
+
+        if cfg.generator.backend == "sglang":
+            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
+
+        if not cfg.generator.batched:
+            raise ValueError(
+                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
+            )
+
+    if cfg.generator.sampling_params.logprobs is not None:
+        assert isinstance(cfg.generator.sampling_params.logprobs, int)
+
+        if cfg.generator.sampling_params.logprobs > 0:
+            raise ValueError(
+                f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
+            )
+        if not cfg.generator.batched:
+            raise NotImplementedError(
+                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
+            )
+
+        if not cfg.generator.run_engines_locally:
+            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
 
 @ray.remote
@@ -263,7 +307,16 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def initialize_ray(cfg: DictConfig):
+def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
+    """
+    Prepare environment variables for Ray runtime environment.
+
+    Args:
+        cfg: Training config
+
+    Returns:
+        Dict[str, str]: Environment variables to be used in Ray runtime environment
+    """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
@@ -291,16 +344,23 @@ def initialize_ray(cfg: DictConfig):
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
-    max_num_gpus_per_node = max(
-        [
-            cfg.trainer.placement.policy_num_gpus_per_node,
-            cfg.trainer.placement.critic_num_gpus_per_node,
-            cfg.trainer.placement.ref_num_gpus_per_node,
-            cfg.trainer.placement.reward_num_gpus_per_node,
-        ]
-    )
+    # Use max of available GPU counts, defaulting to 1 if none found
+    gpu_counts = []
+    if hasattr(cfg.generator, "inference_engine_tensor_parallel_size"):
+        gpu_counts.append(cfg.generator.inference_engine_tensor_parallel_size)
+    if hasattr(cfg, "trainer") and hasattr(cfg.trainer, "placement"):
+        placement = cfg.trainer.placement
+        gpu_counts.extend(
+            [
+                placement.policy_num_gpus_per_node,
+                placement.critic_num_gpus_per_node,
+                placement.ref_num_gpus_per_node,
+                placement.reward_num_gpus_per_node,
+            ]
+        )
+    max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
     if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
-        logger.info("Peer access is not supported on this node type, disabling P2P and SHM")
+        logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
@@ -323,6 +383,22 @@ def initialize_ray(cfg: DictConfig):
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
+
+    return env_vars
+
+
+def initialize_ray(cfg: DictConfig):
+    """
+    Initialize Ray cluster with prepared runtime environment.
+
+    Args:
+        cfg: Training config
+    """
+    from .ppo_utils import (
+        sync_registries,
+    )
+
+    env_vars = prepare_runtime_environment(cfg)
     ray.init(runtime_env={"env_vars": env_vars})
 
     # create the named ray actors for the registries to make available to all workers

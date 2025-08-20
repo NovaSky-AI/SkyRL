@@ -27,14 +27,16 @@ from skyrl_train.generators.utils import concatenate_generator_outputs, get_metr
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train import utils
+from skyrl_train.utils import ppo_utils
 from skyrl_train.utils import trainer_utils
-from skyrl_train.utils import (
-    Timer,
+from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     masked_mean,
+    get_kl_controller,
+    FixedKLController,
+    AdaptiveKLController,
     normalize_advantages_dict,
-    get_ray_pg_ready_with_timeout,
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -96,6 +98,8 @@ class RayPPOTrainer:
         self.eval_weights_manager: InferenceWeightsManager = None
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
+
+        self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -244,6 +248,10 @@ class RayPPOTrainer:
 
         # setup for dynamic sampling
         keep_sampling = False
+
+        # initialize kl controller
+        if self.cfg.trainer.algorithm.use_kl_in_reward:
+            self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
@@ -595,9 +603,19 @@ class RayPPOTrainer:
             refs = []
             if ref_model is not None:
                 refs.extend(ref_model.async_init_model(cfg.trainer.policy.model.path))
-            refs.extend(policy_model.async_init_model(cfg.trainer.policy.model.path))
+            refs.extend(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=self.total_training_steps,
+                )
+            )
             if cfg.trainer.critic.model.path:
-                refs.extend(critic_model.async_init_model(cfg.trainer.critic.model.path))
+                refs.extend(
+                    critic_model.async_init_model(
+                        cfg.trainer.critic.model.path,
+                        num_training_steps=self.total_training_steps,
+                    )
+                )
             if cfg.trainer.reward.model.path:
                 refs.extend(reward_model.async_init_model(cfg.trainer.reward.model.path))
             ray.get(refs)
@@ -606,11 +624,21 @@ class RayPPOTrainer:
             if ref_model is not None:
                 ray.get(ref_model.async_init_model(cfg.trainer.policy.model.path))
                 ref_model.offload_to_cpu()
-            ray.get(policy_model.async_init_model(cfg.trainer.policy.model.path))
+            ray.get(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=self.total_training_steps,
+                )
+            )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                ray.get(critic_model.async_init_model(cfg.trainer.critic.model.path))
+                ray.get(
+                    critic_model.async_init_model(
+                        cfg.trainer.critic.model.path,
+                        num_training_steps=self.total_training_steps,
+                    )
+                )
                 critic_model.offload_to_cpu()
             if cfg.trainer.reward.model.path:
                 ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
@@ -641,19 +669,29 @@ class RayPPOTrainer:
         custom_rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
+        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+
         (
             sequences_tensor,
             attention_masks_tensor,
             response_masks_tensor,
             custom_rewards_tensor,
             loss_masks_tensor,
+            rollout_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
             response_ids,
             custom_rewards,
             loss_masks,
+            logprobs,
         )
+        # sanity check for tis
+        if self.cfg.trainer.algorithm.use_tis:
+            assert (
+                rollout_logprobs_tensor is not None
+            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -661,6 +699,7 @@ class RayPPOTrainer:
                 "response_mask": response_masks_tensor,
                 "custom_rewards": custom_rewards_tensor,
                 "loss_mask": loss_masks_tensor,
+                "rollout_logprobs": rollout_logprobs_tensor,
             },
         )
         training_input.metadata = {
@@ -756,11 +795,12 @@ class RayPPOTrainer:
         # TODO (erictang000): we are just supporting custom rewards for now
         token_level_rewards = data["custom_rewards"]
 
-        advantages, returns = utils.compute_advantages_and_returns(
+        advantages, returns = ppo_utils.compute_advantages_and_returns(
             token_level_rewards=token_level_rewards,
             response_mask=data["response_mask"],
             index=data.metadata["uids"],
             adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            config=self.cfg.trainer.algorithm,
             values=data["values"],
             gamma=self.cfg.trainer.algorithm.gamma,
             lambd=self.cfg.trainer.algorithm.lambd,
@@ -944,6 +984,18 @@ class RayPPOTrainer:
         training_input["values"] = values
         # rewards from the reward model
         training_input["rm_rewards"] = rewards  # `None` or torch.Tensor
+
+        if self.cfg.generator.sampling_params.logprobs is not None:
+            # calculates the difference in probs between inference and trainer components
+            prob_diff = (training_input["rollout_logprobs"].exp() - action_log_probs.exp()).abs()
+            prob_diff_mean = prob_diff.mean().item()
+            prob_diff_std = prob_diff.std().item()
+            self.all_metrics.update(
+                {
+                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
+                    "policy/rollout_train_prob_diff_std": prob_diff_std,
+                }
+            )
         return training_input
 
     def apply_reward_kl_penalty(
@@ -961,18 +1013,26 @@ class RayPPOTrainer:
             action_log_probs,
             base_action_log_probs,
             loss_mask=loss_masks_all,
-            use_kl_estimator_k3=self.cfg.trainer.algorithm.use_kl_estimator_k3,
-            use_abs_kl=self.cfg.trainer.algorithm.use_abs_kl,
+            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
         )
         kl_max: Float[torch.Tensor, "batch_size"] = torch.max(kl.abs(), dim=-1)[0]  # noqa: F821
         kl_mean: Float[torch.Tensor, "batch_size"] = masked_mean(kl, loss_masks_all, dim=-1)  # noqa: F821
 
         # NOTE (erictang000): only supporting custom rewards currently
-        custom_rewards = custom_rewards - kl * max(0, self.cfg.trainer.algorithm.kl_loss_coef)
+        kl_loss_coef = (
+            self.reward_kl_controller.value
+            if self.reward_kl_controller is not None
+            else self.cfg.trainer.algorithm.kl_loss_coef
+        )
+        custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
         data["custom_rewards"] = custom_rewards
 
         avg_kl: float = kl_mean.mean().item()
         avg_kl_max: float = kl_max.mean().item()
+
+        # update the kl controller
+        if self.reward_kl_controller is not None:
+            self.reward_kl_controller.update(current=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
 
@@ -980,6 +1040,7 @@ class RayPPOTrainer:
             {
                 "avg_kl": avg_kl,
                 "avg_kl_max": avg_kl_max,
+                "kl_loss_coef": kl_loss_coef,
             }
         )
 
@@ -987,6 +1048,7 @@ class RayPPOTrainer:
             {
                 "loss/avg_kl": avg_kl,
                 "loss/avg_kl_max": avg_kl_max,
+                "loss/kl_loss_coef": kl_loss_coef,
             }
         )
 
