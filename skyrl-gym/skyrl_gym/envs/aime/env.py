@@ -19,10 +19,6 @@ class AIMEEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step
 
-        # NOTE(shu): manually parse the action with end_string |im_end|
-        # Might want the env to have a tokenizer and being able to take tokens for special reward calculation
-        action = action.split("<|im_end|>")[0]
-
         score_info = utils.compute_score(action, self.ground_truth)
         reward = score_info["score"]
         metadata = {"acc": score_info["acc"], "pred": score_info["pred"]}
