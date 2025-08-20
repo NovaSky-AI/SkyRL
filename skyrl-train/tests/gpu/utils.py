@@ -56,6 +56,7 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
         {
             "sequences": torch.randint(0, 100, (batch_size, seq_len), device="cpu"),
             "attention_mask": torch.ones((batch_size, seq_len), dtype=int, device="cpu"),
+            "rollout_log_probs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
             "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
             "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
             "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),

@@ -107,6 +107,7 @@ trainer:
     # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    max_seq_len: 512
 
     # value loss parameters
     value_clip: 0.2

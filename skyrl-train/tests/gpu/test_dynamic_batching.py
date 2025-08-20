@@ -320,7 +320,7 @@ async def test_e2e_dynamic_batching_loss_consistency():
         
         seq_lengths = np.random.randint(50, 512, size=8)
         seq_lengths = [512, 400, 300, 200, 100, 50, 25, 10]
-        seq_lengths = [1000, 50, 25, 10, 100, 50, 25, 10]
+        # seq_lengths = [1000, 50, 25, 10, 100, 50, 25, 10]
 
         train_data = make_variable_length_training_batch(seq_lengths, num_actions=4)
         train_data.metadata["global_step"] = 0
@@ -344,6 +344,8 @@ async def test_e2e_dynamic_batching_loss_consistency():
         
         results_fixed = ray.get(actor_group_fixed.async_run_ray_method("pass_through", "ppo_train", train_data_fixed))
         
+
+        print(f"Results fixed: {results_fixed}")
         losses_fixed = [r.metadata["train_status"]["policy_loss"] for r in results_fixed]
         loss_fixed = sum(losses_fixed) / len(losses_fixed)
         
@@ -377,6 +379,7 @@ async def test_e2e_dynamic_batching_loss_consistency():
         
         results_dynamic = ray.get(actor_group_dynamic.async_run_ray_method("pass_through", "ppo_train", train_data_dynamic))
         
+        print(f"Results dynamic: {results_dynamic}")
         losses_dynamic = [r.metadata["train_status"]["policy_loss"] for r in results_dynamic]
         loss_dynamic = sum(losses_dynamic) / len(losses_dynamic)
         

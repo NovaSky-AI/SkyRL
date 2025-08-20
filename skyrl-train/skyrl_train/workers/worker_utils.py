@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from loguru import logger
 
 
-def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
+def reduce_metrics(metrics: Dict[str, List[float]], batch_size: int = None) -> Dict[str, float]:
     """
     Reduce metrics from a list of entries per key.
     """
@@ -20,7 +20,7 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     for k, v in metrics.items():
         assert len(v) > 0, f"No metrics for key {k}"
         assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
-        reduced_metrics[k] = sum(v) / len(v)
+        reduced_metrics[k] = sum(v) / batch_size
     return reduced_metrics
 
 
@@ -39,7 +39,6 @@ class BatchIterator:
         worker_type: str = "policy",
         dp_group: Optional[dist.ProcessGroup] = None,
         dynamic_bsz: bool = False,
-        mini_batch_size_per_gpu: Optional[int] = None,
         for_inference: bool = False,
     ):
         """
@@ -71,13 +70,9 @@ class BatchIterator:
 
         logger.info(f"Sizes: {[len(seq) for seq in data["sequences"]]} {dp_size=}")
 
-        self._prepare_common_attributes(mini_batch_size_per_gpu)
+        self._prepare_attributes()
 
         self._all_micro_batches = []
-        self._accumulation_weights = []
-        self._should_step_flags = []
-        self._micro_batch_sizes = []
-        self._micro_batch_indices = []
 
         self._create_micro_batches()
 
@@ -85,24 +80,18 @@ class BatchIterator:
 
         self._log_configuration()
 
-    def _prepare_common_attributes(self, mini_batch_size_per_gpu: Optional[int]):
+    def _prepare_attributes(self):
         """Prepare common attributes used by both batching modes."""
-        if self.for_inference:
-            self.sample_batch_size = self.cfg.trainer.micro_forward_batch_size_per_gpu
-        else:
-            self.sample_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
 
-        if mini_batch_size_per_gpu is not None:
-            self.mini_batch_size_per_gpu = mini_batch_size_per_gpu
+
+        if self.worker_type == "critic":
+            self.mini_batch_size_per_gpu = (
+                self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
+            )
         else:
-            if self.worker_type == "critic":
-                self.mini_batch_size_per_gpu = (
-                    self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
-                )
-            else:
-                self.mini_batch_size_per_gpu = (
-                    self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
-                )
+            self.mini_batch_size_per_gpu = (
+                self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
+            )
 
         if self.mini_batch_size_per_gpu <= 0:
             raise ValueError(
@@ -111,6 +100,12 @@ class BatchIterator:
             )
 
         if not self.dynamic_bsz:
+
+            if self.for_inference:
+                self.sample_batch_size = self.cfg.trainer.micro_forward_batch_size_per_gpu
+            else:
+                self.sample_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+
             self.micro_batches_per_mini_batch = max(1, self.mini_batch_size_per_gpu // self.sample_batch_size)
 
     def _create_micro_batches(self):
@@ -172,21 +167,13 @@ class BatchIterator:
         else:
             partitions = create_fixed_partitions(batch_size, num_micro_batches)
 
-        # Calculate accumulation weight for this mini-batch
-        accumulation_weight = 1.0 / len(partitions)
-        
-        for i, partition in enumerate(partitions):
+        for partition in partitions:
             if not partition:
                 continue
 
             micro_batch = mini_batch.partition(partition)
 
-            should_step = i == len(partitions) - 1
-
             self._all_micro_batches.append(micro_batch)
-            self._should_step_flags.append(should_step)
-            self._micro_batch_sizes.append(len(partition))
-            self._accumulation_weights.append(accumulation_weight)
 
     def _reset_iterator(self):
         """Reset the iterator for the next epoch."""
@@ -199,7 +186,6 @@ class BatchIterator:
             f"Mini-batch/GPU={self.mini_batch_size_per_gpu} | "
             f"Micro-batches={len(self._all_micro_batches)} | "
             f"Micro-batch-size={[len(mb) for mb in self._all_micro_batches]} | "
-            f"should_step={self._should_step_flags}"
         )
 
         if self.dynamic_bsz:
@@ -226,21 +212,14 @@ class BatchIterator:
             if self.dynamic_bsz:
                 exp.info["micro_batch_utilization"] = micro_batch["attention_mask"].sum().item() / self.max_token_len
 
-            resp = (exp, self._should_step_flags[self._current_idx])
-
             self._current_idx += 1
 
-            yield resp
+            yield exp
 
     @property
     def micro_batches(self):
         """Get all micro-batches (for special cases only)."""
         return self._all_micro_batches
-
-    @property
-    def num_accumulation_steps(self):
-        """Get the number of gradient accumulation steps."""
-        return sum(self._should_step_flags)
 
     @staticmethod
     def batch_to_experience(batch: TrainingInputBatch) -> Experience:
