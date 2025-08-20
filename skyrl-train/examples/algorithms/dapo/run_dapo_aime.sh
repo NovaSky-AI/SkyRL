@@ -5,8 +5,8 @@ set -x
 # uv run examples/algorithms/dapo/prepare_dapo_data.sh
 
 DATA_DIR="$HOME/data/dapo"
-TRAIN_FILE="$DATA_DIR/dapo-math-17k.parquet"
-TEST_FILE="$DATA_DIR/aime-2024.parquet"
+TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
+TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
