@@ -73,12 +73,12 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
 
         # Create dummy experience for training step
         dummy_experience = make_dummy_experience()
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        global_step, local_step, should_update_policy = 0, 0, True
 
         # Step 1: Do one training step
         ray.get(
             actor_group_1.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience, global_step, local_step, should_update_policy
             )
         )
 

@@ -60,17 +60,15 @@ def make_variable_length_training_batch(
 def test_dynamic_batch_iterator_core(seq_lengths, max_tokens, expected_num_batches):
     batch = make_variable_length_training_batch(seq_lengths, pad_to_length=max(seq_lengths))
     # Create a mock config for BatchIterator
-    cfg = DictConfig(
-        {
-            "trainer": {
-                "use_dynamic_batching": True,
-                "max_token_len_per_gpu": max_tokens,
-                "micro_train_batch_size_per_gpu": 1,
-            }
-        }
-    )
 
-    iterator = BatchIterator(batch, cfg=cfg, dp_size=1, dynamic_bsz=True, mini_batch_size_per_gpu=len(seq_lengths))
+
+    cfg = get_test_actor_config()
+    cfg.trainer.use_dynamic_batching = True
+    cfg.trainer.max_token_len_per_gpu = max_tokens
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.policy_mini_batch_size = len(seq_lengths)
+
+    iterator = BatchIterator(batch, cfg=cfg, dp_size=1, dynamic_bsz=True)
 
     assert len(iterator) == expected_num_batches
 
@@ -85,11 +83,14 @@ def test_dynamic_batch_iterator_core(seq_lengths, max_tokens, expected_num_batch
 
 def test_dynamic_iterator_multi_epoch():
     batch = make_dummy_training_batch(batch_size=4, seq_len=100)
-    cfg = DictConfig(
-        {"trainer": {"use_dynamic_batching": True, "max_token_len_per_gpu": 300, "micro_train_batch_size_per_gpu": 1}}
-    )
 
-    iterator = BatchIterator(batch, cfg=cfg, dp_size=1, dynamic_bsz=True, mini_batch_size_per_gpu=4)
+    cfg = get_test_actor_config()
+    cfg.trainer.use_dynamic_batching = True
+    cfg.trainer.max_token_len_per_gpu = 300
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.policy_mini_batch_size = 4
+
+    iterator = BatchIterator(batch, cfg=cfg, dp_size=1, dynamic_bsz=True)
 
     epoch_counts = [sum(1 for _ in iterator) for _ in range(3)]
     assert len(set(epoch_counts)) == 1 and epoch_counts[0] == len(iterator)
@@ -199,13 +200,11 @@ def test_batch_iterator_with_dynamic_batching():
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 2
 
-    # Create batch with varying sequence lengths
     seq_lengths = [50, 100, 150, 200]
     batch = make_variable_length_training_batch(seq_lengths, num_actions=4)
 
-    # Create BatchIterator with dynamic batching
     iterator = BatchIterator(
-        data=batch, cfg=cfg, dp_size=1, dynamic_bsz=True, dp_group=None  # No distributed group for unit test
+        data=batch, cfg=cfg, dp_size=1, dynamic_bsz=True, dp_group=None  
     )
 
     # Check that micro-batches are created
@@ -216,8 +215,6 @@ def test_batch_iterator_with_dynamic_batching():
     for exp in iterator:
         assert hasattr(exp, "sequences"), "Experience should have sequences"
         assert hasattr(exp, "attention_mask"), "Experience should have attention_mask"
-        assert "should_step" in exp.info, "Experience info should have should_step"
-        assert "accumulation_weight" in exp.info, "Experience info should have accumulation_weight"
         total_sequences += exp.sequences.shape[0]
 
     assert total_sequences == len(
@@ -319,8 +316,7 @@ async def test_e2e_dynamic_batching_loss_consistency():
         cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
         
         seq_lengths = np.random.randint(50, 512, size=8)
-        seq_lengths = [512, 400, 300, 200, 100, 50, 25, 10]
-        # seq_lengths = [1000, 50, 25, 10, 100, 50, 25, 10]
+        # seq_lengths = [512, 400, 300, 200, 100, 50, 25, 10]
 
         train_data = make_variable_length_training_batch(seq_lengths, num_actions=4)
         train_data.metadata["global_step"] = 0
@@ -361,7 +357,7 @@ async def test_e2e_dynamic_batching_loss_consistency():
         ray.init()
         
         cfg.trainer.use_dynamic_batching = True
-        cfg.trainer.max_token_len_per_gpu = 300  # Allow enough tokens for micro-batching
+        cfg.trainer.max_token_len_per_gpu = 300  
         
         actor_group_dynamic = init_worker_with_type(
             "policy",

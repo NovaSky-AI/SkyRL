@@ -72,12 +72,12 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         for i, seq in enumerate(dummy_experience_2.sequences):
             dummy_experience_2.sequences[i] = torch.randint(100, 200, seq.shape, device=seq.device)
 
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        global_step, local_step, should_policy_update = 0, 0, True
 
         # Step 1: Do initial training step
         ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience_1, global_step, local_step, should_policy_update
             )
         )
 
@@ -108,7 +108,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         # Step 3: Do second training step and record results
         ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_2, global_step + 1, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience_2, global_step + 1, local_step, should_policy_update
             )
         )
 
@@ -127,7 +127,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         # Step 6: Now repeat the exact same second training step
         ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_2, global_step + 1, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience_2, global_step + 1, local_step, should_policy_update
             )
         )
 
