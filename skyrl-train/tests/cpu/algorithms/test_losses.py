@@ -7,8 +7,7 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
 import pytest
 import torch
 from omegaconf import DictConfig
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry
-from skyrl_train.utils import masked_mean
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
 
 
 # Adapted a good test from NeMO-RL
@@ -33,6 +32,7 @@ def test_policy_loss_dual_clip():
             "policy_loss_type": "dual_clip",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
 
@@ -106,6 +106,7 @@ def test_policy_loss_reduction_modes():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
 
@@ -117,6 +118,7 @@ def test_policy_loss_reduction_modes():
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
 
@@ -189,6 +191,7 @@ def test_policy_loss_reduction_edge_cases():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
 
@@ -200,6 +203,7 @@ def test_policy_loss_reduction_edge_cases():
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
 
@@ -285,6 +289,7 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
@@ -299,6 +304,7 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "gspo",
             "loss_reduction": "sequence_mean",  # GSPO recommended reduction
             "max_seq_len": 4,
+            "use_tis": False,
         }
     )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")

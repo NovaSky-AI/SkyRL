@@ -3,7 +3,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightUpdateRequest,
+    NamedWeightsUpdateRequest,
 )
 from typing import List, Optional, Dict, Any
 import json
@@ -66,7 +66,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                     text = choice.get("message", {}).get("content", "")
                     outputs.append(text)
                     finish_reasons.append(choice.get("finish_reason"))
-        return InferenceEngineOutput(responses=outputs, stop_reasons=finish_reasons)
+        return InferenceEngineOutput(
+            responses=outputs, stop_reasons=finish_reasons, response_ids=None, response_logprobs=None
+        )
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
@@ -101,25 +103,36 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             ) as response:
                 return await response.json()
 
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
-        if request.get("extras") and "ipc_handles" in request["extras"]:
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+        if "names" not in request:
+            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
+
+        assert (
+            len(request["names"]) == 1
+        ), f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
+
+        if request.get("extras") and "ipc_handles" in request["extras"][0]:
             raise ValueError(
                 "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
             )
         if self.engine_backend == "vllm":
-            weight_update_method = "update_weight"
+            weight_update_method = "update_weights"
         elif self.engine_backend == "sglang":
             weight_update_method = "update_weights_from_distributed"
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
         async with aiohttp.ClientSession() as session:
+            name = request["names"][0]
+            dtype = request["dtypes"][0]
+            shape = request["shapes"][0]
+
             resp = await session.post(
                 f"{self.url}/{weight_update_method}",
                 json={
-                    "name": request["name"],
-                    "dtype": request["dtype"],
-                    "shape": request["shape"],
+                    "name": name,
+                    "dtype": dtype,
+                    "shape": shape,
                 },
             )
             return await resp.json()

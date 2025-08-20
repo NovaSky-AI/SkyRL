@@ -33,7 +33,7 @@ def get_free_port():
         return sock.getsockname()[1]
 
 
-def wait_for_server(host: str, port: int, timeout_seconds: int = 1200) -> bool:
+def wait_for_server(host: str, port: int, timeout_seconds: int = 180) -> bool:
     """Wait for server to be ready by checking if we can connect."""
     start_time = time.time()
     print(f"Waiting for server at {host}:{port}...")
@@ -153,7 +153,7 @@ class VLLMServer:
                 pass  # Process already terminated
 
 
-def wait_for_all_servers(server_addresses: List[Tuple[str, int]], timeout_seconds: int = 1200) -> bool:
+def wait_for_all_servers(server_addresses: List[Tuple[str, int]], timeout_seconds: int = 180) -> bool:
     """Wait for all servers to be ready using thread pool."""
     with ThreadPoolExecutor(max_workers=len(server_addresses)) as executor:
         futures = [executor.submit(wait_for_server, host, port, timeout_seconds) for host, port in server_addresses]
@@ -177,12 +177,13 @@ def main():
     parser.add_argument("--num-replicas", type=int, required=True, help="Number of server replicas to launch")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
     parser.add_argument("--quiet", action="store_true", help="Quiet mode")
-    parser.add_argument("--timeout", type=int, default=1200, help="Timeout in seconds for server readiness")
+    parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds for server readiness")
     args = parser.parse_args()
 
     cfg = OmegaConf.create()
     cfg.generator = OmegaConf.create()
     cfg.generator.backend = "vllm"
+    cfg.generator.weight_sync_backend = "nccl"
     # Initialize Ray
     initialize_ray(cfg)
 
@@ -190,6 +191,7 @@ def main():
     bundles = [[{"GPU": args.tp_size, "CPU": 1}] for _ in range(args.num_replicas)]
     placement_groups = [placement_group(bundle) for bundle in bundles]
     for pg in placement_groups:
+        print("Waiting for Ray placement group to be ready...")
         get_ray_pg_ready_with_timeout(pg, timeout=180)
 
     # Launch servers

@@ -8,7 +8,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightUpdateRequest,
+    NamedWeightsUpdateRequest,
 )
 
 
@@ -41,8 +41,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
         )
 
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
-        return await self.inference_engine_actor.update_named_weight.remote(request)
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+        return await self.inference_engine_actor.update_named_weights.remote(request)
 
     async def teardown(self):
         return await self.inference_engine_actor.teardown.remote()
@@ -147,6 +147,8 @@ def create_ray_wrapped_inference_engines(
                 max_num_seqs=max_num_seqs,
                 sampling_params=sampling_params,
                 tokenizer=tokenizer,
+                # only need the logprobs for the chosen token if any
+                max_logprobs=1,
             )
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang

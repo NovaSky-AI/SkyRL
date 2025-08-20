@@ -65,6 +65,7 @@ class Experience:
     attention_mask: Optional[Integer[torch.LongTensor, "batch seq_len"]]
     loss_mask: Optional[Integer[torch.LongTensor, "batch response_len"]]
     action_mask: Optional[Integer[torch.Tensor, "batch response_len"]]
+    rollout_logprobs: Optional[Float[torch.Tensor, "batch response_len"]]
     num_actions: int
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
@@ -88,6 +89,8 @@ class Experience:
             self.loss_mask = to(self.loss_mask, device)
         if self.action_mask is not None:
             self.action_mask = to(self.action_mask, device)
+        if self.rollout_logprobs is not None:
+            self.rollout_logprobs = to(self.rollout_logprobs, device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
@@ -106,6 +109,8 @@ class Experience:
             self.loss_mask = self.loss_mask.pin_memory()
         if self.action_mask is not None:
             self.action_mask = self.action_mask.pin_memory()
+        if self.rollout_logprobs is not None:
+            self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         return self
 
 

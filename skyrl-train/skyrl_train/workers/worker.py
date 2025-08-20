@@ -16,7 +16,8 @@ import torch.distributed
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
 
-from skyrl_train.utils import masked_mean, ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
@@ -24,7 +25,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -684,6 +685,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
+        rollout_action_logprobs = experience.rollout_logprobs
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -704,6 +706,7 @@ class PolicyWorkerBase(Worker):
                 advantages,
                 config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
             )
         # entropy
         with torch.no_grad():
@@ -719,11 +722,12 @@ class PolicyWorkerBase(Worker):
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
-            kl_loss = action_log_probs - base_action_log_probs
-            if self.cfg.trainer.algorithm.use_kl_estimator_k3:
-                kl_loss = -kl_loss
-                r = kl_loss.exp()
-                kl_loss = r - 1.0 - kl_loss
+            kl_loss = compute_approx_kl(
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_mask,
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
             kl_loss = torch.tensor(0.0)

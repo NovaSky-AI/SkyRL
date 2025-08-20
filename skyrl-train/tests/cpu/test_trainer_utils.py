@@ -334,6 +334,7 @@ def test_handle_dynamic_sampling_null_strategy():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_metrics": None,
+        "rollout_logprobs": [[0.16, 0.4], [0.2, 0.3]],
     }
     uids = ["uid1", "uid2"]
     sampling_config = {"type": None}
@@ -353,6 +354,7 @@ def test_handle_dynamic_sampling_invalid_strategy():
         "response_ids": [[7, 8]],
         "rewards": [[1.0, 2.0]],
         "loss_masks": [[1, 1]],
+        "rollout_logprobs": [[0.16, 0.4]],
     }
     uids = ["uid1"]
     sampling_config = {"type": "invalid_strategy"}
@@ -378,6 +380,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
         "loss_masks": [[1, 1]] * 6,
         "stop_reasons": ["length"] * 6,
         "rollout_metrics": None,
+        "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
     }
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -391,6 +394,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
     assert len(result_output["prompt_token_ids"]) == 6
     assert len(result_output["response_ids"]) == 6
     assert len(result_output["rewards"]) == 6
+    assert len(result_output["rollout_logprobs"]) == 6
     assert len(result_uids) == 6
 
     # Check that bad uid2 samples were replaced with good samples
@@ -408,6 +412,7 @@ def test_handle_replace_sampling_insufficient_good_samples():
         "loss_masks": [[1, 1]] * 4,
         "stop_reasons": ["length"] * 4,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids = ["uid1", "uid1", "uid2", "uid2"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -431,6 +436,7 @@ def test_handle_replace_sampling_single_sample_per_prompt():
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop", "stop"],
         "rollout_metrics": None,
+        "rollout_logprobs": [[0.1, 0.2]],
     }
     uids = ["uid1", "uid2"]
     sampling_config = {"n_samples_per_prompt": 1, "min_replace_ratio": 0.3}
@@ -454,6 +460,7 @@ def test_handle_replace_sampling_token_level_rewards():
         "loss_masks": [[1, 1]] * 4,
         "stop_reasons": ["stop"] * 4,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids = ["uid1", "uid1", "uid2", "uid2"]  # uid1: [3.0, 7.0] (good), uid2: [2.0, 2.0] (bad)
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -477,6 +484,7 @@ def test_handle_filter_sampling_sufficient_prompts():
         "loss_masks": [[1, 1]] * 4,
         "stop_reasons": ["stop"] * 4,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids = ["uid1", "uid1", "uid2", "uid2"]
     sampling_config = {
@@ -508,6 +516,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids = ["uid1", "uid1"]
     sampling_config = {
@@ -541,6 +550,7 @@ def test_handle_filter_sampling_accumulation():
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids1 = ["uid1", "uid1"]
 
@@ -552,6 +562,7 @@ def test_handle_filter_sampling_accumulation():
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids2 = ["uid2", "uid2"]
 
@@ -591,6 +602,7 @@ def test_handle_filter_sampling_single_sample_per_prompt():
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     uids = ["uid1", "uid2"]  # Different UIDs, single sample each
     sampling_config = {
@@ -619,6 +631,7 @@ def test_filter_generator_output():
         "loss_masks": [[1, 1]] * 3,
         "stop_reasons": ["length", "length", "stop"],
         "rollout_metrics": {"metric": "value"},
+        "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
@@ -630,6 +643,7 @@ def test_filter_generator_output():
     assert filtered["loss_masks"] == [[1, 1]] * 2
     assert filtered["stop_reasons"] == ["length", "stop"]
     assert filtered["rollout_metrics"] == {"metric": "value"}
+    assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
 
 
 def test_validate_generator_output_valid_case():
@@ -648,6 +662,7 @@ def test_validate_generator_output_valid_case():
         loss_masks=[[1, 1, 0], [1, 1], [0]],
         stop_reasons=["stop", "length", "stop"],
         rollout_metrics={"metric1": 0.5, "metric2": 0.6},
+        rollout_logprobs=None,
     )
 
     # Should not raise any exceptions
@@ -657,13 +672,22 @@ def test_validate_generator_output_valid_case():
     generator_output["rewards"] = [0.5, 0.6, 0.7]
     validate_generator_output(input_batch, generator_output)
 
+    # valid rollout logprobs
+    generator_output["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
+    validate_generator_output(input_batch, generator_output)
+
 
 def test_validate_generator_output_empty_response_ids():
     """Test validate_generator_output raises RuntimeError when response_ids is empty."""
     input_batch = GeneratorInput(prompts=["prompt1"], env_classes=["env1"], env_extras=None, sampling_params=None)
 
     generator_output = GeneratorOutput(
-        prompt_token_ids=[[1, 2, 3]], response_ids=[], rewards=[], loss_masks=[], stop_reasons=[]  # Empty response_ids
+        prompt_token_ids=[[1, 2, 3]],
+        response_ids=[],
+        rewards=[],
+        loss_masks=[],
+        stop_reasons=[],
+        rollout_logprobs=[],  # Empty response_ids
     )
 
     with pytest.raises(RuntimeError, match="No outputs generated"):
@@ -685,6 +709,7 @@ def test_validate_generator_output_mismatched_prompts_responses():
         rewards=[0.5, 0.7],
         loss_masks=[[1, 1], [1, 0]],
         stop_reasons=["eos", "eos"],
+        rollout_logprobs=None,
     )
 
     with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
@@ -703,6 +728,7 @@ def test_validate_generator_output_all_loss_masked():
         rewards=[0.5, 0.7],
         loss_masks=[[0, 0], [0, 0]],  # All zeros - completely loss masked
         stop_reasons=["eos", "eos"],
+        rollout_logprobs=None,
     )
 
     # Capture log output to verify warning is issued
@@ -725,6 +751,7 @@ def test_validate_generator_output_mismatched_list_lengths():
         rewards=[0.5, 0.7, 0.9],  # Length 3 - mismatch!
         loss_masks=[[1, 1], [1, 0]],
         stop_reasons=["eos", "eos"],
+        rollout_logprobs=None,
     )
 
     with pytest.raises(AssertionError, match="Generator output rewards length must be equal to response_ids length"):
@@ -747,6 +774,7 @@ def test_validate_generator_output_element_length_mismatch():
         loss_masks=[[1, 1], [1], [1, 1]],  # loss masks are not the same length as response ids
         stop_reasons=["stop", "length", "stop"],
         rollout_metrics={"metric1": 0.5, "metric2": 0.6},
+        rollout_logprobs=None,
     )
 
     with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
@@ -755,4 +783,16 @@ def test_validate_generator_output_element_length_mismatch():
     generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
     generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
     with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
+        validate_generator_output(input_batch, generator_output)
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        response_ids=[[7, 8], [9, 10], [11, 12]],
+        rewards=[0.5, 0.7, -0.1],
+        loss_masks=[[1, 1], [1, 0], [1, 1]],
+        stop_reasons=["eos", "eos", "length"],
+        rollout_logprobs=[[0.17, 0.2], [0.9], [0.1, 0.2]],  # Second entry has length 1 - mismatch !
+    )
+
+    with pytest.raises(AssertionError, match="Response ids and rollout logprobs must have the same length"):
         validate_generator_output(input_batch, generator_output)

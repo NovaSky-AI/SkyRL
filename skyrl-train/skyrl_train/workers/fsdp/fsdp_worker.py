@@ -35,7 +35,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking)
 
-    def init_model(self, model_path):
+    def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
@@ -44,6 +44,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
             train_batch_size=self.cfg.trainer.train_batch_size,
+            num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
         self.strategy = strategy
@@ -106,22 +107,22 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             )
         params = self.model.model.state_dict()
 
-        for name, param in params.items():
-            # broadcast
-            if not self.use_cuda_ipc:
+        if not self.use_cuda_ipc:
+            for name, param in params.items():
                 if torch.distributed.get_rank() == 0:
                     shape = param.shape
 
                     update_weight_task = asyncio.create_task(
-                        inference_engine_client.update_named_weight(
+                        inference_engine_client.update_named_weights(
                             {
-                                "name": name,
-                                "dtype": self.cfg.generator.model_dtype,
-                                "shape": shape,
+                                "names": [name],
+                                "dtypes": [self.cfg.generator.model_dtype],
+                                "shapes": [shape],
                             }
                         )
                     )
 
+                # broadcast
                 def gather_and_broadcast(param):
                     # For FSDP, gather parameter and broadcast to all InferenceEngines by rank 0
                     device = torch.cuda.current_device()
@@ -134,19 +135,22 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                 await asyncio.to_thread(gather_and_broadcast, param)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
+                torch.distributed.barrier()
+        # CUDA IPC
+        else:
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            current_size = 0
 
-            # CUDA IPC
-            else:
+            for name, param in params.items():
                 from torch.multiprocessing.reductions import reduce_tensor
 
                 device = torch.cuda.current_device()
                 param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
                 param = param.to(generator_dtype)
-                weight = param.data.clone()
+                weight = param.detach().contiguous()
                 ipc_handle = reduce_tensor(weight)
 
                 ipc_handle = {get_physical_gpu_id(): ipc_handle}
-
                 ipc_handle_list = [None] * torch.distributed.get_world_size()
                 torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
@@ -155,23 +159,30 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                     for d in ipc_handle_list:
                         ipc_handles.update(d)
 
-                    shape = param.shape
+                    current_size += weight.nbytes
+                    weights_update_request["names"].append(name)
+                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                    weights_update_request["shapes"].append(param.shape)
+                    weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+                    # We send in batches as an optimization
+                    # sync if threshold is reached
+                    if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                        await inference_engine_client.update_named_weights(weights_update_request)
 
-                    await asyncio.create_task(
-                        inference_engine_client.update_named_weight(
-                            {
-                                "name": name,
-                                "dtype": self.cfg.generator.model_dtype,
-                                "shape": shape,
-                                "extras": {
-                                    "ipc_handles": ipc_handles,
-                                },
-                            }
-                        )
-                    )
-
+                        current_size = 0
+                        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                        # force collect any sent tensors if possible to be memory efficient
+                        torch.cuda.ipc_collect()
                 torch.distributed.barrier()
                 torch.cuda.synchronize()
+
+            # sync any remaining weights
+            if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
+                await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
+                current_size = 0
+                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            torch.distributed.barrier()
+            torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -209,7 +220,7 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking)
 
-    def init_model(self, model_path):
+    def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.critic.fsdp_config,
@@ -218,6 +229,7 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
             train_batch_size=self.cfg.trainer.train_batch_size,
+            num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
         self.strategy = strategy

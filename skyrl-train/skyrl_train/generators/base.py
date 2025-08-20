@@ -17,6 +17,7 @@ class GeneratorOutput(TypedDict):
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
+    rollout_logprobs: Optional[List[List[float]]]
 
 
 class GeneratorInterface(ABC):
