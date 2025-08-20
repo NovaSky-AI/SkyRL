@@ -13,10 +13,10 @@ from omegaconf import DictConfig
         ("Answer: \\boxed{0.5}", "\\frac{1}{2}", -1.0),
         ("Answer: \\boxed{\\text{forty-two}}", "42", -1.0),
         # test EOS tokens
-        ("<|im_start|>Answer: \\boxed{42}im_end|>", "42", 1.0),
-        ("<|im_start|>Answer: \\boxed{42}<|im_end|>", "42", -1.0),
-        ("Answer: \\boxed{43}<|eot_id|>", "42", 1.0),
-        ("Answer: \\boxed{43}|eot_id|>", "42", -1.0),
+        ("<|im_start|>Answer: \\boxed{42}<|im_end|>", "42", 1.0),
+        ("<|im_start|>Answer: \\boxed{42}im_end|>", "42", -1.0),
+        ("Answer: \\boxed{42}<|eot_id|>", "42", 1.0),
+        ("Answer: \\boxed{42}|eot_id|>", "42", -1.0),
     ],
 )
 def test_compute_score(output, ground_truth, expected):
