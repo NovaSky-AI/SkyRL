@@ -1,4 +1,5 @@
 import asyncio
+from typing import List, Dict
 
 import deepspeed
 import ray
@@ -157,44 +158,60 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
             current_size = 0
 
-            for name, param in model.named_parameters():
-                # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
-                with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
-                    weight = param.data.clone()
-                    weight = weight.to(generator_dtype)
-                    ipc_handle = reduce_tensor(weight)
+            module_to_params: Dict[str, List[str]] = {}
+            params = dict(model.named_parameters())
+            for param_name, param in model.named_parameters():
+                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
+                module_name = ".".join(param_name.split(".")[:-2])
+                if module_name not in module_to_params:
+                    module_to_params[module_name] = [param_name]
+                else:
+                    module_to_params[module_name].append(param_name)
 
-                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                    ipc_handle_list = [None] * torch.distributed.get_world_size()
-                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
+            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
+            # we need to pass the weights for all of these together.
+            # Overall, this doesn't hurt perf even in the general case
+            for module_name, param_names in module_to_params.items():
+                for name in param_names:
+                    param = params[name]
+                    # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
+                    with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
+                        weight = param.data.clone()
+                        weight = weight.to(generator_dtype)
+                        ipc_handle = reduce_tensor(weight)
 
-                    if torch.distributed.get_rank() == 0:
-                        ipc_handles = {}
-                        for d in ipc_handle_list:
-                            ipc_handles.update(d)
+                        ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                        ipc_handle_list = [None] * torch.distributed.get_world_size()
+                        torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
-                        shape = param.shape if self.zero_stage != 3 else param.ds_shape
+                        if torch.distributed.get_rank() == 0:
+                            ipc_handles = {}
+                            for d in ipc_handle_list:
+                                ipc_handles.update(d)
 
-                        weights_update_request["names"].append(name)
-                        weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                        weights_update_request["shapes"].append(shape)
-                        weights_update_request["extras"].append(
-                            {
-                                "ipc_handles": ipc_handles,
-                            }
-                        )
-                        current_size += weight.nbytes
-                        # We send in batches as an optimization
-                        # sync if threshold is reached
-                        if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
-                            await inference_engine_client.update_named_weights(weights_update_request)
-                            current_size = 0
-                            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-                            # force collect any sent tensors if possible to be memory efficient
-                            torch.cuda.ipc_collect()
+                            shape = param.shape if self.zero_stage != 3 else param.ds_shape
 
-                    torch.distributed.barrier()
-                    torch.cuda.synchronize()
+                            weights_update_request["names"].append(name)
+                            weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                            weights_update_request["shapes"].append(shape)
+                            weights_update_request["extras"].append(
+                                {
+                                    "ipc_handles": ipc_handles,
+                                }
+                            )
+                            current_size += weight.nbytes
+                            # We send in batches as an optimization
+                            # sync if threshold is reached
+                            if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                                await inference_engine_client.update_named_weights(weights_update_request)
+                                current_size = 0
+                                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                                # force collect any sent tensors if possible to be memory efficient
+                                torch.cuda.ipc_collect()
+
+                        torch.distributed.barrier()
+                        torch.cuda.synchronize()
 
             # sync any remaining weights
             if torch.distributed.get_rank() == 0 and len(weights_update_request["names"]) > 0:

@@ -1,5 +1,5 @@
 import asyncio
-
+from typing import Dict, List
 
 import ray
 import torch
@@ -141,40 +141,61 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
             current_size = 0
 
-            for name, param in params.items():
-                from torch.multiprocessing.reductions import reduce_tensor
+            module_to_params: Dict[str, List[str]] = {}
+            for param_name, param in params.items():
+                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
+                module_name = ".".join(param_name.split(".")[:-2])
+                if module_name not in module_to_params:
+                    module_to_params[module_name] = [param_name]
+                else:
+                    module_to_params[module_name].append(param_name)
 
-                device = torch.cuda.current_device()
-                param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                param = param.to(generator_dtype)
-                weight = param.detach().contiguous()
-                ipc_handle = reduce_tensor(weight)
+            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
+            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
+            # we need to pass the weights for all of these together.
+            # Overall, this doesn't hurt perf even in the general case
 
-                ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                ipc_handle_list = [None] * torch.distributed.get_world_size()
-                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+            for module_name, param_names in module_to_params.items():
+                for i, name in enumerate(param_names):
+                    param = params[name]
+                    module_done = i == len(param_names) - 1
 
-                if torch.distributed.get_rank() == 0:
-                    ipc_handles = {}
-                    for d in ipc_handle_list:
-                        ipc_handles.update(d)
+                    from torch.multiprocessing.reductions import reduce_tensor
 
-                    current_size += weight.nbytes
-                    weights_update_request["names"].append(name)
-                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                    weights_update_request["shapes"].append(param.shape)
-                    weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                    # We send in batches as an optimization
-                    # sync if threshold is reached
-                    if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
-                        await inference_engine_client.update_named_weights(weights_update_request)
+                    device = torch.cuda.current_device()
+                    param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                    param = param.to(generator_dtype)
+                    weight = param.detach().contiguous()
+                    ipc_handle = reduce_tensor(weight)
 
-                        current_size = 0
-                        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-                        # force collect any sent tensors if possible to be memory efficient
-                        torch.cuda.ipc_collect()
-                torch.distributed.barrier()
-                torch.cuda.synchronize()
+                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                    ipc_handle_list = [None] * torch.distributed.get_world_size()
+                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+
+                    if torch.distributed.get_rank() == 0:
+                        ipc_handles = {}
+                        for d in ipc_handle_list:
+                            ipc_handles.update(d)
+
+                        current_size += weight.nbytes
+                        weights_update_request["names"].append(name)
+                        weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                        weights_update_request["shapes"].append(param.shape)
+                        weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+                        # We send in batches as an optimization
+                        # sync if threshold is reached
+                        if (
+                            module_done
+                            and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
+                        ):
+                            await inference_engine_client.update_named_weights(weights_update_request)
+
+                            current_size = 0
+                            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                            # force collect any sent tensors if possible to be memory efficient
+                            torch.cuda.ipc_collect()
+                    torch.distributed.barrier()
+                    torch.cuda.synchronize()
 
             # sync any remaining weights
             if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
