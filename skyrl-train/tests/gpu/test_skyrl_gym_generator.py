@@ -56,7 +56,7 @@ register(
 )
 
 MODEL_TO_GENERATION_PROMPT = {
-    "Qwen/Qwen2.5-0.5B-Instruct": "<|im_start|>assistant\n",
+    "Qwen/Qwen2.5-1.5B-Instruct": "<|im_start|>assistant\n",
     "unsloth/Llama-3.2-1B-Instruct": "<|start_header_id|>assistant<|end_header_id|>\n\n",
     "Qwen/Qwen3-0.6B": "<|im_start|>assistant\n",
 }
@@ -290,7 +290,7 @@ async def test_generator_multi_turn_search():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
 async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
@@ -308,7 +308,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
             model=model_name,
             max_prompt_length=1000,
             max_input_length=3000,
-            max_generate_length=500,
+            max_generate_length=1000,
             env_class="test_env",
             num_prompts=2,
             max_turns=3,
@@ -332,6 +332,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
             ), "generation prompts should be loss masked out"
 
             # count number of eos tokens in masked_in_resp_ids
+            # NOTE: this could fail if the stop reason is "length" where model fails to generate eos
             assert (
                 sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 3
             )  # 1 eos for each assistant response
@@ -348,7 +349,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
 async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
