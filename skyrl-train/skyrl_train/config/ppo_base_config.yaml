@@ -177,6 +177,11 @@ generator:
   remote_inference_engine_urls: ["127.0.0.1:8001"]
   max_turns: 1
 
+  # custom chat template support and thinking token masking
+  enable_thinking_tokens: false
+  custom_chat_templates: {}
+  custom_chat_template_key: null
+
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:

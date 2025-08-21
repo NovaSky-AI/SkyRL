@@ -39,7 +39,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        self.custom_chat_template = get_custom_chat_template(model_name)
+        enable_thinking_tokens = getattr(generator_cfg, "enable_thinking_tokens", False)
+        custom_chat_template_key = getattr(generator_cfg, "custom_chat_template_key", None)
+        custom_chat_templates = getattr(generator_cfg, "custom_chat_templates", {})
+        
+        self.custom_chat_template = get_custom_chat_template(
+            model_name=model_name,
+            thinking_mode=enable_thinking_tokens,
+            custom_chat_template_key=custom_chat_template_key,
+            custom_chat_templates=custom_chat_templates
+        )
+        
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:

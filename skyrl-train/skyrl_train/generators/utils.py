@@ -5,8 +5,22 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
 
 CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
-    "qwen3_thinking": (
+    # Chat template for Qwen3 that preserves thinking tokens (trains on all tokens)
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # Chat template for Qwen3 that removes thinking tokens (masks them during training)
+    "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
@@ -28,11 +42,26 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(model_name: str) -> str:
+
+def get_custom_chat_template(model_name: str, thinking_mode: bool = False, custom_chat_template_key: Optional[str] = None, custom_chat_templates: Optional[dict] = None) -> Optional[str]:
+    ## Get option for custom chat templates + the key to index into the dict. Also pass in thinking mode for native Qwen Support (configurable for future models)
+    all_templates = {**CUSTOM_CHAT_TEMPLATES}
+    if custom_chat_templates:
+        all_templates.update(custom_chat_templates)
+    
+    if custom_chat_template_key:
+        if custom_chat_template_key in all_templates:
+            return all_templates[custom_chat_template_key]
+        else:
+            raise ValueError(f"Custom chat template key '{custom_chat_template_key}' not found. Available keys: {list(all_templates.keys())}")
+    
     if "Qwen3" in model_name:
-        return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
-    else:
-        return None
+        if thinking_mode:   
+            return all_templates["qwen3_with_thinking"]
+        else:
+            return all_templates["qwen3_without_thinking"]
+    
+    return None
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
