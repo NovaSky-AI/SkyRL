@@ -3,6 +3,11 @@
 from skyrl_gym.envs.registration import register
 
 register(
+    id="aime",
+    entry_point="skyrl_gym.envs.aime.env:AIMEEnv",
+)
+
+register(
     id="gsm8k",
     entry_point="skyrl_gym.envs.gsm8k.env:GSM8kEnv",
 )

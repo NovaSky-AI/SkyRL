@@ -2,7 +2,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightUpdateRequest,
+    NamedWeightsUpdateRequest,
 )
 import asyncio
 from typing import List, Any, Optional
@@ -96,9 +96,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
 
-        # something went wrong
-        if any([len(response) == 0 for response in responses]) or not all(
-            [isinstance(sample_ids, list) for sample_ids in response_ids]
+        if any([len(response) == 0 for response in responses]) or (
+            add_resp_ids and not all([isinstance(sample_ids, list) for sample_ids in response_ids])
         ):
             raise RuntimeError(
                 "Did not receive responses / response ids for some prompts. This should never happen. There is likely something wrong with the inference engine"
@@ -192,8 +191,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             rank_offset_count += engine.tp_size
         await asyncio.gather(*tasks)
 
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
-        return await self._run_on_all_engines("update_named_weight", request=request)
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+        return await self._run_on_all_engines("update_named_weights", request=request)
 
     async def reset_prefix_cache(self):
         return await self._run_on_all_engines("reset_prefix_cache")
