@@ -126,12 +126,13 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
 
     try:
         all_items = io.list_dir(checkpoint_base_path)
+
         # Filter for directories that match the global_step_* pattern
         checkpoint_dirs = []
         for item in all_items:
             # Get just the basename for pattern matching
             basename = os.path.basename(item)
-            if basename.startswith("global_step_") and io.isdir(item):
+            if basename.startswith("global_step_") and io.isdir(os.path.join(checkpoint_base_path, basename)):
                 checkpoint_dirs.append(basename)
 
         return sorted(checkpoint_dirs)
