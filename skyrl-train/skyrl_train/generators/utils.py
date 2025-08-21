@@ -30,7 +30,7 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% set full_content = message['content'] %}"
         "{% set mycontent = message['content'] %}"
         "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
-        "{% if '</think>' in full_content and not is_last_message %}"
+        "{% if '</think>' in full_content %}"
         "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
         "{% endif %}"
         "{{mycontent + '<|im_end|>'}}"
