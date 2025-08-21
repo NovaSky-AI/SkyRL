@@ -14,6 +14,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, conc
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
+import boto3
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -89,8 +90,7 @@ def extract_step_from_path(path: str) -> int:
 
 def _upload_directory_to_s3(local_dir: str, bucket_name: str, s3_prefix: str):
     """Upload a directory to S3 recursively"""
-    import boto3
-    import os
+
     
     s3 = boto3.client("s3")
     for root, dirs, files in os.walk(local_dir):
@@ -98,7 +98,6 @@ def _upload_directory_to_s3(local_dir: str, bucket_name: str, s3_prefix: str):
             relative_path = os.path.relpath(os.path.join(root, file), local_dir)
             s3_key = os.path.join(s3_prefix, relative_path)
             local_file_path = os.path.join(root, file)
-            print(f"[S3 DEBUG] Uploading {local_file_path} -> s3://{bucket_name}/{s3_key}")
             s3.upload_file(local_file_path, bucket_name, s3_key)
 
 
@@ -111,7 +110,7 @@ def export_checkpoint_to_s3(bucket: str, prefix: str, local_checkpoint_dir: str,
         local_checkpoint_dir: Path to local checkpoint directory (e.g., /path/to/global_step_10)
         global_step: Current training step number
     """
-    print(f"Exporting checkpoint to S3: s3://{bucket}/{prefix}/global_step_{global_step}")
+    logger.info(f"Exporting checkpoint to S3: s3://{bucket}/{prefix}/global_step_{global_step}")
     if not bucket:
         logger.error("S3 export enabled but no bucket specified. Skipping S3 export.")
         return
@@ -123,11 +122,8 @@ def export_checkpoint_to_s3(bucket: str, prefix: str, local_checkpoint_dir: str,
         
         logger.info(f"Exporting checkpoint to S3: s3://{bucket}/{s3_prefix}")
         _upload_directory_to_s3(local_checkpoint_dir, bucket, s3_prefix)
-        print(f"[S3 DEBUG] Upload completed successfully!")
         logger.info(f"Successfully exported checkpoint global_step_{global_step} to S3")
         
-    except ImportError as e:
-        logger.error(f"Cannot export to S3: {e}. Please install required dependencies.")
     except Exception as e:
         logger.error(f"Failed to export checkpoint global_step_{global_step} to S3: {e}")
 

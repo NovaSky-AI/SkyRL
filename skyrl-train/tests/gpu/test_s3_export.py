@@ -85,7 +85,7 @@ def verify_s3_export(bucket: str, prefix: str, global_step: int) -> bool:
     """Verify that checkpoint was exported to S3"""
     try:
         cmd = ["aws", "s3", "ls", f"s3://{bucket}/{prefix}/global_step_{global_step}/", "--recursive"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         
         if result.returncode != 0:
             print(f"S3 ls failed: {result.stderr}")
@@ -111,7 +111,7 @@ def download_from_s3(bucket: str, prefix: str, local_dir: Path, global_step: int
         local_path = local_dir / f"global_step_{global_step}"
         
         cmd = ["aws", "s3", "sync", s3_path, str(local_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         
         
         if result.returncode != 0:
@@ -138,7 +138,7 @@ def cleanup_s3_objects(bucket: str, prefix: str):
     """Cleanup S3 objects after test"""
     try:
         cmd = ["aws", "s3", "rm", f"s3://{bucket}/{prefix}/", "--recursive"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if result.returncode == 0:
             print(f"Cleaned up S3 objects: s3://{bucket}/{prefix}/")
         else:
@@ -168,7 +168,7 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
     import time
     s3_prefix = f"gpu-test/s3-export-{int(time.time())}"
     
-    print(f"\\n=== S3 Export Test ===")
+    print(f"\n=== S3 Export Test ===")
     print(f"Strategy: {strategy}")
     print(f"S3 Bucket: {test_s3_bucket}")
     print(f"S3 Prefix: {s3_prefix}")
@@ -178,7 +178,7 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
     
     try:
         # Step 1: Initialize worker
-        print("\\n--- Step 1: Initialize Worker ---")
+        print("\n--- Step 1: Initialize Worker ---")
         actor_group = init_worker_with_type(
             "policy",
             shared_pg=None,
@@ -189,7 +189,7 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         
         # Step 2: Do training step
-        print("\\n--- Step 2: Training Step ---")
+        print("\n--- Step 2: Training Step ---")
         dummy_experience = make_dummy_experience()
         global_step = 1
         
@@ -200,7 +200,7 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
         )
         
         # Step 3: Save checkpoint (should trigger S3 export)
-        print("\\n--- Step 3: Save Checkpoint with S3 Export ---")
+        print("\n--- Step 3: Save Checkpoint with S3 Export ---")
         checkpoint_path = temp_ckpt_dir / f"global_step_{global_step}" / "policy"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
         
@@ -224,13 +224,13 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
         )
         
         # Step 4: Verify S3 export worked
-        print("\\n--- Step 4: Verify S3 Export ---")
+        print("\n--- Step 4: Verify S3 Export ---")
         s3_export_success = verify_s3_export(test_s3_bucket, s3_prefix, global_step)
         assert s3_export_success, "S3 export verification failed"
         print("✅ S3 export verified successfully")
         
         # Step 5: Clear local checkpoints and download from S3
-        print("\\n--- Step 5: Clear Local and Download from S3 ---")
+        print("\n--- Step 5: Clear Local and Download from S3 ---")
         
         # Get model state before clearing (for comparison)
         test_input = torch.randint(0, 1000, (1, 20), device="cpu")
@@ -248,7 +248,7 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
         print("✅ S3 download successful")
         
         # Step 6: Load checkpoint and verify
-        print("\\n--- Step 6: Load Checkpoint and Verify ---")
+        print("\n--- Step 6: Load Checkpoint and Verify ---")
         downloaded_checkpoint_path = temp_ckpt_dir / f"global_step_{global_step}" / "policy"
         assert downloaded_checkpoint_path.exists(), f"Downloaded checkpoint not found: {downloaded_checkpoint_path}"
         
@@ -260,11 +260,11 @@ def test_s3_export_and_resume(ray_init_fixture, test_s3_bucket, temp_ckpt_dir, s
         torch.testing.assert_close(original_logits, reloaded_logits, atol=1e-6, rtol=1e-6)
         print("✅ Model state verification passed")
         
-        print("\\n🎉 S3 export and resume test PASSED!")
+        print("\nS3 export and resume test PASSED!")
         
     finally:
         # Cleanup S3 objects
-        print("\\n--- Cleanup ---")
+        print("\n--- Cleanup ---")
         cleanup_s3_objects(test_s3_bucket, s3_prefix)
 
 
