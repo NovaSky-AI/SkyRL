@@ -95,11 +95,3 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.dump_data_batch=true \
   trainer.ckpt_path="$HOME/ckpts/qwen3_no_thinking_test" \
   $@
-
-# Add these lines to your script:
-trainer.train_batch_size=1 \          # Process only 1 sample
-trainer.eval_batch_size=1 \           # Eval only 1 sample  
-trainer.epochs=1 \                    # Only 1 epoch
-trainer.max_steps=1 \                 # Stop after 1 step
-trainer.eval_interval=-1 \            # Disable evaluation
-trainer.eval_before_train=false \     # Skip initial eval
