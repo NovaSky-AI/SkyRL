@@ -10,7 +10,7 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_c
 from skyrl_gym.envs import register
 
 # TODO: Update this path based on where the environment is implemented.
-ENV_PATH = "examples.demo.step3:MultiplyEnv"
+ENV_PATH = "examples.demo.step1:MultiplyEnv"
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
