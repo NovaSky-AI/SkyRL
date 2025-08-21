@@ -606,7 +606,7 @@ class PolicyWorkerBase(Worker):
 
         dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
 
-        dynamic_bsz = getattr(self.cfg.trainer, 'use_dynamic_batching', False)
+        dynamic_bsz = self.cfg.trainer.use_dynamic_batching
         dataloader = BatchIterator(
             train_data, cfg=self.cfg, dp_size=self.mesh_rank.dp_size, drop_last=False, dp_group=dp_group, dynamic_bsz=dynamic_bsz
         )

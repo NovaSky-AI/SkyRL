@@ -76,8 +76,6 @@ class BatchIterator:
 
         self._create_micro_batches()
 
-        self._reset_iterator()
-
         self._log_configuration()
 
     def _prepare_attributes(self):
@@ -175,10 +173,6 @@ class BatchIterator:
 
             self._all_micro_batches.append(micro_batch)
 
-    def _reset_iterator(self):
-        """Reset the iterator for the next epoch."""
-        self._current_idx = 0
-
     def _log_configuration(self):
         """Log the configuration for debugging."""
         base_info = (
@@ -199,21 +193,10 @@ class BatchIterator:
 
     def __iter__(self):
         """Return the iterator itself."""
-        self._reset_iterator()
-        for i in range(len(self._all_micro_batches)):
-            if self._current_idx >= len(self._all_micro_batches):
-                self._reset_iterator()
-                raise StopIteration
-
-            micro_batch = self._all_micro_batches[self._current_idx]
-
+        for micro_batch in self._all_micro_batches:
             exp = self.batch_to_experience(micro_batch)
-
             if self.dynamic_bsz:
                 exp.info["micro_batch_utilization"] = micro_batch["attention_mask"].sum().item() / self.max_token_len
-
-            self._current_idx += 1
-
             yield exp
 
     @property

@@ -18,7 +18,7 @@ def ceildiv(a: int, b: int) -> int:
 
 def get_reverse_idx(idx_map: List[int]) -> List[int]:
     """Build the inverse of an index mapping."""
-    reverse_idx_map = copy.deepcopy(idx_map)
+    reverse_idx_map = [0] * len(idx_map)
     for i, idx in enumerate(idx_map):
         reverse_idx_map[idx] = i
     return reverse_idx_map
@@ -183,32 +183,6 @@ def calculate_num_micro_batches(
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
 
     return num_micro_batches
-
-
-def balance_partitions_by_compute(partitions: List[List[int]], token_counts: List[int]) -> List[List[int]]:
-    """
-    Reorder partitions to balance computational load.
-
-    Uses squared sequence lengths to approximate attention computation cost.
-
-    Args:
-        partitions: List of partitions (each is a list of indices)
-        token_counts: Token count for each sequence
-
-    Returns:
-        Reordered partitions
-    """
-    # Calculate computational load for each partition
-    partition_loads = []
-    for partition in partitions:
-        # Use sum of squared lengths to approximate attention cost
-        load = sum(token_counts[idx] ** 2 for idx in partition)
-        partition_loads.append(load)
-
-    # Sort partitions by load (descending)
-    sorted_indices = sorted(range(len(partitions)), key=lambda i: partition_loads[i], reverse=True)
-    return [partitions[i] for i in sorted_indices]
-
 
 def create_fixed_partitions(batch_size: int, num_partitions: int) -> List[List[int]]:
     """Create fixed-size partitions of indices."""

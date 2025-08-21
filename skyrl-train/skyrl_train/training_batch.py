@@ -231,10 +231,10 @@ class TensorBatch(dict, Generic[DictType]):
             raise ValueError("Empty partition encountered")
 
         micro_batch_data = {}
+        indices = torch.tensor(partition, dtype=torch.long, device=self.device)
         for key, value in self.items():
             if value is not None:
                 if isinstance(value, torch.Tensor):
-                    indices = torch.tensor(partition, dtype=torch.long)
                     micro_batch_data[key] = value[indices]
                 else:
                     raise ValueError(f"Unsupported type {type(value)} for key {key}")
