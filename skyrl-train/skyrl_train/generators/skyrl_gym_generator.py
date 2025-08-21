@@ -53,7 +53,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
-        # correctly format and tokenize observations. Using both user and assistant messages as most observations are user messages.
+        # correctly format and tokenize observations.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -178,8 +178,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
                 print(
                     "WARNING: postprocessed action may violate token-in-token-out. Ideally you "
-                    "post-process it in the token space rather than string space, and you can do "
-                    "it in SkyRLGymGenerator."
+                    "post-process it in the token space rather than string space. "
+                    "A better solution coming soon."
                 )
                 output = env_step_output["postprocessed_action"]
                 output_ids = self.tokenizer.encode(output, add_special_tokens=False)
@@ -208,7 +208,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         env.close()  # does nothing for now
 
-        # TODO(Charlie): this makes the prompt_ids include the generation prompt, is this what we want?
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
@@ -550,7 +549,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
         else:
-            # TODO(Charlie): or assert done? i.e. can we still prompt another turn if no observation?
             if not done:
                 input_ids += self.generation_prompt_ids
                 loss_mask += [0] * len(self.generation_prompt_ids)

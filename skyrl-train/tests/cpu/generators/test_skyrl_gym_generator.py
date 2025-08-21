@@ -20,9 +20,9 @@ MOCK_TOKENIZER_ENCODED_IDS = [1, 2, 3, 4]
 @pytest.fixture
 def mock_tokenizer():
     """
-    A mock tokenizer that encodes any non-empty string to `[1,2,3,4]`.
+    A mock tokenizer that encodes any non-empty string to `MOCK_TOKENIZER_ENCODED_IDS`.
     For chat template, if `tokenize=False`, concatenate the content of each message.
-    If `tokenize=True`, return `[1,2,3,4]` for each message.
+    If `tokenize=True`, return `MOCK_TOKENIZER_ENCODED_IDS` for each message.
     """
     tokenizer = MagicMock()
 
@@ -461,7 +461,7 @@ async def test_length_limit_exceeded_during_conversation(
         )
 
     # We start with initial prompt len 4 due to mock_apply_chat_template
-    # Each turn, obesrvation is 4 tokens due to mock_encode
+    # Each turn, observation is 4 tokens due to mock_encode
     mock_env.step.side_effect = mock_step_never_done
     max_input_length = 20  # Low limit to trigger length exceeded
 
