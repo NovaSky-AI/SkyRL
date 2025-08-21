@@ -138,8 +138,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history, _ = env.init(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
-            # If add_generation_prompt when retokenize_chat_history==True, both the prompt_ids and
-            # response_ids will include the generation prompt due to how `response_encodings["input_ids"]` works.
+            # If retokenize_chat_history==True, avoid including the generation prompt in both the
+            # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
             tokenize=True,
         )
