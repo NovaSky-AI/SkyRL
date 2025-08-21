@@ -21,8 +21,8 @@ uv run --isolated --extra vllm -m examples.demo.main \
   trainer.train_batch_size=256 \
   trainer.policy_mini_batch_size=64 \
   trainer.critic_mini_batch_size=64 \
-  trainer.micro_forward_batch_size_per_gpu=64 \
-  trainer.micro_train_batch_size_per_gpu=64 \
+  trainer.micro_forward_batch_size_per_gpu=16 \
+  trainer.micro_train_batch_size_per_gpu=16 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
@@ -38,7 +38,7 @@ uv run --isolated --extra vllm -m examples.demo.main \
   generator.batched=false \
   environment.env_class=multiply_demo \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.6 \
+  generator.gpu_memory_utilization=0.8 \
   trainer.logger="console" \
   trainer.project_name="demo" \
   trainer.run_name="multiply_demo" \
