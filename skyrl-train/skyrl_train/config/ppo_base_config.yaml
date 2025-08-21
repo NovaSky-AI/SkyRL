@@ -179,7 +179,55 @@ generator:
 
   # custom chat template support and thinking token masking
   enable_thinking_tokens: false
-  custom_chat_templates: {}
+  custom_chat_templates:
+    qwen3_with_thinking: |
+      {% for message in messages %}
+      {% if (message['role'] != 'assistant') %}
+      {{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}
+      {% elif (message['role'] == 'assistant')%}
+      {{'<|im_start|>' + message['role'] + '\n'}}
+      {% generation %}
+      {{message['content'] + '<|im_end|>'}}
+      {% endgeneration %}
+      {{'\n'}}
+      {% endif %}
+      {% endfor %}
+    
+    qwen3_without_thinking: |
+      {% for message in messages %}
+      {% if (message['role'] != 'assistant') %}
+      {{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}
+      {% elif (message['role'] == 'assistant')%}
+      {{'<|im_start|>' + message['role'] + '\n'}}
+      {% generation %}
+      {% set full_content = message['content'] %}
+      {% set mycontent = message['content'] %}
+      {% if '</think>' in full_content %}
+      {% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}
+      {% endif %}
+      {{mycontent + '<|im_end|>'}}
+      {% endgeneration %}
+      {{'\n'}}
+      {% endif %}
+      {% endfor %}
+    
+    custom_thinking_remover: |
+      {% for message in messages %}
+      {% if message["role"] == "user" %}
+      Q: {{message["content"]}}
+      {% elif message["role"] == "assistant" %}
+      A: {% generation %}
+      {% set content = message["content"] %}
+      {% if "</think>" in content %}
+      {% set answer = content.split("</think>")[-1].strip() %}
+      {{answer}}
+      {% else %}
+      {{content}}
+      {% endif %}
+      {% endgeneration %}
+      {% endif %}
+      {% endfor %}
+  
   custom_chat_template_key: null
 
   override_existing_update_group: "auto" # "auto", "enable", "disable"
