@@ -115,6 +115,7 @@ trainer:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
       min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+    
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -162,6 +163,8 @@ generator:
   num_inference_engines: 1
   backend: "vllm"
   weight_sync_backend: "nccl"
+  # if using cuda_ipc, we send in batches of this size in GB
+  weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
   n_samples_per_prompt: 5
   async_engine: true
