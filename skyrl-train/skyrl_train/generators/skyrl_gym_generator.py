@@ -231,8 +231,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
 
-        # TODO(Charlie): do we need to truncate generation_prompt_ids of the last round?
-
         # need to truncate loss mask correctly for responses that go to max length
         if self.max_turns > 1:
             # max total resp length = max tokens (max length of final turn generation) + max_input_length (max input for any generation turn) - len(original prompt)
@@ -293,8 +291,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
         for i, (response, response_ids, env) in enumerate(zip(responses, all_response_ids, envs)):
-            # step on function and compute reward
-            # assert self.tokenizer.decode(response_ids) == response  # TODO(Charlie): remove this
+            # step on environment and compute reward
             env_step_output: BaseTextEnvStepOutput = env.step(response)
             reward = env_step_output["reward"]
             rewards.append(reward)
