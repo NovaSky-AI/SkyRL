@@ -29,14 +29,11 @@ class MultiplyEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         answer = self._parse_action(action)
         is_correct = answer is not None and answer.strip() == str(self.ground_truth).strip()
-        
+
         # TODO:
-          # Check whether we have reached the maximum number of turns.
-          # If not, provide some feedback to the agent. For example, if `_parse_action` returns `None`, you can provide feedback like "Please provide your answer in the format \\boxed{your_answer}."
+        # Check whether we have reached the maximum number of turns.
+        # If not, provide some feedback to the agent. For example, if `_parse_action` returns `None`, you can provide feedback like "Please provide your answer in the format \\boxed{your_answer}."
 
         return BaseTextEnvStepOutput(
-          observations=[],
-          reward=1.0 if is_correct else 0.0,
-          done=True,
-          metadata={"parsed_answer": answer}
+            observations=[], reward=1.0 if is_correct else 0.0, done=True, metadata={"parsed_answer": answer}
         )

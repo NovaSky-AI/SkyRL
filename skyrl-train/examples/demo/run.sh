@@ -2,7 +2,7 @@ set -x
 
 # bash examples/demo/run.sh
 
-DATA_DIR="$HOME/data/demo"
+DATA_DIR="$HOME/data/multiply"
 NUM_GPUS=1
 
 uv run --isolated --extra vllm -m examples.demo.main \

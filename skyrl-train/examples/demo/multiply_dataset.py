@@ -9,6 +9,7 @@ from datasets import Dataset
 
 # uv run -- python examples/demo/multiply_dataset.py --output_dir $HOME/data/demo --num_digits 3 --train_size 10000 --test_size 200
 
+
 def generate_multiplication_problem(num_digits):
     """Generate a random multiplication problem with n-digit numbers."""
     # Generate random n-digit numbers
