@@ -52,9 +52,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
-        # Code below is only for use_conversation_multi_turn==True and custom_chat_template==None
-        # This is used to format observation in `_get_next_input_ids_with_multiturn_chat_template()`.
-        # Similar to https://github.com/volcengine/verl/blob/6bbbff13a131dac9f29411f180ccabe2fe64e786/verl/experimental/agent_loop/tool_agent_loop.py#L196
+        # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
+        # correctly format and tokenize observations. Using both user and assistant messages as most observations are user messages.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -130,8 +129,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         trajectory_id = uuid4().hex
         done = False
 
-        # Instantiate chat_history and chat_end_index, which are only used for retokenize_chat_history.
-        # need copy here since the prompt is a list of messages and we are going to modify it
+        # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
+        # Need copy here since the prompt is a list of messages and we are going to modify it.
         chat_history = copy.deepcopy(prompt)
         chat_end_index = len(chat_history)
 
@@ -139,8 +138,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history, _ = env.init(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
-            # otherwise the prompt_ids and response_ids will both include the generation prompt
-            # when retokenize_chat_history is True, due to how `response_encodings["input_ids"]` works.
+            # If add_generation_prompt when retokenize_chat_history==True, both the prompt_ids and
+            # response_ids will include the generation prompt due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
             tokenize=True,
         )
@@ -456,7 +455,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         new_obs: ConversationType,
     ):
         """
-        Update the chat history, loss mask, and input ids given a new model response and observation.
+        Update the chat history and input ids given a new model response and observation by retokenizing
+        the entire chat history. Hence token-in-token-out is not followed.
 
         loss_mask is not maintained because we get it at the end of the trajectory with
         `response_encodings["assistant_masks"]`.
@@ -464,8 +464,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             chat_history: The updated chat history.
             chat_end_index: The updated chat end index.
-            input_ids: The new input IDs after tokenizing the chat history, mainly used to check if
-              the input length is too long for next turn.
+            input_ids: The new input IDs after tokenizing the chat history.
         """
         assert self.use_conversation_multi_turn and self.custom_chat_template
         # remove eos token from end of output if it exists, since it will be reapplied by the chat template
@@ -496,7 +495,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         done: bool,
     ):
         """
-        Update the chat history, loss mask, and input ids given a new model response and observation.
+        Update the loss mask and input ids given a new model response and observation, following
+        token-in-token-out.
 
         This function is used if `use_conversation_multi_turn` is True. It assumes that the input to the LLM is formatted as a list of messages, with observations
         stored in user messages.
@@ -569,7 +569,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         logprobs: Optional[List[float]],
     ):
         """
-        Update the loss mask and input ids given a new model response and observation.
+        Update the loss mask and input ids given a new model response and observation, following
+        token-in-token-out.
 
         This function is used if `use_conversation_multi_turn` is False. It assumes that the input to the LLM is a list of token ids
         and that the multi-turn conversation happens in a single assistant message.

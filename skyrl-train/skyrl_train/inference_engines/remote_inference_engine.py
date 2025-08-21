@@ -89,7 +89,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
         if self.engine_backend == "vllm":
             for i, choice in enumerate(response.get("choices", [])):
-                # Since n=1, so choice of index i represents the output of `pompt[i]`
+                # Since n=1, index i represents the output for `prompt[i]`
                 assert choice["index"] == i, "Expect the choices to be ordered by index."
                 text = choice["text"]
                 outputs.append(text)
