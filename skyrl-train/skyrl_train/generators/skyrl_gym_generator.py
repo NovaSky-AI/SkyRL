@@ -50,6 +50,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             custom_chat_templates=custom_chat_templates
         )
         
+        print("CUSTOM CHAT TEMPLATE: ", self.custom_chat_template)
+
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:
@@ -230,6 +232,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
+            
+            # Debug output to verify masking is working
+            print(f"NON-BATCHED CUSTOM CHAT TEMPLATE DEBUG:")
+            print(f"  - Response length: {len(response_ids)}")
+            print(f"  - Loss mask length: {len(loss_mask)}")
+            print(f"  - Loss mask: {loss_mask}")
+            print(f"  - Masked tokens: {sum(loss_mask)}/{len(loss_mask)} ({sum(loss_mask)/len(loss_mask)*100:.1f}%)")
         else:
             response_ids = input_ids[initial_prompt_length:]
             assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
@@ -305,10 +314,47 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
+            # NOTE (sumanthrh): We add a guard since response_ids is `None` with remote inference engine
+            if all_response_ids is not None:
+                sample_response_ids = all_response_ids[i]
+            else:
+                sample_response_ids = self.tokenizer.encode(response)
+
+            # apple custom chat template masking if configured for batch mode
+            if self.custom_chat_template:
+                response_chat_history = [{"role": "assistant", "content": response}]
+                
+                response_encodings = self.tokenizer.apply_chat_template(
+                    response_chat_history,
+                    chat_template=self.custom_chat_template,
+                    add_generation_prompt=False,
+                    return_dict=True,
+                    return_assistant_tokens_mask=True,
+                    tokenize=True,
+                )
+                # update response IDs and loss mask from custom template (no length assertion fail)
+                custom_loss_mask = response_encodings["assistant_masks"]
+                sample_response_ids = response_encodings["input_ids"]
+                
+                # apply max_tokens truncation to both
+                if len(sample_response_ids) > max_tokens:
+                    sample_response_ids = sample_response_ids[:max_tokens]
+                    custom_loss_mask = custom_loss_mask[:max_tokens]
+                
+                loss_masks.append(custom_loss_mask)
+                
+                print(f"BATCHED CUSTOM CHAT TEMPLATE DEBUG:")
+                print(f"Response length: {len(sample_response_ids)}")
+                print(f"Loss mask length: {len(custom_loss_mask)}")
+                print(f"Loss mask: {custom_loss_mask}")
+                print(f"Masked tokens: {sum(custom_loss_mask)}/{len(custom_loss_mask)} ({sum(custom_loss_mask)/len(custom_loss_mask)*100:.1f}%)")
+            else:
+                # keep original default masking behaviour
+                if len(sample_response_ids) > max_tokens:
+                    sample_response_ids = sample_response_ids[:max_tokens]
+                loss_masks.append([1] * len(sample_response_ids))
+            
+            truncated_responses.append(sample_response_ids)
             if logprobs is not None:
                 sample_logprobs = logprobs[i][: len(response_ids)]
                 truncated_logprobs.append(sample_logprobs)
