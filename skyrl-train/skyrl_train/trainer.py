@@ -56,6 +56,7 @@ from skyrl_train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
     ResumeMode,
     DynamicSamplingState,
+    export_checkpoint_to_s3,
 )
 
 
@@ -1235,6 +1236,14 @@ class RayPPOTrainer:
             f.write(str(self.global_step))
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
+        if self.cfg.trainer.s3_export.enabled:
+            with Timer("s3_export", self.all_timings):
+                export_checkpoint_to_s3(
+                    bucket=self.cfg.trainer.s3_export.bucket,
+                    prefix=self.cfg.trainer.s3_export.prefix,
+                    local_checkpoint_dir=global_step_folder,
+                    global_step=self.global_step,
+                )
 
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):

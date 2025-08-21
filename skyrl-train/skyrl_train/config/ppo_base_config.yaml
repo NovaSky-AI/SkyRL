@@ -126,6 +126,10 @@ trainer:
   ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
   hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.
   export_path: "${oc.env:HOME}/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
+  s3_export:
+    enabled: false                              # Enable/disable S3 export
+    bucket: null                                # S3 bucket name (required if enabled)
+    prefix: "checkpoints/${run_name}"           # S3 key prefix
   bf16: true
   epochs: 1  # Number of passes over the full dataset
   update_epochs_per_batch: 1  # Number of gradient update passes over each train batch

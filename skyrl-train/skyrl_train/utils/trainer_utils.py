@@ -87,6 +87,49 @@ def extract_step_from_path(path: str) -> int:
         return int(basename.split(GLOBAL_STEP_PREFIX)[1])
     return -1
 
+def _upload_directory_to_s3(local_dir: str, bucket_name: str, s3_prefix: str):
+    """Upload a directory to S3 recursively"""
+    import boto3
+    import os
+    
+    s3 = boto3.client("s3")
+    for root, dirs, files in os.walk(local_dir):
+        for file in files:
+            relative_path = os.path.relpath(os.path.join(root, file), local_dir)
+            s3_key = os.path.join(s3_prefix, relative_path)
+            local_file_path = os.path.join(root, file)
+            print(f"[S3 DEBUG] Uploading {local_file_path} -> s3://{bucket_name}/{s3_key}")
+            s3.upload_file(local_file_path, bucket_name, s3_key)
+
+
+def export_checkpoint_to_s3(bucket: str, prefix: str, local_checkpoint_dir: str, global_step: int):
+    """Export a local checkpoint directory to S3.
+    
+    Args:
+        bucket: S3 bucket name
+        prefix: S3 prefix
+        local_checkpoint_dir: Path to local checkpoint directory (e.g., /path/to/global_step_10)
+        global_step: Current training step number
+    """
+    print(f"Exporting checkpoint to S3: s3://{bucket}/{prefix}/global_step_{global_step}")
+    if not bucket:
+        logger.error("S3 export enabled but no bucket specified. Skipping S3 export.")
+        return
+    if not prefix:
+        logger.error("S3 export enabled but no prefix specified. Skipping S3 export.")
+        return
+    try:
+        s3_prefix = f"{prefix}/global_step_{global_step}"
+        
+        logger.info(f"Exporting checkpoint to S3: s3://{bucket}/{s3_prefix}")
+        _upload_directory_to_s3(local_checkpoint_dir, bucket, s3_prefix)
+        print(f"[S3 DEBUG] Upload completed successfully!")
+        logger.info(f"Successfully exported checkpoint global_step_{global_step} to S3")
+        
+    except ImportError as e:
+        logger.error(f"Cannot export to S3: {e}. Please install required dependencies.")
+    except Exception as e:
+        logger.error(f"Failed to export checkpoint global_step_{global_step} to S3: {e}")
 
 def cleanup_old_checkpoints(ckpt_path: str, max_ckpts_to_keep: int, current_global_step: int):
     """Remove old global_step directories, keeping only the most recent max_ckpts_to_keep"""
