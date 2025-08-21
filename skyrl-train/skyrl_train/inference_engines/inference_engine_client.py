@@ -95,13 +95,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
 
-        if any([len(response) == 0 for response in responses]) or (
-            add_resp_ids and not all([isinstance(sample_ids, list) for sample_ids in response_ids])
-        ):
-            raise RuntimeError(
-                "Did not receive responses / response ids for some prompts. This should never happen. There is likely something wrong with the inference engine"
-            )
-
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
