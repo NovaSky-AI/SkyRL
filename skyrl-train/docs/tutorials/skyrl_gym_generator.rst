@@ -108,8 +108,8 @@ The three codepaths are:
 
 .. note::
 
-  Currently, the Qwen3 model by-default follows the 3rd codepath (i.e. TI/TO is not enforced). That
-  is, this codepath rollouts Qwen3 by following the inference chat template, and returns only the
+  Currently, the Qwen3 model by default follows the 3rd codepath (i.e. TI/TO is not enforced). That
+  is, this codepath rolls out Qwen3 by following the inference chat template, and returns only the
   last-turn thinking tokens to Generator for the training pipeline.
 
   It is debatable whether this is the best method to train Qwen3. We will soon add a configuration flag
