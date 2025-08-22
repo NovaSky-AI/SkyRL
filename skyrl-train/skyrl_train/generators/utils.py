@@ -96,7 +96,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
         "rollout_logprobs": (
             sum([output["rollout_logprobs"] for output in generator_outputs], [])
-            if generator_outputs[0]["rollout_logprobs"]
+            if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
     }

@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm -m examples.flash_rl.main_dapo_flashrl
+uv run --isolated --extra flashrl -m examples.flash_rl.main_dapo_flashrl
 """
 
 import ray

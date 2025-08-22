@@ -38,6 +38,7 @@ dependencies = [
     "jaxtyping",
     "skyrl-gym",
     "flash-attn",
+    "polars",
 ]
 
 [tool.uv]
@@ -65,7 +66,7 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
- 
+
 [project.optional-dependencies]
 deepspeed = [
     "deepspeed==0.16.5"
@@ -99,12 +100,12 @@ sglang = [
 ]
 flashrl = [
     # TODO (sumanthrh): Shift to install from git source
-    # Currently, this is the wheel built for commit a13b4adac at: https://github.com/SumanthRH/vllm/tree/flashrl
-    # Install from git source is currently breaking for some reason
-    "vllm @ https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7505+ga13b4adac-cp312-cp312-linux_x86_64.whl",
+    # Currently, this is the wheel built for commit 4b04dfc at: https://github.com/SumanthRH/vllm/tree/flashrl
+    # Install from git source is currently defaulting to cpu build for some reason
+    "vllm @ https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl",
     "torch==2.7.0",
     "flashinfer-python",
-    "torchvision"
+    "torchvision",
 ]
 
 [[tool.uv.index]]

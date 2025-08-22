@@ -1,17 +1,25 @@
 import pandas as pd
 import polars as pl
 from pathlib import Path
+from argparse import ArgumentParser
+
+DEFAULT_DIR = Path.home() / "data/dapo"
+
+parser = ArgumentParser()
+parser.add_argument("--data-dir", default=str(DEFAULT_DIR), type=str)
+
+args = parser.parse_args()
 
 # Define input and output files
-DATA_DIR = Path.home() / "data/dapo"
+data_dir = Path(args.data_dir)
 FILES = {
     "dapo-math-17k": "dapo-math-17k.parquet",
     "aime-2024": "aime-2024.parquet",
 }
 
 for name, filename in FILES.items():
-    in_path = DATA_DIR / filename
-    out_path = DATA_DIR / f"{name}-cleaned.parquet"
+    in_path = data_dir / filename
+    out_path = data_dir / f"{name}-cleaned.parquet"
 
     # Read using pandas
     df = pd.read_parquet(in_path)

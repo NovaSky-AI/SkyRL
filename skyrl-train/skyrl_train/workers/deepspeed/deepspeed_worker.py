@@ -173,8 +173,9 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             # we need to pass the weights for all of these together.
             # Overall, this doesn't hurt perf even in the general case
             for module_name, param_names in module_to_params.items():
-                for name in param_names:
+                for i, name in enumerate(param_names):
                     param = params[name]
+                    module_done = i == len(param_names) - 1
                     # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
                     with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
                         weight = param.data.clone()
@@ -203,7 +204,10 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                             current_size += weight.nbytes
                             # We send in batches as an optimization
                             # sync if threshold is reached
-                            if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                            if (
+                                module_done
+                                and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
+                            ):
                                 await inference_engine_client.update_named_weights(weights_update_request)
                                 current_size = 0
                                 weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
