@@ -107,4 +107,4 @@ Reference Scripts
 Use the following scripts as a template to prepare your dataset:
 
 - `gsm8k_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/gsm8k/gsm8k_dataset.py>`_
-- `synsql_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/text_to_sql/sql_dataset.py>`_
+- `multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_

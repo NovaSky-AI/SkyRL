@@ -2,7 +2,7 @@ import asyncio
 import math
 import os
 import shutil
-from typing import Any, List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -17,7 +17,6 @@ from transformers import AutoTokenizer
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.generators.base import (
     GeneratorInput,
@@ -28,17 +27,20 @@ from skyrl_train.generators.utils import concatenate_generator_outputs, get_metr
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train import utils
-from skyrl_train.utils import (
-    Timer,
+from skyrl_train.utils import ppo_utils
+from skyrl_train.utils import trainer_utils
+from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     masked_mean,
+    get_kl_controller,
+    FixedKLController,
+    AdaptiveKLController,
     normalize_advantages_dict,
-    get_ray_pg_ready_with_timeout,
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.weights_manager import InferenceWeightsManager
+from skyrl_train.weights_manager import InferenceWeightsManager, ConditionalWeightsManager
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.trainer_utils import (
@@ -49,7 +51,10 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    validate_generator_output,
     GLOBAL_STEP_PREFIX,
+    ResumeMode,
+    DynamicSamplingState,
 )
 
 
@@ -91,6 +96,10 @@ class RayPPOTrainer:
 
         self.weights_manager: InferenceWeightsManager = None
         self.eval_weights_manager: InferenceWeightsManager = None
+
+        self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
+
+        self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -157,6 +166,8 @@ class RayPPOTrainer:
 
         # Extract data_sources from env_extras
         concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
+        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+        print("Eval output example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
         eval_metrics = calculate_per_dataset_metrics(
@@ -203,8 +214,14 @@ class RayPPOTrainer:
         self.weights_manager = InferenceWeightsManager(
             self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all
         )
+        # NOTE(Charlie): sglang's engine needs to sync weights after wake up. see https://github.com/sgl-project/sglang/issues/7939
+        # Change it to True after sglang fixes the issue.
+        sync_before_eval = self.cfg.trainer.placement.colocate_all and self.cfg.generator.backend == "sglang"
         self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model, self.inference_engine_client, self.cfg.trainer.placement.colocate_all, no_sync=True
+            self.policy_model,
+            self.inference_engine_client,
+            self.cfg.trainer.placement.colocate_all,
+            no_sync=not sync_before_eval,
         )
 
         # Load checkpoint state if resumption is enabled
@@ -229,8 +246,15 @@ class RayPPOTrainer:
             if self.cfg.trainer.placement.colocate_all:
                 self.policy_model.backload_to_gpu()
 
+        # setup for dynamic sampling
+        keep_sampling = False
+
+        # initialize kl controller
+        if self.cfg.trainer.algorithm.use_kl_in_reward:
+            self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
+
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
@@ -242,13 +266,26 @@ class RayPPOTrainer:
                         self.cfg.generator.n_samples_per_prompt, rand_prompts
                     )
 
+                    # if we are continuing sampling, we don't want to trigger weight management
+                    weights_manager = ConditionalWeightsManager(self.weights_manager, not keep_sampling)
+
                     # NOTE: Policy model is on GPU at the beginning of each training step
                     # After exiting the context manager, policy model is on CPU with `colocate_all` enabled.
                     # Policy model stays on cpu because the training loop will carefully backload different models depending on colocation strategy
-                    with self.weights_manager:
+                    with weights_manager:
                         # 1.1 generation phase
                         with Timer("generate", self.all_timings):
                             generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+
+                        # dynamic sampling
+                        if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
+                            generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
+                            # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
+                            weights_manager.update_condition(not keep_sampling)
+                            if keep_sampling:  # continue sampling
+                                # update progress bar for current batch (but not global step)
+                                pbar.update(1)
+                                continue
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -566,9 +603,19 @@ class RayPPOTrainer:
             refs = []
             if ref_model is not None:
                 refs.extend(ref_model.async_init_model(cfg.trainer.policy.model.path))
-            refs.extend(policy_model.async_init_model(cfg.trainer.policy.model.path))
+            refs.extend(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=self.total_training_steps,
+                )
+            )
             if cfg.trainer.critic.model.path:
-                refs.extend(critic_model.async_init_model(cfg.trainer.critic.model.path))
+                refs.extend(
+                    critic_model.async_init_model(
+                        cfg.trainer.critic.model.path,
+                        num_training_steps=self.total_training_steps,
+                    )
+                )
             if cfg.trainer.reward.model.path:
                 refs.extend(reward_model.async_init_model(cfg.trainer.reward.model.path))
             ray.get(refs)
@@ -577,11 +624,21 @@ class RayPPOTrainer:
             if ref_model is not None:
                 ray.get(ref_model.async_init_model(cfg.trainer.policy.model.path))
                 ref_model.offload_to_cpu()
-            ray.get(policy_model.async_init_model(cfg.trainer.policy.model.path))
+            ray.get(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=self.total_training_steps,
+                )
+            )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                ray.get(critic_model.async_init_model(cfg.trainer.critic.model.path))
+                ray.get(
+                    critic_model.async_init_model(
+                        cfg.trainer.critic.model.path,
+                        num_training_steps=self.total_training_steps,
+                    )
+                )
                 critic_model.offload_to_cpu()
             if cfg.trainer.reward.model.path:
                 ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
@@ -612,19 +669,29 @@ class RayPPOTrainer:
         custom_rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
+        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+
         (
             sequences_tensor,
             attention_masks_tensor,
             response_masks_tensor,
             custom_rewards_tensor,
             loss_masks_tensor,
+            rollout_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
             response_ids,
             custom_rewards,
             loss_masks,
+            logprobs,
         )
+        # sanity check for tis
+        if self.cfg.trainer.algorithm.use_tis:
+            assert (
+                rollout_logprobs_tensor is not None
+            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -632,6 +699,7 @@ class RayPPOTrainer:
                 "response_mask": response_masks_tensor,
                 "custom_rewards": custom_rewards_tensor,
                 "loss_mask": loss_masks_tensor,
+                "rollout_logprobs": rollout_logprobs_tensor,
             },
         )
         training_input.metadata = {
@@ -663,12 +731,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        if len(generator_output["response_ids"]) <= 0:
-            raise RuntimeError("No outputs generated")
-
-        assert len(input_batch["prompts"]) == len(
-            generator_output["response_ids"]
-        ), f"generate objects number must be equal to all inputs number, got {len(input_batch['prompts'])} and {len(generator_output['response_ids'])}"
+        validate_generator_output(input_batch, generator_output)
 
         return generator_output
 
@@ -679,19 +742,25 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        # TODO (tgriggs): This assumes response-level rewards. Should support per-token rewards from generator
         mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
             generator_output,
             uids,
         )
 
-        rewards: List[float] = generator_output["rewards"]
+        rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]
         per_token_rewards: List[List[float]] = []
-        for reward, response in zip(rewards, responses):
-            per_token_reward = [0] * len(response)
-            per_token_reward[-1] = float(reward)
-            per_token_rewards.append(per_token_reward)
+
+        # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
+        if rewards and isinstance(rewards[0], list):
+            # Token-level rewards: rewards is List[List[float]]
+            per_token_rewards = rewards
+        else:
+            # Response-level rewards: rewards is List[float], convert to per-token rewards
+            for reward, response in zip(rewards, responses):
+                per_token_reward = [0.0] * len(response)
+                per_token_reward[-1] = float(reward)
+                per_token_rewards.append(per_token_reward)
 
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
@@ -726,14 +795,16 @@ class RayPPOTrainer:
         # TODO (erictang000): we are just supporting custom rewards for now
         token_level_rewards = data["custom_rewards"]
 
-        advantages, returns = utils.compute_advantages_and_returns(
+        advantages, returns = ppo_utils.compute_advantages_and_returns(
             token_level_rewards=token_level_rewards,
             response_mask=data["response_mask"],
             index=data.metadata["uids"],
             adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            config=self.cfg.trainer.algorithm,
             values=data["values"],
             gamma=self.cfg.trainer.algorithm.gamma,
             lambd=self.cfg.trainer.algorithm.lambd,
+            grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
         )
         data["returns"] = returns
         data["advantages"] = advantages
@@ -913,6 +984,18 @@ class RayPPOTrainer:
         training_input["values"] = values
         # rewards from the reward model
         training_input["rm_rewards"] = rewards  # `None` or torch.Tensor
+
+        if self.cfg.generator.sampling_params.logprobs is not None:
+            # calculates the difference in probs between inference and trainer components
+            prob_diff = (training_input["rollout_logprobs"].exp() - action_log_probs.exp()).abs()
+            prob_diff_mean = prob_diff.mean().item()
+            prob_diff_std = prob_diff.std().item()
+            self.all_metrics.update(
+                {
+                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
+                    "policy/rollout_train_prob_diff_std": prob_diff_std,
+                }
+            )
         return training_input
 
     def apply_reward_kl_penalty(
@@ -930,18 +1013,26 @@ class RayPPOTrainer:
             action_log_probs,
             base_action_log_probs,
             loss_mask=loss_masks_all,
-            use_kl_estimator_k3=self.cfg.trainer.algorithm.use_kl_estimator_k3,
-            use_abs_kl=self.cfg.trainer.algorithm.use_abs_kl,
+            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
         )
         kl_max: Float[torch.Tensor, "batch_size"] = torch.max(kl.abs(), dim=-1)[0]  # noqa: F821
         kl_mean: Float[torch.Tensor, "batch_size"] = masked_mean(kl, loss_masks_all, dim=-1)  # noqa: F821
 
         # NOTE (erictang000): only supporting custom rewards currently
-        custom_rewards = custom_rewards - kl * max(0, self.cfg.trainer.algorithm.kl_loss_coef)
+        kl_loss_coef = (
+            self.reward_kl_controller.value
+            if self.reward_kl_controller is not None
+            else self.cfg.trainer.algorithm.kl_loss_coef
+        )
+        custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
         data["custom_rewards"] = custom_rewards
 
         avg_kl: float = kl_mean.mean().item()
         avg_kl_max: float = kl_max.mean().item()
+
+        # update the kl controller
+        if self.reward_kl_controller is not None:
+            self.reward_kl_controller.update(current=avg_kl, n_steps=kl.shape[0])  # n_steps is just the batch size
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
 
@@ -949,6 +1040,7 @@ class RayPPOTrainer:
             {
                 "avg_kl": avg_kl,
                 "avg_kl_max": avg_kl_max,
+                "kl_loss_coef": kl_loss_coef,
             }
         )
 
@@ -956,6 +1048,7 @@ class RayPPOTrainer:
             {
                 "loss/avg_kl": avg_kl,
                 "loss/avg_kl_max": avg_kl_max,
+                "loss/kl_loss_coef": kl_loss_coef,
             }
         )
 
@@ -1001,6 +1094,68 @@ class RayPPOTrainer:
 
         return policy_status
 
+    def handle_dynamic_sampling(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str], bool]:
+        """
+        Handle dynamic sampling for the current batch.
+
+        Accumulates the generator output and UIDs across batches if we are sampling repeatedly
+        and applies the dynamic sampling strategy (i.e. filter, replace) to the current batch.
+        If we hit the limit of max sample batches, we raise an error.
+
+        Args:
+            generator_output: Current batch generator output
+            uids: Current batch UIDs
+
+        Returns:
+            processed_output: Filtered generator output
+            processed_uids: Filtered UIDs
+            keep_sampling: Whether to keep sampling
+        """
+        # Prepare sampling configuration
+        max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
+        dynamic_sampling_config = {
+            "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
+            "max_sample_batches": max_sample_batches,
+            "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
+            "train_batch_size": self.cfg.trainer.train_batch_size,
+            "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
+        }
+
+        if self.dynamic_sampling_state is None:
+            self.dynamic_sampling_state: DynamicSamplingState = {
+                "sample_batch_count": 1,
+            }
+        else:
+            self.dynamic_sampling_state["sample_batch_count"] += 1
+
+        # Handle dynamic sampling using utilities
+        processed_output, processed_uids, keep_sampling, updated_state = trainer_utils.handle_dynamic_sampling(
+            generator_output, uids, dynamic_sampling_config, self.dynamic_sampling_state
+        )
+
+        # Check max resample limit, and if we hit it, raise an error
+        if (
+            keep_sampling
+            and max_sample_batches > 0
+            and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
+        ):
+            raise RuntimeError(
+                f"Exiting training loop due to hitting dynamic sampling limit for "
+                f"{self.cfg.trainer.algorithm.dynamic_sampling.type} strategy with "
+                f"{self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. "
+                f"Please check your data difficulty distribution."
+            )
+        # Update state
+        self.dynamic_sampling_state = updated_state
+
+        if not keep_sampling:
+            # Reset state when sampling is complete
+            self.dynamic_sampling_state = None
+
+        return processed_output, processed_uids, keep_sampling
+
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)
         if model_type == "reward_model":
@@ -1031,6 +1186,7 @@ class RayPPOTrainer:
                 "save_ckpt",
                 global_step=self.global_step,
                 ckpt_dir=policy_save_dir,
+                tokenizer=self.tokenizer,
             )
         )
 
@@ -1046,6 +1202,7 @@ class RayPPOTrainer:
                     "save_ckpt",
                     global_step=self.global_step,
                     ckpt_dir=critic_save_dir,
+                    tokenizer=self.tokenizer,
                 )
             )
 

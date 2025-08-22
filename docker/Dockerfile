@@ -1,4 +1,4 @@
-FROM anyscale/ray:2.44.0-slim-py312-cu128
+FROM anyscale/ray:2.48.0-slim-py312-cu128
 
 RUN sudo apt-get update -y && sudo apt-get install -y wget kmod libxml2 build-essential libnuma-dev
 
@@ -17,8 +17,3 @@ RUN sudo apt-get update \
 RUN sudo apt update && sudo apt install --fix-broken && sudo apt install -y default-jre-headless openjdk-8-jdk \
     && sudo apt-get clean \
     && sudo rm -rf /var/lib/apt/lists/*
-
-# NOTE: vllm installation in base environment is needed for uv + vLLM to work
-RUN pip install vllm==0.9.2 --extra-index-url https://download.pytorch.org/whl/cu128 \
-    && pip install ray==2.44.0 \
-    && rm -rf ~/.cache/pip

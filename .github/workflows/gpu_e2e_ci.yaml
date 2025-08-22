@@ -1,0 +1,46 @@
+name: SkyRL-GPU-E2E-CI
+
+on:
+  schedule:
+    - cron: '5 8 * * *'   # Every day at 08:05 UTC (~00:05 PST / ~01:05 PDT)
+  workflow_dispatch:
+
+permissions:
+  checks: write   # for status checks to appear
+  contents: read
+
+jobs:
+  
+  skyrl_gpu_e2e_test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./skyrl-train
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        # This is the version of the action for setting up Python, not the Python version.
+        uses: actions/setup-python@v5
+        with:
+          # Semantic version range syntax or exact version of a Python version
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install basic dependencies
+        run: uv pip install anyscale==0.24.79 typer==0.9.0
+      - name: Install envsubst
+        run: sudo apt-get update && sudo apt-get install -y gettext-base
+      - name: Basic convergence test
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: |
+          envsubst < ci/anyscale_gpu_e2e_test.yaml > ci/anyscale_gpu_e2e_test_envsubst.yaml
+          anyscale job submit -f ci/anyscale_gpu_e2e_test_envsubst.yaml --wait
+          rm -f ci/anyscale_gpu_e2e_test_envsubst.yaml

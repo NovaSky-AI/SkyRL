@@ -5,7 +5,7 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_trainer_full_checkpointing.py
+uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/test_trainer_full_checkpointing.py
 """
 
 import ray
@@ -18,10 +18,11 @@ import tempfile
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from unittest.mock import MagicMock
+from transformers import AutoTokenizer
 
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
-from tests.gpu.utils import import_worker
+from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -43,25 +44,6 @@ class DummyDataset(Dataset):
         return batch
 
 
-class MinimalTokenizer:
-    """Minimal tokenizer for testing"""
-
-    def __init__(self):
-        self.pad_token_id = 0
-        self.eos_token_id = 1
-        self.vocab_size = 1000
-
-    def encode(self, text, **kwargs):
-        # Return dummy token IDs
-        return list(range(10))
-
-    def decode(self, token_ids, **kwargs):
-        return f"Decoded: {token_ids}"
-
-    def apply_chat_template(self, messages, **kwargs):
-        return list(range(5))  # Return dummy tokens
-
-
 def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> DictConfig:
     """Create minimal trainer config for testing"""
     with hydra.initialize_config_dir(config_dir=config_dir):
@@ -75,10 +57,10 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
 
     # Use minimal settings for faster testing
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.trainer.placement.ref_num_gpus_per_node = 2
+    cfg.trainer.placement.critic_num_gpus_per_node = 2
     cfg.trainer.placement.policy_num_nodes = 1
     cfg.trainer.placement.critic_num_nodes = 1
-    cfg.trainer.placement.ref_num_nodes = 1
+    cfg.trainer.algorithm.use_kl_loss = False  # disable ref model so we just have policy and critic (4 GPUs)
     cfg.trainer.placement.colocate_all = False  # Disable colocation for simpler testing
     cfg.trainer.train_batch_size = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 1
@@ -103,7 +85,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
 def create_minimal_trainer(cfg: DictConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
-    tokenizer = MinimalTokenizer()
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     # Create dummy dataset
     train_dataset = DummyDataset(size=4)  # Small dataset for quick testing
@@ -152,7 +134,7 @@ def capture_training_state(trainer):
         ("fsdp2", True),
     ],
 )
-def test_trainer_full_checkpointing(strategy, fsdp2_cpu_offload):
+def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -228,7 +210,7 @@ def test_trainer_full_checkpointing(strategy, fsdp2_cpu_offload):
 
         # ============= PHASE 2: Resume from Checkpoint =============
         print("Phase 2: Resume from checkpoint")
-
+        ray_init_for_tests()
         # Create new config with resume enabled
         cfg_resume = get_test_trainer_config(strategy, fsdp2_cpu_offload)
         cfg_resume.trainer.resume_mode = "from_path"  # Enable resume
@@ -275,12 +257,6 @@ def test_trainer_full_checkpointing(strategy, fsdp2_cpu_offload):
         assert latest_step == trainer2.global_step, "Atomic tracking file was not updated after second save"
 
     finally:
-        # Cleanup
-        try:
-            ray.shutdown()
-        except Exception as e:
-            print(f"Error shutting down Ray -- it may already be shut down. Error: {e}")
-
         if checkpoint_dir and os.path.exists(os.path.dirname(checkpoint_dir)):
             print(f"Cleaning up checkpoint directory: {os.path.dirname(checkpoint_dir)}")
             shutil.rmtree(os.path.dirname(checkpoint_dir))

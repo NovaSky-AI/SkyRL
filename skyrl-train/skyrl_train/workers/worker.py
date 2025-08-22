@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import socket
-from typing import Dict, Optional, Type, List, Literal, Any, Tuple
+from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
 from collections import defaultdict
@@ -16,7 +16,8 @@ import torch.distributed
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
 
-from skyrl_train.utils import masked_mean, ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
@@ -24,6 +25,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -315,91 +317,6 @@ class Worker(DistributedTorchRayActor):
         raise NotImplementedError()
 
 
-class ValueLoss(nn.Module):
-    """
-    Value Loss for PPO
-    """
-
-    def __init__(self, clip_eps: float = None) -> None:
-        super().__init__()
-        self.clip_eps = clip_eps
-
-    def forward(
-        self,
-        values: torch.Tensor,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
-        loss_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
-        if self.clip_eps is not None:
-            values_clipped = old_values + (values - old_values).clamp(-self.clip_eps, self.clip_eps)
-            surr1 = (values_clipped - returns) ** 2
-            surr2 = (values - returns) ** 2
-            loss = torch.max(surr1, surr2)
-            clipfrac = masked_mean((surr1 > surr2).float(), loss_mask).mean().detach().item()
-        else:
-            clipfrac = None
-            loss = (values - returns) ** 2
-
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        return 0.5 * loss, clipfrac
-
-
-class PolicyLoss(nn.Module):
-    """
-    Policy Loss for PPO
-    """
-
-    def __init__(
-        self,
-        clip_eps_low: float = 0.2,
-        clip_eps_high: float = 0.2,
-        clip_ratio_c: float = 3.0,
-        loss_type: Literal["regular", "dual_clip"] = "regular",
-        loss_reduction: Literal["token_mean", "sequence_mean"] = "token_mean",
-    ) -> None:
-        super().__init__()
-        self.clip_eps_low = clip_eps_low
-        self.clip_eps_high = clip_eps_high
-        self.clip_ratio_c = clip_ratio_c
-        self.loss_type = loss_type
-        assert loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
-        self.loss_reduction = loss_reduction
-        assert loss_reduction in [
-            "token_mean",
-            "sequence_mean",
-        ], "loss_reduction must be either 'token_mean' or 'sequence_mean'"
-
-    def forward(
-        self,
-        log_probs: torch.Tensor,
-        old_log_probs: torch.Tensor,
-        advantages: torch.Tensor,
-        loss_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, float]:
-
-        ratio = (log_probs - old_log_probs).exp()
-        surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
-        loss = -torch.min(surr1, surr2)
-        clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
-        clip_pg_losses1 = loss
-        if self.loss_type == "dual_clip":
-            pg_losses3 = -advantages * self.clip_ratio_c
-            clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-            loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        if self.loss_reduction == "token_mean":
-            # sum over *all* valid tokens, divide by total valid-token count
-            loss = masked_mean(loss, loss_mask)
-        elif self.loss_reduction == "sequence_mean":
-            # per-sequence token-mean (dim=-1), then batch-mean
-            loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        else:
-            raise ValueError(f"Invalid loss reduction type: {self.loss_reduction}")
-        return loss, clip_ratio
-
-
 # adapted from OpenReasonerZero: https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero/blob/main/orz/ppo/actors.py
 class PPORayActorGroup:
     """
@@ -658,7 +575,7 @@ class PolicyWorkerBase(Worker):
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.actor_loss_fn: nn.Module = None
+        self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
 
     def _normalize_mini_batch_size(self):
         """
@@ -768,6 +685,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
+        rollout_action_logprobs = experience.rollout_logprobs
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -782,11 +700,13 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            actor_loss, clip_ratio = self.actor_loss_fn(
+            policy_loss, clip_ratio = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
+                config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
             )
         # entropy
         with torch.no_grad():
@@ -802,16 +722,17 @@ class PolicyWorkerBase(Worker):
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
-            kl_loss = action_log_probs - base_action_log_probs
-            if self.cfg.trainer.algorithm.use_kl_estimator_k3:
-                kl_loss = -kl_loss
-                r = kl_loss.exp()
-                kl_loss = r - 1.0 - kl_loss
+            kl_loss = compute_approx_kl(
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_mask,
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
             kl_loss = torch.tensor(0.0)
 
-        loss = actor_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+        loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
@@ -826,7 +747,7 @@ class PolicyWorkerBase(Worker):
 
         # status
         status = {
-            "policy_loss": actor_loss.item(),
+            "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "ppo_clip_ratio": clip_ratio,
             "policy_entropy": entropy,
@@ -847,7 +768,7 @@ class PolicyWorkerBase(Worker):
         status["response_length"] = num_actions
         return status
 
-    def save_ckpt(self, global_step: int, ckpt_dir: Path):
+    def save_ckpt(self, global_step: int, ckpt_dir: Path, tokenizer=None):
         self.strategy.save_ckpt(
             model=self.model,
             optimizer=self.optimizer,
@@ -855,6 +776,7 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             global_step=global_step,
             node_local_rank=self.get_node_local_rank(),
+            tokenizer=tokenizer,
         )
 
     def load_ckpt(self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
@@ -912,7 +834,7 @@ class CriticWorkerBase(Worker):
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.critic_loss_fn: nn.Module = None
+        self.critic_loss_fn: Callable = ppo_critic_loss
 
     def _normalize_mini_batch_size(self):
         """
@@ -1031,6 +953,7 @@ class CriticWorkerBase(Worker):
                 values,
                 old_values,
                 returns,
+                config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
         loss = loss / accumulation_steps
@@ -1052,7 +975,7 @@ class CriticWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         return status
 
-    def save_ckpt(self, global_step: int, ckpt_dir: str):
+    def save_ckpt(self, global_step: int, ckpt_dir: str, tokenizer=None):
         self.strategy.save_ckpt(
             model=self.model,
             optimizer=self.optimizer,
@@ -1060,6 +983,7 @@ class CriticWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             global_step=global_step,
             node_local_rank=self.get_node_local_rank(),
+            tokenizer=tokenizer,
         )
 
     def load_ckpt(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):

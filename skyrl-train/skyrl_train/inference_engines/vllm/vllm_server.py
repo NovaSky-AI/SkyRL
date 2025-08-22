@@ -98,15 +98,16 @@ class VllmServer:
             await engine.reset_prefix_cache()
             return {"status": "ok"}
 
-        @app.post("/update_weight")
-        async def _update_weight(request: Request):
+        @app.post("/update_weights")
+        async def _update_weights(request: Request):
             data = await request.json()
-            name = data.get("name")
-            dtype = data.get("dtype")
-            shape = data.get("shape")
+            # engine expects a list of objects
+            names = [data.get("name")]
+            dtypes = [data.get("dtype")]
+            shapes = [data.get("shape")]
             await engine.collective_rpc(
-                "update_weight",
-                args=(name, dtype, shape),
+                "update_weights",
+                args=(names, dtypes, shapes),
             )
             return {"status": "ok"}
 

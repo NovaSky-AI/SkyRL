@@ -1,3 +1,7 @@
+"""
+uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py
+"""
+
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
@@ -5,12 +9,19 @@ from skyrl_train.utils.trainer_utils import (
     sanitize_data_source,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    handle_dynamic_sampling,
+    handle_replace_sampling,
+    handle_filter_sampling,
+    filter_generator_output,
+    validate_generator_output,
 )
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from typing import Union
 import ray
 import os
 import tempfile
 import pytest
+import re
 
 from unittest.mock import Mock, patch, mock_open
 import json
@@ -312,3 +323,476 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
                 break
         except json.JSONDecodeError:
             continue
+
+
+def test_handle_dynamic_sampling_null_strategy():
+    """Test that null strategy returns input unchanged."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2, 3], [4, 5, 6]],
+        "response_ids": [[7, 8], [9, 10]],
+        "rewards": [[1.0, 2.0], [3.0, 4.0]],
+        "loss_masks": [[1, 1], [1, 1]],
+        "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": [[0.16, 0.4], [0.2, 0.3]],
+    }
+    uids = ["uid1", "uid2"]
+    sampling_config = {"type": None}
+
+    result_output, result_uids, keep_sampling, state = handle_dynamic_sampling(generator_output, uids, sampling_config)
+
+    assert result_output == generator_output
+    assert result_uids == uids
+    assert keep_sampling is False
+    assert state is None
+
+
+def test_handle_dynamic_sampling_invalid_strategy():
+    """Test that invalid strategy raises ValueError."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2, 3]],
+        "response_ids": [[7, 8]],
+        "rewards": [[1.0, 2.0]],
+        "loss_masks": [[1, 1]],
+        "rollout_logprobs": [[0.16, 0.4]],
+    }
+    uids = ["uid1"]
+    sampling_config = {"type": "invalid_strategy"}
+
+    with pytest.raises(ValueError, match="Invalid dynamic sampling type: invalid_strategy"):
+        handle_dynamic_sampling(generator_output, uids, sampling_config)
+
+
+def test_handle_replace_sampling_sufficient_good_samples():
+    """Test replace sampling when there are sufficient good samples (>0.3)."""
+    # Create test data with some good UIDs (high variance) and some bad UIDs (zero variance)
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4], [5, 6], [5, 6]],
+        "response_ids": [[13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24]],
+        "rewards": [
+            1.0,
+            2.0,
+            1.0,
+            1.0,
+            3.0,
+            4.0,
+        ],  # uid1: [1.0, 2.0] (good), uid2: [1.0, 1.0] (bad), uid3: [3.0, 4.0] (good)
+        "loss_masks": [[1, 1]] * 6,
+        "stop_reasons": ["length"] * 6,
+        "rollout_metrics": None,
+        "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
+    }
+    uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
+    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
+
+    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+
+    # Should not keep sampling
+    assert keep_sampling is False
+
+    # Output should have same structure but with replacements
+    assert len(result_output["prompt_token_ids"]) == 6
+    assert len(result_output["response_ids"]) == 6
+    assert len(result_output["rewards"]) == 6
+    assert len(result_output["rollout_logprobs"]) == 6
+    assert len(result_uids) == 6
+
+    # Check that bad uid2 samples were replaced with good samples
+    uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
+    # After replacement, uid2 indices should now contain UIDs from good samples
+    assert len(uid2_indices) == 0  # uid2 should be completely replaced
+
+
+def test_handle_replace_sampling_insufficient_good_samples():
+    """Test replace sampling when there are insufficient good samples (<0.3)."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
+        "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
+        "rewards": [1.0, 1.0, 2.0, 2.0],  # uid1: [1.0, 1.0] (bad), uid2: [2.0, 2.0] (bad)
+        "loss_masks": [[1, 1]] * 4,
+        "stop_reasons": ["length"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids = ["uid1", "uid1", "uid2", "uid2"]  # 2 samples per prompt
+    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
+
+    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+
+    # Should keep sampling due to insufficient good samples
+    assert keep_sampling is True
+
+    # Output should be unchanged
+    assert result_output == generator_output
+    assert result_uids == uids
+
+
+def test_handle_replace_sampling_single_sample_per_prompt():
+    """Test replace sampling with single sample per prompt (should always be considered good)."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[5, 6], [7, 8]],
+        "rewards": [1.0, 1.0],
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": [[0.1, 0.2]],
+    }
+    uids = ["uid1", "uid2"]
+    sampling_config = {"n_samples_per_prompt": 1, "min_replace_ratio": 0.3}
+
+    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+
+    # Should not keep sampling (single samples are always considered good)
+    assert keep_sampling is False
+
+    # Output should be unchanged since all samples are good
+    assert result_output == generator_output
+    assert result_uids == uids
+
+
+def test_handle_replace_sampling_token_level_rewards():
+    """Test replace sampling with token-level rewards (should sum to sequence level)."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
+        "response_ids": [[9, 10], [11, 12, 13], [14, 15], [16]],
+        "rewards": [[1.0, 2.0], [3.0, 4.0, 5.0], [1.0, 1.0], [1.0]],  # Token-level rewards
+        "loss_masks": [[1, 1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids = ["uid1", "uid1", "uid2", "uid2"]  # uid1: [3.0, 7.0] (good), uid2: [2.0, 2.0] (bad)
+    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
+
+    result_output, result_uids, keep_sampling = handle_replace_sampling(generator_output, uids, sampling_config)
+
+    # Should not keep sampling (sufficient good samples)
+    assert keep_sampling is False
+
+    # Check that replacements occurred
+    assert len(result_output["rewards"]) == 4
+    assert len(result_uids) == 4
+
+
+def test_handle_filter_sampling_sufficient_prompts():
+    """Test filter sampling when we get sufficient prompts in one batch."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
+        "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
+        "rewards": [1.0, 2.0, 3.0, 3.0],  # uid1: [1.0, 2.0] (good), uid2: [3.0, 3.0] (bad)
+        "loss_masks": [[1, 1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids = ["uid1", "uid1", "uid2", "uid2"]
+    sampling_config = {
+        "train_batch_size": 1,  # Only need 1 prompt
+        "n_samples_per_prompt": 2,
+        "max_sample_batches": 20,
+    }
+
+    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
+        generator_output, uids, sampling_config, collected_state={"sample_batch_count": 1}
+    )
+
+    # Should not keep sampling (sufficient prompts)
+    assert keep_sampling is False
+    assert state is None
+
+    # Should only keep the good uid1 samples
+    assert len(result_output["prompt_token_ids"]) == 2
+    assert len(result_uids) == 2
+    assert all(uid == "uid1" for uid in result_uids)
+
+
+def test_handle_filter_sampling_insufficient_prompts_continue():
+    """Test filter sampling when we need to continue sampling."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[5, 6], [7, 8]],
+        "rewards": [1.0, 2.0],  # Only 1 good prompt
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids = ["uid1", "uid1"]
+    sampling_config = {
+        "train_batch_size": 2,  # Need 2 prompts
+        "n_samples_per_prompt": 2,
+        "max_sample_batches": 20,
+    }
+
+    collected_state = {"sample_batch_count": 1}
+
+    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
+        generator_output, uids, sampling_config, collected_state=collected_state
+    )
+
+    # Should keep sampling (insufficient prompts)
+    assert keep_sampling is True
+    assert result_output is generator_output
+    assert result_uids is uids
+    assert state is not None
+    assert state["num_prompts_in_batch"] == 1
+    assert state["sample_batch_count"] == 1
+
+
+def test_handle_filter_sampling_accumulation():
+    """Test filter sampling accumulation across multiple batches."""
+    # First batch
+    generator_output1 = {
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[5, 6], [7, 8]],
+        "rewards": [1.0, 2.0],  # Good prompt
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids1 = ["uid1", "uid1"]
+
+    # Second batch
+    generator_output2 = {
+        "prompt_token_ids": [[9, 10], [11, 12]],
+        "response_ids": [[13, 14], [15, 16]],
+        "rewards": [3.0, 4.0],  # Another good prompt
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids2 = ["uid2", "uid2"]
+
+    sampling_config = {
+        "train_batch_size": 2,  # Need 2 prompts
+        "n_samples_per_prompt": 2,
+        "max_sample_batches": 20,
+    }
+
+    collected_state = {"sample_batch_count": 1}
+
+    # Process first batch
+    result1_output, result1_uids, keep_sampling1, state1 = handle_filter_sampling(
+        generator_output1, uids1, sampling_config, collected_state=collected_state
+    )
+
+    assert keep_sampling1 is True  # Need more prompts
+    assert state1["num_prompts_in_batch"] == 1
+
+    # Process second batch
+    result2_output, result2_uids, keep_sampling2, state2 = handle_filter_sampling(
+        generator_output2, uids2, sampling_config, collected_state=state1
+    )
+
+    assert keep_sampling2 is False  # Now have enough prompts
+    assert state2 is None
+    assert len(result2_output["prompt_token_ids"]) == 4  # Both batches combined
+    assert len(result2_uids) == 4
+
+
+def test_handle_filter_sampling_single_sample_per_prompt():
+    """Test filter sampling with single sample per prompt."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[5, 6], [7, 8]],
+        "rewards": [1.0, 1.0],  # Same rewards but single sample per prompt
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    uids = ["uid1", "uid2"]  # Different UIDs, single sample each
+    sampling_config = {
+        "train_batch_size": 2,
+        "n_samples_per_prompt": 1,
+        "max_sample_batches": 20,
+    }
+
+    result_output, result_uids, keep_sampling, state = handle_filter_sampling(
+        generator_output, uids, sampling_config, collected_state={"sample_batch_count": 1}
+    )
+
+    # Should not keep sampling (single samples are always kept)
+    assert keep_sampling is False
+    assert state is None
+    assert len(result_output["prompt_token_ids"]) == 2
+    assert len(result_uids) == 2
+
+
+def test_filter_generator_output():
+    """Test the filter_generator_output utility function."""
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
+        "response_ids": [[7, 8], [9, 10], [11, 12]],
+        "rewards": [1.0, 2.0, 3.0],
+        "loss_masks": [[1, 1]] * 3,
+        "stop_reasons": ["length", "length", "stop"],
+        "rollout_metrics": {"metric": "value"},
+        "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
+    }
+    kept_indices = [0, 2]  # Keep first and third samples
+
+    filtered = filter_generator_output(generator_output, kept_indices)
+
+    assert filtered["prompt_token_ids"] == [[1, 2], [5, 6]]
+    assert filtered["response_ids"] == [[7, 8], [11, 12]]
+    assert filtered["rewards"] == [1.0, 3.0]
+    assert filtered["loss_masks"] == [[1, 1]] * 2
+    assert filtered["stop_reasons"] == ["length", "stop"]
+    assert filtered["rollout_metrics"] == {"metric": "value"}
+    assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
+
+
+def test_validate_generator_output_valid_case():
+    """Test validate_generator_output with valid case."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2", "prompt3"],
+        env_classes=["env1", "env2", "env3"],
+        env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
+        sampling_params={"temperature": 0.7},
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
+        response_ids=[[10, 11, 12], [13, 14], [15]],
+        rewards=[[0.5, 0.6, 0.7], [0.8, 0.9], [1.0]],  # Nested list structure
+        loss_masks=[[1, 1, 0], [1, 1], [0]],
+        stop_reasons=["stop", "length", "stop"],
+        rollout_metrics={"metric1": 0.5, "metric2": 0.6},
+        rollout_logprobs=None,
+    )
+
+    # Should not raise any exceptions
+    validate_generator_output(input_batch, generator_output)
+
+    # per trajectory rewards should work too
+    generator_output["rewards"] = [0.5, 0.6, 0.7]
+    validate_generator_output(input_batch, generator_output)
+
+    # valid rollout logprobs
+    generator_output["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
+    validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_empty_response_ids():
+    """Test validate_generator_output raises RuntimeError when response_ids is empty."""
+    input_batch = GeneratorInput(prompts=["prompt1"], env_classes=["env1"], env_extras=None, sampling_params=None)
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3]],
+        response_ids=[],
+        rewards=[],
+        loss_masks=[],
+        stop_reasons=[],
+        rollout_logprobs=[],  # Empty response_ids
+    )
+
+    with pytest.raises(RuntimeError, match="No outputs generated"):
+        validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_mismatched_prompts_responses():
+    """Test validate_generator_output raises AssertionError when prompts and response_ids lengths don't match."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2", "prompt3"],  # 3 prompts
+        env_classes=["env1", "env2", "env3"],
+        env_extras=None,
+        sampling_params=None,
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2], [3, 4]],
+        response_ids=[[7, 8], [9, 10]],  # Only 2 responses
+        rewards=[0.5, 0.7],
+        loss_masks=[[1, 1], [1, 0]],
+        stop_reasons=["eos", "eos"],
+        rollout_logprobs=None,
+    )
+
+    with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
+        validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_all_loss_masked():
+    """Test validate_generator_output logs warning when all outputs are loss masked."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
+        response_ids=[[7, 8], [9, 10]],
+        rewards=[0.5, 0.7],
+        loss_masks=[[0, 0], [0, 0]],  # All zeros - completely loss masked
+        stop_reasons=["eos", "eos"],
+        rollout_logprobs=None,
+    )
+
+    # Capture log output to verify warning is issued
+    with patch("skyrl_train.utils.trainer_utils.logger") as mock_logger:
+        validate_generator_output(input_batch, generator_output)
+        mock_logger.info.assert_called_once_with(
+            "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
+        )
+
+
+def test_validate_generator_output_mismatched_list_lengths():
+    """Test validate_generator_output raises AssertionError when generator output lists have mismatched lengths."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
+        response_ids=[[7, 8], [9, 10]],  # Length 2
+        rewards=[0.5, 0.7, 0.9],  # Length 3 - mismatch!
+        loss_masks=[[1, 1], [1, 0]],
+        stop_reasons=["eos", "eos"],
+        rollout_logprobs=None,
+    )
+
+    with pytest.raises(AssertionError, match="Generator output rewards length must be equal to response_ids length"):
+        validate_generator_output(input_batch, generator_output)
+
+
+def test_validate_generator_output_element_length_mismatch():
+    """Test validate_generator_output with element length mismatch."""
+    input_batch = GeneratorInput(
+        prompts=["prompt1", "prompt2", "prompt3"],
+        env_classes=["env1", "env2", "env3"],
+        env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
+        sampling_params={"temperature": 0.7},
+    )
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
+        response_ids=[[10, 11, 12], [13, 14], [15]],
+        rewards=[[0.5, 0.6, 0.7], [0.8, 0.9], [1.0]],
+        loss_masks=[[1, 1], [1], [1, 1]],  # loss masks are not the same length as response ids
+        stop_reasons=["stop", "length", "stop"],
+        rollout_metrics={"metric1": 0.5, "metric2": 0.6},
+        rollout_logprobs=None,
+    )
+
+    with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
+        validate_generator_output(input_batch, generator_output)
+
+    generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
+    generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
+    with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
+        validate_generator_output(input_batch, generator_output)
+
+    generator_output = GeneratorOutput(
+        prompt_token_ids=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        response_ids=[[7, 8], [9, 10], [11, 12]],
+        rewards=[0.5, 0.7, -0.1],
+        loss_masks=[[1, 1], [1, 0], [1, 1]],
+        stop_reasons=["eos", "eos", "length"],
+        rollout_logprobs=[[0.17, 0.2], [0.9], [0.1, 0.2]],  # Second entry has length 1 - mismatch !
+    )
+
+    with pytest.raises(AssertionError, match="Response ids and rollout logprobs must have the same length"):
+        validate_generator_output(input_batch, generator_output)

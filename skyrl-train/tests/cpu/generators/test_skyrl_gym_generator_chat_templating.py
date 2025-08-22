@@ -59,17 +59,22 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        return {"responses": ["b" + tokenizer.eos_token] * num_prompts, "stop_reasons": ["stop"] * num_prompts}
+        return {
+            "responses": ["b" + tokenizer.eos_token] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+        }
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
     generator_cfg = DictConfig(
         {
-            "sampling_params": {"max_generate_length": 200},
+            "sampling_params": {"max_generate_length": 200, "logprobs": None},
             "max_input_length": 200,
             "batched": False,
             "max_turns": 3,
             "zero_reward_on_non_stop": False,
+            "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
         }
     )

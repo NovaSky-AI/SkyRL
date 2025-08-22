@@ -1,10 +1,12 @@
 import os
+import copy
 import random
 from collections import defaultdict
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
 import gc
+import json
 
 import numpy as np
 import torch
@@ -28,7 +30,6 @@ from skyrl_train.distributed.fsdp_utils import (
     fsdp2_get_full_state_dict,
     apply_fsdp2,
     get_sharding_strategy,
-    get_constant_schedule_with_warmup,
     offload_fsdp_model_to_cpu,
     load_fsdp_model_to_gpu,
     offload_fsdp_optimizer,
@@ -37,6 +38,7 @@ from skyrl_train.distributed.fsdp_utils import (
     fsdp_version,
     fsdp2_load_full_state_dict,
 )
+from transformers.trainer import get_scheduler
 
 from packaging import version
 
@@ -61,6 +63,7 @@ class FSDPStrategy(DistributedStrategy):
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
         train_batch_size=1,
+        num_training_steps: Optional[int] = None,
     ) -> None:
         super().__init__()
         assert fsdp_strategy in ("fsdp", "fsdp2"), f"Unsupported FSDP strategy: {fsdp_strategy}"
@@ -72,6 +75,7 @@ class FSDPStrategy(DistributedStrategy):
         self.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         self.seed = seed
         self.device_mesh = None
+        self.total_training_steps: Optional[int] = num_training_steps
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
@@ -274,9 +278,11 @@ class FSDPStrategy(DistributedStrategy):
                 weight_decay=optim_config.weight_decay,
             )
 
-            #  TODO(csy): add other schedulers, add more to config
-            actor_lr_scheduler = get_constant_schedule_with_warmup(
-                optimizer=actor_optimizer, num_warmup_steps=optim_config.num_warmup_steps
+            actor_lr_scheduler = get_scheduler(
+                optim_config.scheduler,
+                actor_optimizer,
+                num_warmup_steps=optim_config.num_warmup_steps,
+                num_training_steps=self.total_training_steps,
             )
         else:
             actor_optimizer = None
@@ -373,6 +379,7 @@ class FSDPStrategy(DistributedStrategy):
         scheduler=None,
         client_state={},
         tag=None,
+        tokenizer=None,
     ):
         """Save model checkpoint for FSDP"""
         import warnings
@@ -443,6 +450,15 @@ class FSDPStrategy(DistributedStrategy):
 
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
+
+        if self.is_rank_0():
+            config_save_model = self._unwrap_model(model)
+            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
+
+            # Also save runtime FSDP config
+            fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
+            with open(fsdp_config_path, "w") as f:
+                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
@@ -592,8 +608,28 @@ class FSDPStrategy(DistributedStrategy):
                 output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs  # Always use safetensors
             )
 
-            # Save config
-            model_to_save.config.save_pretrained(output_dir)
+            # Determine which config to save
+            config_to_save = model_to_save.config
+
+            # Fix architecture name by removing FSDP prefix if present
+            if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+                # Create a copy of the config to avoid modifying the original
+                config_to_save = copy.deepcopy(config_to_save)
+
+                # Fix architecture names to remove FSDP prefix
+                fixed_architectures = []
+                for arch in config_to_save.architectures:
+                    fixed_arch = arch
+                    if arch.startswith("FSDP"):
+                        # Remove "FSDP" prefix (for fsdp2)
+                        fixed_arch = arch[len("FSDP") :]
+                        self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                    fixed_architectures.append(fixed_arch)
+
+                config_to_save.architectures = fixed_architectures
+
+            # Save the config
+            config_to_save.save_pretrained(output_dir)
 
             # Save tokenizer if provided
             if tokenizer is not None:

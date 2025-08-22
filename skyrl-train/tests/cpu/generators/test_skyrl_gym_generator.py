@@ -50,7 +50,13 @@ def mock_llm():
     # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        return {"responses": ["mocked output"] * num_prompts, "stop_reasons": ["stop"] * num_prompts}
+        return {
+            "responses": ["mocked output"] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            # say response gets tokenized to 3 tokens
+            "response_logprobs": [[0.1, 0.2, 0.3]] * num_prompts,
+            "response_ids": [[1, 10, 12]] * num_prompts,
+        }
 
     mock.generate = AsyncMock(side_effect=mock_generate)
     return mock
@@ -70,6 +76,8 @@ def mock_env():
 def mock_generator_cfg():
     cfg = MagicMock()
     cfg.sampling_params.max_generate_length = 5
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
     cfg.max_input_length = 512
     cfg.batched = True
     cfg.max_turns = 1
@@ -133,7 +141,15 @@ def validate_generator_input(input_batch: GeneratorInput) -> bool:
 def validate_generator_output(output: GeneratorOutput) -> bool:
     """Validate that output conforms to GeneratorOutput TypedDict interface."""
     # Check that output has all required keys
-    required_keys = {"prompt_token_ids", "response_ids", "rewards", "loss_masks", "stop_reasons", "rollout_metrics"}
+    required_keys = {
+        "prompt_token_ids",
+        "response_ids",
+        "rewards",
+        "loss_masks",
+        "stop_reasons",
+        "rollout_metrics",
+        "rollout_logprobs",
+    }
     if not all(key in output for key in required_keys):
         return False
 
@@ -190,6 +206,15 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
         if not all(isinstance(k, str) for k in rollout_metrics.keys()):
             return False
 
+    rollout_logprobs = output["rollout_logprobs"]
+    if rollout_logprobs is not None:
+        if not isinstance(rollout_logprobs, list):
+            return False
+        for sample_logprobs in rollout_logprobs:
+            if not isinstance(sample_logprobs, list):
+                return False
+            if not all(isinstance(val, (int, float)) for val in sample_logprobs):
+                return False
     return True
 
 
@@ -216,7 +241,7 @@ async def test_agent_loop_single_turn(
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
-    response_text, reward, stop_reason, loss_mask, input_prompt = await generator.agent_loop(
+    response_text, reward, stop_reason, loss_mask, input_prompt, rollout_logprobs = await generator.agent_loop(
         prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
     )
 
@@ -251,15 +276,25 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, m
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
-    assert generator_output["response_ids"][0] == [1, 2, 3, 4]
+    # uses output from llm directly
+    assert generator_output["response_ids"][0] == [1, 10, 12]
+
     assert generator_output["rewards"][0] == 1.0
     assert generator_output["stop_reasons"][0] == "stop"
-    assert generator_output["loss_masks"][0] == [1, 1, 1, 1]
+    assert generator_output["loss_masks"][0] == [1, 1, 1]
 
 
 def test_generator_output_concatenation():
     # First ensure that the GeneratorOutput fields are what we expect
-    expected_fields = ["prompt_token_ids", "response_ids", "rewards", "loss_masks", "stop_reasons", "rollout_metrics"]
+    expected_fields = [
+        "prompt_token_ids",
+        "response_ids",
+        "rewards",
+        "loss_masks",
+        "stop_reasons",
+        "rollout_metrics",
+        "rollout_logprobs",
+    ]
     assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
         "GeneratorOutput fields are not what we expect. "
         "Please update the test and `concatenate_generator_outputs()` to reflect the new fields."
@@ -272,6 +307,7 @@ def test_generator_output_concatenation():
         "rewards": [1.0, 2.0],
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
+        "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -280,6 +316,7 @@ def test_generator_output_concatenation():
         "rewards": [2.0, 3.0],
         "loss_masks": [[1, 1, 1], [1, 1, 1]],
         "stop_reasons": ["stop", "stop"],
+        "rollout_logprobs": [[0.5, 0.6], [0.7, 0.8]],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -290,6 +327,7 @@ def test_generator_output_concatenation():
     assert concatenated_output["rewards"] == [1.0, 2.0, 2.0, 3.0]
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1, 1, 1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
+    assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]]
 
 
 def test_get_metrics_from_generator_output():
@@ -299,6 +337,7 @@ def test_get_metrics_from_generator_output():
         "rewards": [1.0, 2.0],
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
+        "rollout_logprobs": None,
     }
     uids = ["a", "b"]
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
@@ -455,7 +494,7 @@ async def test_length_limit_exceeded_during_conversation(
     extras = {"test": "value"}
     max_input_length = 20  # Low limit to trigger length exceeded
 
-    response_ids, reward, stop_reason, loss_mask, prompt_token_ids = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length
     )
 
@@ -534,7 +573,7 @@ async def test_multi_turn_response_truncation(
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
 
-    response_ids, _, stop_reason, loss_mask, _ = await generator.agent_loop(
+    response_ids, _, stop_reason, loss_mask, _, _ = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
     )
 
@@ -614,7 +653,7 @@ async def test_postprocessed_action_used(
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_ids = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = await generator.agent_loop(
         prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
     )
 
@@ -627,3 +666,175 @@ async def test_postprocessed_action_used(
     assert reward == 1.0
     assert stop_reason == "stop"
     assert len(response_ids) == len(loss_mask)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_apply_overlong_filtering_non_batched(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that apply_overlong_filtering correctly zeroes out loss masks for truncated trajectories
+    in non-batched mode (using agent_loop).
+
+    Tests both truncated and non-truncated responses to verify that:
+    - Trajectories with responses not ending with eos token have their loss masks zeroed out
+    - Trajectories with responses ending with eos token keep their original loss masks
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.apply_overlong_filtering = True  # Enable filtering
+    mock_generator_cfg.batched = False
+    mock_generator_cfg.max_turns = 1
+    mock_generator_cfg.use_conversation_multi_turn = False
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Mock out the environment and inference engine generation.
+    mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+    def mock_apply_chat_template(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [1, 2, 3, 4, 5]  # 5 tokens for prompt
+        else:
+            return "".join([msg.get("content", "") for msg in messages])
+
+    def mock_encode_or_tokenize(text, **kwargs):
+        # Return different token patterns for different responses
+        if "truncated" in str(text):
+            # Simulate a long response that will get truncated by max_response_tokens
+            return [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]  # 10 tokens, will be truncated
+        else:
+            return [20, 21, 4]  # 3 tokens, ends with eos_token_id=4
+
+    mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
+    mock_tokenizer.encode.side_effect = mock_encode_or_tokenize
+    mock_tokenizer.eos_token_id = 4  # Set EOS token ID
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    # First test: response that doesn't end with eos token (should be filtered)
+    mock_llm.generate = AsyncMock(return_value={"responses": ["truncated response"], "stop_reasons": ["length"]})
+
+    input_batch_truncated: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "Test prompt"}]],
+        "env_extras": [{"test": "value"}],
+        "env_classes": [mock_env_cfg.env_class],
+    }
+
+    output_truncated = await generator.generate(input_batch_truncated)
+
+    # Verify truncated response has zeroed loss mask
+    assert len(output_truncated["loss_masks"]) == 1
+    assert len(output_truncated["loss_masks"][0]) == 5  # Truncated to max_generate_length=5
+    assert output_truncated["loss_masks"][0] == [
+        0,
+        0,
+        0,
+        0,
+        0,
+    ], "Loss mask should be all zeros for response not ending with eos token"
+    # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
+
+    # Second test: response that ends with eos token (should not be filtered)
+    # Reset the environment init to ensure clean state
+    mock_env.init.return_value = ([{"role": "user", "content": "Fresh input"}], {})
+    mock_llm.generate = AsyncMock(return_value={"responses": ["normal response"], "stop_reasons": ["stop"]})
+
+    input_batch_normal: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "Another test prompt"}]],
+        "env_extras": [{"test": "value"}],
+        "env_classes": [mock_env_cfg.env_class],
+    }
+
+    output_normal = await generator.generate(input_batch_normal)
+
+    # Verify normal response keeps original loss mask (all 1s)
+    assert len(output_normal["loss_masks"]) == 1
+    assert len(output_normal["loss_masks"][0]) == 3  # 3 response tokens (already includes EOS token)
+    assert output_normal["loss_masks"][0] == [
+        1,
+        1,
+        1,
+    ], "Loss mask should remain as 1s for response ending with eos token"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_apply_overlong_filtering_batched(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    mock_generator_cfg,
+    mock_env_cfg,
+):
+    """
+    Test that apply_overlong_filtering correctly zeroes out loss masks for truncated trajectories
+    in batched mode.
+
+    Tests a response that doesn't end with eos token to verify that it gets filtered.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.apply_overlong_filtering = True  # Enable filtering
+    mock_generator_cfg.batched = True
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Mock out environment and inference engine generation.
+    mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["truncated response"],
+            "stop_reasons": ["length"],
+            "response_ids": [[10, 11, 12, 13]],
+        }
+    )
+
+    def mock_apply_chat_template(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [[1, 2, 3, 4, 5] for _ in messages]  # 5 tokens for each prompt
+        else:
+            return "".join([msg.get("content", "") for msg in messages])
+
+    def mock_encode_or_tokenize(text):
+        return [10, 11, 12, 13]  # 4 tokens, doesn't end with eos_token_id=4
+
+    mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
+    mock_tokenizer.side_effect = lambda text: {"input_ids": mock_encode_or_tokenize(text)}
+    mock_tokenizer.eos_token_id = 4  # Set EOS token ID
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    # Test batched mode with response that doesn't end with eos token
+    prompts = [[{"role": "user", "content": "Test prompt"}]]
+    env_extras = [{"test": "value"}]
+    env_classes = [mock_env_cfg.env_class]
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output = await generator.generate(input_batch)
+
+    # Verify that the loss mask is zeroed out for the response not ending with eos token
+    assert len(generator_output["loss_masks"]) == 1
+    assert len(generator_output["loss_masks"][0]) == 4  # Should match response length
+    assert generator_output["loss_masks"][0] == [
+        0,
+        0,
+        0,
+        0,
+    ], "Loss mask should be all zeros for response not ending with eos token"

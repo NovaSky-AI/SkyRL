@@ -74,7 +74,7 @@ def dummy_config():
                     "advantage_estimator": "grpo",
                     "use_kl_estimator_k3": False,
                     "use_abs_kl": False,
-                    "init_kl_coef": 0.2,
+                    "kl_estimator_type": "k1",
                     "reward_clip_range": 5.0,
                     "use_kl_loss": True,
                     "kl_loss_coef": 0.0,
@@ -85,8 +85,9 @@ def dummy_config():
                     "clip_ratio_c": 3.0,
                     "value_clip": 0.2,
                     "normalize_reward": True,
-                    "ppo_loss_type": "regular",
+                    "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
+                    "grpo_norm_by_std": True,
                 },
                 "resume_mode": "none",
             },
@@ -178,7 +179,7 @@ def test_calculate_kl_create_experience_batched(dummy_config):
     assert metrics["avg_kl"] == approx(0.1249, abs=1e-4)
 
 
-@patch("skyrl_train.utils.compute_advantages_and_returns", new_callable=MagicMock)
+@patch("skyrl_train.utils.ppo_utils.compute_advantages_and_returns", new_callable=MagicMock)
 def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
@@ -254,6 +255,9 @@ def test_normalize_mini_batch_size():
                     "train_batch_size": train_batch_size,
                     "policy_mini_batch_size": policy_mini_batch_size,
                     "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
+                    "algorithm": {
+                        "policy_loss_type": "regular",
+                    },
                 },
                 "generator": {
                     "n_samples_per_prompt": n_samples_per_prompt,
@@ -565,6 +569,9 @@ def test_ppo_train_batch_calculations():
             "trainer": {
                 "micro_train_batch_size_per_gpu": 2,
                 "update_epochs_per_batch": 1,
+                "algorithm": {
+                    "policy_loss_type": "regular",
+                },
             },
             "generator": {
                 "sampling_params": {
@@ -588,6 +595,7 @@ def test_ppo_train_batch_calculations():
             "advantages": torch.randn(batch_size, response_length),
             "loss_mask": torch.ones(batch_size, response_length),
             "response_mask": torch.ones(batch_size, response_length),
+            "rollout_logprobs": None,
         },
     )
     dummy_databatch.metadata = {"global_step": 0, "response_length": response_length}

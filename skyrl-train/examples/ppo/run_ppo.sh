@@ -43,7 +43,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="wandb" \
   trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_test" \
+  trainer.run_name="gsm8k_ppo" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt_ppo" \
   trainer.eval_batch_size=1024 \

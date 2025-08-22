@@ -10,8 +10,8 @@ Data Configuration
     train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
     val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
-- ``data.train_data``: A list of files for the training dataset in parquet format. 
-- ``data.val_data``: A list of files for evaluation in parquet format. 
+- ``data.train_data``: A list of files for the training dataset in parquet format.
+- ``data.val_data``: A list of files for evaluation in parquet format.
 
 
 .. note::
@@ -41,15 +41,15 @@ For an in-depth guide on model placement and colocation, please refer to the :do
 General Training Configuration
 ------------------------------
 
-.. code-block:: yaml 
+.. code-block:: yaml
 
     epochs: 1  # Number of passes over the full dataset
     update_epochs_per_batch: 1
     train_batch_size: 1024
     policy_mini_batch_size: 256
     critic_mini_batch_size: 256
-    micro_train_batch_size_per_gpu: 1 
-    micro_forward_batch_size_per_gpu: 1  
+    micro_train_batch_size_per_gpu: 1
+    micro_forward_batch_size_per_gpu: 1
     update_ref_every_epoch: false
     use_sample_packing: true
     max_prompt_length: 512
@@ -62,21 +62,21 @@ General Training Configuration
 - ``train_batch_size``: Batch size of prompts used for each dataloader step.
 - ``policy_mini_batch_size``: Mini batch size used during RL training step. Each mini batch corresponds to one optimizer step. For example, if the ``train_batch_size`` is 4 and ``policy_mini_batch_size`` is 2, then there will be 2 optimizer steps (i.e., model updates) for a given training batch. Note that is this the global mini batch size. The actual size of the mini batch per worker would be ``policy_mini_batch_size/ number of DP ranks``
 - ``critic_mini_batch_size``: Similar to ``policy_mini_batch_size`` but for the critic model (if applicable). Note that in general, the critic model can tolerate off-policy updates more than the policy. Thus, you would want to set ``critic_mini_batch_size`` to be lower compared ``policy_mini_batch_size`` (i.e., more critic updates).
-- ``micro_train_batch_size_per_gpu``: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches. 
+- ``micro_train_batch_size_per_gpu``: Micro batch size during training step. This is common for both policy and critic models. Each mini batch is split into micro batches of this size, gradients are computed and accumulated over these micro batches.
 - ``micro_forward_batch_size_per_gpu``: Micro batch size during forward pass (i.e., for log probability or value computation). This is common for both policy and critic models. Each mini batch is split into micro batches of this size, model forward pass is performed over these micro batches.
-- ``update_ref_every_epoch``: Whether to update the reference model every epoch. 
+- ``update_ref_every_epoch``: Whether to update the reference model every epoch.
 - ``use_sample_packing``: Whether to use sample packing during model forward pass (common for all models).
 - ``max_prompt_length``: Maximum prompt length during training. Longer prompts will be truncated.
 - ``gradient_checkpointing``: Whether to use gradient checkpointing.
 - ``seed``: Random seed for training.
 
 
-.. tip:: 
+.. tip::
   If you're facing issues with tuning the right values for ``micro_train_batch_size_per_gpu``, ``policy_mini_batch_size`` and ``micro_forward_batch_size_per_gpu``, see ``utils/utils.py::validate_batch_sizes`` for details on constraints.
 
 Evaluation Configuration
 ------------------------------
-.. code-block:: yaml 
+.. code-block:: yaml
 
     eval_batch_size: 1024
     eval_before_train: true
@@ -86,7 +86,7 @@ Evaluation Configuration
 - ``eval_before_train``: Whether to evaluate the model before training.
 - ``eval_interval``: The frequency of evaluating the model with the validation dataset (in terms of number of steps). If set to ``-1``, evaluation will not be performed.
 
-.. note:: 
+.. note::
   If multiple validation datasets are provided (e.g. ``data.val_data="['$DATA_DIR/validation1.parquet', '$DATA_DIR/validation2.parquet']" \``),
   then the evaluation will be performed on all of them. The metrics for each dataset, and the aggregated metrics, will
   all be logged in WandB. If ``dump_eval_results`` is set to ``true``, the per-dataset and aggregated results will be
@@ -121,9 +121,9 @@ Logging and Debugging Configuration
     dump_data_batch: false
     dump_eval_results: true
 
-- ``logger``: Logger to use. Currently, we support ``wandb`` and ``console``. ``console`` will simply log metrics to the console. 
-- ``project_name``: Name of the project in WandB.
-- ``run_name``: Name of the run in WandB.
+- ``logger``: Logger to use. Currently, we support ``wandb``, ``mlflow``, and ``console``. ``console`` will simply log metrics to the console.
+- ``project_name``: Name of the project in WandB and MLFlow.
+- ``run_name``: Name of the run in WandB and MLFlow.
 - ``dump_data_batch``: Whether to dump the data batch to a file. This is useful for debugging. When ``true``, the data batch will be dumped to a file in the ``export_path`` directory. The training batch at global step ``N`` is saved to ``self.cfg.trainer.export_path / "dumped_data" / global_step_N_training_input``
 - ``dump_eval_results``: Whether to dump the evaluation results to a file. When ``true``, the full evaluation results will be dumped to a file in the ``export_path`` directory. The evaluation results at global step ``N`` is saved to ``self.cfg.trainer.export_path / "dumped_eval" / global_step_N_eval_results``
 
@@ -139,7 +139,7 @@ FSDP Configuration
 
 We use the same configuration group for FSDP1 and FSDP2
 
-.. code-block:: yaml 
+.. code-block:: yaml
 
     fsdp_config:
         cpu_offload: false # offload params + optimizer state to cpu during fwd pass
@@ -150,11 +150,11 @@ We use the same configuration group for FSDP1 and FSDP2
 - ``reshard_after_forward``: Whether to re-shard FSDP model after forward pass. This is a FSDP2 specific configuration, please refer to the `FSDP2 docs <https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard>`_ for more details. If set to ``false``, this would retain the full model parameters on each worker (similar to DeepSpeed's ZeRO stage 2).
 - ``fsdp_size``: The group size within which worker state is sharded with FSDP. This is a parameter to be used for hybrid sharding in multi-node settings. For example, if the number of workers in the actor group is 8, with 4 in each node, and ``fsdp_size`` is 4, then the training state will be fully sharded across 4 ranks in each node, but replicated (DP) across nodes.
 
-.. note:: 
-    ``cpu_offload`` is different from worker state offloading with model colocation. 
-    
-    In FSDP, ``cpu_offload`` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass. 
-    
+.. note::
+    ``cpu_offload`` is different from worker state offloading with model colocation.
+
+    In FSDP, ``cpu_offload`` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
+
     In `skyrl-train`, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on :doc:`model placement and colocation <placement>`
 
 .. _deepspeed-configurations:
@@ -165,8 +165,8 @@ DeepSpeed Configuration
 For DeepSpeed, please refer to DeepSpeed's `configuration guide <https://www.deepspeed.ai/docs/config-json/>`_ for more details. In general, the user experience with DeepSpeed is better and most parameters can set to ``auto`` for DeepSpeed to automatically configure. Here are a couple of important parameters:
 
 - ``deepspeed_config.zero_optimization.stage``: Which ZeRO stage to use. Currently, we only support stage 3.
-- ``deepspeed_config.zero_optimization.zero_hpz_partition_size``: Hierarchical Partitioning size. This is similar (although not equivalent) to hybrid sharding in FSDP. 
-- ``deepspeed_config.gradient_clipping``: This should not be set during training. We instead provide a common optimizer config ``optimizer_config.max_grad_norm`` that will handle gradient clipping configuration for all training backends. 
+- ``deepspeed_config.zero_optimization.zero_hpz_partition_size``: Hierarchical Partitioning size. This is similar (although not equivalent) to hybrid sharding in FSDP.
+- ``deepspeed_config.gradient_clipping``: This should not be set during training. We instead provide a common optimizer config ``optimizer_config.max_grad_norm`` that will handle gradient clipping configuration for all training backends.
 
 Optimizer Configuration
 -----------------------
@@ -175,12 +175,13 @@ For both the critic and policy model, we provide a common optimizer configuratio
 .. code-block:: yaml
 
     optimizer_config:
-       lr: 1.0e-6 
+       lr: 1.0e-6
        adam_betas: [0.9, 0.999]
        weight_decay: 1e-2
        max_grad_norm: 1.0
        offload_after_step: true
        num_warmup_steps: 0
+       scheduler: "constant_with_warmup"
 
 - ``optimizer_config.lr``: Learning rate for the optimizer
 - ``optimizer_config.adam_betas``: Betas for AdamW optimizer.
@@ -188,6 +189,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
 - ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
+- ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from ([Hugging Face Docs](https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType)).
 
 Policy Configuration
 --------------------
@@ -218,12 +220,12 @@ This section configures the policy model used for training, including optimizer,
      use_torch_compile: false  # Enable torch compile for the entropy calculation
      record_memory: false  # Dump memory snapshot for debugging
 
-- ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``. 
+- ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``policy.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
 - ``policy.use_torch_compile``: Whether to enable torch compile for entropy calculation
-- ``policy.record_memory``: Whether to record memory usage. If ``True``, this will use PyTorch's `memory snapshotting utility <https://docs.pytorch.org/docs/stable/torch_cuda_memory.html>`_ to record memory usage and dump memory snapshots after each policy model training step. 
+- ``policy.record_memory``: Whether to record memory usage. If ``True``, this will use PyTorch's `memory snapshotting utility <https://docs.pytorch.org/docs/stable/torch_cuda_memory.html>`_ to record memory usage and dump memory snapshots after each policy model training step.
 
 
 
@@ -257,7 +259,7 @@ Reference Model Configuration
 
 .. code-block:: yaml
 
-    ref: 
+    ref:
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
         cpu_offload: true
@@ -265,11 +267,11 @@ Reference Model Configuration
         fsdp_size: -1
       sequence_parallel_size: 1
 
-- ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``. 
+- ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
 
-.. note:: 
+.. note::
 
   The reference model is used only if the base model log probabilities are required either as a part of the training loss or as a part of the reward. Thus, ``trainer.algorithm.use_kl_in_reward`` or ``trainer.algorithm.use_kl_loss`` should be set to ``true`` to use the reference model. If both are ``false``, then the reference model is not instantiated.
 
@@ -278,20 +280,30 @@ Algorithm Configuration
 -----------------------
 
 .. code-block:: yaml
-  
+
     algorithm:
-      advantage_estimator: "grpo"
-      use_kl_estimator_k3: true
-      use_abs_kl: false
+      advantage_estimator: "grpo"  # "grpo", "gae", or customizable with AdvantageEstimatorRegistry
+
+      # KL Penalty Parameters
+      kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
+        type: "fixed" # "fixed" or "adaptive"
+        kl_target: 0.1 # target KL divergence for adaptive KL controller
+        horizon: 10000 # controls the update rate of the adaptive KL controller
+  
+      kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
+      use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
+      use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
+
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
       use_kl_in_reward: false # apply kl loss to rewards
       use_kl_loss: true # used in policy model
       kl_loss_coef: 0.001
-      # this adds training batch level normalization to advantages 
+      # this adds training batch level normalization to advantages
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      ppo_loss_type: "regular" # "regular", "dual_clip"
-      loss_reduction: "token_mean" # "token_mean", "sequence_mean"
+      policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
+      loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+      grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
 
       # GAE parameters
       lambd: 1.0
@@ -307,16 +319,46 @@ Algorithm Configuration
       value_clip: 0.2
       normalize_reward: true
 
-- ``algorithm.advantage_estimator``: Advantage estimator to use. Currently, we support ``grpo`` and ``gae``.
-- ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance.
-- ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation.
+      # dynamic sampling parameters
+      dynamic_sampling:
+        type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
+        max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
+        min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
+      
+      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+      use_tis: false 
+      tis_imp_ratio_cap: -1.0
+
+
+- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
+- ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
+
+ - ``type``: Type of KL controller to use. Options include: ``fixed`` or ``adaptive``. 
+ - ``kl_target``: Target KL divergence for adaptive KL controller.
+ - ``horizon``: Controls the update rate of the adaptive KL controller.
+
+- ``algorithm.kl_estimator_type``: KL estimator type to use. Options include: ``k1``, ``k2``, ``k3``, ``abs``. See `this blog post <http://joschu.net/blog/kl-approx.html>`_ for details. We use ``k3`` as the default.
+- ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance. This flag is to be deprecated, use ``kl_estimator_type="k3"`` instead.
+- ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation. This flag is to be deprecated, use ``kl_estimator_type="abs"`` instead.
 - ``algorithm.use_kl_in_reward``: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as ``rewards - kl * kl_loss_coef``.
 - ``algorithm.use_kl_loss``: Whether to add a KL divergence loss to the policy model. The policy loss will be computed as ``policy_loss + kl * kl_loss_coef``.
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.
 - ``algorithm.advantage_batch_normalize``: Whether to normalize advantages by the (global) batch mean and standard deviation.
 - ``algorithm.value_head_prefix``: The name used to identify the value head in the critic model.
-- ``algorithm.ppo_loss_type``: Type of PPO loss to use. Currently, we support ``regular`` and ``dual_clip``. ``regular`` is the vanilla PPO loss, while ``dual_clip`` is the dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_.
-- ``algorithm.loss_reduction``: Type of PPO loss reduction to use. Currently, we support ``token_mean`` and ``sequence_mean``. ``token_mean`` matches token-level loss introduced by `DAPO <https://dapo-sia.github.io/>`_. ``sequence_mean`` computes per-sequence avg token loss, then averages over the batch.
+- ``algorithm.policy_loss_type``: Type of policy loss to use. Options include:
+
+  - ``regular``: Vanilla PPO loss with token-level importance sampling
+  - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - Custom policy losses can be registered with the ``PolicyLossRegistry``
+
+- ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
+
+  - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
+  - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
+  - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+
+- ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.
@@ -324,37 +366,42 @@ Algorithm Configuration
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
 - ``algorithm.normalize_reward``: Whether to normalize critic model output (i.e., values). When ``true``, the critic model learns the mean and standard deviation of the values during training and normalizes the values during forward pass.
+- ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
+  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
+  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
+  - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
+- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
+- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
 
-Policy Loss Formulation 
+
+Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``PolicyLoss`` class.
+It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``ppo_policy_loss`` function.
 
 .. code-block:: python
 
-  class PolicyLoss(nn.Module):
-    ...
-    def forward(
-        self,
-        log_probs: torch.Tensor,
-        old_log_probs: torch.Tensor,
-        advantages: torch.Tensor,
-        loss_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+  def ppo_policy_loss(
+      log_probs: torch.Tensor,
+      old_log_probs: torch.Tensor,
+      advantages: torch.Tensor,
+      config: DictConfig, # trainer.algorithm config
+      loss_mask: Optional[torch.Tensor] = None,
+  ) -> torch.Tensor:
 
-        ratio = (log_probs - old_log_probs).exp()
-        surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
-        loss = -torch.min(surr1, surr2)
-        clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
-        clip_pg_losses1 = loss
-        if self.loss_type == "dual_clip":
-            pg_losses3 = -advantages * self.clip_ratio_c
-            clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-            loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
-        return loss, clip_ratio
-  
+      ratio = (log_probs - old_log_probs).exp()
+      surr1 = ratio * advantages
+      surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+      loss = -torch.min(surr1, surr2)
+      clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+      clip_pg_losses1 = loss
+      if config.policy_loss_type == "dual_clip":
+        pg_losses3 = -advantages * config.clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+      loss = reduce_loss(loss, loss_mask, config.loss_reduction)
+      return loss, clip_ratio
+
 
 Generator Configuration
 -----------------------
@@ -379,12 +426,12 @@ Generator Configuration
     gpu_memory_utilization: 0.8
     max_num_seqs: 1024
     remote_inference_engine_urls: ["127.0.0.1:8001"]
-    max_turns: 1 
+    max_turns: 1
 
     override_existing_update_group: "auto" # "auto", "enable", "disable"
     # sampling params for generation phase
     sampling_params:
-      max_generate_length: 1024 
+      max_generate_length: 1024
       temperature: 1.0
       top_p: 1.0
       min_p: 0.0
@@ -394,7 +441,7 @@ Generator Configuration
 
     # sampling params for evaluation
     eval_sampling_params:
-      max_generate_length: ${generator.sampling_params.max_generate_length} 
+      max_generate_length: ${generator.sampling_params.max_generate_length}
       temperature: 1.0
       top_p: 1.0
       min_p: 0.0
@@ -403,7 +450,9 @@ Generator Configuration
     # number of samples per prompt for evaluation
     eval_n_samples_per_prompt: 1
 
-    zero_reward_on_non_stop: false 
+    zero_reward_on_non_stop: false
+
+    apply_overlong_filtering: false
 
 
 Inference Engine Placement Configuration
@@ -434,7 +483,7 @@ Inference Engine Configuration
 - ``generator.gpu_memory_utilization``: GPU memory utilization for the inference engine. Applicable only for ``run_engines_locally=true``.
 - ``generator.vllm_v1_disable_multiproc``: If ``true``, this will set ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
 - ``generator.enable_prefix_caching``: Whether to enable prefix caching for the inference engine. Applicable only when ``backend="vllm"``. This can be left to the default ``true`` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
-- ``generator.enable_chunked_prefill``: Whether to enable chunked prefill for the inference engine. Applicable only when ``backend="vllm"``. With vLLM, this can be left to the default ``true`` in most cases. 
+- ``generator.enable_chunked_prefill``: Whether to enable chunked prefill for the inference engine. Applicable only when ``backend="vllm"``. With vLLM, this can be left to the default ``true`` in most cases.
 - ``generator.max_num_seqs``: Continous batching parameter for vLLM. Maximum number of sequences to pack into a batch.
 - ``generator.max_num_batched_tokens``: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
 
@@ -461,3 +510,4 @@ Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
+- ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.

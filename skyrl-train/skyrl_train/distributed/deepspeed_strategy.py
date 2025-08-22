@@ -257,6 +257,7 @@ class DeepspeedStrategy(DistributedStrategy):
         scheduler=None,
         client_state={},
         tag=None,
+        tokenizer=None,
     ):
         if isinstance(model, Actor):
             model = model.model
@@ -276,6 +277,11 @@ class DeepspeedStrategy(DistributedStrategy):
         }
 
         model.save_checkpoint(ckpt_dir, tag=tag, client_state=extra_state_dict)
+
+        # Save HuggingFace config and tokenizer
+        if self.is_rank_0():
+            config_save_model = self._unwrap_model(model)
+            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
 
     def load_ckpt(
         self,

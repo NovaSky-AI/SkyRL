@@ -1,4 +1,5 @@
 import asyncio
+from typing import List, Dict
 
 import deepspeed
 import ray
@@ -6,8 +7,8 @@ import torch
 import torch.distributed
 from loguru import logger
 from transformers import AutoModel
-
 from transformers.trainer import get_scheduler
+
 
 from skyrl_train.models import get_llm_for_sequence_regression, Actor
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
@@ -18,8 +19,6 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RewardWorkerBase,
     RefWorkerBase,
-    PolicyLoss,
-    ValueLoss,
 )
 
 
@@ -32,7 +31,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, non_blocking)
 
-    def init_model(self, model_id_or_path):
+    def init_model(self, model_id_or_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("deepspeed")
         self.zero_stage = self.cfg.trainer.policy.deepspeed_config.zero_optimization.stage
         if self.cfg.trainer.policy.optimizer_config.max_grad_norm > 0:
@@ -75,9 +74,10 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         )
 
         actor_scheduler = get_scheduler(
-            "constant_with_warmup",
+            self.cfg.trainer.policy.optimizer_config.scheduler,
             actor_optim,
             num_warmup_steps=self.cfg.trainer.policy.optimizer_config.num_warmup_steps,
+            num_training_steps=num_training_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:
@@ -90,15 +90,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         # prepare models/optimizers...
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (actor, actor_optim, actor_scheduler),
-        )
-
-        # set ppo loss function
-        self.actor_loss_fn = PolicyLoss(
-            self.cfg.trainer.algorithm.eps_clip_low,
-            self.cfg.trainer.algorithm.eps_clip_high,
-            self.cfg.trainer.algorithm.clip_ratio_c,
-            loss_type=self.cfg.trainer.algorithm.ppo_loss_type,
-            loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
         )
 
         self.use_cuda_ipc = False
@@ -133,22 +124,22 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
 
         torch.cuda.empty_cache()
         model = self.model.model.module
-        for name, param in model.named_parameters():
-            # broadcast
-            if not self.use_cuda_ipc:
+        if not self.use_cuda_ipc:
+            for name, param in model.named_parameters():
                 if torch.distributed.get_rank() == 0:
                     shape = param.shape if self.zero_stage != 3 else param.ds_shape
 
                     update_weight_task = asyncio.create_task(
-                        inference_engine_client.update_named_weight(
+                        inference_engine_client.update_named_weights(
                             {
-                                "name": name,
-                                "dtype": self.cfg.generator.model_dtype,
-                                "shape": shape,
+                                "names": [name],
+                                "dtypes": [self.cfg.generator.model_dtype],
+                                "shapes": [shape],
                             }
                         )
                     )
 
+                # broadcast
                 def gather_and_broadcast(param):
                     # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
                     with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
@@ -159,43 +150,75 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                 await asyncio.to_thread(gather_and_broadcast, param)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
+            torch.distributed.barrier()
+        # CUDA IPC
+        else:
+            from torch.multiprocessing.reductions import reduce_tensor
 
-            # CUDA IPC
-            else:
-                from torch.multiprocessing.reductions import reduce_tensor
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            current_size = 0
 
-                # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
-                with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
-                    weight = param.data.clone()
-                    weight = weight.to(generator_dtype)
-                    ipc_handle = reduce_tensor(weight)
+            module_to_params: Dict[str, List[str]] = {}
+            params = dict(model.named_parameters())
+            for param_name, param in model.named_parameters():
+                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
+                module_name = ".".join(param_name.split(".")[:-2])
+                if module_name not in module_to_params:
+                    module_to_params[module_name] = [param_name]
+                else:
+                    module_to_params[module_name].append(param_name)
 
-                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                    ipc_handle_list = [None] * torch.distributed.get_world_size()
-                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
+            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
+            # we need to pass the weights for all of these together.
+            # Overall, this doesn't hurt perf even in the general case
+            for module_name, param_names in module_to_params.items():
+                for name in param_names:
+                    param = params[name]
+                    # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
+                    with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
+                        weight = param.data.clone()
+                        weight = weight.to(generator_dtype)
+                        ipc_handle = reduce_tensor(weight)
 
-                    if torch.distributed.get_rank() == 0:
-                        ipc_handles = {}
-                        for d in ipc_handle_list:
-                            ipc_handles.update(d)
+                        ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                        ipc_handle_list = [None] * torch.distributed.get_world_size()
+                        torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
-                        shape = param.shape if self.zero_stage != 3 else param.ds_shape
+                        if torch.distributed.get_rank() == 0:
+                            ipc_handles = {}
+                            for d in ipc_handle_list:
+                                ipc_handles.update(d)
 
-                        await asyncio.create_task(
-                            inference_engine_client.update_named_weight(
+                            shape = param.shape if self.zero_stage != 3 else param.ds_shape
+
+                            weights_update_request["names"].append(name)
+                            weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                            weights_update_request["shapes"].append(shape)
+                            weights_update_request["extras"].append(
                                 {
-                                    "name": name,
-                                    "dtype": self.cfg.generator.model_dtype,
-                                    "shape": shape,
-                                    "extras": {
-                                        "ipc_handles": ipc_handles,
-                                    },
+                                    "ipc_handles": ipc_handles,
                                 }
                             )
-                        )
+                            current_size += weight.nbytes
+                            # We send in batches as an optimization
+                            # sync if threshold is reached
+                            if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                                await inference_engine_client.update_named_weights(weights_update_request)
+                                current_size = 0
+                                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                                # force collect any sent tensors if possible to be memory efficient
+                                torch.cuda.ipc_collect()
 
-                    torch.distributed.barrier()
-                    torch.cuda.synchronize()
+                        torch.distributed.barrier()
+                        torch.cuda.synchronize()
+
+            # sync any remaining weights
+            if torch.distributed.get_rank() == 0 and len(weights_update_request["names"]) > 0:
+                await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
+                current_size = 0
+                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            torch.distributed.barrier()
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -229,7 +252,7 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
     def backload_to_gpu(self, non_blocking=True):
         self.strategy.backload_to_gpu(self.model, non_blocking)
 
-    def init_model(self, model_id_or_path):
+    def init_model(self, model_id_or_path, num_training_steps: int = None):
         assert self.cfg.trainer.strategy in ("deepspeed")
         self.zero_stage = self.cfg.trainer.critic.deepspeed_config.zero_optimization.stage
         strategy = DeepspeedStrategy(
@@ -273,9 +296,10 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
 
         # configure scheduler
         critic_scheduler = get_scheduler(
-            "constant_with_warmup",
+            self.cfg.trainer.critic.optimizer_config.scheduler,
             critic_optim,
             num_warmup_steps=self.cfg.trainer.critic.optimizer_config.num_warmup_steps,
+            num_training_steps=num_training_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:
@@ -289,9 +313,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (critic, critic_optim, critic_scheduler),
         )
-
-        # set ppo loss function
-        self.critic_loss_fn = ValueLoss(self.cfg.trainer.algorithm.value_clip)
 
 
 class DeepSpeedRewardWorkerBase(RewardWorkerBase):
