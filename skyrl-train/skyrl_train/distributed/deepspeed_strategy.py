@@ -340,6 +340,9 @@ class DeepspeedStrategy(DistributedStrategy):
 
         # Use our context manager to handle local vs cloud paths
         with io.local_work_dir(output_dir) as work_dir:
+            # FIXME[ben] now that we're using a temp dir, the different workers can't see all the shards.
+            # In general, the current approach won't work for multi-node
+
             # Create a temporary DS checkpoint folder (only on rank 0)
             temp_ckpt_dir = os.path.join(work_dir, "temp_deepspeed_ckpt")
             if rank == 0:

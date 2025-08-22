@@ -185,6 +185,7 @@ class RayPPOTrainer:
         )
 
         # 4. Prepare dumping data
+        # TODO[Ben] update this to be cloud-compatible
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
