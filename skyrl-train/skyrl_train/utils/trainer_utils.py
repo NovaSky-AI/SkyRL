@@ -88,10 +88,10 @@ def extract_step_from_path(path: str) -> int:
         return int(basename.split(GLOBAL_STEP_PREFIX)[1])
     return -1
 
+
 def _upload_directory_to_s3(local_dir: str, bucket_name: str, s3_prefix: str):
     """Upload a directory to S3 recursively"""
 
-    
     s3 = boto3.client("s3")
     for root, dirs, files in os.walk(local_dir):
         for file in files:
@@ -103,7 +103,7 @@ def _upload_directory_to_s3(local_dir: str, bucket_name: str, s3_prefix: str):
 
 def export_checkpoint_to_s3(bucket: str, prefix: str, local_checkpoint_dir: str, global_step: int):
     """Export a local checkpoint directory to S3.
-    
+
     Args:
         bucket: S3 bucket name
         prefix: S3 prefix
@@ -119,13 +119,14 @@ def export_checkpoint_to_s3(bucket: str, prefix: str, local_checkpoint_dir: str,
         return
     try:
         s3_prefix = f"{prefix}/global_step_{global_step}"
-        
+
         logger.info(f"Exporting checkpoint to S3: s3://{bucket}/{s3_prefix}")
         _upload_directory_to_s3(local_checkpoint_dir, bucket, s3_prefix)
         logger.info(f"Successfully exported checkpoint global_step_{global_step} to S3")
-        
+
     except Exception as e:
         logger.error(f"Failed to export checkpoint global_step_{global_step} to S3: {e}")
+
 
 def cleanup_old_checkpoints(ckpt_path: str, max_ckpts_to_keep: int, current_global_step: int):
     """Remove old global_step directories, keeping only the most recent max_ckpts_to_keep"""
