@@ -43,8 +43,8 @@ LLM engine's ``.generate()`` method.
 There are three distinct codepaths in ``agent_loop()``, each managing the chat history and tokens
 differently. The codepaths are determined by:
 
-- Config's ``generator.use_conversation_multi_turn``: if false, all turns' observations and assistant
-  generations are stored in the same assistant message. If true, each observation from the
+- Config's ``generator.use_conversation_multi_turn``: If ``False``, all turns' observations and assistant
+  generations are stored in the same assistant message. If ``True``, each observation from the
   environment's ``step()`` is a message.
 - Whether ``get_custom_chat_template(model_name)`` returns a template (currently used for Qwen3).
 
