@@ -6,7 +6,7 @@ from skyrl_train.inference_engines.base import (
 )
 import asyncio
 import threading
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 
 
 class InferenceEngineClient(InferenceEngineInterface):

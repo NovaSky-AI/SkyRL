@@ -160,7 +160,7 @@ def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineCli
         tokenizer=AutoTokenizer.from_pretrained(MODEL),
         backend=backend,
     )
-    client = InferenceEngineClient(engine, generator_config=DictConfig({"model_name": model}))
+    client = InferenceEngineClient(engine, generator_config=DictConfig({"model_name": MODEL}))
     return client
 
 
