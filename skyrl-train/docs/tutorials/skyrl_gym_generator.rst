@@ -171,7 +171,7 @@ message. For instance, in Qwen2.5 and Qwen3, the ``base_conversation_token_ids``
   <|im_start|>user\nI am a user.<|im_end|>\n
   <|im_start|>assistant\nI am an assistant.<|im_end|>\n
 
-Note that there is a ``\n`` in assistant's line before next user's message starts.
+Note that there is a ``\n`` in the assistant's message before the next user's message starts.
 If we do token-in-token-out, there is no way for the LLM engine to generate ``\n`` since the
 EOS token is ``<|im_end|>``. Therefore, we need to add the ``\n`` back when creating ``observation_ids``.
 In order to do this, we cut the ``\n`` out in ``base_conversation_token_ids``:
