@@ -79,7 +79,7 @@ def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, 
         tokenizer=AutoTokenizer.from_pretrained(MODEL),
         backend=backend,
     )
-    client = InferenceEngineClient(eps)
+    client = InferenceEngineClient(eps, cfg.generator)
     if sleep:
         asyncio.run(client.wake_up())
     return client, pg

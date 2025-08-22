@@ -32,7 +32,7 @@ from skyrl_train.inference_engines.launch_inference_engine_http_server import (
     shutdown_server,
 )
 from skyrl_train.entrypoints.main_base import config_dir
-from tests.gpu.test_policy_vllm_e2e import init_inference_engines
+from tests.gpu.test_policy_local_engines_e2e import init_inference_engines
 from uuid import uuid4
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -66,11 +66,11 @@ def init_to_simulate_trainer():
 
     client, _ = init_inference_engines(
         cfg=cfg,
-        v1=True,
         use_local=True,
         async_engine=cfg.generator.async_engine,
         tp_size=cfg.generator.inference_engine_tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
+        backend="vllm",
     )
 
     # Start server in background thread using serve function directly

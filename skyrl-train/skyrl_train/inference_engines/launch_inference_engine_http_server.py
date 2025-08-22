@@ -168,6 +168,7 @@ async def generate_with_http_server(
     inference_engine_output: InferenceEngineOutput = {
         "responses": results,
         "stop_reasons": finish_reasons,
+        "response_ids": None,
     }
 
     return inference_engine_output

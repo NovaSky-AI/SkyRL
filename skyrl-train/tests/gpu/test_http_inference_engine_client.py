@@ -1,7 +1,7 @@
 """
 Test the HTTP server with OpenAI client and policy weight sync.
 
-This uses the same workflow as test_policy_vllm_e2e.py, but with the HTTP server instead of
+This uses the same workflow as test_policy_local_engines_e2e.py, but with the HTTP server instead of
 the inference client engine.
 
 # Run only vllm tests (requires vllm extra):
@@ -30,7 +30,7 @@ from skyrl_train.inference_engines.launch_inference_engine_http_server import (
     shutdown_server,
 )
 from openai import OpenAI
-from .test_policy_vllm_e2e import init_inference_engines
+from .test_policy_local_engines_e2e import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
 from skyrl_train.inference_engines.openai_api_protocol import (
     ChatCompletionRequest,
@@ -76,11 +76,11 @@ def test_http_server_openai_api_with_weight_sync(test_type):
 
         client, pg = init_inference_engines(
             cfg=cfg,
-            v1=True,
             use_local=True,
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
         )
 
         # Start server in background thread using serve function directly
@@ -280,11 +280,11 @@ def test_structured_generation():
 
         client, _ = init_inference_engines(
             cfg=cfg,
-            v1=True,
             use_local=True,
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
         )
 
         # Start server in background thread using serve function directly
@@ -351,11 +351,11 @@ def test_http_server_error_handling():
 
         client, _ = init_inference_engines(
             cfg=cfg,
-            v1=True,
             use_local=True,
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
         )
 
         from skyrl_train.inference_engines.launch_inference_engine_http_server import serve, wait_for_server_ready
