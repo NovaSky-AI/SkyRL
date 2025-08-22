@@ -88,10 +88,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # need copy here since the prompt is a list of messages and we are going to modify it
         chat_history = copy.deepcopy(prompt)
-        chat_end_index = len(chat_history)
 
         # Init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = env.init(chat_history)
+        chat_end_index = len(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             # if we are keeping the chat history in token ids, we have to add the generation prompt to the original prompt
