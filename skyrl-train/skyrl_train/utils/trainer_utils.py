@@ -14,6 +14,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, conc
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
+import boto3
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -86,6 +87,45 @@ def extract_step_from_path(path: str) -> int:
     if basename.startswith(GLOBAL_STEP_PREFIX):
         return int(basename.split(GLOBAL_STEP_PREFIX)[1])
     return -1
+
+
+def _upload_directory_to_s3(local_dir: str, bucket_name: str, s3_prefix: str):
+    """Upload a directory to S3 recursively"""
+
+    s3 = boto3.client("s3")
+    for root, dirs, files in os.walk(local_dir):
+        for file in files:
+            relative_path = os.path.relpath(os.path.join(root, file), local_dir)
+            s3_key = os.path.join(s3_prefix, relative_path)
+            local_file_path = os.path.join(root, file)
+            s3.upload_file(local_file_path, bucket_name, s3_key)
+
+
+def export_checkpoint_to_s3(bucket: str, prefix: str, local_checkpoint_dir: str, global_step: int):
+    """Export a local checkpoint directory to S3.
+
+    Args:
+        bucket: S3 bucket name
+        prefix: S3 prefix
+        local_checkpoint_dir: Path to local checkpoint directory (e.g., /path/to/global_step_10)
+        global_step: Current training step number
+    """
+    logger.info(f"Exporting checkpoint to S3: s3://{bucket}/{prefix}/global_step_{global_step}")
+    if not bucket:
+        logger.error("S3 export enabled but no bucket specified. Skipping S3 export.")
+        return
+    if not prefix:
+        logger.error("S3 export enabled but no prefix specified. Skipping S3 export.")
+        return
+    try:
+        s3_prefix = f"{prefix}/global_step_{global_step}"
+
+        logger.info(f"Exporting checkpoint to S3: s3://{bucket}/{s3_prefix}")
+        _upload_directory_to_s3(local_checkpoint_dir, bucket, s3_prefix)
+        logger.info(f"Successfully exported checkpoint global_step_{global_step} to S3")
+
+    except Exception as e:
+        logger.error(f"Failed to export checkpoint global_step_{global_step} to S3: {e}")
 
 
 def cleanup_old_checkpoints(ckpt_path: str, max_ckpts_to_keep: int, current_global_step: int):
