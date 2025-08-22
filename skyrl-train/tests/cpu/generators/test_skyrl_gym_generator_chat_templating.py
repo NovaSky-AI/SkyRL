@@ -59,10 +59,14 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+        mock_llm_output_text = "b" + tokenizer.eos_token
         return {
-            "responses": ["b" + tokenizer.eos_token] * num_prompts,
+            "responses": [mock_llm_output_text] * num_prompts,
             "stop_reasons": ["stop"] * num_prompts,
             "response_logprobs": None,
+            # add_special_tokens needs to be False, otherwise for instance Llama will always
+            # add a `<|begin_of_text|>` before the assistant response.
+            "response_ids": [tokenizer.encode(mock_llm_output_text, add_special_tokens=False)] * num_prompts,
         }
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
@@ -112,6 +116,12 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         {"role": "assistant", "content": "b"},
     ]
 
+    # For Qwen2.5 generator_output_str, we have (note the missing \n after the eos token):
+    # <|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n
+    # <|im_start|>user\na<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n
+    # <|im_start|>user\n1<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n
+    # <|im_start|>user\n2<|im_end|>\n<|im_start|>assistant\nb<|im_end|>
+
     # check that the full response is exactly string matching with applying the chat template on history
     prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
     resp_str = tokenizer.decode(generator_output["response_ids"][0])
@@ -121,7 +131,16 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             expected_chat_history, chat_template=custom_chat_template, tokenize=False
         )
     else:
-        assert prompt_str + resp_str == tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
+        generator_output_str = prompt_str + resp_str
+        expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
+        if "Qwen" in model_name:
+            # For Qwen models, there is an `\n` after the eos token. Our generator follows token-in-token-out,
+            # so it will not generate anything after the eos token, and hence will not have the `\n`.
+            # e.g. `<|assistant|>\Some content<|im_end|>\n` for expected_str, but
+            # `<|assistant|>\Some content<|im_end|>` for generator_output_str.
+            if expected_str.endswith("\n"):
+                expected_str = expected_str[:-1]
+        assert generator_output_str == expected_str
 
     # check loss mask exact matches
     system_prompt = tokenizer.apply_chat_template(
@@ -132,13 +151,35 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
     )
     # TODO (erictang000): consider hard coding the full loss mask for each model to avoid copying logic in code
-    generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
-    empty_user = empty_user[len(system_prompt) :]
+    generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`
+    empty_user = empty_user[len(system_prompt) :]  # `<|im_start|>user\n<|im_end|>\n`
+
+    # `<|im_start|>assistant\nb<|im_end|>\n`
     expected_assistant_loss_mask = [0] * len(generation_prompt_ids) + [1, 1]  # 1 for single response token, 1 for eos
+    expected_assistant_no_generation_prompt_loss_mask = [1, 1]  # 1 for single response token, 1 for eos
     if "Qwen" in model_name:
         expected_assistant_loss_mask += [0]  # extra 0 for \n for qwen templates
+        expected_assistant_no_generation_prompt_loss_mask += [0]
+    # `<|im_start|>user\n1<|im_end|>\n`
     expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
 
-    expected_loss_masks = (expected_assistant_loss_mask + expected_user_loss_mask) * 2 + expected_assistant_loss_mask
+    if custom_chat_template is not None:
+        # For custom_chat_template, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
+        expected_loss_masks = (
+            expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
+            + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
+        ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
+    else:
+        # For non-custom_chat_template, `resp_str` directly starts with what the model generates
+        expected_loss_masks = (
+            expected_assistant_no_generation_prompt_loss_mask  # b<|im_end|>\n
+            + (
+                expected_user_loss_mask  # <|im_start|>user\n1
+                + expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
+            )
+            * 2
+        )
+        if "Qwen" in model_name:
+            expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
     assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
     assert generator_output["loss_masks"][0] == expected_loss_masks
