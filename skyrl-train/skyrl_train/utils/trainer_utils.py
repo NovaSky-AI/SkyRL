@@ -169,7 +169,6 @@ def calculate_per_dataset_metrics(
 
     # Calculate metrics for each data source
     for data_source, indices in data_source_indices.items():
-        print("subset_generator_output: ", subset_generator_output)
         # Extract subset for this data source
         print("data_source: ", data_source)
         print("indices: ", indices)
