@@ -65,10 +65,6 @@ class BatchIterator:
         self.for_inference = for_inference
         self.total_batch_size = data.batch_size
 
-        logger.info(f"Total batch size: {self.total_batch_size}")
-
-        logger.info(f"Sizes: {[len(seq) for seq in data["sequences"]]} {dp_size=}")
-
         self._prepare_attributes()
 
         self._all_micro_batches = []
@@ -80,15 +76,12 @@ class BatchIterator:
     def _prepare_attributes(self):
         """Prepare common attributes used by both batching modes."""
 
-
         base_mini_batch_size = (
             self.cfg.trainer.critic_mini_batch_size
             if self.worker_type == "critic"
             else self.cfg.trainer.policy_mini_batch_size
         )
-        self.mini_batch_size_per_gpu = (
-            base_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
-        )
+        self.mini_batch_size_per_gpu = base_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
 
         if self.mini_batch_size_per_gpu <= 0:
             raise ValueError(
@@ -122,11 +115,9 @@ class BatchIterator:
     def _calculate_dynamic_micro_batch_counts(self, mini_batches: List[TrainingInputBatch]) -> List[int]:
         """Calculate the number of micro-batches needed for each mini-batch based on token counts."""
         if self.for_inference:
-            self.max_token_len = getattr(
-                self.cfg.trainer, "max_token_len_per_gpu_forward", self.cfg.trainer.max_token_len_per_gpu
-            )
+            self.max_token_len = self.cfg.trainer.max_token_len_per_gpu_forward
         else:
-            self.max_token_len = self.cfg.trainer.max_token_len_per_gpu
+            self.max_token_len = self.cfg.trainer.max_token_len_per_gpu_train
 
         micro_batch_counts = []
         for mini_batch in mini_batches:
@@ -139,19 +130,14 @@ class BatchIterator:
     def _synchronize_micro_batch_counts(self, local_counts: List[int]) -> List[int]:
         """Synchronize micro-batch counts across distributed workers."""
         if self.dp_group is not None and dist.is_initialized():
-            local_copy = local_counts.copy()
             counts_tensor = torch.tensor(local_counts, dtype=torch.int64, device="cuda")
             dist.all_reduce(counts_tensor, op=dist.ReduceOp.MAX, group=self.dp_group)
             synced_counts = [int(x) for x in counts_tensor.tolist()]
 
-            logger.info(
-                f"[Rank {dist.get_rank()}] BatchIterator sync - " f"Local counts: {local_copy}, Synced: {synced_counts}"
-            )
-
             return synced_counts
         else:
             if self.dynamic_bsz:
-                logger.info(f"BatchIterator - No distributed sync, using local: {local_counts}")
+                logger.info(f"[DEBUG] BatchIterator - No distributed sync, using local: {local_counts}")
             return local_counts
 
     def _partition_mini_batch(self, mini_batch: TrainingInputBatch, num_micro_batches: int):
@@ -208,7 +194,7 @@ class BatchIterator:
         """Convert a TrainingInputBatch to an Experience."""
         exp = Experience(
             sequences=batch["sequences"],
-            rollout_logprobs=batch["rollout_log_probs"],
+            rollout_logprobs=batch["rollout_logprobs"],
             returns=batch["returns"],
             advantages=batch["advantages"],
             action_log_probs=batch["action_log_probs"],

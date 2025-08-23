@@ -8,15 +8,10 @@ uv run --isolated --extra dev -- pytest tests/gpu/test_dynamic_batching.py -v
 import pytest
 import torch
 import ray
-from omegaconf import DictConfig
 
-from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils.dynamic_batching import (
-    get_seqlen_balanced_partitions,
-    calculate_num_micro_batches,
-)
-from tests.gpu.utils import make_dummy_training_batch, init_worker_with_type, get_test_actor_config, make_variable_length_training_batch
+from tests.gpu.utils import init_worker_with_type, get_test_actor_config, make_variable_length_training_batch
+
 
 @pytest.mark.parametrize(
     "use_dynamic,seq_lengths,expected_mode",
@@ -46,7 +41,7 @@ def test_ppo_train_with_adaptive_batching(use_dynamic, seq_lengths, expected_mod
         # Configure batching mode
         cfg.trainer.use_dynamic_batching = use_dynamic
         if use_dynamic:
-            cfg.trainer.max_token_len_per_gpu = 300
+            cfg.trainer.max_token_len_per_gpu_train = 300
 
         actor_group = init_worker_with_type(
             "policy",
@@ -78,6 +73,7 @@ def test_ppo_train_with_adaptive_batching(use_dynamic, seq_lengths, expected_mod
     finally:
         ray.shutdown()
 
+
 def test_batch_iterator_dynamic_sync_across_workers():
     """
     Test that BatchIterator with dynamic batching synchronizes across workers.
@@ -96,7 +92,7 @@ def test_batch_iterator_dynamic_sync_across_workers():
         cfg.generator.n_samples_per_prompt = 4
 
         cfg.trainer.use_dynamic_batching = True
-        cfg.trainer.max_token_len_per_gpu = 300
+        cfg.trainer.max_token_len_per_gpu_train = 300
 
         actor_group = init_worker_with_type(
             "policy",
@@ -137,7 +133,7 @@ def test_batch_iterator_dynamic_sync_across_workers():
 async def test_e2e_dynamic_batching_loss_consistency():
     """
     Test that one training step produces the same loss with and without dynamic batching.
-    
+
     This test validates:
     - Training with fixed batch size produces a specific loss
     - Training with dynamic batching produces the same loss for the same data
@@ -147,15 +143,16 @@ async def test_e2e_dynamic_batching_loss_consistency():
     """
     # import asyncio
     # from tests.gpu.test_skyrl_gym_generator import run_generator_end_to_end
-    
+
     try:
         # Set seeds for reproducibility
         torch.manual_seed(42)
         import random
         import numpy as np
+
         random.seed(42)
         np.random.seed(42)
-        
+
         # Base configuration with multiple GPUs
         cfg = get_test_actor_config()
         cfg.trainer.strategy = "fsdp"
@@ -166,19 +163,18 @@ async def test_e2e_dynamic_batching_loss_consistency():
         cfg.trainer.policy_mini_batch_size = 8  # Total batch size across GPUs
         cfg.generator.n_samples_per_prompt = 1
         cfg.trainer.algorithm.max_seq_len = 512
-        
+
         # Use a smaller model for testing
         cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
-        
+
         seq_lengths = np.random.randint(50, 512, size=8)
         # seq_lengths = [512, 400, 300, 200, 100, 50, 25, 10]
 
         train_data = make_variable_length_training_batch(seq_lengths, num_actions=4)
         train_data.metadata["global_step"] = 0
 
-        
         cfg.trainer.use_dynamic_batching = False
-        
+
         actor_group_fixed = init_worker_with_type(
             "policy",
             shared_pg=None,
@@ -186,34 +182,32 @@ async def test_e2e_dynamic_batching_loss_consistency():
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
         )
-        
-        train_data_fixed = TrainingInputBatch({
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in train_data.items()
-        })
+
+        train_data_fixed = TrainingInputBatch(
+            {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in train_data.items()}
+        )
         train_data_fixed.metadata = train_data.metadata.copy()
-        
+
         results_fixed = ray.get(actor_group_fixed.async_run_ray_method("pass_through", "ppo_train", train_data_fixed))
-        
 
         print(f"Results fixed: {results_fixed}")
         losses_fixed = [r.metadata["train_status"]["policy_loss"] for r in results_fixed]
         loss_fixed = sum(losses_fixed) / len(losses_fixed)
-        
+
         print(f"Fixed batching losses per GPU: {losses_fixed}")
         print(f"Fixed batching average loss: {loss_fixed}")
-        
+
         ray.shutdown()
-        
+
         torch.manual_seed(42)
         random.seed(42)
         np.random.seed(42)
-        
+
         ray.init()
-        
+
         cfg.trainer.use_dynamic_batching = True
-        cfg.trainer.max_token_len_per_gpu = 300  
-        
+        cfg.trainer.max_token_len_per_gpu_train = 300
+
         actor_group_dynamic = init_worker_with_type(
             "policy",
             shared_pg=None,
@@ -221,37 +215,39 @@ async def test_e2e_dynamic_batching_loss_consistency():
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
         )
-        
-        train_data_dynamic = TrainingInputBatch({
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in train_data.items()
-        })
+
+        train_data_dynamic = TrainingInputBatch(
+            {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in train_data.items()}
+        )
         train_data_dynamic.metadata = train_data.metadata.copy()
-        
-        results_dynamic = ray.get(actor_group_dynamic.async_run_ray_method("pass_through", "ppo_train", train_data_dynamic))
-        
+
+        results_dynamic = ray.get(
+            actor_group_dynamic.async_run_ray_method("pass_through", "ppo_train", train_data_dynamic)
+        )
+
         print(f"Results dynamic: {results_dynamic}")
         losses_dynamic = [r.metadata["train_status"]["policy_loss"] for r in results_dynamic]
         loss_dynamic = sum(losses_dynamic) / len(losses_dynamic)
-        
+
         print(f"Dynamic batching losses per GPU: {losses_dynamic}")
         print(f"Dynamic batching average loss: {loss_dynamic}")
-        
-        print(f"\nComparison:")
+
+        print("\nComparison:")
         print(f"Fixed batching average loss: {loss_fixed}")
         print(f"Dynamic batching average loss: {loss_dynamic}")
         print(f"Absolute difference: {abs(loss_fixed - loss_dynamic)}")
-        
+
         for i in range(len(losses_fixed)):
             print(f"GPU {i} - Fixed: {losses_fixed[i]}, Dynamic: {losses_dynamic[i]}")
-        
+
         assert abs(loss_fixed - loss_dynamic) < 1e-4, (
             f"Losses should be nearly identical. Fixed: {loss_fixed}, Dynamic: {loss_dynamic}, "
             f"Diff: {abs(loss_fixed - loss_dynamic)}"
         )
-        
-        print("✅ E2E test passed: Dynamic batching produces same loss as fixed batching on multiple GPUs with inference engines")
-        
+
+        print(
+            "✅ E2E test passed: Dynamic batching produces same loss as fixed batching on multiple GPUs with inference engines"
+        )
+
     finally:
         ray.shutdown()
-

@@ -1,13 +1,10 @@
-
 import pytest
 
 from skyrl_train.workers.worker_utils import BatchIterator
-from skyrl_train.utils.dynamic_batching import (
-    get_seqlen_balanced_partitions,
-    calculate_num_micro_batches
-)
+from skyrl_train.utils.dynamic_batching import get_seqlen_balanced_partitions, calculate_num_micro_batches
 
 from tests.gpu.utils import make_dummy_training_batch, get_test_actor_config, make_variable_length_training_batch
+
 
 @pytest.mark.parametrize(
     "seq_lengths,max_tokens,expected_num_batches",
@@ -23,10 +20,9 @@ def test_dynamic_batch_iterator_core(seq_lengths, max_tokens, expected_num_batch
     batch = make_variable_length_training_batch(seq_lengths, pad_to_length=max(seq_lengths))
     # Create a mock config for BatchIterator
 
-
     cfg = get_test_actor_config()
     cfg.trainer.use_dynamic_batching = True
-    cfg.trainer.max_token_len_per_gpu = max_tokens
+    cfg.trainer.max_token_len_per_gpu_train = max_tokens
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.policy_mini_batch_size = len(seq_lengths)
 
@@ -48,7 +44,7 @@ def test_dynamic_iterator_multi_epoch():
 
     cfg = get_test_actor_config()
     cfg.trainer.use_dynamic_batching = True
-    cfg.trainer.max_token_len_per_gpu = 300
+    cfg.trainer.max_token_len_per_gpu_train = 300
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.policy_mini_batch_size = 4
 
@@ -91,11 +87,12 @@ def test_micro_batch_calculation(token_counts, max_tokens, min_micro_batch, expe
 
     assert num_micro == expected
 
+
 def test_batch_iterator_with_dynamic_batching():
     """Test BatchIterator with dynamic batching enabled."""
     cfg = get_test_actor_config()
     cfg.trainer.use_dynamic_batching = True
-    cfg.trainer.max_token_len_per_gpu = 200
+    cfg.trainer.max_token_len_per_gpu_train = 200
     cfg.trainer.policy_mini_batch_size = 4
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 2
@@ -103,9 +100,7 @@ def test_batch_iterator_with_dynamic_batching():
     seq_lengths = [50, 100, 150, 200]
     batch = make_variable_length_training_batch(seq_lengths, num_actions=4)
 
-    iterator = BatchIterator(
-        data=batch, cfg=cfg, dp_size=1, dynamic_bsz=True, dp_group=None  
-    )
+    iterator = BatchIterator(data=batch, cfg=cfg, dp_size=1, dynamic_bsz=True, dp_group=None)
 
     # Check that micro-batches are created
     assert len(iterator) > 0, "Should have at least one micro-batch"

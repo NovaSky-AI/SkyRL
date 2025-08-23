@@ -301,23 +301,23 @@ class Worker(DistributedTorchRayActor):
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
         """
-        
-        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
-        
+
+        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, "device_mesh") else None
+
         dataloader = BatchIterator(
-            data, 
-            cfg=self.cfg, 
-            dp_size=self.mesh_rank.dp_size if hasattr(self, 'mesh_rank') else 1,
-            drop_last=False, 
-            dp_group=dp_group, 
+            data,
+            cfg=self.cfg,
+            dp_size=self.mesh_rank.dp_size if hasattr(self, "mesh_rank") else 1,
+            drop_last=False,
+            dp_group=dp_group,
             dynamic_bsz=self.cfg.trainer.use_dynamic_batching,
-            for_inference=True
+            for_inference=True,
         )
 
         outputs = []
         for micro_batch in dataloader.micro_batches:
             outputs.append(self._forward_micro_batch(micro_batch))
-        
+
         output = TrainingOutputBatch.cat(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
@@ -602,23 +602,30 @@ class PolicyWorkerBase(Worker):
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
 
-        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
+        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, "device_mesh") else None
 
         dynamic_bsz = self.cfg.trainer.use_dynamic_batching
         dataloader = BatchIterator(
-            train_data, cfg=self.cfg, dp_size=self.mesh_rank.dp_size, drop_last=False, dp_group=dp_group, dynamic_bsz=dynamic_bsz
+            train_data,
+            cfg=self.cfg,
+            dp_size=self.mesh_rank.dp_size,
+            drop_last=False,
+            dp_group=dp_group,
+            dynamic_bsz=dynamic_bsz,
         )
 
         if dynamic_bsz:
             logger.info(
-                f"Data {len(train_data)} | Dynamic Batching | Max Tokens per GPU {self.cfg.trainer.max_token_len_per_gpu} | Num Micro Batches {len(dataloader)}"
+                f"Training Batch Size {len(train_data)} | Dynamic Batching | Max Tokens per GPU {self.cfg.trainer.max_token_len_per_gpu} | Num Micro Batches {len(dataloader)}"
             )
         else:
             logger.info(
-                f"Data {len(train_data)} | Mini Batch Size per GPU {self.policy_mini_batch_size_per_gpu} | Micro Bsz {self.cfg.trainer.micro_train_batch_size_per_gpu} | Grad Accumulation Steps {dataloader.micro_batches_per_mini_batch}"
+                f"Training Batch Size {len(train_data)} | Mini Batch Size per GPU {self.policy_mini_batch_size_per_gpu} | Micro Bsz {self.cfg.trainer.micro_train_batch_size_per_gpu} | Grad Accumulation Steps {dataloader.micro_batches_per_mini_batch}"
             )
         if not dynamic_bsz:
-            assert dataloader.micro_batches_per_mini_batch <= len(dataloader), f"Accumulation Steps {dataloader.micro_batches_per_mini_batch} cannot be greater than number of micro batches in total {len(dataloader)}"
+            assert dataloader.micro_batches_per_mini_batch <= len(
+                dataloader
+            ), f"Accumulation Steps {dataloader.micro_batches_per_mini_batch} cannot be greater than number of micro batches in total {len(dataloader)}"
 
         status_list = []
         all_metrics = defaultdict(list)
@@ -636,14 +643,9 @@ class PolicyWorkerBase(Worker):
 
                 samples_seen += len(experience)
 
-                should_policy_update = (samples_seen % self.policy_mini_batch_size_per_gpu == 0)
+                should_policy_update = samples_seen % self.policy_mini_batch_size_per_gpu == 0
 
-                status = self.training_step(
-                    experience,
-                    global_step,
-                    local_step,
-                    should_policy_update
-                )
+                status = self.training_step(experience, global_step, local_step, should_policy_update)
                 if should_policy_update:
                     policy_update_steps += 1
 
@@ -690,7 +692,9 @@ class PolicyWorkerBase(Worker):
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
 
-        status_mean = reduce_metrics(all_metrics, dataloader.total_batch_size * self.cfg.trainer.update_epochs_per_batch * self._world_size)
+        status_mean = reduce_metrics(
+            all_metrics, dataloader.total_batch_size * self.cfg.trainer.update_epochs_per_batch * self._world_size
+        )
         status_mean["policy_update_steps"] = policy_update_steps
 
         # should return an `TrainingOutputBatch`
@@ -913,21 +917,20 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
-        
+        dp_group = self.device_mesh["dp"].get_group() if hasattr(self, "device_mesh") else None
+
         dataloader = BatchIterator(
             train_data,
-            cfg=self.cfg, 
+            cfg=self.cfg,
             dp_size=self.mesh_rank.dp_size,
             drop_last=False,
             worker_type="critic",
             dp_group=dp_group,
-            dynamic_bsz=self.cfg.trainer.use_dynamic_batching
+            dynamic_bsz=self.cfg.trainer.use_dynamic_batching,
         )
 
         torch.cuda.empty_cache()
         self.model.train()
-
 
         all_metrics = defaultdict(list)
         critic_update_steps = 0
@@ -942,7 +945,7 @@ class CriticWorkerBase(Worker):
             for local_step, experience in enumerate(pbar):
 
                 samples_seen += len(experience)
-                should_critic_update = (samples_seen % self.critic_mini_batch_size_per_gpu == 0)
+                should_critic_update = samples_seen % self.critic_mini_batch_size_per_gpu == 0
                 status = self.training_step(experience, global_step, local_step, should_critic_update)
 
                 if should_critic_update:
@@ -963,8 +966,10 @@ class CriticWorkerBase(Worker):
 
         torch.distributed.barrier()
 
-        status_mean = reduce_metrics(all_metrics, dataloader.total_batch_size * self.cfg.trainer.update_epochs_per_batch * self.world_size)
-        status_mean["critic_update_steps"] = critic_update_steps 
+        status_mean = reduce_metrics(
+            all_metrics, dataloader.total_batch_size * self.cfg.trainer.update_epochs_per_batch * self.world_size
+        )
+        status_mean["critic_update_steps"] = critic_update_steps
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
@@ -1000,7 +1005,6 @@ class CriticWorkerBase(Worker):
                 config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
-
 
         loss = loss * accumulation_weight
         self.strategy.backward(loss, self.model, self.optimizer)
