@@ -918,7 +918,6 @@ class CriticWorkerBase(Worker):
         dataloader = BatchIterator(
             train_data,
             cfg=self.cfg, 
-            fg=self.cfg, 
             dp_size=self.mesh_rank.dp_size,
             drop_last=False,
             worker_type="critic",
