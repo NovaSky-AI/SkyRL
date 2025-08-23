@@ -616,7 +616,7 @@ class PolicyWorkerBase(Worker):
 
         if dynamic_bsz:
             logger.info(
-                f"Training Batch Size {len(train_data)} | Dynamic Batching | Max Tokens per GPU {self.cfg.trainer.max_token_len_per_gpu} | Num Micro Batches {len(dataloader)}"
+                f"Training Batch Size {len(train_data)} | Dynamic Batching | Max Tokens per GPU {self.cfg.trainer.max_token_len_per_gpu_train} | Num Micro Batches {len(dataloader)}"
             )
         else:
             logger.info(
