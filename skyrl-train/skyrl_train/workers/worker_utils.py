@@ -81,14 +81,14 @@ class BatchIterator:
         """Prepare common attributes used by both batching modes."""
 
 
-        if self.worker_type == "critic":
-            self.mini_batch_size_per_gpu = (
-                self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
-            )
-        else:
-            self.mini_batch_size_per_gpu = (
-                self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
-            )
+        base_mini_batch_size = (
+            self.cfg.trainer.critic_mini_batch_size
+            if self.worker_type == "critic"
+            else self.cfg.trainer.policy_mini_batch_size
+        )
+        self.mini_batch_size_per_gpu = (
+            base_mini_batch_size * self.cfg.generator.n_samples_per_prompt // self.dp_size
+        )
 
         if self.mini_batch_size_per_gpu <= 0:
             raise ValueError(
