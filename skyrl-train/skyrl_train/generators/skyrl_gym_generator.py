@@ -311,7 +311,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
         responses = truncated_responses
-        rollout_metrics = self._rollout_metrics(responses, rewards)
+        rollout_metrics = self._rollout_metrics(responses, rewards, env_metrics)
 
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
@@ -324,7 +324,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
-            "env_metrics": env_metrics,
         }
 
         return generator_output
@@ -391,7 +390,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_logprobs = None
 
-        rollout_metrics = self._rollout_metrics(responses, rewards)
+        rollout_metrics = self._rollout_metrics(responses, rewards, env_metrics)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
@@ -408,12 +407,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
-            "env_metrics": env_metrics,
         }
 
         return generator_output
 
-    def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]) -> Dict[str, float]:
+    def _rollout_metrics(self, responses: List[List[int]], rewards: List[float], env_metrics: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         num_tokens_arr = np.array([len(response) for response in responses])
         non_zero_rewards_arr = np.array([reward > 0.0 for reward in rewards])
         zero_rewards_arr = np.array([reward == 0.0 for reward in rewards])
@@ -426,7 +424,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
         )
 
-        return {
+        rollout_metrics = {
             "generate/min_num_tokens": np.min(num_tokens_arr).item(),
             "generate/max_num_tokens": np.max(num_tokens_arr).item(),
             "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
@@ -434,6 +432,20 @@ class SkyRLGymGenerator(GeneratorInterface):
             "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
             "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
         }
+
+        if env_metrics:
+            metric_groups = {}
+            for i, metrics in enumerate(env_metrics):
+                if metrics:
+                    for key, value in metrics.items():
+                        if key not in metric_groups:
+                            metric_groups[key] = []
+                        metric_groups[key].append(value)
+
+            for key, values in metric_groups.items():
+                rollout_metrics[f"environment/{key}"] = values
+
+        return rollout_metrics
 
     def _zero_reward_if_not_stop(self, rewards: List[float], stop_reasons: List[str]):
         """Sets the reward to 0 if the stop reason is not "stop".

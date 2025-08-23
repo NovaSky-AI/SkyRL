@@ -151,7 +151,6 @@ class RayPPOTrainer:
         concat_all_envs: List[str] = []
         concat_env_extras: List[Dict[str, Any]] = []
         concat_uids: List[str] = []
-        concat_all_env_metrics: List[Dict[str, Any]] = []
         sampling_params = self.cfg.generator.eval_sampling_params
         pbar = tqdm(total=len(self.eval_dataloader), initial=0, desc="Evaluation Progress")
         for _, prompts in enumerate(self.eval_dataloader):
@@ -164,7 +163,6 @@ class RayPPOTrainer:
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])
             concat_uids.extend(uids)
-            concat_all_env_metrics.extend(generator_output["env_metrics"])
         concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
         # Extract data_sources from env_extras
@@ -179,28 +177,7 @@ class RayPPOTrainer:
 
         # 3. Calculate overall metrics across all datasets
         overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
-
-        # 4. Aggregate environment metrics for logging
-        env_aggregated_metrics = {}
-        if concat_all_env_metrics:
-            metric_sums = defaultdict(float)
-            metric_counts = defaultdict(int)
-
-            for metrics_dict in concat_all_env_metrics:
-                if not metrics_dict:
-                    continue
-                for key, value in metrics_dict.items():
-                    try:
-                        metric_sums[key] += float(value)
-                        metric_counts[key] += 1
-                    except (ValueError, TypeError):
-                        logger.warning(f"Skipping non-numeric environment metric '{key}' with value '{value}'"
-                                       f" - only numeric metrics are aggregated for logging")
-            
-            for key in metric_sums:
-                if metric_counts[key] > 0:
-                    env_aggregated_metrics[f"env/{key}"] = metric_sums[key] / metric_counts[key]
-
+        
         eval_metrics.update(
             {
                 "eval/all/avg_score": overall_avg_score,
@@ -208,9 +185,7 @@ class RayPPOTrainer:
             }
         )
 
-        eval_metrics.update(env_aggregated_metrics)
-
-        # 5. Prepare dumping data
+        # 4. Prepare dumping data
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
@@ -227,7 +202,7 @@ class RayPPOTrainer:
                     eval_metrics,
                 )
 
-        # 6. Restore self.all_metrics
+        # 5. Restore self.all_metrics
         self.all_metrics = all_metrics_copy
 
         return eval_metrics

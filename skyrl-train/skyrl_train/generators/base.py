@@ -18,7 +18,6 @@ class GeneratorOutput(TypedDict):
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
-    env_metrics: Optional[List[Dict[str, Any]]]
 
 
 class GeneratorInterface(ABC):
