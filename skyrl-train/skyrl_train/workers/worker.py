@@ -618,7 +618,7 @@ class PolicyWorkerBase(Worker):
                 f"Data {len(train_data)} | Mini Batch Size per GPU {self.policy_mini_batch_size_per_gpu} | Micro Bsz {self.cfg.trainer.micro_train_batch_size_per_gpu} | Grad Accumulation Steps {dataloader.micro_batches_per_mini_batch}"
             )
         if not dynamic_bsz:
-            assert dataloader.micro_batches_per_mini_batch <= len(dataloader), f"Accumulation Steps {dataloader.micro_batches_per_mini_batch} cannot be less than number of micro batches in total {len(dataloader)}"
+            assert dataloader.micro_batches_per_mini_batch <= len(dataloader), f"Accumulation Steps {dataloader.micro_batches_per_mini_batch} cannot be greater than number of micro batches in total {len(dataloader)}"
 
         status_list = []
         all_metrics = defaultdict(list)
@@ -916,6 +916,7 @@ class CriticWorkerBase(Worker):
         dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
         
         dataloader = BatchIterator(
+            train_data,
             cfg=self.cfg, 
             fg=self.cfg, 
             dp_size=self.mesh_rank.dp_size,
