@@ -1,0 +1,17 @@
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+### User:
+{{ message['content'] }}
+
+{% elif message['role'] == 'assistant' %}
+### Assistant:
+{% generation %}
+{{ message['content'] }}
+{% endgeneration %}
+
+{% elif message['role'] == 'system' %}
+### System:
+{{ message['content'] }}
+
+{% endif %}
+{% endfor %}

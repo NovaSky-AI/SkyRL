@@ -22,7 +22,8 @@ print("="*60)
 
 # Test WITH thinking tokens
 print("\n1. WITH THINKING TOKENS:")
-template_with = get_custom_chat_template(model_name, thinking_mode=True)
+chat_template_config_with = {"source": "name", "name_or_path": "qwen3_with_thinking"}
+template_with = get_custom_chat_template(chat_template_config_with)
 if template_with:
     result_with = tokenizer.apply_chat_template(test_conversation, chat_template=template_with, tokenize=False)
     tokens_with = tokenizer.apply_chat_template(test_conversation, chat_template=template_with, tokenize=True)
@@ -33,7 +34,8 @@ else:
 
 # Test WITHOUT thinking tokens  
 print("\n2. WITHOUT THINKING TOKENS:")
-template_without = get_custom_chat_template(model_name, thinking_mode=False)
+chat_template_config_without = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+template_without = get_custom_chat_template(chat_template_config_without)
 if template_without:
     result_without = tokenizer.apply_chat_template(test_conversation, chat_template=template_without, tokenize=False)
     tokens_without = tokenizer.apply_chat_template(test_conversation, chat_template=template_without, tokenize=True)

@@ -4,67 +4,103 @@ from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
 
-# CUSTOM_CHAT_TEMPLATES = {
-#     # Chat template for Qwen3 that preserves thinking tokens (trains on all tokens)
-#     "qwen3_with_thinking": (
-#         "{% for message in messages %}"
-#         "{% if (message['role'] != 'assistant') %}"
-#         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-#         "{% elif (message['role'] == 'assistant')%}"
-#         "{{'<|im_start|>' + message['role'] + '\n'}}"
-#         "{% generation %}"
-#         "{{message['content'] + '<|im_end|>'}}"
-#         "{% endgeneration %}"
-#         "{{'\n'}}"
-#         "{% endif %}"
-#         "{% endfor %}"
-#     ),
-#     # Chat template for Qwen3 that removes thinking tokens (masks them during training)
-#     "qwen3_without_thinking": (
-#         "{% for message in messages %}"
-#         "{% if (message['role'] != 'assistant') %}"
-#         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-#         "{% elif (message['role'] == 'assistant')%}"
-#         "{{'<|im_start|>' + message['role'] + '\n'}}"
-#         "{% generation %}"
-#         "{% set full_content = message['content'] %}"
-#         "{% set mycontent = message['content'] %}"
-#         "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
-#         "{% if '</think>' in full_content %}"
-#         "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
-#         "{% endif %}"
-#         "{{mycontent + '<|im_end|>'}}"
-#         "{% endgeneration %}"
-#         "{{'\n'}}"
-#         "{% endif %}"
-#         "{% endfor %}"
-#     ),
-# }
+CUSTOM_CHAT_TEMPLATES = {
+    # chat template for qwen3 that preserves thinking tokens (trains on all tokens)
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # chat template for qwen3 that removes thinking tokens (masks them during training)
+    "qwen3_without_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{% set full_content = message['content'] %}"
+        "{% set mycontent = message['content'] %}"
+        "{% if '</think>' in full_content %}"
+        "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
+        "{% endif %}"
+        "{{mycontent + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # custom template that removes thinking tokens with Q/A format
+    "custom_thinking_remover": (
+        "{% for message in messages %}"
+        "{% if message['role'] == 'user' %}"
+        "Q: {{message['content']}}"
+        "{% elif message['role'] == 'assistant' %}"
+        "A: {% generation %}"
+        "{% set content = message['content'] %}"
+        "{% if '</think>' in content %}"
+        "{% set answer = content.split('</think>')[-1].strip() %}"
+        "{{answer}}"
+        "{% else %}"
+        "{{content}}"
+        "{% endif %}"
+        "{% endgeneration %}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+}
 
 
-
-def get_custom_chat_template(model_name: str, thinking_mode: bool = False, custom_chat_template_key: Optional[str] = None, custom_chat_templates: Optional[dict] = None) -> Optional[str]:
-    all_templates = {}
-    if custom_chat_templates:
-        all_templates.update(custom_chat_templates)
+def get_custom_chat_template(model_name: str, thinking_mode: Optional[bool] = False, chat_template_config: Optional[dict] = None) -> Optional[str]:
+    """
+    Get custom chat template based on the new config structure.
     
-    if custom_chat_template_key:
-        if custom_chat_template_key in all_templates:
-            return all_templates[custom_chat_template_key]
+    Args:
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields
+        
+    Returns:
+        Chat template string or None
+    """
+    if not chat_template_config:
+        return None
+        
+    source = chat_template_config.get("source")
+    name_or_path = chat_template_config.get("name_or_path")
+    
+    if not source or not name_or_path:
+        return None
+        
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
         else:
-            raise ValueError(f"Custom chat template key '{custom_chat_template_key}' not found. Available keys: {list(all_templates.keys())}")
-    
-    # The template should already be registered in base config, allowing for universal support for all custom model templates and types
+            raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
+            
+    elif source == "file":
+        try:
+            with open(name_or_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            raise ValueError(f"Template file '{name_or_path}' not found")
+        except Exception as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}")
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
+
+    # backward compatibility for qwen3 models
     if "Qwen3" in model_name:
         if thinking_mode:
-            template_key = "qwen3_with_thinking"
+            return CUSTOM_CHAT_TEMPLATES["qwen3_with_thinking"]
         else:
-            template_key = "qwen3_without_thinking"
-        
-        if template_key in all_templates:
-            return all_templates[template_key]
-        else:
-            raise ValueError(f"Expected Qwen3 template '{template_key}' not found in configuration")
+            return CUSTOM_CHAT_TEMPLATES["qwen3_without_thinking"]
     
     return None
 

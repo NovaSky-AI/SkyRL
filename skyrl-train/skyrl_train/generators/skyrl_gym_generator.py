@@ -38,16 +38,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
-        # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        enable_thinking_tokens = getattr(generator_cfg, "enable_thinking_tokens", False)
-        custom_chat_template_key = getattr(generator_cfg, "custom_chat_template_key", None)
-        custom_chat_templates = getattr(generator_cfg, "custom_chat_templates", {})
-        
+        enable_thinking_tokens = generator_cfg.enable_thinking_tokens
+        name_or_path = generator_cfg.chat_template.name_or_path
+        source = generator_cfg.chat_template.source
+
         self.custom_chat_template = get_custom_chat_template(
             model_name=model_name,
             thinking_mode=enable_thinking_tokens,
-            custom_chat_template_key=custom_chat_template_key,
-            custom_chat_templates=custom_chat_templates
+            chat_template_config={
+                "source": source,
+                "name_or_path": name_or_path
+            }
         )
         
         print("CUSTOM CHAT TEMPLATE: ", self.custom_chat_template)
@@ -233,7 +234,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
             
-            # Debug output to verify masking is working
             print(f"NON-BATCHED CUSTOM CHAT TEMPLATE DEBUG:")
             print(f"Response length: {len(response_ids)}")
             print(f"Loss mask length: {len(loss_mask)}")
@@ -603,8 +603,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             len(new_resp_tokens) - len(self.generation_prompt_ids) - num_output_tokens
         )  # 0 for rest of response
         loss_mask += new_loss_mask
-        input_ids += new_resp_tokens
 
+        input_ids += new_resp_tokens
         chat_end_index += 1
 
         # Add observations to chat history
@@ -668,46 +668,21 @@ class SkyRLGymGenerator(GeneratorInterface):
             input_ids: List[int]
             logprobs: Optional[List[float]]
         """
-        # Update raw tokens and loss mask
+        # just update raw tokens and loss mask
+        new_resp_tokens = self.tokenizer.encode(output, add_special_tokens=False)
+        if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
+            # remove the eos token since we are continuing the current assistant message
+            new_resp_tokens = new_resp_tokens[:-1]
+        loss_mask += [1] * len(new_resp_tokens)
+        input_ids += new_resp_tokens
 
-        if self.custom_chat_template:
-            response_chat_history = [{"role": "assistant", "content": output}]
-            response_encodings = self.tokenizer.apply_chat_template(
-                response_chat_history,
-                chat_template=self.custom_chat_template,
-                add_generation_prompt=False,
-                return_dict=True,
-                return_assistant_tokens_mask=True,
-                tokenize=True,
-            )
-            new_resp_tokens = response_encodings["input_ids"]
-            custom_loss_mask = response_encodings["assistant_masks"]
-            loss_mask += custom_loss_mask
-            input_ids += new_resp_tokens
-
-            if len(new_obs) > 0:
-                for obs in new_obs:
-                    obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                    loss_mask += [0] * len(obs_tokens)
-                    if logprobs:
-                        logprobs += [1] * len(obs_tokens)
-                    input_ids += obs_tokens
-
-        else:
-            new_resp_tokens = self.tokenizer.encode(output, add_special_tokens=False)
-            if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
-                # remove the eos token since we are continuing the current assistant message
-                new_resp_tokens = new_resp_tokens[:-1]
-            loss_mask += [1] * len(new_resp_tokens)
-            input_ids += new_resp_tokens
-
-            if len(new_obs) > 0:
-                for obs in new_obs:
-                    obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                    loss_mask += [0] * len(obs_tokens)
-                    # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-                    if logprobs:
-                        logprobs += [1] * len(obs_tokens)
-                    input_ids += obs_tokens
+        if len(new_obs) > 0:
+            for obs in new_obs:
+                obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
+                loss_mask += [0] * len(obs_tokens)
+                # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
+                if logprobs:
+                    logprobs += [1] * len(obs_tokens)
+                input_ids += obs_tokens
 
         return loss_mask, input_ids, logprobs
