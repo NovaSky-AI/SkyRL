@@ -171,9 +171,11 @@ class RayPPOTrainer:
         print("Eval output example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
+        import pdb; pdb.set_trace()
         eval_metrics = calculate_per_dataset_metrics(
             concat_generator_outputs, concat_uids, concat_data_sources, self.cfg.generator.eval_n_samples_per_prompt
         )
+        import pdb; pdb.set_trace()
 
         # 3. Calculate overall metrics across all datasets
         overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)

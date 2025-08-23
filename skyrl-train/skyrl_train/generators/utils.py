@@ -99,7 +99,6 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
-        "env_metrics": sum([output.get("env_metrics", []) for output in generator_outputs], []),
     }
     if "stop_reasons" in generator_outputs[0]:
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
