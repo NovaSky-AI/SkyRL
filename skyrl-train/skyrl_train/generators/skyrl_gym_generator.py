@@ -338,7 +338,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 
                 # apply max_tokens truncation to both
                 if len(sample_response_ids) > max_tokens:
-                    sample_response_ids = sample_response_ids[:max_tokens]
                     custom_loss_mask = custom_loss_mask[:max_tokens]
                 
                 loss_masks.append(custom_loss_mask)
@@ -350,10 +349,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 print(f"Masked tokens: {sum(custom_loss_mask)}/{len(custom_loss_mask)} ({sum(custom_loss_mask)/len(custom_loss_mask)*100:.1f}%)")
             else:
                 # keep original default masking behaviour
-                if len(sample_response_ids) > max_tokens:
-                    sample_response_ids = sample_response_ids[:max_tokens]
                 loss_masks.append([1] * len(sample_response_ids))
-            
+
+            if len(sample_response_ids) > max_tokens:
+                    sample_response_ids = sample_response_ids[:max_tokens]
             truncated_responses.append(sample_response_ids)
             if logprobs is not None:
                 sample_logprobs = logprobs[i][: len(response_ids)]
