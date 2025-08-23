@@ -682,15 +682,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             new_resp_tokens = response_encodings["input_ids"]
             custom_loss_mask = response_encodings["assistant_masks"]
-            loss_mask.extend(custom_loss_mask)
+            loss_mask += custom_loss_mask
             input_ids += new_resp_tokens
 
-            # Handle observations 
             if len(new_obs) > 0:
                 for obs in new_obs:
                     obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
                     loss_mask += [0] * len(obs_tokens)
-                    # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
                     if logprobs:
                         logprobs += [1] * len(obs_tokens)
                     input_ids += obs_tokens
