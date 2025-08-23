@@ -4,7 +4,7 @@ set -x
 
 uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 export WANDB_API_KEY=1b9270c544078d34c8b22f53beebd76ff6250bbc
-bash examples/gsm8k/run_gsm8k.sh
+# bash examples/gsm8k/run_gsm8k.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
