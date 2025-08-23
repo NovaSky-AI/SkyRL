@@ -2,7 +2,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightUpdateRequest,
+    NamedWeightsUpdateRequest,
 )
 import asyncio
 from typing import List, Any, Optional
@@ -47,7 +47,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             # Split evenly across engines
             return await self._generate_batched(prompts, prompt_token_ids, sampling_params)
 
-    async def _generate_with_trajectory_routing(self, prompts, prompt_token_ids, trajectory_ids, sampling_params):
+    async def _generate_with_trajectory_routing(
+        self, prompts, prompt_token_ids, trajectory_ids, sampling_params
+    ) -> InferenceEngineOutput:
         """
         Route prompts to engines based on trajectory_ids and return results in the original order of the prompts.
         """
@@ -80,38 +82,27 @@ class InferenceEngineClient(InferenceEngineInterface):
         responses: list[str] = [""] * n
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
-        response_ids: List[Optional[List[float]]] = [None for _ in range(n)]
+        response_ids: List[List[int]] = [[] for _ in range(n)]
         # a bit hacky for now
-        add_resp_ids = False
         add_resp_logprobs = False
 
         for indices, result in zip(indices_list, results):
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
-                if result.get("response_ids", None):
-                    add_resp_ids = True
-                    response_ids[original_idx] = result["response_ids"][local_idx]
+                response_ids[original_idx] = result["response_ids"][local_idx]
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
 
-        # something went wrong
-        if any([len(response) == 0 for response in responses]) or not all(
-            [isinstance(sample_ids, list) for sample_ids in response_ids]
-        ):
-            raise RuntimeError(
-                "Did not receive responses / response ids for some prompts. This should never happen. There is likely something wrong with the inference engine"
-            )
-
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
-            response_ids=response_ids if add_resp_ids else None,
+            response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
         )
 
-    async def _generate_batched(self, prompts, prompt_token_ids, sampling_params):
+    async def _generate_batched(self, prompts, prompt_token_ids, sampling_params) -> InferenceEngineOutput:
         """
         Split prompts evenly across engines and return results in the original order of the prompts.
         """
@@ -145,15 +136,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         for output in all_outputs:
             responses.extend(output["responses"])
             stop_reasons.extend(output["stop_reasons"])
-            if output.get("response_ids", None):
-                response_ids.extend(output["response_ids"])
+            response_ids.extend(output["response_ids"])
             if output.get("response_logprobs", None):
                 response_logprobs.extend(output["response_logprobs"])
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
-            response_ids=response_ids if len(response_ids) else None,
+            response_ids=response_ids,
             response_logprobs=response_logprobs if len(response_logprobs) else None,
         )
 
@@ -192,8 +182,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             rank_offset_count += engine.tp_size
         await asyncio.gather(*tasks)
 
-    async def update_named_weight(self, request: NamedWeightUpdateRequest):
-        return await self._run_on_all_engines("update_named_weight", request=request)
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+        return await self._run_on_all_engines("update_named_weights", request=request)
 
     async def reset_prefix_cache(self):
         return await self._run_on_all_engines("reset_prefix_cache")

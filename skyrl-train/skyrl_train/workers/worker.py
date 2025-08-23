@@ -16,7 +16,8 @@ import torch.distributed
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
 
-from skyrl_train.utils import masked_mean, ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel

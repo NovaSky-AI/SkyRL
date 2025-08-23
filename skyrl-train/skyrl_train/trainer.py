@@ -27,17 +27,16 @@ from skyrl_train.generators.utils import concatenate_generator_outputs, get_metr
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train import utils
+from skyrl_train.utils import ppo_utils
 from skyrl_train.utils import trainer_utils
-from skyrl_train.utils import (
-    Timer,
+from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     masked_mean,
-    normalize_advantages_dict,
-    get_ray_pg_ready_with_timeout,
     get_kl_controller,
     FixedKLController,
     AdaptiveKLController,
+    normalize_advantages_dict,
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -796,7 +795,7 @@ class RayPPOTrainer:
         # TODO (erictang000): we are just supporting custom rewards for now
         token_level_rewards = data["custom_rewards"]
 
-        advantages, returns = utils.compute_advantages_and_returns(
+        advantages, returns = ppo_utils.compute_advantages_and_returns(
             token_level_rewards=token_level_rewards,
             response_mask=data["response_mask"],
             index=data.metadata["uids"],

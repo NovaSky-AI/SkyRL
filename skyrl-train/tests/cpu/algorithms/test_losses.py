@@ -7,8 +7,7 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
 import pytest
 import torch
 from omegaconf import DictConfig
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry
-from skyrl_train.utils import masked_mean
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
 
 
 # Adapted a good test from NeMO-RL

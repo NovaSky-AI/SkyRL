@@ -179,7 +179,7 @@ def test_calculate_kl_create_experience_batched(dummy_config):
     assert metrics["avg_kl"] == approx(0.1249, abs=1e-4)
 
 
-@patch("skyrl_train.utils.compute_advantages_and_returns", new_callable=MagicMock)
+@patch("skyrl_train.utils.ppo_utils.compute_advantages_and_returns", new_callable=MagicMock)
 def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
