@@ -9,6 +9,10 @@ import re
 import sqlite3
 from func_timeout import func_timeout, FunctionTimedOut
 import sys
+from skyrl_gym.utils import get_logger
+
+# Initialize logger for SQL environment
+logger = get_logger("sql")
 
 
 THINK_START, THINK_END = "<think>", "</think>"
@@ -52,10 +56,10 @@ def execute_sql_single(db_file, sql):
         execution_res = frozenset(cursor.fetchall())
         conn.rollback()
         conn.close()
-        # print('Successfully executed')
+        # logger.debug('Successfully executed SQL', sql=sql[:100], db_file=db_file)
         return db_file, sql, execution_res, 1
-    except Exception:
-        # print(f"Error executing SQL: {e}, db file: {db_file}")
+    except Exception as e:
+        # logger.debug(f"Error executing SQL: {e}, db file: {db_file}", sql=sql[:100])
         conn.rollback()
         conn.close()
         return db_file, sql, None, 0
@@ -67,11 +71,10 @@ def execute_sql_wrapper_single(db_file, sql, timeout, output_str):
     except KeyboardInterrupt:
         sys.exit(0)
     except FunctionTimedOut:
-        print(f"SQL:\n{sql}\nTime Out!")
-        print("-" * 30)
+        logger.warning(f"SQL timeout after {timeout}s: {sql[:100]}... (db: {db_file})")
         res = (db_file, sql, None, 0)
-    except Exception:
-        # print(f"Error executing SQL: {e}, db_file: {db_file}")
+    except Exception as e:
+        # logger.debug(f"Error executing SQL: {e}, db_file: {db_file}", sql=sql[:100])
         res = (db_file, sql, None, 0)
 
     # Append the output to the tuple
@@ -110,5 +113,5 @@ def compute_score_single(completion, reference, db_file):
         res = calculate_reward_single(completion, reference, db_file)
         return res
     except Exception as e:
-        print(f"Unexpected error: {e}; Setting reward as 0")
+        logger.error(f"Unexpected error computing score: {e}; Setting reward as 0")
         return 0

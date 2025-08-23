@@ -8,6 +8,7 @@ import platform
 import re
 from datetime import datetime
 import signal
+from skyrl_gym.utils import get_logger
 
 from io import StringIO
 from unittest.mock import patch, mock_open
@@ -18,6 +19,8 @@ import time
 
 import multiprocessing
 
+# Initialize logger for LiveCodeBench environment
+logger = get_logger("lcb")
 
 BASE_IMPORTS = """from itertools import accumulate, chain, combinations, count, permutations, product, groupby, islice, repeat
 from copy import deepcopy
@@ -83,7 +86,7 @@ class TimeoutException(Exception):
 
 
 def timeout_handler(signum, frame):
-    print("timeout occured: alarm went off")
+    logger.warning("Timeout occurred: alarm went off")
     raise TimeoutException
 
 
@@ -426,7 +429,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
     reliability_guard()
 
     if debug:
-        print(f"start = {datetime.now().time()}")
+        logger.debug(f"Start time: {datetime.now().time()}")
 
     try:
         in_outs = json.loads(sample["input_output"])
@@ -443,7 +446,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
             method_name = in_outs["fn_name"]
 
     if debug:
-        print(f"loaded input_output = {datetime.now().time()}")
+        logger.debug("Loaded input_output data")
 
     if test is None:
         assert False, "should not happen: test code is none"
@@ -452,7 +455,7 @@ def run_test(sample, test=None, debug=False, timeout=6):
         results = []
         # sol = import_string
         if debug:
-            print(f"loading test code = {datetime.now().time()}")
+            logger.debug(f"Loading test code at {datetime.now().time()}")
 
         if which_type == CODE_TYPE.call_based:
             signal.alarm(timeout)
@@ -630,10 +633,10 @@ def lcb_check_correctness(sample, generation, timeout=6, debug=False):
         # consider that all tests failed
         result = [[-1 for i in range(len(in_outs["inputs"]))]]
         if debug:
-            print("global timeout")
+            logger.warning("Global test execution timeout")
     if not result:
         return False
-    # print(result[0], metadata_list)
+    # logger.debug(f"Result: {result[0]}, metadata: {metadata_list}")
     # Check if all elements in result[0] are True
     return all(x is True for x in result[0])
 

@@ -1,5 +1,4 @@
 import json
-import logging
 import requests
 import uuid
 import time
@@ -8,9 +7,9 @@ from typing import Tuple, Optional, Any, Dict
 from urllib.parse import urlparse
 
 from skyrl_gym.tools.core import tool, ToolGroup
+from skyrl_gym.utils import get_logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_logger("tools.search")
 
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 10
