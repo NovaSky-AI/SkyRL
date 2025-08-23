@@ -45,22 +45,44 @@ COMMON_ARGS="
   trainer.resume_mode=null \
   trainer.dump_data_batch=true"
 
-# qwen3 with thinking tokens (using boolean and model name)
-echo "=== TEST 1: QWEN3 WITH THINKING TOKENS (BOOLEAN) ==="
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
-  $COMMON_ARGS \
-  generator.enable_thinking_tokens=true \
-  trainer.run_name="test1_qwen3_with_thinking" \
-  trainer.ckpt_path="$HOME/ckpts/test1_qwen3_with_thinking" \
-  $@
+# # qwen3 with thinking tokens (using boolean and model name)
+# echo "=== TEST 1: QWEN3 WITH THINKING TOKENS (BOOLEAN) ==="
+# uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+#   $COMMON_ARGS \
+#   generator.enable_thinking_tokens=true \
+#   trainer.run_name="test1_qwen3_with_thinking" \
+#   trainer.ckpt_path="$HOME/ckpts/test1_qwen3_with_thinking" \
+#   $@
 
 # qwen3 without thinking tokens (using boolean and model name)
-echo "=== TEST 2: QWEN3 WITHOUT THINKING TOKENS (BOOLEAN) ==="
+# echo "=== TEST 2: QWEN3 WITHOUT THINKING TOKENS (BOOLEAN) ==="
+# uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+#   $COMMON_ARGS \
+#   generator.enable_thinking_tokens=false \
+#   trainer.run_name="test2_qwen3_without_thinking" \
+#   trainer.ckpt_path="$HOME/ckpts/test2_qwen3_without_thinking" \
+#   $@
+
+
+
+# using named template explicitly instead of boolean (compare diff from test 1)
+echo "=== TEST 1: NAMED TEMPLATE (qwen3_with_thinking via name) ==="
 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   $COMMON_ARGS \
-  generator.enable_thinking_tokens=false \
-  trainer.run_name="test2_qwen3_without_thinking" \
-  trainer.ckpt_path="$HOME/ckpts/test2_qwen3_without_thinking" \
+  generator.chat_template.source="name" \
+  generator.chat_template.name_or_path="qwen3_with_thinking" \
+  trainer.run_name="test1_named_qwen3_thinking" \
+  trainer.ckpt_path="$HOME/ckpts/test6_named_qwen3_thinking" \
+  $@
+
+# using named template explicitly instead of boolean (compare diff from test 1)
+echo "=== TEST 2: NAMED TEMPLATE (qwen3_without_thinking via name) ==="
+uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+  $COMMON_ARGS \
+  generator.chat_template.source="name" \
+  generator.chat_template.name_or_path="qwen3_without_thinking" \
+  trainer.run_name="test2_named_qwen3_without_thinking" \
+  trainer.ckpt_path="$HOME/ckpts/test2_named_qwen3_without_thinking" \
   $@
 
 # using named template from CUSTOM_CHAT_TEMPLATES
@@ -91,16 +113,6 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   generator.chat_template.name_or_path="/home/ubuntu/SkyRL/skyagent/skyagent/functional/templates/qwen3_acc_thinking.jinja2" \
   trainer.run_name="test5_file_template_qwen3" \
   trainer.ckpt_path="$HOME/ckpts/test5_file_template_qwen3" \
-  $@
-
-# using named template explicitly instead of boolean (compare diff from test 1)
-echo "=== TEST 6: NAMED TEMPLATE (qwen3_with_thinking via name) ==="
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
-  $COMMON_ARGS \
-  generator.chat_template.source="name" \
-  generator.chat_template.name_or_path="qwen3_with_thinking" \
-  trainer.run_name="test6_named_qwen3_thinking" \
-  trainer.ckpt_path="$HOME/ckpts/test6_named_qwen3_thinking" \
   $@
 
 echo "=== ALL TESTS COMPLETE ==="
