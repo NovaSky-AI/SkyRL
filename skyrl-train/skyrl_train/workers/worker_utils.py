@@ -52,7 +52,6 @@ class BatchIterator:
             worker_type: Type of worker ("policy" or "critic")
             dp_group: Distributed process group for synchronization
             dynamic_bsz: Whether to use dynamic token-based batching
-            mini_batch_size_per_gpu: Override mini-batch size per GPU
             for_inference: Whether this is for inference (affects micro-batch size)
         """
         assert not drop_last, "drop_last is not supported yet"
@@ -141,7 +140,7 @@ class BatchIterator:
         """Synchronize micro-batch counts across distributed workers."""
         if self.dp_group is not None and dist.is_initialized():
             local_copy = local_counts.copy()
-            counts_tensor = torch.tensor(local_counts, dtype=torch.float32, device="cuda")
+            counts_tensor = torch.tensor(local_counts, dtype=torch.int64, device="cuda")
             dist.all_reduce(counts_tensor, op=dist.ReduceOp.MAX, group=self.dp_group)
             synced_counts = [int(x) for x in counts_tensor.tolist()]
 

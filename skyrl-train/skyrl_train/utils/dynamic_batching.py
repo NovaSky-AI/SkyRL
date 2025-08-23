@@ -5,7 +5,6 @@ This module provides the core algorithms for partitioning sequences based on tok
 adapted from the reference implementation to work with skyrl-train's architecture.
 """
 
-import copy
 import heapq
 from typing import List, Optional, Tuple
 import math
@@ -14,15 +13,6 @@ import math
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
-
-
-def get_reverse_idx(idx_map: List[int]) -> List[int]:
-    """Build the inverse of an index mapping."""
-    reverse_idx_map = [0] * len(idx_map)
-    for i, idx in enumerate(idx_map):
-        reverse_idx_map[idx] = i
-    return reverse_idx_map
-
 
 class Set:
     """Helper class for Karmarkar-Karp algorithm."""

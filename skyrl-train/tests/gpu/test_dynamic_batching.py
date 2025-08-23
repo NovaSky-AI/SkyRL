@@ -16,35 +16,7 @@ from skyrl_train.utils.dynamic_batching import (
     get_seqlen_balanced_partitions,
     calculate_num_micro_batches,
 )
-from tests.gpu.utils import make_dummy_training_batch, init_worker_with_type, get_test_actor_config
-
-
-def make_variable_length_training_batch(
-    seq_lengths: list[int], num_actions: int = 4, pad_to_length: int = None
-) -> TrainingInputBatch:
-    batch_size = len(seq_lengths)
-    max_seq_len = max(seq_lengths) if not pad_to_length else pad_to_length
-
-    attention_mask = torch.zeros((batch_size, max_seq_len), dtype=torch.long)
-    for i, length in enumerate(seq_lengths):
-        attention_mask[i, :length] = 1
-
-    data = TrainingInputBatch(
-        {
-            "sequences": torch.randint(0, 100, (batch_size, max_seq_len)),
-            "attention_mask": attention_mask,
-            "rollout_log_probs": torch.randn((batch_size, num_actions)),
-            "action_log_probs": torch.randn((batch_size, num_actions)),
-            "base_action_log_probs": torch.randn((batch_size, num_actions)),
-            "values": torch.randn((batch_size, num_actions)),
-            "returns": torch.randn((batch_size, num_actions)),
-            "advantages": torch.randn((batch_size, num_actions)),
-            "loss_mask": torch.ones((batch_size, num_actions), dtype=torch.long),
-            "response_mask": torch.ones((batch_size, num_actions), dtype=torch.long),
-        }
-    )
-    data.metadata = {"response_length": num_actions}
-    return data
+from tests.gpu.utils import make_dummy_training_batch, init_worker_with_type, get_test_actor_config, make_variable_length_training_batch
 
 @pytest.mark.parametrize(
     "use_dynamic,seq_lengths,expected_mode",

@@ -303,15 +303,13 @@ class Worker(DistributedTorchRayActor):
         
         dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
         
-        dynamic_bsz = getattr(self.cfg.trainer, 'use_dynamic_batching', False)
-        
         dataloader = BatchIterator(
             data, 
             cfg=self.cfg, 
             dp_size=self.mesh_rank.dp_size if hasattr(self, 'mesh_rank') else 1,
             drop_last=False, 
             dp_group=dp_group, 
-            dynamic_bsz=dynamic_bsz,
+            dynamic_bsz=self.cfg.trainer.use_dynamic_batching,
             for_inference=True,
             mini_batch_size_per_gpu=data.batch_size
         )
@@ -915,12 +913,16 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        # Get the dp group for synchronization
         dp_group = self.device_mesh["dp"].get_group() if hasattr(self, 'device_mesh') else None
-        # Check if dynamic batching is enabled
-        dynamic_bsz = getattr(self.cfg.trainer, 'use_dynamic_batching', False)
+        
         dataloader = BatchIterator(
-            train_data, cfg=self.cfg, dp_size=self.mesh_rank.dp_size, drop_last=False, worker_type="critic", dp_group=dp_group, dynamic_bsz=dynamic_bsz
+            train_data, 
+            fg=self.cfg, 
+            dp_size=self.mesh_rank.dp_size,
+            drop_last=False,
+            worker_type="critic",
+            dp_group=dp_group,
+            dynamic_bsz=self.cfg.trainer.use_dynamic_batching
         )
 
         torch.cuda.empty_cache()
