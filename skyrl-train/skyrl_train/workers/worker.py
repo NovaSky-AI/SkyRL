@@ -311,8 +311,7 @@ class Worker(DistributedTorchRayActor):
             drop_last=False, 
             dp_group=dp_group, 
             dynamic_bsz=self.cfg.trainer.use_dynamic_batching,
-            for_inference=True,
-            mini_batch_size_per_gpu=data.batch_size
+            for_inference=True
         )
 
         outputs = []
