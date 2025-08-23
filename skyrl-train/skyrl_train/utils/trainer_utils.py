@@ -173,11 +173,17 @@ def calculate_per_dataset_metrics(
         # Extract subset for this data source
         print("data_source: ", data_source)
         print("indices: ", indices)
-        subset_generator_output = {
-            key: [value[i] for i in indices]
-            for key, value in concat_generator_outputs.items()
-            if isinstance(value, list)
-        }
+        try:
+            subset_generator_output = {
+                key: [value[i] for i in indices]
+                for key, value in concat_generator_outputs.items()
+                if isinstance(value, list)
+            }
+        except Exception as e:
+            print(f"Error extracting subset for data source {data_source}: {e}")
+            import pdb; pdb.set_trace()
+            import pdb; pdb.set_trace()
+            continue
         subset_uids = [concat_uids[i] for i in indices]
 
         # Calculate metrics for this subset
