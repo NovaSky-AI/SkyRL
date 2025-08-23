@@ -6,7 +6,7 @@ import requests
 import importlib
 from loguru import logger
 from ray.util.placement_group import placement_group
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, open_dict
 import hydra
 from typing import List
 from transformers import AutoTokenizer
@@ -34,7 +34,9 @@ def get_test_actor_config() -> DictConfig:
         cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
 
         with open_dict(cfg.trainer.algorithm):
-            cfg.trainer.algorithm.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+            cfg.trainer.algorithm.max_seq_len = (
+                cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+            )
         return cfg
 
 
@@ -58,7 +60,7 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
         {
             "sequences": torch.randint(0, 100, (batch_size, seq_len), device="cpu"),
             "attention_mask": torch.ones((batch_size, seq_len), dtype=int, device="cpu"),
-            "rollout_log_probs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
+            "rollout_logprobs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
             "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
             "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
             "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
@@ -70,6 +72,7 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
     )
     data.metadata = {"response_length": num_actions}
     return data
+
 
 def make_variable_length_training_batch(
     seq_lengths: list[int], num_actions: int = 4, pad_to_length: int = None
@@ -85,7 +88,7 @@ def make_variable_length_training_batch(
         {
             "sequences": torch.randint(0, 100, (batch_size, max_seq_len)),
             "attention_mask": attention_mask,
-            "rollout_log_probs": torch.randn((batch_size, num_actions)),
+            "rollout_logprobs": torch.randn((batch_size, num_actions)),
             "action_log_probs": torch.randn((batch_size, num_actions)),
             "base_action_log_probs": torch.randn((batch_size, num_actions)),
             "values": torch.randn((batch_size, num_actions)),
@@ -95,8 +98,10 @@ def make_variable_length_training_batch(
             "response_mask": torch.ones((batch_size, num_actions), dtype=torch.long),
         }
     )
+
     data.metadata = {"response_length": num_actions}
     return data
+
 
 def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
     torch.manual_seed(42)
@@ -367,4 +372,3 @@ def ray_init_for_tests():
         log_once("Disabling NCCL P2P for test environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
     ray.init(runtime_env={"env_vars": env_vars})
-

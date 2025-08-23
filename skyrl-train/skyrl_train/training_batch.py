@@ -347,7 +347,7 @@ class TrainingInput(TypedDict, total=False):
     response_mask: Integer[torch.Tensor, "batch_size seq_len"]
     action_log_probs: Float[torch.Tensor, "batch_size seq_len"]
     base_action_log_probs: Float[torch.Tensor, "batch_size seq_len"]
-    rollout_log_probs: Float[torch.Tensor, "batch_size seq_len"]
+    rollout_logprobs: Float[torch.Tensor, "batch_size seq_len"]
     values: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     returns: Float[torch.Tensor, "batch_size seq_len"]
     advantages: Float[torch.Tensor, "batch_size seq_len"]
