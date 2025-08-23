@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from loguru import logger
 
 
-def reduce_metrics(metrics: Dict[str, List[float]], batch_size: int = None) -> Dict[str, float]:
+def reduce_metrics(metrics: Dict[str, List[float]], batch_size: int) -> Dict[str, float]:
     """
     Reduce metrics from a list of entries per key.
     """
