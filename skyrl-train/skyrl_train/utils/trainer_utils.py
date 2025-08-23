@@ -154,7 +154,7 @@ def calculate_per_dataset_metrics(
     concat_uids: List[str],
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
-) -> Dict[str, float]:
+) -> Dict[str, float]: #Dict[str, Any]:
     """Calculate metrics per data source."""
     eval_metrics = {}
 
@@ -169,7 +169,10 @@ def calculate_per_dataset_metrics(
 
     # Calculate metrics for each data source
     for data_source, indices in data_source_indices.items():
+        print("subset_generator_output: ", subset_generator_output)
         # Extract subset for this data source
+        print("data_source: ", data_source)
+        print("indices: ", indices)
         subset_generator_output = {
             key: [value[i] for i in indices]
             for key, value in concat_generator_outputs.items()

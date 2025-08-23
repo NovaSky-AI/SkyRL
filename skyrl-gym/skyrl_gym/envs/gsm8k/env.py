@@ -29,6 +29,12 @@ class GSM8kEnv(BaseTextEnv):
             "word_count": word_count,
             "answer_accuracy": answer_accuracy,
         }
+    
+    def _aggregate_metrics(self, metrics_list: Dict[str, Any]) -> Dict[str, Any]:
+        aggregated = {}
+        for key in metrics_list[0].keys():
+            aggregated[key] = sum(metric[key] for metric in metrics_list) / len(metrics_list)
+        return aggregated
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step
