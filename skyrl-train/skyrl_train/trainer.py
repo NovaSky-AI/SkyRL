@@ -172,9 +172,11 @@ class RayPPOTrainer:
 
         # 2. Group data by data source and calculate per-dataset metrics
         # import pdb; pdb.set_trace()
+        print("###################### mag - entering calculate_per_dataset_metrics from trainer/eval ######################")
         eval_metrics = calculate_per_dataset_metrics(
             concat_generator_outputs, concat_uids, concat_data_sources, self.cfg.generator.eval_n_samples_per_prompt
         )
+        print("###################### mag - eval # eval_metrics", eval_metrics, "######################")
         # import pdb; pdb.set_trace()
 
         # 3. Calculate overall metrics across all datasets
@@ -186,6 +188,7 @@ class RayPPOTrainer:
                 f"eval/all/pass_at_{self.cfg.generator.eval_n_samples_per_prompt}": overall_pass_at_n,
             }
         )
+        print("###################### mag - trainer/eval # eval_metrics", eval_metrics, "######################")
 
         # 4. Prepare dumping data
         if self.cfg.trainer.dump_eval_results:
@@ -742,7 +745,9 @@ class RayPPOTrainer:
 
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
+            print("###################### mag - trainer/generate # generator_output['rollout_metrics'] is not None ######################")
             self.all_metrics.update(generator_output["rollout_metrics"])
+            print("###################### mag - trainer/generate # rollout_metrics", generator_output["rollout_metrics"], "######################")
 
         validate_generator_output(input_batch, generator_output)
 
