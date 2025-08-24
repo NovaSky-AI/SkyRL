@@ -64,38 +64,36 @@ def get_custom_chat_template(model_name: str, thinking_mode: Optional[bool] = Fa
     Get custom chat template based on the new config structure.
     
     Args:
-        chat_template_config: Config dict with 'source' and 'name_or_path' fields
+        model_name: Name of the model.
+        thinking_mode: Flag for backward compatibility with Qwen3 models.
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
         
     Returns:
         Chat template string or None
     """
-    if not chat_template_config:
-        return None
+    if chat_template_config:
+        source = chat_template_config.get("source")
+        name_or_path = chat_template_config.get("name_or_path")
         
-    source = chat_template_config.get("source")
-    name_or_path = chat_template_config.get("name_or_path")
-    
-    if not source or not name_or_path:
-        return None
-        
-    if source == "name":
-        if name_or_path in CUSTOM_CHAT_TEMPLATES:
-            return CUSTOM_CHAT_TEMPLATES[name_or_path]
-        else:
-            raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
+        if source and name_or_path:
+            if source == "name":
+                if name_or_path in CUSTOM_CHAT_TEMPLATES:
+                    return CUSTOM_CHAT_TEMPLATES[name_or_path]
+                else:
+                    raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
             
-    elif source == "file":
-        try:
-            with open(name_or_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            raise ValueError(f"Template file '{name_or_path}' not found")
-        except Exception as e:
-            raise ValueError(f"Error reading template file '{name_or_path}': {e}")
-    else:
-        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
+            elif source == "file":
+                try:
+                    with open(name_or_path, 'r', encoding='utf-8') as f:
+                        return f.read()
+                except FileNotFoundError:
+                    raise ValueError(f"Template file '{name_or_path}' not found")
+                except Exception as e:
+                    raise ValueError(f"Error reading template file '{name_or_path}': {e}")
+            else:
+                raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
-    # backward compatibility for qwen3 models
+    # backward compatibility for qwen3 models if new config is not used
     if "Qwen3" in model_name:
         if thinking_mode:
             return CUSTOM_CHAT_TEMPLATES["qwen3_with_thinking"]
@@ -103,7 +101,6 @@ def get_custom_chat_template(model_name: str, thinking_mode: Optional[bool] = Fa
             return CUSTOM_CHAT_TEMPLATES["qwen3_without_thinking"]
     
     return None
-
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
     """
