@@ -453,6 +453,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
         }
 
+        env_metrics_unaggregated = {}
         if env_metrics:
             metric_groups = {}
             for i, metrics in enumerate(env_metrics):
@@ -463,7 +464,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                         metric_groups[key].append(value)
 
             for key, values in metric_groups.items():
-                rollout_metrics[f"environment/{key}"] = values
+                env_metrics_unaggregated[f"environment/{key}"] = values
+
+        for key, values in env_metrics_unaggregated.items():
+            values_arr = np.array(values)
+            rollout_metrics[f"{key}/min"] = np.min(values_arr).item()  # Placeholder env aggregation
+            rollout_metrics[f"{key}/max"] = np.max(values_arr).item()
+            rollout_metrics[f"{key}/avg"] = np.mean(values_arr).item()
+            rollout_metrics[f"{key}/std"] = np.std(values_arr).item()
 
         return rollout_metrics
 
