@@ -91,12 +91,12 @@ class SQLEnv(BaseTextEnv):
 
     def _validate_action(self, action: str):
         if "</sql>" in action:
-            assert action.split("</sql>")[1] == "", (
+            assert action.split("</sql>", 1)[1] == "", (
                 "</sql> detected in the response but it is not the last string generated. "
                 'Use "</sql>" and "</solution>" as stop strings in the configuration.'
             )
         elif "</solution>" in action:
-            assert action.split("</solution>")[1] == "", (
+            assert action.split("</solution>", 1)[1] == "", (
                 "</solution> detected in the response but it is not the last string generated. "
                 'Use "</sql>" and "</solution>" as stop strings in the configuration.'
             )

@@ -58,12 +58,12 @@ class SearchEnv(BaseTextEnv):
 
     def _validate_action(self, action: str):
         if "</search>" in action:
-            assert action.split("</search>")[1] == "", (
+            assert action.split("</search>", 1)[1] == "", (
                 "</search> detected in the response but it is not the last string generated. "
                 'Use "</search>" and "</answer>" as stop strings in the configuration.'
             )
         elif "</answer>" in action:
-            assert action.split("</answer>")[1] == "", (
+            assert action.split("</answer>", 1)[1] == "", (
                 "</answer> detected in the response but it is not the last string generated. "
                 'Use "</search>" and "</answer>" as stop strings in the configuration.'
             )
