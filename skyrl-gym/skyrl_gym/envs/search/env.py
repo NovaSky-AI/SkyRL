@@ -58,9 +58,15 @@ class SearchEnv(BaseTextEnv):
 
     def _validate_action(self, action: str):
         if "</search>" in action:
-            assert action.split("</search>")[1] == "", "</search> detected in the response but it is not the last string generated. Use \"</search>\" and \"</answer>\" as stop strings in the configuration."
+            assert action.split("</search>")[1] == "", (
+                "</search> detected in the response but it is not the last string generated. "
+                'Use "</search>" and "</answer>" as stop strings in the configuration.'
+            )
         elif "</answer>" in action:
-            assert action.split("</answer>")[1] == "", "</answer> detected in the response but it is not the last string generated. Use \"</search>\" and \"</answer>\" as stop strings in the configuration."
+            assert action.split("</answer>")[1] == "", (
+                "</answer> detected in the response but it is not the last string generated. "
+                'Use "</search>" and "</answer>" as stop strings in the configuration.'
+            )
 
     def _execute_tool(self, tool_group_name: str, tool_name: str, tool_input: Any) -> str:
         tool_output = super()._execute_tool(tool_group_name, tool_name, tool_input)
@@ -77,9 +83,7 @@ class SearchEnv(BaseTextEnv):
         reward = self._get_reward(action, done)
 
         if done:
-            return BaseTextEnvStepOutput(
-                observations=[], reward=reward, done=done, metadata={}
-            )
+            return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
 
         try:
             query = self._parse_action(action)

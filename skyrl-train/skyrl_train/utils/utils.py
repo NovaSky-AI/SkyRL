@@ -284,6 +284,15 @@ def validate_cfg(cfg: DictConfig):
                 "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
             )
 
+    if cfg.generator.use_conversation_multi_turn:
+        if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
+            print(
+                "WARNING: `sampling_params.stop` and `eval_sampling_params.stop` are specified but we "
+                "are using multi-turn generation. You might want to manually append tokenizer.eos_token_id "
+                "to the assistant-generated response to match the chat template."
+            )
+
+
 @ray.remote
 def get_all_env_variables():
     import os
