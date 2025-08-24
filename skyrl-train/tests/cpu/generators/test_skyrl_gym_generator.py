@@ -176,13 +176,11 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
         if not all(isinstance(token, int) for token in token_ids):
             return False
 
-    # Validate rewards: List[float] or List[List[float]]
+    # Validate rewards: List[float]
     rewards = output["rewards"]
     if not isinstance(rewards, list):
         return False
-    is_list_of_float = all(isinstance(r, (int, float)) for r in rewards)
-    is_list_of_list_float = all(isinstance(r, list) and all(isinstance(x, (int, float)) for x in r) for r in rewards)
-    if not (is_list_of_float or is_list_of_list_float):
+    if not all(isinstance(reward, (int, float)) for reward in rewards):
         return False
 
     # Validate loss_masks: List[List[int]]
@@ -251,15 +249,15 @@ async def test_agent_loop_single_turn(
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
-    output = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512)
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
+        prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
+    )
 
-    assert output.response_ids == MOCK_LLM_OUTPUT_IDS
-    if isinstance(output.reward, list):
-        assert sum(output.reward) == 1.0
-    else:
-        assert output.reward == 1.0
-    assert output.stop_reason == "stop"
-    assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert response_ids == MOCK_LLM_OUTPUT_IDS
+    assert reward == 1.0
+    assert stop_reason == "stop"
+    assert loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert env_metrics == {}
 
 
 @pytest.mark.asyncio
@@ -343,7 +341,6 @@ def test_generator_output_concatenation():
 
 
 def test_get_metrics_from_generator_output():
-    # Per trajectory rewards, where rewards are List[float]
     generator_output: GeneratorOutput = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
@@ -356,14 +353,6 @@ def test_get_metrics_from_generator_output():
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
     assert avg_score == 1.5
     assert pass_at_n == 1.0
-
-    # Per token rewards, where rewards are List[List[float]], so for pass_at_n we use the last
-    # token's reward to signify the trajectory's reward
-    generator_output["rewards"] = [[1.0, 0.0], [0.0, 1.0]]
-    uids = ["a", "b"]
-    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
-    assert avg_score == 1.0
-    assert pass_at_n == 0.5
 
 
 @pytest.mark.asyncio
@@ -515,10 +504,12 @@ async def test_length_limit_exceeded_during_conversation(
     prompt = [{"role": "user", "content": "Start conversation"}]
     extras = {"test": "value"}
 
-    output = await generator.agent_loop(prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length)
+    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
+        prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length
+    )
 
     # Verify that length limit was hit
-    assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
+    assert stop_reason == "length", f"Expected stop_reason='length', got '{stop_reason}'"
 
     # Verify environment step was called the expected number of times
     expected_calls = turns_to_exceed
@@ -527,9 +518,9 @@ async def test_length_limit_exceeded_during_conversation(
     ), f"Expected {expected_calls} environment steps, got {mock_env.step.call_count}"
 
     # Verify response is still properly formatted
-    assert isinstance(output.response_ids, list)
-    assert isinstance(output.loss_mask, list)
-    assert isinstance(output.reward, float) or isinstance(output.reward, list)
+    assert isinstance(response_ids, list)
+    assert isinstance(loss_mask, list)
+    assert isinstance(reward, float)
 
 
 @pytest.mark.asyncio
@@ -603,21 +594,21 @@ async def test_multi_turn_response_truncation(
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
 
-    output = await generator.agent_loop(
+    response_ids, _, stop_reason, loss_mask, _, _, _ = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
     )
 
     # Verify truncation occurred
-    assert len(output.response_ids) <= expected_max_response_tokens
+    assert len(response_ids) <= expected_max_response_tokens
     assert (
-        len(output.response_ids) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} response tokens, got {len(output.response_ids)}"
+        len(response_ids) == expected_final_response_tokens
+    ), f"Expected {expected_final_response_tokens} response tokens, got {len(response_ids)}"
     assert (
-        len(output.loss_mask) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} loss mask entries, got {len(output.loss_mask)}"
+        len(loss_mask) == expected_final_response_tokens
+    ), f"Expected {expected_final_response_tokens} loss mask entries, got {len(loss_mask)}"
 
     # Verify stop reason is "length" due to truncation
-    assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
+    assert stop_reason == "length", f"Expected stop_reason='length', got '{stop_reason}'"
 
 
 @pytest.mark.asyncio
@@ -685,24 +676,19 @@ async def test_postprocessed_action_used(
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
 
-    output = await generator.agent_loop(prompt, "test_env", env_extras, max_tokens=20, max_input_length=50)
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = await generator.agent_loop(
+        prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
+    )
 
     # Check that the postprocessed response tokens (42) are present in response_ids
     # This verifies that postprocessed_action was used instead of raw LLM output
-    assert any(
-        token == 42 for token in output.response_ids
-    ), f"Expected postprocessed response tokens (42) in {output.response_ids}"
+    assert any(token == 42 for token in response_ids), f"Expected postprocessed response tokens (42) in {response_ids}"
     # Make sure raw LLM tokens (99) are NOT present
-    assert not any(
-        token == 99 for token in output.response_ids
-    ), f"Raw LLM output tokens (99) should not be in {output.response_ids}"
+    assert not any(token == 99 for token in response_ids), f"Raw LLM output tokens (99) should not be in {response_ids}"
 
-    if isinstance(output.reward, list):
-        assert sum(output.reward) == 1.0
-    else:
-        assert output.reward == 1.0
-    assert output.stop_reason == "stop"
-    assert len(output.response_ids) == len(output.loss_mask)
+    assert reward == 1.0
+    assert stop_reason == "stop"
+    assert len(response_ids) == len(loss_mask)
 
 
 @pytest.mark.asyncio
@@ -880,351 +866,3 @@ async def test_apply_overlong_filtering_batched(
         0,
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
-
-
-@pytest.mark.asyncio
-@patch("skyrl_gym.make")
-async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
-    """use_conversation_multi_turn=False; verify rewards at assistant turn ends across two steps."""
-    # Tokenizer behavior
-    mock_tokenizer.eos_token_id = 4
-
-    def apply_chat_template_side_effect(messages, **kwargs):
-        # initial prompt tokenization
-        if kwargs.get("tokenize", True):
-            return [101, 102]
-        else:
-            return "".join([m.get("content", "") for m in messages])
-
-    def encode_side_effect(text, **kwargs):
-        # one token for each observation
-        return [77] if text else []
-
-    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
-    mock_tokenizer.encode.side_effect = encode_side_effect
-
-    # LLM returns fixed response tokens per step: 3 tokens + eos
-    async def llm_generate_side_effect(input_batch):
-        num = (
-            len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
-        )  # noqa: E501
-        return {
-            "responses": ["aaa"] * num,
-            "stop_reasons": ["stop"] * num,
-            "response_logprobs": None,
-            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
-
-    # Two-step env with rewards 0.3 then 1.7
-    class TwoStepEnv:
-        def __init__(self):
-            self.turns = 0
-
-        def init(self, prompt):
-            return prompt, {}
-
-        def step(self, action):
-            self.turns += 1
-            if self.turns == 1:
-                return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": "obs1"}], reward=0.3, done=False, metadata={}
-                )
-            else:
-                return BaseTextEnvStepOutput(observations=[], reward=1.7, done=True, metadata={})
-
-        def close(self):
-            return None
-
-    mock_make.return_value = TwoStepEnv()
-
-    # Generator config
-    cfg = MagicMock()
-    cfg.sampling_params.max_generate_length = 50
-    cfg.sampling_params.logprobs = None
-    cfg.apply_overlong_filtering = False
-    cfg.max_input_length = 512
-    cfg.batched = False
-    cfg.max_turns = 10
-    cfg.zero_reward_on_non_stop = False
-    cfg.use_conversation_multi_turn = False
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
-    )
-
-    # Run agent loop
-    prompt = [{"role": "user", "content": "Q?"}]
-    extras = {}
-    out = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=50, max_input_length=512)
-
-    # Response ids layout: step1 (3 tokens) + obs (1) + step2 (3) + final eos (1) = 8
-    assert len(out.response_ids) == 8
-    # Indices: 2 (end of step1 assistant), 6 (end of step2 assistant), 7 (manually appended eos token)
-    # Note that the last reward is placed at the 7 instead of at 6 since we manually move
-    # it using the flag `appended_eos_token` in skyrl_gym_generator.py
-    expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 1.7]
-    assert isinstance(out.reward, list)
-    assert out.reward == expected_rewards
-    assert out.stop_reason == "stop"
-
-
-@pytest.mark.asyncio
-@patch("skyrl_gym.make")
-async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
-    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
-):
-    """use_conversation_multi_turn=True; verify rewards placed at ends of assistant segments before observations."""
-    mock_tokenizer.eos_token_id = 4
-
-    # Tokenizer: initial prompt -> 2 tokens; observation template -> 2 tokens each call
-    def apply_chat_template_side_effect(messages, **kwargs):
-        if kwargs.get("tokenize", True):
-            # For observations path, generator passes [*base_conversation, *new_obs] with add_generation_prompt=True
-            return [201, 202]
-        else:
-            return "".join([m.get("content", "") for m in messages])
-
-    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
-
-    # LLM outputs include EOS and are kept in multi-turn path
-    async def llm_generate_side_effect(input_batch):
-        num = (
-            len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
-        )  # noqa: E501
-        return {
-            "responses": ["aaa"] * num,
-            "stop_reasons": ["stop"] * num,
-            "response_logprobs": None,
-            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
-
-    # Env: two steps with rewards 0.5 then 0.25; first step has an observation, second has none
-    class MTEnv:
-        def __init__(self):
-            self.turns = 0
-
-        def init(self, prompt):
-            return prompt, {}
-
-        def step(self, action):
-            self.turns += 1
-            if self.turns == 1:
-                return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": "obs1"}], reward=0.5, done=False, metadata={}
-                )
-            else:
-                return BaseTextEnvStepOutput(observations=[], reward=0.25, done=True, metadata={})
-
-        def close(self):
-            return None
-
-    mock_make.return_value = MTEnv()
-
-    # Generator config
-    cfg = MagicMock()
-    cfg.sampling_params.max_generate_length = 50
-    cfg.sampling_params.logprobs = None
-    cfg.apply_overlong_filtering = False
-    cfg.max_input_length = 512
-    cfg.batched = False
-    cfg.max_turns = 10
-    cfg.zero_reward_on_non_stop = False
-    cfg.use_conversation_multi_turn = True
-
-    mock_env_cfg.env_class = "mt_env"
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
-    )
-    # Ensure base_conversation_token_ids doesn't shift observation slicing in test
-    generator.base_conversation_token_ids = []
-
-    prompt = [{"role": "user", "content": "Q?"}]
-    extras = {}
-    out = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=50, max_input_length=512)
-
-    # Response ids layout: step1 assistant (4 incl. eos) + obs(2) + step2 assistant(4 incl. eos) = 10
-    assert len(out.response_ids) == 10
-    # Rewards at indices: 3 (end of step1 assistant), 9 (end of step2 assistant)
-    expected = [0.0] * 10
-    expected[3] = 0.5
-    expected[9] = 0.25
-    assert isinstance(out.reward, list)
-    assert out.reward == expected
-    assert out.stop_reason == "stop"
-
-
-@pytest.mark.asyncio
-@patch("skyrl_gym.make")
-async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
-    """Retokenize mode should return a single float reward (last non-None step reward) because token-level rewards are not yet supported."""
-    mock_tokenizer.eos_token_id = 4
-
-    # Tokenizer: initial prompt ids and final retokenized response with masks
-    def apply_chat_template_side_effect(messages, **kwargs):
-        if kwargs.get("return_dict", False):
-            # Final retokenization output
-            return {"assistant_masks": [1, 0, 1], "input_ids": [5, 6, 7]}
-        if kwargs.get("tokenize", True):
-            return [301, 302]
-        else:
-            return "".join([m.get("content", "") for m in messages])
-
-    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
-
-    # LLM generate in retokenize mode uses prompts; we can return any ids
-    async def llm_generate_side_effect(input_batch):
-        num = (
-            len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        )  # noqa: E501
-        return {
-            "responses": ["bbb"] * num,
-            "stop_reasons": ["stop"] * num,
-            "response_logprobs": None,
-            "response_ids": [[20, 21, 22] for _ in range(num)],
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
-
-    # Env with rewards: None then 2.5
-    class RetokEnv:
-        def __init__(self):
-            self.turns = 0
-
-        def init(self, prompt):
-            return prompt, {}
-
-        def step(self, action):
-            self.turns += 1
-            if self.turns == 1:
-                return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": "o1"}], reward=None, done=False, metadata={}
-                )  # noqa: E501
-            else:
-                return BaseTextEnvStepOutput(observations=[], reward=2.5, done=True, metadata={})
-
-        def close(self):
-            return None
-
-    mock_make.return_value = RetokEnv()
-
-    # Generator config enabling retokenize path
-    cfg = MagicMock()
-    cfg.sampling_params.max_generate_length = 50
-    cfg.sampling_params.logprobs = None
-    cfg.apply_overlong_filtering = False
-    cfg.max_input_length = 512
-    cfg.batched = False
-    cfg.max_turns = 10
-    cfg.zero_reward_on_non_stop = False
-    cfg.use_conversation_multi_turn = True
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="Qwen/Qwen3-0.6B",  # ensures custom_chat_template is truthy in get_custom_chat_template
-    )
-    # Force retokenize path regardless of model resolution logic if needed
-    generator.custom_chat_template = "<custom>"
-
-    prompt = [{"role": "user", "content": "Q?"}]
-    extras = {}
-    out = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=50, max_input_length=512)
-
-    assert isinstance(out.reward, float)
-    assert out.reward == 2.5
-    assert out.stop_reason == "stop"
-
-
-@pytest.mark.asyncio
-@patch("skyrl_gym.make")
-async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
-    """Non-retokenize path: ensure rewards whose indices fall beyond truncated response are ignored."""
-
-    # Configure tokenizer: initial prompt -> 2 tokens
-    def apply_chat_template_side_effect(messages, **kwargs):
-        if kwargs.get("tokenize", True):
-            return [101, 102]
-        else:
-            return "".join([m.get("content", "") for m in messages])
-
-    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
-    mock_tokenizer.eos_token_id = 4
-
-    # LLM returns 4 assistant tokens per turn (no eos here; final EOS appended by generator for non-conv-mt)
-    async def llm_generate_side_effect(input_batch):
-        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
-        return {
-            "responses": ["step"] * num,
-            "stop_reasons": ["stop"] * num,
-            "response_logprobs": None,
-            "response_ids": [[10, 11, 12, 13] for _ in range(num)],
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
-
-    # Env with two steps, rewards on both; no observations to keep math simple
-    class TruncEnv:
-        def __init__(self):
-            self.turns = 0
-
-        def init(self, prompt):
-            return prompt, {}
-
-        def step(self, action):
-            self.turns += 1
-            if self.turns == 1:
-                return BaseTextEnvStepOutput(observations=[], reward=1.0, done=False, metadata={})
-            else:
-                return BaseTextEnvStepOutput(observations=[], reward=2.0, done=True, metadata={})
-
-        def close(self):
-            return None
-
-    mock_make.return_value = TruncEnv()
-
-    # Generator config: non-retokenize message mode; max_turns=1 so max_response_tokens = max_tokens
-    cfg = MagicMock()
-    cfg.sampling_params.max_generate_length = 5  # enforce truncation
-    cfg.sampling_params.logprobs = None
-    cfg.apply_overlong_filtering = False
-    cfg.max_input_length = 1000  # prevent earlier length break
-    cfg.batched = False
-    cfg.max_turns = 1
-    cfg.zero_reward_on_non_stop = False
-    cfg.use_conversation_multi_turn = False
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
-    )
-
-    prompt = [{"role": "user", "content": "Q?"}]
-    extras = {}
-    out = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=5, max_input_length=1000)
-
-    # Untruncated response would be: 4 (step1) + 4 (step2) + 1 (final eos) = 9; we expect truncation to 5
-    assert len(out.response_ids) == 5
-    assert isinstance(out.reward, list)
-    assert len(out.reward) == 5
-    # Step1 end index relative should be 3 (0-based), step2 end index would be 7 -> out of range after truncation
-    assert out.reward[3] == 1.0
-    assert sum(out.reward) == 1.0
-    assert out.stop_reason == "length"
