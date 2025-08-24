@@ -171,11 +171,11 @@ class RayPPOTrainer:
         print("Eval output example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         eval_metrics = calculate_per_dataset_metrics(
             concat_generator_outputs, concat_uids, concat_data_sources, self.cfg.generator.eval_n_samples_per_prompt
         )
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
 
         # 3. Calculate overall metrics across all datasets
         overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
@@ -191,17 +191,26 @@ class RayPPOTrainer:
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
-                    Path(self.cfg.trainer.export_path) / "dumped_evals" / f"global_step_{self.global_step}_evals"
+                    Path(self.cfg.trainer.export_path) / "dumped_evals" / f"global_step_{self.global_step}_evals"  # PosixPath('/home/ubuntu/exports/dumped_evals/global_step_0_evals')
                 )
                 data_save_dir.mkdir(parents=True, exist_ok=True)
                 dump_per_dataset_eval_results(
-                    data_save_dir,
-                    self.tokenizer,
-                    concat_generator_outputs,
-                    concat_data_sources,
-                    concat_all_envs,
-                    concat_env_extras,
+                    data_save_dir,  # PosixPath('/home/ubuntu/exports/dumped_evals/global_step_0_evals')
+                    self.tokenizer,  # Qwen2TokenizerFast(name_or_path='Qwen/Qwen2-0.5B', vocab_size=151643, model_max_length=32768, is_fast=True, padding_side='left', truncation_side='right', special_tokens={'eos_token': '<|endoftext|>', 'pad_token': '<|endoftext|>', 'additional_special_tokens': ['<|im_start|>', '<|im_end|>']}, clean_up_tokenization_spaces=False, added_tokens_decoder={151643: AddedToken("<|endoftext|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True), 151644: AddedToken("<|im_start|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True), 151645: AddedToken("<|im_end|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),})
+                    concat_generator_outputs,  # dict_keys(['prompt_token_ids' (1319), 'response_ids' (1319), 'rewards', 'loss_masks', 'rollout_logprobs', 'stop_reasons'])
+                    concat_data_sources,  # ['openai/gsm8k', 'openai/gsm8k', 'openai/gsm8k', ...] (1319)
+                    concat_all_envs,  # ['gsm8k', 'gsm8k', 'gsm8k', ...] (2638)
+                    concat_env_extras, 
+                    # {'data_source': 'openai/gsm8k', 
+                    #  'reward_spec': {'ground_truth': '18', 
+                    #                  'method': 'rule'}, 
+                    #  'extra_info': {'answer': 'Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.\nShe makes 9 * 2 = $<<9*2=18>>18 every day at the farmer’s market.\n#### 18', 
+                    #                 'index': 0, 
+                    #                 'question': "Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?", 
+                    #                 'split': 'test'}, 
+                    #  'max_turns': 1}
                     eval_metrics,
+                    # {'eval/openai_gsm8k/avg_score': 0.05079605761940864, 'eval/openai_gsm8k/pass_at_1': 0.05079605761940864, 'eval/all/avg_score': 0.05079605761940864, 'eval/all/pass_at_1': 0.05079605761940864}
                 )
 
         # 5. Restore self.all_metrics
