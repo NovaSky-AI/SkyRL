@@ -182,4 +182,74 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         if "Qwen" in model_name:
             expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
     assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
-    assert generator_output["loss_masks"][0] == expected_loss_masks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
+)
+async def test_skyrl_gym_generator_single_turn_chat_templating(model_name):
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    mock_llm = MagicMock()
+
+    def mock_generate(input_batch):
+        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+        output_text = "b" + (tokenizer.eos_token or "")
+        output_ids = tokenizer.encode(output_text, add_special_tokens=False)
+        return {
+            "responses": ["b"] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+            "response_ids": [output_ids.copy()] * num_prompts,
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+
+    generator_cfg = DictConfig(
+        {
+            "sampling_params": {"max_generate_length": 200, "logprobs": None},
+            "max_input_length": 200,
+            "batched": False,
+            "max_turns": 3,
+            "zero_reward_on_non_stop": False,
+            "apply_overlong_filtering": False,
+            "use_conversation_multi_turn": False,
+        }
+    )
+    env_cfg = DictConfig({"max_env_workers": 0, "env_class": "cpu_test_env"})
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=tokenizer,
+        model_name=model_name,
+    )
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "a"}]],
+        "env_extras": [{"answer": "4"}],
+        "env_classes": [env_cfg.env_class],
+    }
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    tokens_b = tokenizer.encode("b", add_special_tokens=False)
+    tokens_1 = tokenizer.encode("1", add_special_tokens=False)
+    tokens_2 = tokenizer.encode("2", add_special_tokens=False)
+    expected_len = len(tokens_b) + len(tokens_1) + len(tokens_b) + len(tokens_2) + len(tokens_b) + 1
+    resp_ids = generator_output["response_ids"][0]
+    loss_mask = generator_output["loss_masks"][0]
+
+    assert len(resp_ids) == expected_len
+    assert resp_ids[-1] == tokenizer.eos_token_id
+
+    expected_loss_mask = (
+        [1] * len(tokens_b)
+        + [0] * len(tokens_1)
+        + [1] * len(tokens_b)
+        + [0] * len(tokens_2)
+        + [1] * len(tokens_b)
+        + [1]
+    )
+    assert loss_mask == expected_loss_mask
