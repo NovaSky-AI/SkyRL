@@ -49,6 +49,8 @@ uv run --isolated --frozen --extra vllm --extra deepspeed -m skyrl_train.entrypo
   generator.use_conversation_multi_turn=false \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
+  generator.sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
