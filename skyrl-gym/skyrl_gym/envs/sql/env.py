@@ -91,9 +91,15 @@ class SQLEnv(BaseTextEnv):
 
     def _validate_action(self, action: str):
         if "</sql>" in action:
-            assert action.split("</sql>")[1] == "", "</sql> detected in the response but it is not the last string generated. Use \"</sql>\" and \"</solution>\" as stop strings in the configuration."
+            assert action.split("</sql>")[1] == "", (
+                "</sql> detected in the response but it is not the last string generated. "
+                'Use "</sql>" and "</solution>" as stop strings in the configuration.'
+            )
         elif "</solution>" in action:
-            assert action.split("</solution>")[1] == "", "</solution> detected in the response but it is not the last string generated. Use \"</sql>\" and \"</solution>\" as stop strings in the configuration."
+            assert action.split("</solution>")[1] == "", (
+                "</solution> detected in the response but it is not the last string generated. "
+                'Use "</sql>" and "</solution>" as stop strings in the configuration.'
+            )
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
