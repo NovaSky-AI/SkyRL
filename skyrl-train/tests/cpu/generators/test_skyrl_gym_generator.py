@@ -676,7 +676,7 @@ async def test_postprocessed_action_used(
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, _, _ = await generator.agent_loop(
         prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
     )
 
