@@ -342,10 +342,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             env.close()
 
         # apply tokenizer to each prompt in batch independently
-        prompt_token_ids = []
-        for prompt in prompts:
-            prompt_ids = self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
-            prompt_token_ids.append(prompt_ids)
+        prompt_token_ids = [
+            self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            for prompt in prompts
+        ]
         responses = truncated_responses
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
