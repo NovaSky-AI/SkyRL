@@ -274,6 +274,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             GeneratorOutput
         """
+        print("###################### mag - entering generate_batched ######################")
         envs = []
         init_prompts = []
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
@@ -353,6 +354,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
+        print("###################### mag - entering generate ######################")
 
         if self.batched:
             return await self.generate_batched(

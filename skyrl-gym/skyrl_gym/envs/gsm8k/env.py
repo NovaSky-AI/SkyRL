@@ -42,7 +42,7 @@ class GSM8kEnv(BaseTextEnv):
         reward = self._get_reward(action)
         metrics = self._calculate_metrics(action, reward)
 
-        print("###################### mag gsm8k/env/step() 1 ############################")
+        print("###################### mag gsm8k/env/step() ############################")
         print("###################### Action:", action, "######################")
         print("###################### Reward:", reward, "######################")
         print("###################### Metrics:", metrics, "######################")
