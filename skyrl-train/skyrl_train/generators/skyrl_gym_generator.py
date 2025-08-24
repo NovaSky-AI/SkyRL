@@ -167,20 +167,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # 2. Environment step
             if self.env_executor is not None:
-                print("###################### mag - agent_loop # self.env_executor is not None. 1 ######################")
                 loop = asyncio.get_running_loop()
                 env_step_output: BaseTextEnvStepOutput = await loop.run_in_executor(self.env_executor, env.step, output)
             else:
-                print("###################### mag - agent_loop # self.env_executor == NONE   2######################")
                 env_step_output: BaseTextEnvStepOutput = env.step(output)
             new_obs = env_step_output["observations"]
             reward = env_step_output["reward"]
             done = env_step_output["done"]
             env_metrics = env_step_output.get("metrics", {})
-            print("###################### mag - agent_loop # new_obs", new_obs, "######################")
-            print("###################### mag - agent_loop # reward", reward, "######################")
-            print("###################### mag - agent_loop # done", done, "######################")
-            print("###################### mag - agent_loop # env_metrics", env_metrics, "######################")
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
@@ -274,7 +268,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             GeneratorOutput
         """
-        print("###################### mag - entering generate_batched ######################")
         envs = []
         init_prompts = []
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
@@ -319,9 +312,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
         responses = truncated_responses
 
-        print("###################### mag - entering rollout_metrics from generate_batched ######################")
         rollout_metrics = self._rollout_metrics(responses, rewards, env_metrics)
-        print("###################### mag - generate_batched # rollout_metrics", rollout_metrics, "######################")
 
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
@@ -354,7 +345,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
-        print("###################### mag - entering generate ######################")
 
         if self.batched:
             return await self.generate_batched(
@@ -389,13 +379,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_token_ids = [output[4] for output in all_outputs]
         env_metrics = [output[6] for output in all_outputs]
 
-        print("###################### mag - generate # responses", responses, "######################")
-        print("###################### mag - generate # rewards", rewards, "######################")
-        print("###################### mag - generate # stop_reasons", stop_reasons, "######################")
-        print("###################### mag - generate # loss_masks", loss_masks, "######################")
-        print("###################### mag - generate # prompt_token_ids", prompt_token_ids, "######################")
-        print("###################### mag - generate # env_metrics", env_metrics, "######################")
-
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
             # TODO: this might have to change when we support logprobs for sglang
@@ -408,9 +391,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_logprobs = None
 
-        print("###################### mag - entering rollout_metrics from generate ######################")
         rollout_metrics = self._rollout_metrics(responses, rewards, env_metrics)
-        print("###################### mag - generate # rollout_metrics", rollout_metrics, "######################")
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"

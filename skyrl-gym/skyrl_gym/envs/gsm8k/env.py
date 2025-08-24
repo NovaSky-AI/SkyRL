@@ -24,7 +24,6 @@ class GSM8kEnv(BaseTextEnv):
         response_length = len(action)
         word_count = len(action.split())
         answer_accuracy = float(reward > 0)
-        print("###################### mag gsm8k/env/_calculate_metrics() ############################")
         return {
             "response_length": response_length,
             "word_count": word_count,
@@ -41,11 +40,6 @@ class GSM8kEnv(BaseTextEnv):
         done = True  # always done after one step
         reward = self._get_reward(action)
         metrics = self._calculate_metrics(action, reward)
-
-        print("###################### mag gsm8k/env/step() ############################")
-        print("###################### Action:", action, "######################")
-        print("###################### Reward:", reward, "######################")
-        print("###################### Metrics:", metrics, "######################")
 
         # No observation in gsm8k, and no tool call
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={}, metrics=metrics)
