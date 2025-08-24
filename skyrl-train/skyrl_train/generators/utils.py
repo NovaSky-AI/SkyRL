@@ -59,13 +59,12 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(model_name: str, thinking_mode: Optional[bool] = False, chat_template_config: Optional[dict] = None) -> Optional[str]:
+def get_custom_chat_template(model_name: str, chat_template_config: Optional[dict] = None) -> Optional[str]:
     """
     Get custom chat template based on the new config structure.
     
     Args:
         model_name: Name of the model.
-        thinking_mode: Flag for backward compatibility with Qwen3 models.
         chat_template_config: Config dict with 'source' and 'name_or_path' fields.
         
     Returns:
@@ -93,14 +92,8 @@ def get_custom_chat_template(model_name: str, thinking_mode: Optional[bool] = Fa
             else:
                 raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
-    # backward compatibility for qwen3 models if new config is not used
-    if "Qwen3" in model_name:
-        if thinking_mode:
-            return CUSTOM_CHAT_TEMPLATES["qwen3_with_thinking"]
-        else:
-            return CUSTOM_CHAT_TEMPLATES["qwen3_without_thinking"]
-    
     return None
+
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
     """

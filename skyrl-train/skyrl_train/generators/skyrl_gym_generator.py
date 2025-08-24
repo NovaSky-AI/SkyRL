@@ -44,7 +44,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         self.custom_chat_template = get_custom_chat_template(
             model_name=model_name,
-            thinking_mode=enable_thinking_tokens,
             chat_template_config={
                 "source": source,
                 "name_or_path": name_or_path
@@ -312,7 +311,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             else:
                 sample_response_ids = self.tokenizer.encode(response)
 
-            # apple custom chat template masking if configured for batch mode
+            # apply custom chat template masking if configured for batch mode
             if self.custom_chat_template:
                 response_chat_history = [{"role": "assistant", "content": response}]
                 

@@ -177,11 +177,7 @@ generator:
   remote_inference_engine_urls: ["127.0.0.1:8001"]
   max_turns: 1
 
-  # custom chat template support and thinking token masking for backwards compatibility with qwen3 models (can remove later)
-  enable_thinking_tokens: false
-
   # chat template configuration
-  
   chat_template:
     source: "name"  # "name" or "file"
     name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
