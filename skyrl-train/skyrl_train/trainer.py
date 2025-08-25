@@ -2,7 +2,6 @@ import asyncio
 import math
 import os
 import shutil
-from collections import defaultdict
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
