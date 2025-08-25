@@ -186,6 +186,7 @@ generator:
     min_p: 0.0
     top_k: -1
     logprobs: null
+    stop: null
 
   # whether to use a conversation based format for multi-turn generations
   # if false, append multi-turn model responses and env observations to the original assistant response
@@ -200,6 +201,7 @@ generator:
     min_p: 0.0
     top_k: -1
     logprobs: null
+    stop: null
 
   # number of samples per prompt for evaluation
   eval_n_samples_per_prompt: 1

@@ -100,6 +100,7 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         generator.use_conversation_multi_turn=false \
         generator.sampling_params.temperature=1.0 \
         generator.sampling_params.top_p=1.0 \
+        generator.sampling_params.stop='["</search>", "</answer>"]' \
 
         # - Environment: environment class, max env workers, search env settings
         environment.env_class="search" \
@@ -112,11 +113,16 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         trainer.eval_batch_size=256 \
         trainer.eval_before_train=false \
         generator.eval_sampling_params.temperature=0 \
+        generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
         trainer.eval_interval=50 \
         ... # logging + checkpointing configuration (see `examples/search/run_search.sh` for the full script)
     
 To change the number of turns, you can simply change the ``generator.max_turns`` setting.
 For more details on environment implementation, see :skyrl_gym_link:`skyrl_gym/envs/search/env.py`.
+
+Note we add ``stop='["</search>", "</answer>"]'`` for both generation and evaluation sampling parameters
+to adhere to the Search-R1 recipe. If you are using ``generator.use_conversation_multi_turn=true``,
+you might want to manually append an EOS token ID to the end of the response after these stop strings.
 
 Launching Your Training Run
 ---------------------------
