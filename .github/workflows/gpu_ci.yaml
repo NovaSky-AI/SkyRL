@@ -47,3 +47,4 @@ jobs:
           ANYSCALE_HOST: https://console.anyscale.com
         run: |
           anyscale job submit -f ci/anyscale_gpu_ci.yaml --wait --timeout 3600
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci --timeout 3600
