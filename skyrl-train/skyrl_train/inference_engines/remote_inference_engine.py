@@ -22,15 +22,23 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         engine_backend: str,
         tokenizer: PreTrainedTokenizerBase,
         tp_size: Optional[int] = None,
+        dp_size: Optional[int] = None,
         sampling_params: Optional[Dict[str, Any]] = None,
     ):
         """Initialize the InferenceEngine."""
         self.url = f"http://{url}"
         self.model_name = model_name
         self.engine_backend = engine_backend
-        self.tp_size = tp_size
+        self._tp_size = tp_size
+        self._dp_size = dp_size
         self.sampling_params = sampling_params if sampling_params is not None else {}
         self.tokenizer = tokenizer
+
+    def tp_size(self) -> int:
+        return self._tp_size
+
+    def dp_size(self) -> int:
+        return self._dp_size
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 1. Prepare inputs
@@ -219,6 +227,7 @@ def create_remote_inference_engines(
     engine_backend: str,
     tokenizer: PreTrainedTokenizerBase,
     tensor_parallel_size: Optional[int] = None,
+    data_parallel_size: Optional[int] = None,
     sampling_params: Optional[Dict[str, Any]] = None,
 ):
     return [
@@ -228,6 +237,7 @@ def create_remote_inference_engines(
             tokenizer=tokenizer,
             engine_backend=engine_backend,
             tp_size=tensor_parallel_size,
+            dp_size=data_parallel_size,
             sampling_params=sampling_params,
         )
         for url in urls

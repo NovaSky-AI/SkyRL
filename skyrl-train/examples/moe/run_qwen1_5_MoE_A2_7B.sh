@@ -15,18 +15,29 @@ LOGGER="wandb"  # change to "console" to print to stdout
 INFERENCE_BACKEND="vllm"
 # INFERENCE_BACKEND="sglang"
 
-uv run --isolated --extra $INFERENCE_BACKEND --env-file .env -m skyrl_train.entrypoints.main_base \
+# 4/2/2 doesn't work
+# 980s for forward/values/logprobs, then get an error 
+    # torch.utils.checkpoint.CheckpointError: torch.utils.checkpoint: A different number of tensors was saved during the original forward and recomputation.
+    # Number of tensors saved during forward: 1010
+    # Number of tensors saved during recomputation: 674
+# 
+
+# Remote is failing on weight sync ??
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND --env-file .env -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen1.5-MoE-A2.7B-Chat" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=false \
+  trainer.placement.colocate_policy_ref=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_inference_engines=2 \
+  generator.num_inference_engines=4 \
   generator.inference_engine_tensor_parallel_size=1 \
-  generator.inference_engine_expert_parallel_size=2 \
+  generator.inference_engine_expert_parallel_size=1 \
+  generator.inference_engine_data_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
@@ -34,8 +45,8 @@ uv run --isolated --extra $INFERENCE_BACKEND --env-file .env -m skyrl_train.entr
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=1024 \
   trainer.policy_mini_batch_size=256 \
-  trainer.micro_forward_batch_size_per_gpu=64 \
-  trainer.micro_train_batch_size_per_gpu=64 \
+  trainer.micro_forward_batch_size_per_gpu=40 \
+  trainer.micro_train_batch_size_per_gpu=40 \
   trainer.ckpt_interval=-1 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -50,8 +61,8 @@ uv run --isolated --extra $INFERENCE_BACKEND --env-file .env -m skyrl_train.entr
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_test" \
+  trainer.project_name="moe" \
+  trainer.run_name="moe_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/moe_1.5B_ckpt" \
   $@
