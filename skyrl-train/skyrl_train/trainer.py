@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import shutil
+from collections import defaultdict
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
@@ -176,6 +177,7 @@ class RayPPOTrainer:
 
         # 3. Calculate overall metrics across all datasets
         overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+        
         eval_metrics.update(
             {
                 "eval/all/avg_score": overall_avg_score,
@@ -187,7 +189,7 @@ class RayPPOTrainer:
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
-                    Path(self.cfg.trainer.export_path) / "dumped_evals" / f"global_step_{self.global_step}_evals"
+                    Path(self.cfg.trainer.export_path) / "dumped_evals" / f"global_step_{self.global_step}_evals"  # PosixPath('/home/ubuntu/exports/dumped_evals/global_step_0_evals')
                 )
                 data_save_dir.mkdir(parents=True, exist_ok=True)
                 dump_per_dataset_eval_results(
@@ -196,7 +198,7 @@ class RayPPOTrainer:
                     concat_generator_outputs,
                     concat_data_sources,
                     concat_all_envs,
-                    concat_env_extras,
+                    concat_env_extras, 
                     eval_metrics,
                 )
 

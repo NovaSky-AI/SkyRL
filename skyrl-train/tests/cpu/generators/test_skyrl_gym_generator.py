@@ -249,7 +249,7 @@ async def test_agent_loop_single_turn(
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
-    response_ids, reward, stop_reason, loss_mask, prompt_ids, rollout_logprobs = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
         prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
     )
 
@@ -257,6 +257,7 @@ async def test_agent_loop_single_turn(
     assert reward == 1.0
     assert stop_reason == "stop"
     assert loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert env_metrics == {}
 
 
 @pytest.mark.asyncio
@@ -503,7 +504,7 @@ async def test_length_limit_exceeded_during_conversation(
     prompt = [{"role": "user", "content": "Start conversation"}]
     extras = {"test": "value"}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length
     )
 
@@ -593,7 +594,7 @@ async def test_multi_turn_response_truncation(
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
 
-    response_ids, _, stop_reason, loss_mask, _, _ = await generator.agent_loop(
+    response_ids, _, stop_reason, loss_mask, _, _, _ = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
     )
 
@@ -675,7 +676,7 @@ async def test_postprocessed_action_used(
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = await generator.agent_loop(
+    response_ids, reward, stop_reason, loss_mask, prompt_ids, _, _ = await generator.agent_loop(
         prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
     )
 
@@ -865,3 +866,253 @@ async def test_apply_overlong_filtering_batched(
         0,
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_env_metrics_collection_and_aggregation(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that environment metrics are properly collected from environments
+    and bundled into rollout_metrics in GeneratorOutput.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = False
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    def mock_step_with_metrics(action):
+        return BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "next"}],
+            reward=1.0,
+            done=True,
+            metadata={},
+            metrics={
+                "response_length": len(action),
+                "word_count": len(action.split()),
+                "answer_accuracy": 1.0,
+                "custom_metric": 42.5
+            }
+        )
+
+    mock_env.step.side_effect = mock_step_with_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    prompts = [[{"role": "user", "content": "What is 2 + 2?"}]]
+    env_extras = [{"answer": "4"}]
+    env_classes = [mock_env_cfg.env_class]
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # Verify environment metrics are bundled in rollout_metrics
+    assert "rollout_metrics" in generator_output, "rollout_metrics should be present"
+    rollout_metrics = generator_output["rollout_metrics"]
+    assert rollout_metrics is not None, "rollout_metrics should not be None"
+    
+    # Check for environment metrics with proper prefix
+    expected_env_metrics = [
+        "environment/response_length",
+        "environment/word_count", 
+        "environment/answer_accuracy",
+        "environment/custom_metric"
+    ]
+    
+    for metric_key in expected_env_metrics:
+        assert metric_key in rollout_metrics, f"Environment metric '{metric_key}' should be in rollout_metrics"
+        assert isinstance(rollout_metrics[metric_key], list), f"Environment metric '{metric_key}' should be a list"
+        assert len(rollout_metrics[metric_key]) == 1, f"Should have one value per trajectory"
+    
+    # Verify values
+    assert rollout_metrics["environment/response_length"][0] == 13  # Length of "mocked output"
+    assert rollout_metrics["environment/word_count"][0] == 2        # "mocked" and "output"
+    assert rollout_metrics["environment/answer_accuracy"][0] == 1.0
+    assert rollout_metrics["environment/custom_metric"][0] == 42.5
+    
+    # Verify generation metrics are still there
+    assert "generate/avg_num_tokens" in rollout_metrics, "Should still contain generation metrics"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_env_metrics_batched_mode(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that environment metrics work correctly in batched mode with multiple trajectories.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = True
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    step_call_count = 0
+    
+    def mock_step_with_varying_metrics(action):
+        nonlocal step_call_count
+        step_call_count += 1
+        
+        if step_call_count == 1:
+            metrics = {"accuracy": 1.0, "length": 10}
+        elif step_call_count == 2:
+            metrics = {"accuracy": 0.0, "length": 5}
+        else:
+            metrics = {"accuracy": 0.5, "length": 8}
+            
+        return BaseTextEnvStepOutput(
+            observations=[],
+            reward=1.0,
+            done=True,
+            metadata={},
+            metrics=metrics
+        )
+
+    mock_env.step.side_effect = mock_step_with_varying_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    prompts = [
+        [{"role": "user", "content": "Problem 1"}],
+        [{"role": "user", "content": "Problem 2"}],
+        [{"role": "user", "content": "Problem 3"}]
+    ]
+    env_extras = [{"answer": "1"}, {"answer": "2"}, {"answer": "3"}]
+    env_classes = [mock_env_cfg.env_class] * 3
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # Verify environment metrics are bundled in rollout_metrics as lists
+    rollout_metrics = generator_output["rollout_metrics"]
+    
+    # Check environment metrics are grouped by key
+    assert "environment/accuracy" in rollout_metrics, "Should have grouped accuracy metrics"
+    assert "environment/length" in rollout_metrics, "Should have grouped length metrics"
+    
+    # Verify values are lists with correct data
+    assert rollout_metrics["environment/accuracy"] == [1.0, 0.0, 0.5], "Should have all accuracy values"
+    assert rollout_metrics["environment/length"] == [10, 5, 8], "Should have all length values"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make") 
+async def test_env_metrics_empty_when_no_metrics(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that rollout_metrics handles cases where environment doesn't return metrics.
+    No environment metrics should be added to rollout_metrics.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = False
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    def mock_step_no_metrics(action):
+        return BaseTextEnvStepOutput(
+            observations=[],
+            reward=1.0,
+            done=True,
+            metadata={}
+            # No metrics field
+        )
+
+    mock_env.step.side_effect = mock_step_no_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    prompts = [[{"role": "user", "content": "Test"}]]
+    env_extras = [{}]
+    env_classes = [mock_env_cfg.env_class]
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    # Verify rollout_metrics exists but contains no environment metrics
+    rollout_metrics = generator_output["rollout_metrics"]
+    assert rollout_metrics is not None, "rollout_metrics should exist"
+    
+    # Check that no environment metrics are present
+    env_metric_keys = [key for key in rollout_metrics.keys() if key.startswith("environment/")]
+    assert len(env_metric_keys) == 0, "Should have no environment metrics when env doesn't provide them"
+    
+    # Verify generation metrics are still present
+    gen_metric_keys = [key for key in rollout_metrics.keys() if key.startswith("generate/")]
+    assert len(gen_metric_keys) > 0, "Should still have generation metrics"
+
+
+def test_env_metrics_in_generator_output_schema():
+    """
+    Test that env_metrics are properly bundled into rollout_metrics.
+    """
+    # Verify env_metrics is NOT in GeneratorOutput schema anymore
+    expected_fields = [
+        "prompt_token_ids",
+        "response_ids", 
+        "rewards",
+        "loss_masks",
+        "stop_reasons",
+        "rollout_metrics",  # Environment metrics are bundled here now
+        "rollout_logprobs",
+        # "env_metrics" removed - no longer exists
+    ]
+    
+    actual_fields = list(GeneratorOutput.__annotations__.keys())
+    assert set(actual_fields) == set(expected_fields), (
+        f"GeneratorOutput fields mismatch. Expected {expected_fields}, got {actual_fields}"
+    )
+
+    # Test that environment metrics are bundled into rollout_metrics
+    generator_output_1: GeneratorOutput = {
+        "prompt_token_ids": [[1, 2]],
+        "response_ids": [[3, 4]],
+        "rewards": [1.0],
+        "loss_masks": [[1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": [[0.1, 0.2]],
+        "rollout_metrics": {
+            "generate/avg_tokens": 2.0,
+            "environment/response_length": [150],  # Environment metrics bundled here
+            "environment/word_count": [25]
+        }
+    }
+
+    # Verify rollout_metrics contains both generation and environment metrics
+    rollout_metrics = generator_output_1["rollout_metrics"]
+    assert "generate/avg_tokens" in rollout_metrics, "Should contain generation metrics"
+    assert "environment/response_length" in rollout_metrics, "Should contain environment metrics"
+    assert "environment/word_count" in rollout_metrics, "Should contain environment metrics"

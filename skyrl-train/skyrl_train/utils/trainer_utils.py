@@ -154,7 +154,7 @@ def calculate_per_dataset_metrics(
     concat_uids: List[str],
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
-) -> Dict[str, float]:
+) -> Dict[str, float]: #Dict[str, Any]:
     """Calculate metrics per data source."""
     eval_metrics = {}
 
