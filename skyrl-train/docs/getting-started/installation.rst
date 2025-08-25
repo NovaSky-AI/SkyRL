@@ -57,7 +57,7 @@ The only packages required are `build-essential` and `libnuma <https://github.co
     sudo apt update && sudo apt-get install build-essential libnuma-dev
 
 .. note::
-   Installing `libnuma-dev` will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile. However, you can install from source using:
+   Installing ``libnuma-dev`` will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile. However, you can install from source using:
    
    .. code-block:: bash
 
@@ -76,8 +76,7 @@ The only packages required are `build-essential` and `libnuma <https://github.co
        export LIBRARY_PATH=$HOME/.local/lib:$LIBRARY_PATH
        export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH
 
-.. note::
-   If libnuma is not set up, you might run into errors such as the following when running SkyRL:
+   If ``libnuma`` is not installed, you might run into errors such as the following when running SkyRL:
 
    .. code-block:: bash
 
