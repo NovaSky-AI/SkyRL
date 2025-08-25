@@ -59,11 +59,11 @@ async def test_policy_training_step(cfg, packed, strategy):
         )
 
         dummy_experience = make_dummy_experience()
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        global_step, local_step, should_update_policy = 0, 0, True
 
         results = ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience, global_step, local_step, should_update_policy
             )
         )
 
@@ -114,11 +114,11 @@ async def test_critic_training_step(cfg, packed, strategy):
         )
 
         dummy_experience = make_dummy_experience()
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        global_step, local_step, should_update_policy = 0, 0, True
 
         results = ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience, global_step, local_step, should_update_policy
             )
         )
         for result in results:

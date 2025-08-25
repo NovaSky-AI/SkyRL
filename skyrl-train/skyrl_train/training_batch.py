@@ -225,6 +225,26 @@ class TensorBatch(dict, Generic[DictType]):
             chunks.append(chunk)
         return chunks
 
+    def partition(self, partition: List[int]) -> "TensorBatch[DictType]":
+        """Extract samples at indices in partition from batch_data."""
+        if not partition:
+            raise ValueError("Empty partition encountered")
+
+        micro_batch_data = {}
+        indices = torch.tensor(partition, dtype=torch.long, device=self.device)
+        for key, value in self.items():
+            if value is not None:
+                if isinstance(value, torch.Tensor):
+                    micro_batch_data[key] = value[indices]
+                else:
+                    raise ValueError(f"Unsupported type {type(value)} for key {key}")
+            else:
+                micro_batch_data[key] = value
+
+        micro_batch = self.__class__(micro_batch_data)
+        micro_batch.metadata = self.metadata
+        return micro_batch
+
     def slice(self, start: int, end: int, step: int = 1) -> "TensorBatch[DictType]":
         """Slice the data batch.
 
@@ -327,13 +347,13 @@ class TrainingInput(TypedDict, total=False):
     response_mask: Integer[torch.Tensor, "batch_size seq_len"]
     action_log_probs: Float[torch.Tensor, "batch_size seq_len"]
     base_action_log_probs: Float[torch.Tensor, "batch_size seq_len"]
+    rollout_logprobs: Float[torch.Tensor, "batch_size seq_len"]
     values: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     returns: Float[torch.Tensor, "batch_size seq_len"]
     advantages: Float[torch.Tensor, "batch_size seq_len"]
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rm_rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     custom_rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

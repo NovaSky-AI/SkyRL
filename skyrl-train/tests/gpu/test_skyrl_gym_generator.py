@@ -78,6 +78,7 @@ async def run_generator_end_to_end(
     max_turns=1,
     use_conversation_multi_turn=True,
     max_env_workers=10,
+    inference_engine_enable_sleep=True,  # Add as parameter with default
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -97,7 +98,7 @@ async def run_generator_end_to_end(
             max_model_len=max_input_length + max_generate_length,
             shared_pg=None,
             gpu_memory_utilization=0.8,
-            inference_engine_enable_sleep=True,
+            inference_engine_enable_sleep=inference_engine_enable_sleep,  # Use parameter
             async_engine=use_async_engine,
             max_num_batched_tokens=8192,
             max_num_seqs=1024,
@@ -110,7 +111,7 @@ async def run_generator_end_to_end(
                         "top_k": -1,
                         "max_generate_length": max_generate_length,
                         "min_p": 0.0,
-                        "logprobs": None,
+                        "logprobs": None
                     }
                 ),
             ),
@@ -118,7 +119,9 @@ async def run_generator_end_to_end(
         )
     )
 
-    await inference_engine_client.wake_up()
+    # Only wake up if sleep was enabled
+    if inference_engine_enable_sleep:
+        await inference_engine_client.wake_up()
 
     # Create a mock generator config
     generator_cfg = DictConfig(

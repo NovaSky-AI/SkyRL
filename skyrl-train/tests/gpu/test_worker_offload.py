@@ -100,10 +100,10 @@ async def test_critic_policy_offload_memory_and_correctness(cfg, worker_type, st
 
         dummy_experience = make_dummy_experience()
         # Run first training step to get optimizer initialized and stepped
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        global_step, local_step, should_update_policy = 0, 0, True
         results = ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience, global_step, local_step, should_update_policy
             )
         )
 
@@ -134,7 +134,7 @@ async def test_critic_policy_offload_memory_and_correctness(cfg, worker_type, st
         # Run training again and ensure output consistency
         results_backload = ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step + 1, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience, global_step + 1, local_step, should_update_policy
             )
         )
 
@@ -327,12 +327,12 @@ def test_offload_after_ckpt(strategy):
 
         # Create dummy experiences for training steps
         dummy_experience_1 = make_dummy_experience()  # First training step
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        global_step, local_step, should_update_policy = 0, 0, True
 
         # Step 1: Do initial training step
         ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
+                "pass_through", "training_step", dummy_experience_1, global_step, local_step, should_update_policy
             )
         )
         get_rank_0_memory(actor_group, "After training step 1")

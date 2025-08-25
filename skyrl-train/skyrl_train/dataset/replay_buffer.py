@@ -113,6 +113,8 @@ class Experience:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         return self
 
+    def __len__(self):
+        return len(self.sequences)
 
 @dataclass
 class BufferItem:
