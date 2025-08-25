@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
+import os
 import subprocess
 import tempfile
 from typing import Optional, Dict, Any, List
@@ -20,12 +21,13 @@ class ExecutionResult:
 class Executor(ABC):
 
     @abstractmethod
-    def execute(self, command: str, timeout: int = 30) -> ExecutionResult:
+    def execute(self, command: str, working_dir: Optional[str] = None, timeout: int = 120) -> ExecutionResult:
         """Execute a command and return the result.
 
         Args:
             command: The command to execute
-            timeout: Timeout in seconds (default: 30)
+            working_dir: The working directory of the command
+            timeout: Timeout in seconds (default: 120)
 
         Returns:
             ExecutionResult containing the command output and status
@@ -33,31 +35,27 @@ class Executor(ABC):
         pass
 
 
-class GuixExecutor(Executor):
-    """Guix-based executor that runs commands in a sandboxed Guix shell environment."""
+class BubblewrapExecutor(Executor):
+    """Bubblewrap-based executor that runs commands in a sandboxed shell environment."""
 
-    def __init__(self, working_dir: str, manifest_file: Optional[str] = None):
-        """Initialize the Guix executor.
+    def __init__(self, home_dir: str, init_cmd: Optional[str] = None):
+        """Initialize the Bubblewrap executor.
 
         Args:
-            working_dir: Working directory of the execution
-            manifest_file: Path to a Guix manifest file specifying packages
+            home_dir: Home directory of the execution
+            init_cmd: Optional command that can be run before the actual command runs
         """
-        self.working_dir = working_dir
-        self.manifest_file = manifest_file
+        self.home_dir = home_dir
+        self.init_cmd = init_cmd or ""
         self.current_env = ""
 
     def execute(
         self,
         command: str,
-        timeout: int = 30,
+        working_dir: Optional[str] = None,
+        timeout: int = 120,
     ) -> ExecutionResult:
-        """Execute a command in a sandboxed Guix shell."""
-
-        guix_cmd = ["guix", "shell"]
-
-        if self.manifest_file:
-            guix_cmd.extend(["-m", self.manifest_file])
+        """Execute a command in a sandboxed shell."""
 
         with tempfile.NamedTemporaryFile(mode="w", suffix="_env.sh", delete=False) as env_file:
             env_file.write(self.current_env)
@@ -65,43 +63,45 @@ class GuixExecutor(Executor):
         with tempfile.NamedTemporaryFile(mode="w", suffix="_script.sh", delete=False) as script_file:
             script_file.write(f"source {env_file.name}\n")
             script_file.write("cd $PWD\n")
+            script_file.write(self.init_cmd + "\n")
             script_file.write(f"{command}\n")
+            script_file.write("exit_code=$?\n")
             script_file.write(f"export -p > {env_file.name}\n")
+            script_file.write("exit $exit_code")
 
         # Add a very lightweight sandbox using https://github.com/containers/bubblewrap.
-        # Originally we were using the guix shell --container sandbox for this, but there
-        # are environments where that does not work (e.g. mounting the /proc filesystem
-        # can fail in a GPU container). We might want to revisit this.
-        guix_cmd.extend(
-            # fmt: off
-            [
-                "--",
-                "bwrap",
-                "--ro-bind", "/bin", "/bin",
-                "--ro-bind", "/gnu", "/gnu",
-                "--proc", "/proc",
-                "--dev", "/dev",
-                "--tmpfs", "/tmp",
-                "--new-session",
-                "--ro-bind", script_file.name, script_file.name,
-                "--bind", env_file.name, env_file.name,
-                "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-                "--bind", self.working_dir, "/home/skyrl",
-                "--setenv", "HOME", "/home/skyrl/",
-                "sh",
-                script_file.name,
-            ]
-            # fmt: on
-        )
+        bwrap_cmd = [
+            "bwrap",
+            "--ro-bind", "/usr", "/usr",
+            "--ro-bind", "/bin", "/bin",
+            "--ro-bind", "/lib", "/lib",
+            "--ro-bind", "/lib64", "/lib64",
+            "--ro-bind", os.path.join(os.path.dirname(os.path.realpath(__file__)), "bin", "apply_patch"), "/opt/apply_patch",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--new-session",
+            "--ro-bind", script_file.name, script_file.name,
+            "--bind", env_file.name, env_file.name,
+            "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+            "--bind", self.home_dir, "/home/skyrl",
+            "--setenv", "HOME", "/home/skyrl/",
+            "--setenv", "USER", "skyrl",
+            "--setenv", "PATH", "/opt:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ]
+
+        if working_dir:
+            bwrap_cmd += ["--chdir", working_dir]
+
+        bwrap_cmd += ["bash", script_file.name]
 
         try:
             result = subprocess.run(
-                guix_cmd,
+                bwrap_cmd,
                 shell=False,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=self.working_dir,
             )
         except Exception as e:
             return ExecutionResult(
@@ -173,7 +173,7 @@ class ShellCommandTool(Tool):
             "required": ["command"],
         }
 
-    def execute(self, command: str, timeout: int = 30) -> ToolResult:
+    def execute(self, command: str, timeout: int = 120) -> ToolResult:
         """Execute a shell command using the configured executor."""
         execution_result = self.executor.execute(command, timeout=timeout)
 
@@ -219,12 +219,13 @@ class SimpleCoder:
         self.conversation_history = [
             {
                 "role": "system",
-                "content": """You are a Software Engineering Agent. You can:
-1. Execute shell commands using execute_shell
-2. Read, write, or append to files using edit_file
+                "content": """You are a Software Engineering Agent. You can execute shell commands using execute_shell.
 
 Break down complex tasks into steps and use the appropriate tools to complete them.
-Always check the results of your actions and adapt your approach if needed.""",
+Always check the results of your actions and adapt your approach if needed.
+
+IMPORTANT: You must use the tools to solve the problem and create a patch.
+""",
             },
             {"role": "user", "content": task},
         ]
@@ -271,9 +272,8 @@ if __name__ == "__main__":
     import os
     import simplecoder
 
-    manifest = os.path.abspath("manifest.scm")
     working_dir = os.path.abspath("test-repo")
-    executor = simplecoder.GuixExecutor(working_dir, manifest)
+    executor = simplecoder.BubblewrapExecutor(working_dir)
 
     coder = simplecoder.SimpleCoder(os.environ["OPENAI_API_KEY"], "o4-mini", executor)
     task = """
