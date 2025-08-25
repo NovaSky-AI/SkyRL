@@ -6,10 +6,11 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
+from skyrl_train.inference_engines.launch_inference_engine_http_server import generate_with_http_server
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
+from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType, InferenceEngineOutput
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids, apply_overlong_filtering
@@ -34,9 +35,29 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.model_name = model_name
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+
+        self.use_http_server_inference_engine_client = generator_cfg.get(
+            "use_http_server_inference_engine_client", False
+        )
+        self.http_server_inference_engine_client_host = generator_cfg.get(
+            "http_server_inference_engine_client_host", "127.0.0.1"
+        )
+        self.http_server_inference_engine_client_port = generator_cfg.get(
+            "http_server_inference_engine_client_port", 8000
+        )
+
+        if self.use_http_server_inference_engine_client:
+            assert (
+                self.use_conversation_multi_turn
+            ), "HTTP server inference engine client in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
+            # Store the base URL for direct HTTP requests
+            self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        else:
+            self.base_url = None
 
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
@@ -49,41 +70,15 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             self.env_executor = None
 
-        if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
-
-        # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
-        # correctly format and tokenize observations.
-        # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
-        self.base_conversation = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "I am a user."},
-            {"role": "assistant", "content": "I am an assistant."},
-        ]
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
-            self.base_conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-        )
-        # For Qwen2.5 and Qwen3, the above would generate
-        # <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
-        # <|im_start|>user\nI am a user.<|im_end|>\n
-        # <|im_start|>assistant\nI am an assistant.<|im_end|>\n
-
-        # Note that there is a `\n` in assistant's line before next user's messsage starts.
-        # If we do token-in-token-out, there is no way for LLM engine to generate `\n` since the
-        # EOS token is `<|im_end|>`. Therefore, we need to add it during `observation_ids`.
-        # By cutting `\n` out in `base_conversation_token_ids`, `observation_ids` in
-        # `_get_next_input_ids_with_multiturn_chat_template()` will be `\n<|im_start|>user\nObservation here<|im_end|>\n`.
-        # Note the `\n` at the final assistant turn will still be missing, but this is fine.
-        # See tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py for more details.
-        if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
-            last_eos_token_index = (
-                len(self.base_conversation_token_ids)
-                - 1
-                - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
+    async def _generate_with_inference_engine_client(self, engine_input: InferenceEngineInput) -> InferenceEngineOutput:
+        """Helper to dispatch generation to either HTTP server or direct client."""
+        if self.use_http_server_inference_engine_client:
+            return await generate_with_http_server(
+                base_url=self.base_url,
+                model_name=self.model_name,
+                input_batch=engine_input,
             )
-            self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
+        return await self.inference_engine_client.generate(engine_input)
 
     async def agent_loop(
         self,
@@ -159,7 +154,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            engine_output = await self._generate_with_inference_engine_client(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
@@ -278,7 +273,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        engine_output = await self.inference_engine_client.generate(engine_input)
+        engine_output = await self._generate_with_inference_engine_client(engine_input)
         responses = engine_output["responses"]
         all_response_ids = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
@@ -407,6 +402,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         return generator_output
 
     def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]):
+        print("response", responses)
         num_tokens_arr = np.array([len(response) for response in responses])
         non_zero_rewards_arr = np.array([reward > 0.0 for reward in rewards])
         zero_rewards_arr = np.array([reward == 0.0 for reward in rewards])
