@@ -33,3 +33,16 @@ class GeneratorInterface(ABC):
             GeneratorOutput: Generated trajectories
         """
         raise NotImplementedError()
+    
+    def flush_trajectories(self, step: int, prefix: str = "train") -> None:
+        """Flush any buffered trajectories to the logger.
+        
+        This is a public interface method that can be called by trainers
+        to flush trajectory data at specific intervals.
+        
+        Args:
+            step: Current training step
+            prefix: Prefix for logging (e.g., "train", "eval")
+        """
+        # Default implementation does nothing - subclasses override if needed
+        pass

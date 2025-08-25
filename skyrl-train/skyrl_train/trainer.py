@@ -159,6 +159,10 @@ class RayPPOTrainer:
             )
             generator_output: GeneratorOutput = await self.generate(generator_input)
             generator_outputs.append(generator_output)
+            
+            # Log eval trajectories if enabled (log each batch during eval)
+            if self.cfg.generator.get('trajectory_logging', {}).get('enabled', False):
+                self.generator.flush_trajectories(self.global_step, prefix="eval")
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])
             concat_uids.extend(uids)
@@ -290,6 +294,12 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
+                    
+                    # Log trajectories if enabled in config
+                    if self.cfg.generator.get('trajectory_logging', {}).get('enabled', False):
+                        log_interval = self.cfg.generator.trajectory_logging.get('log_interval', 100)
+                        if log_interval == 0 or self.global_step % log_interval == 0:
+                            self.generator.flush_trajectories(self.global_step, prefix="train")
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
