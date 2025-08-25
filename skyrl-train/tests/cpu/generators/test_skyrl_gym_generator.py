@@ -866,3 +866,108 @@ async def test_apply_overlong_filtering_batched(
         0,
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_env_metrics_statistical_aggregation(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that environment metrics are statistically aggregated (mean, min, max, std)
+    as scalar values.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = True
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Hard-coded metrics with known statistical properties
+    expected_metrics = [
+        {"response_length": 10, "word_count": 2, "answer_accuracy": 1.0},
+        {"response_length": 20, "word_count": 4, "answer_accuracy": 0.0},
+        {"response_length": 30, "word_count": 6, "answer_accuracy": 1.0},
+    ]
+
+    step_call_count = 0
+    
+    def mock_step_with_metrics(action):
+        nonlocal step_call_count
+        metrics = expected_metrics[step_call_count % len(expected_metrics)]
+        step_call_count += 1
+        
+        return BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": f"response_{step_call_count}"}],
+            reward=metrics["answer_accuracy"],
+            done=True,
+            metadata={},
+            metrics=metrics
+        )
+
+    mock_env.step.side_effect = mock_step_with_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    prompts = [
+        [{"role": "user", "content": "Problem 1"}],
+        [{"role": "user", "content": "Problem 2"}],  
+        [{"role": "user", "content": "Problem 3"}]
+    ]
+    env_extras = [{"answer": "1"}, {"answer": "2"}, {"answer": "3"}]
+    env_classes = [mock_env_cfg.env_class] * 3
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+    rollout_metrics = generator_output["rollout_metrics"]
+
+    # Test that ONLY scalar statistical aggregations are present
+    expected_stats = {
+        # Response length stats: [10, 20, 30]
+        "environment/response_length/avg": 20.0,                # mean([10, 20, 30])
+        "environment/response_length/min": 10,                  # min([10, 20, 30])
+        "environment/response_length/max": 30,                  # max([10, 20, 30])
+        "environment/response_length/std": 8.16496580927726,    # std([10, 20, 30])
+        
+        # Word count stats: [2, 4, 6]  
+        "environment/word_count/avg": 4.0,                      # mean([2, 4, 6])
+        "environment/word_count/min": 2,                        # min([2, 4, 6])
+        "environment/word_count/max": 6,                        # max([2, 4, 6])
+        "environment/word_count/std": 1.632993161855452,        # std([2, 4, 6])
+        
+        # Answer accuracy stats: [1.0, 0.0, 1.0]
+        "environment/answer_accuracy/avg": 0.6666666666666666,  # mean([1.0, 0.0, 1.0])
+        "environment/answer_accuracy/min": 0.0,                 # min([1.0, 0.0, 1.0])
+        "environment/answer_accuracy/max": 1.0,                 # max([1.0, 0.0, 1.0])
+        "environment/answer_accuracy/std": 0.4714045207910317,  # std([1.0, 0.0, 1.0])
+    }
+
+    # Verify all expected stats are present and correct
+    for stat_key, expected_value in expected_stats.items():
+        assert stat_key in rollout_metrics, f"Missing statistical aggregation: {stat_key}"
+        actual_value = rollout_metrics[stat_key]
+        assert isinstance(actual_value, (int, float)), f"Stat {stat_key} should be scalar, got {type(actual_value)}"
+        
+        if isinstance(expected_value, float):
+            assert abs(actual_value - expected_value) < 1e-10, f"Stat {stat_key}: expected {expected_value}, got {actual_value}"
+        else:
+            assert actual_value == expected_value, f"Stat {stat_key}: expected {expected_value}, got {actual_value}"
+    
+    # Verify generation metrics are still present
+    generation_metrics = [key for key in rollout_metrics.keys() if key.startswith("generate/")]
+    assert len(generation_metrics) > 0, "Should still contain generation metrics"
+    
+    # Verify all environment metrics are scalars
+    env_metrics = {k: v for k, v in rollout_metrics.items() if k.startswith("environment/")}
+    for key, value in env_metrics.items():
+        assert isinstance(value, (int, float)), f"Environment metric {key} should be scalar, got {type(value)}"
