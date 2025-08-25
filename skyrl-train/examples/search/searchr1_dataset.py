@@ -237,9 +237,12 @@ def main():
 
     processed_files = []
 
+    # Determine splits to process
+    splits = [args.split] if args.split else ["train", "test"]
+
     # Download and process files using temporary directory
     with tempfile.TemporaryDirectory() as tmp_download_dir:
-        for split in ["train", "test"]:
+        for split in splits:
             parquet_filename = f"{split}.parquet"
             logger.info(f"Processing {split} split...")
 
@@ -310,6 +313,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS directory to copy the Parquet files to.")
     parser.add_argument("--max_rows", type=int, default=None, help="Maximum number of rows to process from each split.")
+    parser.add_argument(
+        "--split", choices=["train", "test"], default=None, help="If set, only download this split (train or test)."
+    )
 
     args = parser.parse_args()
 

@@ -5,7 +5,7 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/test_trainer_full_checkpointing.py
+uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py
 """
 
 import ray
