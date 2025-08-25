@@ -31,3 +31,8 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+register(
+    id="reasoning_gym",
+    entry_point="skyrl_gym.envs.reasoning_gym.env:ReasoningGymEnv",
+)
