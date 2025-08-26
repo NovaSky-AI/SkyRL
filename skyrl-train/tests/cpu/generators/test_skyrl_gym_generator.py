@@ -928,25 +928,25 @@ async def test_env_metrics_statistical_aggregation(
     generator_output: GeneratorOutput = await generator.generate(input_batch)
     rollout_metrics = generator_output["rollout_metrics"]
 
-    # Test that ONLY scalar statistical aggregations are present
+    # Test that scalar statistical aggregations are present
     expected_stats = {
         # Response length stats: [10, 20, 30]
-        "environment/response_length/avg": 20.0,                # mean([10, 20, 30])
-        "environment/response_length/min": 10,                  # min([10, 20, 30])
-        "environment/response_length/max": 30,                  # max([10, 20, 30])
-        "environment/response_length/std": 8.16496580927726,    # std([10, 20, 30])
+        "environment/response_length/avg": 20.0,
+        "environment/response_length/min": 10,
+        "environment/response_length/max": 30,
+        "environment/response_length/std": 8.16496580927726,
         
         # Word count stats: [2, 4, 6]  
-        "environment/word_count/avg": 4.0,                      # mean([2, 4, 6])
-        "environment/word_count/min": 2,                        # min([2, 4, 6])
-        "environment/word_count/max": 6,                        # max([2, 4, 6])
-        "environment/word_count/std": 1.632993161855452,        # std([2, 4, 6])
+        "environment/word_count/avg": 4.0,
+        "environment/word_count/min": 2,
+        "environment/word_count/max": 6,
+        "environment/word_count/std": 1.632993161855452,
         
         # Contains boxed stats: [1.0, 0.0, 1.0]
-        "environment/contains_boxed/avg": 0.6666666666666666,   # mean([1.0, 0.0, 1.0])
-        "environment/contains_boxed/min": 0.0,                  # min([1.0, 0.0, 1.0])
-        "environment/contains_boxed/max": 1.0,                  # max([1.0, 0.0, 1.0])
-        "environment/contains_boxed/std": 0.4714045207910317,   # std([1.0, 0.0, 1.0])
+        "environment/contains_boxed/avg": 0.6666666666666666,
+        "environment/contains_boxed/min": 0.0,
+        "environment/contains_boxed/max": 1.0,
+        "environment/contains_boxed/std": 0.4714045207910317,
     }
 
     # Verify all expected stats are present and correct
