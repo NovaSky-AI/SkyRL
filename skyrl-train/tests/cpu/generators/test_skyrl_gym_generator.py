@@ -884,9 +884,9 @@ async def test_env_metrics_statistical_aggregation(
 
     # Hard-coded metrics with known statistical properties
     expected_metrics = [
-        {"response_length": 10, "word_count": 2, "answer_accuracy": 1.0},
-        {"response_length": 20, "word_count": 4, "answer_accuracy": 0.0},
-        {"response_length": 30, "word_count": 6, "answer_accuracy": 1.0},
+        {"response_length": 10, "word_count": 2, "contains_boxed": 1.0},
+        {"response_length": 20, "word_count": 4, "contains_boxed": 0.0},
+        {"response_length": 30, "word_count": 6, "contains_boxed": 1.0},
     ]
 
     step_call_count = 0
@@ -898,7 +898,7 @@ async def test_env_metrics_statistical_aggregation(
         
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": f"response_{step_call_count}"}],
-            reward=metrics["answer_accuracy"],
+            reward=metrics["contains_boxed"],  # Use contains_boxed as reward
             done=True,
             metadata={},
             metrics=metrics
@@ -945,11 +945,11 @@ async def test_env_metrics_statistical_aggregation(
         "environment/word_count/max": 6,                        # max([2, 4, 6])
         "environment/word_count/std": 1.632993161855452,        # std([2, 4, 6])
         
-        # Answer accuracy stats: [1.0, 0.0, 1.0]
-        "environment/answer_accuracy/avg": 0.6666666666666666,  # mean([1.0, 0.0, 1.0])
-        "environment/answer_accuracy/min": 0.0,                 # min([1.0, 0.0, 1.0])
-        "environment/answer_accuracy/max": 1.0,                 # max([1.0, 0.0, 1.0])
-        "environment/answer_accuracy/std": 0.4714045207910317,  # std([1.0, 0.0, 1.0])
+        # Contains boxed stats: [1.0, 0.0, 1.0]
+        "environment/contains_boxed/avg": 0.6666666666666666,   # mean([1.0, 0.0, 1.0])
+        "environment/contains_boxed/min": 0.0,                  # min([1.0, 0.0, 1.0])
+        "environment/contains_boxed/max": 1.0,                  # max([1.0, 0.0, 1.0])
+        "environment/contains_boxed/std": 0.4714045207910317,   # std([1.0, 0.0, 1.0])
     }
 
     # Verify all expected stats are present and correct
