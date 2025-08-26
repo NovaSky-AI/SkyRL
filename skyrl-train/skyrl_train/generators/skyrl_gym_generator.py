@@ -177,6 +177,20 @@ class SkyRLGymGenerator(GeneratorInterface):
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
 
+            # append eos token if needed. Only applicable when sampling_params.stop is not None.
+            stop_strs = sampling_params.get("stop", None) if sampling_params is not None else None
+            if (
+                stop_strs is not None
+                and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
+                and (retokenize_chat_history or self.use_conversation_multi_turn)
+            ):
+                for stop_str in stop_strs:
+                    if output.endswith(stop_str) and output_ids[-1] != self.tokenizer.eos_token_id:
+                        # Append EOS token to output to match chat template termination.
+                        # Do not mutate loss_mask here; it will be updated downstream together with output_ids.
+                        output_ids.append(self.tokenizer.eos_token_id)
+                        break
+
             # 2. Environment step
             if self.env_executor is not None:
                 loop = asyncio.get_running_loop()
