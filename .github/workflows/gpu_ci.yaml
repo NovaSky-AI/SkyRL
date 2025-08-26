@@ -46,4 +46,5 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
         run: |
-          anyscale job submit -f ci/anyscale_gpu_ci.yaml --wait
+          anyscale job submit -f ci/anyscale_gpu_ci.yaml --timeout 3600
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci --timeout 3600
