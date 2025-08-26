@@ -187,7 +187,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 for stop_str in stop_strs:
                     if output.endswith(stop_str) and output_ids[-1] != self.tokenizer.eos_token_id:
                         # Append EOS token to output to match chat template termination.
-                        # Do not mutate loss_mask here; it will be updated downstream together with output_ids.
                         output_ids.append(self.tokenizer.eos_token_id)
                         break
 

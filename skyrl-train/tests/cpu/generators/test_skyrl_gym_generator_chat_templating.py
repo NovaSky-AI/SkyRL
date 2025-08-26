@@ -192,17 +192,26 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
 )
 async def test_append_eos_after_stop_multi_turn(model_name):
+    """
+    Test the behavior of `append_eos_token_after_stop_str_in_multi_turn`, which is applicable
+    when `sampling_params.stop` is not `null` and `use_conversation_multi_turn` is `true` in
+    the ``agent_loop()`` function.
+    It is used in scripts `examples/search/run_search_multiturn.sh` and `examples/text_to_sql/run_skyrl_sql_multiturn.sh`.
+    """
     _register_test_env_if_needed()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     stop_tag = "</solution>"
+    mock_text = "b" + stop_tag
 
     async def make_generator(append_flag: bool):
         mock_llm = MagicMock()
 
+        # The LLM engine will generate and return the stop tag, but no EOS token ID.
         def mock_generate(input_batch):
-            num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-            mock_text = "b" + stop_tag
+            num_prompts = (
+                len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+            )
             return {
                 "responses": [mock_text] * num_prompts,
                 "stop_reasons": ["stop"] * num_prompts,
@@ -214,7 +223,7 @@ async def test_append_eos_after_stop_multi_turn(model_name):
 
         generator_cfg = DictConfig(
             {
-                "sampling_params": {"max_generate_length": 200, "logprobs": None},
+                "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
                 "max_input_length": 200,
                 "batched": False,
                 "max_turns": 3,
@@ -256,19 +265,21 @@ async def test_append_eos_after_stop_multi_turn(model_name):
     assert len(out_true["response_ids"][0]) == len(out_true["loss_masks"][0])
     assert len(out_false["response_ids"][0]) == len(out_false["loss_masks"][0])
 
-    last_true = out_true["response_ids"][0][-1]
-    last_false = out_false["response_ids"][0][-1]
-
     if "Qwen3" in model_name:
-        # Retokenize path: custom chat template appends "<|im_end|>\n".
-        # Ensure EOS appears and allow a trailing newline token after it.
-        assert tokenizer.eos_token_id in out_true["response_ids"][0]
-        assert tokenizer.eos_token_id in out_false["response_ids"][0]
-        if last_true != tokenizer.eos_token_id:
-            assert tokenizer.decode(out_true["response_ids"][0]).endswith("\n")
-        if last_false != tokenizer.eos_token_id:
-            assert tokenizer.decode(out_false["response_ids"][0]).endswith("\n")
+        # Retokenize path is not affected by append_eos_token_after_stop_str_in_multi_turn
+        # The chat template does things like '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n'
+        # So regardless of append_eos_token_after_stop_str_in_multi_turn, the last tokens are:
+        # stop_tag, eos_token_id and \n
+        last_token_ids = tokenizer.encode(stop_tag + tokenizer.eos_token + "\n")
+        num_last_tokens = len(last_token_ids)
+        response_ids_true = out_true["response_ids"][0]
+        response_ids_false = out_false["response_ids"][0]
+        assert response_ids_true[-num_last_tokens:] == last_token_ids
+        assert response_ids_false[-num_last_tokens:] == last_token_ids
+        assert response_ids_true == response_ids_false
     else:
         # Non-retokenize path: last token is eos only when append flag is True
-        assert last_true == tokenizer.eos_token_id
-        assert last_false != tokenizer.eos_token_id
+        last_token_id_true = out_true["response_ids"][0][-1]
+        last_token_id_false = out_false["response_ids"][0][-1]
+        assert last_token_id_true == tokenizer.eos_token_id
+        assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
