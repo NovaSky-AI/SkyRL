@@ -233,7 +233,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
         for output in outputs:
             response_ids.append(output["output_ids"])
-            responses.append(self.tokenizer.decode(output["output_ids"]))
+            responses.append(self.tokenizer.decode(output["output_ids"], skip_special_tokens=True))
             stop_reasons.append(output["meta_info"]["finish_reason"]["type"])
 
         return InferenceEngineOutput(

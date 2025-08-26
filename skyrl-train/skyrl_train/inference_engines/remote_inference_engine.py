@@ -105,7 +105,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 output_ids.append(cur_output_ids)
                 # SGLang only returns tokens not text when skip_tokenizer_init is True, so
                 # we manually decode it.
-                outputs.append(self.tokenizer.decode(cur_output_ids))
+                outputs.append(self.tokenizer.decode(cur_output_ids, skip_special_tokens=True))
                 finish_reasons.append(output["meta_info"]["finish_reason"]["type"])
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
