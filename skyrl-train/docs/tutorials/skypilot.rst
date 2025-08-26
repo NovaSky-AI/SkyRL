@@ -69,7 +69,6 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
 
     # --------------- Enviornment variables ---------------
     envs:
-      NUM_GPUS: 4
       LOGGER: "wandb"  # change to "console" to print to stdout
 
       INFERENCE_BACKEND: "vllm"
