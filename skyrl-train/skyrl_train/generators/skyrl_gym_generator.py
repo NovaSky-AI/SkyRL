@@ -441,7 +441,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                         metric_groups.setdefault(key, []).append(value)
             for key, values in metric_groups.items():
                 values_arr = np.array(values)
-                rollout_metrics[f"environment/{key}/min"] = np.min(values_arr).item()  # Placeholder env aggregation
+                rollout_metrics[f"environment/{key}/min"] = np.min(values_arr).item()
                 rollout_metrics[f"environment/{key}/max"] = np.max(values_arr).item()
                 rollout_metrics[f"environment/{key}/avg"] = np.mean(values_arr).item()
                 rollout_metrics[f"environment/{key}/std"] = np.std(values_arr).item()
