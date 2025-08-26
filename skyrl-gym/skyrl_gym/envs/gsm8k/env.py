@@ -23,12 +23,12 @@ class GSM8kEnv(BaseTextEnv):
         """Calculate environment-specific metrics for training insights."""
         response_length = len(action)
         word_count = len(action.split())
-        answer_accuracy = float(reward > 0)
+        contains_boxed = float("\\boxed{" in action)
         return {
             "response_length": response_length,
             "word_count": word_count,
-            "answer_accuracy": answer_accuracy,
-        }
+            "contains_boxed": contains_boxed,
+        } 
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step
