@@ -121,8 +121,14 @@ To change the number of turns, you can simply change the ``generator.max_turns``
 For more details on environment implementation, see :skyrl_gym_link:`skyrl_gym/envs/search/env.py`.
 
 Note we add ``stop='["</search>", "</answer>"]'`` for both generation and evaluation sampling parameters
-to adhere to the Search-R1 recipe. If you are using ``generator.use_conversation_multi_turn=true``,
-you might want to manually append an EOS token ID to the end of the response after these stop strings.
+to adhere to the Search-R1 recipe.
+
+If you are using ``generator.use_conversation_multi_turn=true``,
+you might want to append an EOS token ID to the end of the response after these stop strings to adhere
+to the model's behavior (i.e. ending generation with an EOS token ID rather than say ``</answer>``).
+This can be done by setting ``generator.append_eos_token_after_stop_str_in_multi_turn=true`` in the generator config.
+The full script is available in `examples/search/run_search_multiturn.sh`.
+
 
 Launching Your Training Run
 ---------------------------
