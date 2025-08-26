@@ -1,8 +1,8 @@
 # Run this from skyrl-train directory.
 resources:
-  infra: nebius        # replace this with what cloud you want to launch on
-  accelerators: L40S:2 # every node has 1 L4 GPU
-  memory: 64+          # every node has 64 GB memory
+  infra: aws           # replace this with what cloud you want to launch on
+  accelerators: L4:2   # every node has 2 L4 GPU
+  memory: 64+          # every node has at least 64 GB memory
   ports: 6479          # expose port for ray dashboard
 # check the skypilot documentation for what clouds network tier is supported.
 #  network_tier: best # when using multiple nodes, communication can become a bottleneck
