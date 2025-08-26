@@ -285,11 +285,13 @@ def validate_cfg(cfg: DictConfig):
             )
 
     if cfg.generator.use_conversation_multi_turn:
-        if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
-            print(
-                "WARNING: `sampling_params.stop` and `eval_sampling_params.stop` are specified but we "
-                "are using multi-turn generation. You might want to manually append tokenizer.eos_token_id "
-                "to the assistant-generated response to match the chat template."
+        if (
+            cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
+        ) and not cfg.generator.append_eos_token_after_stop_str_in_multi_turn:
+            logger.warning(
+                "WARNING: `sampling_params.stop` and `eval_sampling_params.stop` are specified and we "
+                "are using multi-turn generation. You might want to set `append_eos_token_after_stop_str_in_multi_turn` "
+                "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
             )
 
 

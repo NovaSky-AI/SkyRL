@@ -178,6 +178,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             stop_reason = engine_output["stop_reasons"][0]
 
             # append eos token if needed. Only applicable when sampling_params.stop is not None.
+            # Note this does not affect 3.a because the chat template adds eos_token to the end.
             stop_strs = sampling_params.get("stop", None) if sampling_params is not None else None
             if (
                 stop_strs is not None
