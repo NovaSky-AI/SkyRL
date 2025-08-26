@@ -38,7 +38,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
-        enable_thinking_tokens = generator_cfg.enable_thinking_tokens
+        
         name_or_path = generator_cfg.chat_template.name_or_path
         source = generator_cfg.chat_template.source
 
