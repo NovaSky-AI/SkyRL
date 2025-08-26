@@ -249,15 +249,12 @@ async def test_agent_loop_single_turn(
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
-    response_ids, reward, stop_reason, loss_mask, prompt_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
-        prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
-    )
+    output = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512)
 
-    assert response_ids == MOCK_LLM_OUTPUT_IDS
-    assert reward == 1.0
-    assert stop_reason == "stop"
-    assert loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
-    assert env_metrics == {}
+    assert output.response_ids == MOCK_LLM_OUTPUT_IDS
+    assert output.reward == 1.0
+    assert output.stop_reason == "stop"
+    assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
 
 
 @pytest.mark.asyncio
@@ -504,12 +501,10 @@ async def test_length_limit_exceeded_during_conversation(
     prompt = [{"role": "user", "content": "Start conversation"}]
     extras = {"test": "value"}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs, env_metrics = await generator.agent_loop(
-        prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length
-    )
+    output = await generator.agent_loop(prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length)
 
     # Verify that length limit was hit
-    assert stop_reason == "length", f"Expected stop_reason='length', got '{stop_reason}'"
+    assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
 
     # Verify environment step was called the expected number of times
     expected_calls = turns_to_exceed
@@ -518,9 +513,9 @@ async def test_length_limit_exceeded_during_conversation(
     ), f"Expected {expected_calls} environment steps, got {mock_env.step.call_count}"
 
     # Verify response is still properly formatted
-    assert isinstance(response_ids, list)
-    assert isinstance(loss_mask, list)
-    assert isinstance(reward, float)
+    assert isinstance(output.response_ids, list)
+    assert isinstance(output.loss_mask, list)
+    assert isinstance(output.reward, float)
 
 
 @pytest.mark.asyncio
@@ -594,21 +589,21 @@ async def test_multi_turn_response_truncation(
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
 
-    response_ids, _, stop_reason, loss_mask, _, _, _ = await generator.agent_loop(
+    output = await generator.agent_loop(
         prompt, "test_env", extras, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
     )
 
     # Verify truncation occurred
-    assert len(response_ids) <= expected_max_response_tokens
+    assert len(output.response_ids) <= expected_max_response_tokens
     assert (
-        len(response_ids) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} response tokens, got {len(response_ids)}"
+        len(output.response_ids) == expected_final_response_tokens
+    ), f"Expected {expected_final_response_tokens} response tokens, got {len(output.response_ids)}"
     assert (
-        len(loss_mask) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} loss mask entries, got {len(loss_mask)}"
+        len(output.loss_mask) == expected_final_response_tokens
+    ), f"Expected {expected_final_response_tokens} loss mask entries, got {len(output.loss_mask)}"
 
     # Verify stop reason is "length" due to truncation
-    assert stop_reason == "length", f"Expected stop_reason='length', got '{stop_reason}'"
+    assert output.stop_reason == "length", f"Expected stop_reason='length', got '{output.stop_reason}'"
 
 
 @pytest.mark.asyncio
@@ -676,19 +671,21 @@ async def test_postprocessed_action_used(
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
 
-    response_ids, reward, stop_reason, loss_mask, prompt_ids, _, _ = await generator.agent_loop(
-        prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
-    )
+    output = await generator.agent_loop(prompt, "test_env", env_extras, max_tokens=20, max_input_length=50)
 
     # Check that the postprocessed response tokens (42) are present in response_ids
     # This verifies that postprocessed_action was used instead of raw LLM output
-    assert any(token == 42 for token in response_ids), f"Expected postprocessed response tokens (42) in {response_ids}"
+    assert any(
+        token == 42 for token in output.response_ids
+    ), f"Expected postprocessed response tokens (42) in {output.response_ids}"
     # Make sure raw LLM tokens (99) are NOT present
-    assert not any(token == 99 for token in response_ids), f"Raw LLM output tokens (99) should not be in {response_ids}"
+    assert not any(
+        token == 99 for token in output.response_ids
+    ), f"Raw LLM output tokens (99) should not be in {output.response_ids}"
 
-    assert reward == 1.0
-    assert stop_reason == "stop"
-    assert len(response_ids) == len(loss_mask)
+    assert output.reward == 1.0
+    assert output.stop_reason == "stop"
+    assert len(output.response_ids) == len(output.loss_mask)
 
 
 @pytest.mark.asyncio

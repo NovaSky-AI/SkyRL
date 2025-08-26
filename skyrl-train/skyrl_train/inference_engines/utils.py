@@ -5,7 +5,7 @@ from omegaconf import DictConfig, ListConfig
 def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
     vllm_sampling_params = {
         "min_tokens": 1,
-        "skip_special_tokens": False,
+        "skip_special_tokens": True,
         "include_stop_str_in_output": True,
         "max_tokens": sampling_params.max_generate_length,
         "temperature": sampling_params.temperature,
@@ -27,7 +27,7 @@ def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
 def get_sglang_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
     # min_tokens, include_stop_str_in_output are not used in sglang
     sglang_sampling_params = {
-        "skip_special_tokens": False,
+        "skip_special_tokens": True,
         "max_new_tokens": sampling_params.max_generate_length,
         "temperature": sampling_params.temperature,
         "top_p": sampling_params.top_p,
