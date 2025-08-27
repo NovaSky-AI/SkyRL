@@ -128,7 +128,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     
     # For Qwen3 models, test with explicit chat template config
     if "Qwen3" in model_name:
-        chat_template_config = {"source": "name", "name_or_path": "qwen3_with_thinking"}
+        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
         custom_chat_template = get_custom_chat_template(chat_template_config=chat_template_config)
         assert prompt_str + resp_str == tokenizer.apply_chat_template(
             expected_chat_history, chat_template=custom_chat_template, tokenize=False
