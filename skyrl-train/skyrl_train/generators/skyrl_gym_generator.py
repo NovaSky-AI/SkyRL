@@ -1,3 +1,10 @@
+"""
+This file implements ``SkyRLGymGenerator``, an implementation of the `GeneratorInterface` that
+uses SkyRL-Gym as the environment.
+
+For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html
+"""
+
 import asyncio
 import copy
 from uuid import uuid4
@@ -66,7 +73,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
-        # correctly format and tokenize observations.
+        # correctly format and tokenize observations into `observation_ids`.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -78,18 +85,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             add_generation_prompt=False,
             tokenize=True,
         )
-        # For Qwen2.5 and Qwen3, the above would generate
-        # <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
-        # <|im_start|>user\nI am a user.<|im_end|>\n
-        # <|im_start|>assistant\nI am an assistant.<|im_end|>\n
-
-        # Note that there is a `\n` in assistant's line before next user's messsage starts.
-        # If we do token-in-token-out, there is no way for LLM engine to generate `\n` since the
-        # EOS token is `<|im_end|>`. Therefore, we need to add it during `observation_ids`.
-        # By cutting `\n` out in `base_conversation_token_ids`, `observation_ids` in
-        # `_get_next_input_ids_with_multiturn_chat_template()` will be `\n<|im_start|>user\nObservation here<|im_end|>\n`.
-        # Note the `\n` at the final assistant turn will still be missing, but this is fine.
-        # See tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py for more details.
+        # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
+        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
         if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
             last_eos_token_index = (
                 len(self.base_conversation_token_ids)
@@ -559,8 +556,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
-            # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the first `\n`
-            # is generated due to `self.base_conversation_token_ids[: last_eos_token_index + 1]` in `__init__()`.
+            # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
+            # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,
