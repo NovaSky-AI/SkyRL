@@ -71,6 +71,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
+
+    chat_template_config = None
+    if "Qwen3" in model_name:
+        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+
     generator_cfg = DictConfig(
         {
             "sampling_params": {"max_generate_length": 200, "logprobs": None},
@@ -80,6 +85,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "zero_reward_on_non_stop": False,
             "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
+            "chat_template": chat_template_config,
         }
     )
     env_cfg = DictConfig(
@@ -93,7 +99,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=tokenizer,
-        model_name=model_name,
     )
 
     prompt = [[{"role": "user", "content": "a"}]]
@@ -126,10 +131,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
     resp_str = tokenizer.decode(generator_output["response_ids"][0])
     
-    # For Qwen3 models, test with explicit chat template config
-    if "Qwen3" in model_name:
-        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
-        custom_chat_template = get_custom_chat_template(chat_template_config=chat_template_config)
+    custom_chat_template = generator.custom_chat_template
+    if custom_chat_template is not None:
         assert prompt_str + resp_str == tokenizer.apply_chat_template(
             expected_chat_history, chat_template=custom_chat_template, tokenize=False
         )
