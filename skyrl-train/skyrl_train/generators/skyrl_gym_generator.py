@@ -36,11 +36,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-
+        self.chat_template_config = generator_cfg.chat_template
         
-        self.custom_chat_template = get_custom_chat_template(
-            chat_template_config=generator_cfg.chat_template
-        )
+        self.custom_chat_template = get_custom_chat_template(self.chat_template_config)
         
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None

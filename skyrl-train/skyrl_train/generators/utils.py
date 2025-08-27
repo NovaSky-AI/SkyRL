@@ -64,7 +64,6 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
     Get custom chat template based on the new config structure.
     
     Args:
-        model_name: Name of the model.
         chat_template_config: Config dict with 'source' and 'name_or_path' fields.
         
     Returns:
