@@ -38,14 +38,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
 
         
-        name_or_path = generator_cfg.chat_template.name_or_path
-        source = generator_cfg.chat_template.source
-
         self.custom_chat_template = get_custom_chat_template(
-            chat_template_config={
-                "source": source,
-                "name_or_path": name_or_path
-            }
+            chat_template_config=generator_cfg.chat_template
         )
         
         # get generation prompt ids for the tokenizer if needed
