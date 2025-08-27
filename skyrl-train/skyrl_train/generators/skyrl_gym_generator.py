@@ -179,7 +179,11 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # append eos token if needed. Only applicable when sampling_params.stop is not None.
             # Note this does not affect 3.a because the chat template adds eos_token to the end.
-            stop_strs = sampling_params.get("stop", None) if sampling_params is not None else None
+            stop_strs = None
+            if sampling_params is None:
+                stop_strs = self.generator_cfg.sampling_params.get("stop", None)
+            else:
+                stop_strs = sampling_params.get("stop", None)
             if (
                 stop_strs is not None
                 and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
