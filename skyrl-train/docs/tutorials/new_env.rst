@@ -16,7 +16,7 @@ SkyRL-Gym includes a simple text-in/text-out environment interface for LLM tasks
    :linenos:
    :caption: Base text environment interface at `skyrl_gym/envs/base_text_env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-gym/skyrl_gym/envs/base_text_env.py>`_
 
-   class BaseTextEnv(Env[str, str]):
+   class BaseTextEnv(Env[ConversationType, str]):
       def step(self, action: str) -> BaseTextEnvStepOutput:
          """
          Runs one environment step.
