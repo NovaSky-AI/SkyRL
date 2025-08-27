@@ -177,23 +177,19 @@ class SkyRLGymGenerator(GeneratorInterface):
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
 
-            # append eos token if needed. Only applicable when sampling_params.stop is not None.
-            # Note this does not affect 3.a because the chat template adds eos_token to the end.
-            stop_strs = None
-            if sampling_params is None:
-                stop_strs = self.generator_cfg.sampling_params.get("stop", None)
-            else:
-                stop_strs = sampling_params.get("stop", None)
+            # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
+            # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
+            current_sampling_params = (
+                sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+            )
+            stop_strs = current_sampling_params.get("stop", None)
             if (
                 stop_strs is not None
                 and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
-                and (retokenize_chat_history or self.use_conversation_multi_turn)
+                and self.use_conversation_multi_turn
             ):
-                for stop_str in stop_strs:
-                    if output.endswith(stop_str) and output_ids[-1] != self.tokenizer.eos_token_id:
-                        # Append EOS token to output to match chat template termination.
-                        output_ids.append(self.tokenizer.eos_token_id)
-                        break
+                if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                    output_ids.append(self.tokenizer.eos_token_id)
 
             # 2. Environment step
             if self.env_executor is not None:

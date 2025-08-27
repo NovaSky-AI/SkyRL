@@ -196,7 +196,8 @@ async def test_append_eos_after_stop_multi_turn(model_name):
     Test the behavior of `append_eos_token_after_stop_str_in_multi_turn`, which is applicable
     when `sampling_params.stop` is not `null` and `use_conversation_multi_turn` is `true` in
     the ``agent_loop()`` function.
-    It is used in scripts `examples/search/run_search_multiturn.sh` and `examples/text_to_sql/run_skyrl_sql_multiturn.sh`.
+    It is used in scripts `examples/search/run_search_conversation_format.sh` and
+    `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
     """
     _register_test_env_if_needed()
     tokenizer = AutoTokenizer.from_pretrained(model_name)

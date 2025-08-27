@@ -127,7 +127,7 @@ If you are using ``generator.use_conversation_multi_turn=true``,
 you might want to append an EOS token ID to the end of the response after these stop strings to adhere
 to the model's behavior (i.e. ending generation with an EOS token ID rather than say ``</answer>``).
 This can be done by setting ``generator.append_eos_token_after_stop_str_in_multi_turn=true`` in the generator config.
-The full script is available in `examples/search/run_search_multiturn.sh`.
+The full script is available in `examples/search/run_search_conversation_format.sh`.
 
 
 Launching Your Training Run
