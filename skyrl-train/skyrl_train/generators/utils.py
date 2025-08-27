@@ -59,7 +59,7 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(model_name: str, chat_template_config: Optional[dict] = None) -> Optional[str]:
+def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Optional[str]:
     """
     Get custom chat template based on the new config structure.
     

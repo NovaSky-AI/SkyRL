@@ -21,8 +21,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         generator_cfg: DictConfig,
         skyrl_gym_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
-        tokenizer,
-        model_name: str,
+        tokenizer
     ):
         """
         Args:
@@ -43,7 +42,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         source = generator_cfg.chat_template.source
 
         self.custom_chat_template = get_custom_chat_template(
-            model_name=model_name,
             chat_template_config={
                 "source": source,
                 "name_or_path": name_or_path
