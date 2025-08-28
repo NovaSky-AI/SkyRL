@@ -145,6 +145,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = env.init(chat_history)
+        initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
@@ -221,7 +222,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                chat_history[len(prompt) :],
+                chat_history[initial_chat_history_length:],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
