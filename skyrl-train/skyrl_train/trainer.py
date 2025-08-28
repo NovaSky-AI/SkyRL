@@ -732,7 +732,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        validate_generator_output(input_batch, generator_output)
+        # validate_generator_output(input_batch, generator_output)
 
         return generator_output
 

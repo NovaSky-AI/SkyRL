@@ -5,7 +5,7 @@ set -x
 # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
 # For standalone server, we use mp for now. 
 CUDA_VISIBLE_DEVICES=3 uv run --isolated --extra vllm --env-file examples/mini_swe_agent/.env.miniswe -m skyrl_train.inference_engines.vllm.vllm_server \
-    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --model Qwen/Qwen3-4B \
     --tensor-parallel-size 1 \
     --host 127.0.0.1 \
     --port 8001 \

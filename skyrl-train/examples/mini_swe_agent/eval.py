@@ -1,44 +1,128 @@
+import asyncio
+from typing import Dict, List, Optional, Any, Tuple
+from omegaconf import DictConfig
+import yaml
+import traceback
+import time
+import os
+from pathlib import Path, PurePosixPath
 from loguru import logger 
-import swebench
 import tempfile
+import shutil
 
-def evaluate_result(runtime, instance, run_results, instance_id, trajectory_id, dataset) -> bool:
+from loguru import logger
+from minisweagent.models import get_model
+from minisweagent.run.extra.swebench import (
+    DATASET_MAPPING,
+    get_sb_environment,
+)
+from minisweagent.agents.default import DefaultAgent
+from minisweagent.run.utils.save import save_traj
+from minisweagent.config import builtin_config_dir, get_config_path
+
+from skyrl_train.generators.skyrl_gym_generator import AgentLoopOutput, SkyRLGymGenerator, GeneratorOutput, GeneratorInput
+from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+import swebench
+
+def process_git_patch(patch):
+    if not isinstance(patch, str):
+        return ''
+
+    if not patch.strip():
+        # skip empty patches
+        return ''
+
+    patch = patch.replace('\r\n', '\n')
+    # There might be some weird characters at the beginning of the patch
+    # due to some OpenHands inference command outputs
+
+    # FOR EXAMPLE:
+    # git diff --no-color --cached 895f28f9cbed817c00ab68770433170d83132d90
+    # [A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[K0
+    # diff --git a/django/db/models/sql/.backup.query.py b/django/db/models/sql/.backup.query.py
+    # new file mode 100644
+    # index 0000000000..fc13db5948
+
+    # We "find" the first line that starts with "diff" and then we remove lines before it
+    lines = patch.split('\n')
+    for i, line in enumerate(lines):
+        if line.startswith('diff --git'):
+            patch = '\n'.join(lines[i:])
+            break
+
+    patch = patch.rstrip() + '\n'  # Make sure the last line ends with a newline
+    return patch
+
+def copy_to(src: str | Path, dst_in_container: str, sandbox_dir: Path) -> Path:
+    """Copy a file/dir from the host into the sandbox at the given container path."""
+    src = Path(src)
+    if not src.exists():
+        raise FileNotFoundError(src)
+
+    # Map container path (e.g. "/app/file.txt") to host path under sandbox_dir
+    dst_rel = PurePosixPath(dst_in_container).relative_to("/")  # strips leading "/"
+    host_dst = (sandbox_dir / Path(*dst_rel.parts)).resolve()
+
+    # Prevent path traversal outside sandbox
+    sandbox_root = sandbox_dir.resolve()
+    if not str(host_dst).startswith(str(sandbox_root)):
+        raise ValueError("Destination escapes sandbox_dir")
+
+    host_dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        shutil.copytree(src, host_dst, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, host_dst)
+    return host_dst
+
+def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config) -> Tuple[bool, str]:
         """Apply patch and evaluate the solution."""
         from swebench.harness.grading import get_eval_report
         from swebench.harness.constants import (
             APPLY_PATCH_FAIL,
             APPLY_PATCH_PASS,
         )
-        from swebench.harness.test_spec import (
-            make_test_spec,
-        )
+        from swebench.harness.test_spec.test_spec import make_test_spec
+
+        print("git patch: ", model_patch)
         
-        model_patch = run_results.get('git_patch', None)
         if not model_patch:
-            raise Exception(f"No git patch found for instance {instance_id}, trajectory {trajectory_id}")
-        
+            raise Exception(f"No git patch found for instance {instance_id}")
+    
+        agent = None
+        env = None
+        extra_info = None
+        try:
+            env = get_sb_environment(sweagent_config, instance)
+            print("agent: ", agent, flush=True)
+            exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+        except Exception as e:
+            return False, f"Env creation failed with {e}"
+
         test_spec = make_test_spec(instance=instance)
         model_patch = process_git_patch(model_patch)
+        print("model patch after processing: ", model_patch)
+        
         # Get patch and save it to /tmp/patch.diff
         with tempfile.TemporaryDirectory() as temp_dir:
             # Patch file
             patch_file_path = os.path.join(temp_dir, 'patch.diff')
             with open(patch_file_path, 'w') as f:
                 f.write(model_patch)
-            runtime.copy_to(patch_file_path, '/tmp')
+            copy_to(patch_file_path,  "/tmp", sandbox_dir=env.sandbox_dir)
             # Eval script
             eval_script_path = os.path.join(temp_dir, 'eval.sh')
             with open(eval_script_path, 'w') as f:
                 f.write(test_spec.eval_script)
-            runtime.copy_to(eval_script_path, '/tmp')
+            copy_to(eval_script_path,  "/tmp", sandbox_dir=env.sandbox_dir)
 
         # Set +x
-        action = CmdRunAction(command='chmod +x /tmp/eval.sh')
-        action.set_hard_timeout(600)
-        logger.info(action, extra={'msg_type': 'ACTION'})
-        obs = runtime.run_action(action)
+        logger.info("chmod /tmp/eval.sh", extra={'msg_type': 'ACTION'})
+        obs = env.execute("chmod +x /tmp/eval.sh")
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-        assert obs.exit_code == 0
+        assert obs["returncode"] == 0
 
         # Apply patch
         if 'swe-smith' in dataset:
@@ -60,29 +144,26 @@ def evaluate_result(runtime, instance, run_results, instance_id, trajectory_id, 
                 "(patch --batch --fuzz=5 -p1 -i /tmp/patch.diff && echo 'APPLY_PATCH_PASS' || "
                 "echo 'APPLY_PATCH_FAIL')))"
             )
-        action = CmdRunAction(command=exec_command)
-        action.set_hard_timeout(600)
-        obs = runtime.run_action(action)
-        assert isinstance(obs, CmdOutputObservation)
-        apply_patch_output = obs.content
+        obs = env.execute(exec_command)
+        apply_patch_output = obs["output"]
         assert isinstance(apply_patch_output, str)
+        print("Output for apply patch: ", apply_patch_output)
         # instance['test_result']['apply_patch_output'] = apply_patch_output
 
         if 'APPLY_PATCH_FAIL' in apply_patch_output:
-            raise Exception(f"Instance {instance_id}, trajectory {trajectory_id} {APPLY_PATCH_FAIL}:\n{apply_patch_output}")
+            raise Exception(f"Instance {instance_id} {APPLY_PATCH_FAIL}:\n{apply_patch_output}")
         elif 'APPLY_PATCH_PASS' in apply_patch_output:
-            logger.info(f'[{instance_id}, {trajectory_id}] {APPLY_PATCH_PASS}:\n{apply_patch_output}')
+            logger.info(f'[{instance_id}] {APPLY_PATCH_PASS}:\n{apply_patch_output}')
 
             # Run eval script in background and save output to log file
             log_file = '/tmp/eval_output.log'
-            action = CmdRunAction(command=f'/tmp/eval.sh > {log_file} 2>&1 & echo $!')
-            action.set_hard_timeout(300)  # Short timeout just to get the process ID
-            obs = runtime.run_action(action)
+            command=f'/tmp/eval.sh > {log_file} 2>&1 & echo $!'
+            obs = env.execute(command)
 
-            if isinstance(obs, CmdOutputObservation) and obs.exit_code == 0:
-                pid = obs.content.split()[-1].strip()
+            if isinstance(obs, dict) and obs["returncode"] == 0:
+                pid = obs["output"].split()[-1].strip()
                 logger.info(
-                    f'[{instance_id}, {trajectory_id}] Evaluation process started with PID: {pid}'
+                    f'[{instance_id}] Evaluation process started with PID: {pid}'
                 )
 
                 # Poll for completion
@@ -92,39 +173,35 @@ def evaluate_result(runtime, instance, run_results, instance_id, trajectory_id, 
                     seconds_elapsed = time.time() - start_time
                     if seconds_elapsed > timeout:
                         raise Exception(
-                            f'[{instance_id}, {trajectory_id}] Evaluation timed out after {timeout} seconds'
+                            f'[{instance_id}] Evaluation timed out after {timeout} seconds'
                         )
-                    check_action = CmdRunAction(
-                        command=f'ps -p {pid} > /dev/null; echo $?'
-                    )
-                    check_action.set_hard_timeout(300)
-                    check_obs = runtime.run_action(check_action)
+                    command=f'ps -p {pid} > /dev/null; echo $?'
+                    check_obs = env.execute(command)
                     if (
-                        isinstance(check_obs, CmdOutputObservation)
-                        and check_obs.content.split()[-1].strip() == '1'
+                        isinstance(check_obs, dict)
+                        and check_obs["output"].split()[-1].strip() == '1'
                     ):
                         logger.info(
-                            f'[{instance_id}, {trajectory_id}] Evaluation process completed after {seconds_elapsed} seconds'
+                            f'[{instance_id}] Evaluation process completed after {seconds_elapsed} seconds'
                         )
                         break
                     logger.info(
-                        f'[{instance_id}, {trajectory_id}] [{seconds_elapsed:.0f}s] Evaluation still running, waiting...'
+                        f'[{instance_id}] [{seconds_elapsed:.0f}s] Evaluation still running, waiting...'
                     )
                     time.sleep(30)  # Wait for 30 seconds before checking again
 
                 # Read the log file
-                cat_action = CmdRunAction(command=f'cat {log_file}')
-                cat_action.set_hard_timeout(300)
-                cat_obs = runtime.run_action(cat_action)
+                command=f'cat {log_file}'
+                cat_obs = env.execute(command)
 
                 # Grade answer
-                if isinstance(cat_obs, CmdOutputObservation) and cat_obs.exit_code == 0:
-                    test_output = cat_obs.content
+                if isinstance(cat_obs, dict) and cat_obs["returncode"] == 0:
+                    test_output = cat_obs["output"]
                     assert isinstance(test_output, str)
                     # instance['test_result']['test_output'] = test_output
 
                     # Get report from test output
-                    logger.info(f'[{instance_id}, {trajectory_id}] Grading answer...')
+                    logger.info(f'[{instance_id}] Grading answer...')
                     
                     with tempfile.TemporaryDirectory() as temp_dir:
                         # Create a directory structure that matches the expected format
@@ -160,16 +237,16 @@ def evaluate_result(runtime, instance, run_results, instance_id, trajectory_id, 
                             # in swe-gym and swe-bench, the report is a dict with instance_id
                             report = _report if 'swe-smith' in dataset else _report[instance_id]
                             logger.info(
-                                f"[{instance_id}, {trajectory_id}] report: {report}\nResult for [{instance_id}, {trajectory_id}]: resolved: {report['resolved']}"
+                                f"[{instance_id}] report: {report}\nResult for [{instance_id}]: resolved: {report['resolved']}"
                             )
-                            return report['resolved']
+                            return report['resolved'], "NOERROR"
                         except Exception as e:
                             logger.error(
-                                f'[{instance_id}, {trajectory_id}] Error when getting eval report: {e}'
+                                f'[{instance_id}] Error when getting eval report: {e}'
                             )
-                            return False
+                            return False, f"Error when getting eval report: {e}"
             else:
-                raise Exception(f'[{instance_id}, {trajectory_id}] Error when starting eval:\n{obs.content}')
+                raise Exception(f'[{instance_id}] Error when starting eval:\n{obs["output"]}')
         else:
             raise Exception(
                 f'[{instance_id}] Unexpected output when applying patch:\n{apply_patch_output}'

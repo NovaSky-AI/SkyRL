@@ -19,7 +19,7 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen3-4B" \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \

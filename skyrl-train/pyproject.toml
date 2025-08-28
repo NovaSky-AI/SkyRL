@@ -67,6 +67,7 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
+mini-swe-agent = { path = "/home/ray/default/mini-swe-agent" , editable = true }
 
 [project.optional-dependencies]
 deepspeed = [
@@ -109,8 +110,9 @@ flashrl = [
     "torchvision",
 ]
 miniswe = [
-    "mini-swe-agent@git+https://github.com/SWE-agent/mini-swe-agent",
-    "litellm"
+    "mini-swe-agent",
+    "litellm",
+    "swebench@git+https://github.com/SWE-bench/SWE-bench"
 ]
 
 [[tool.uv.index]]

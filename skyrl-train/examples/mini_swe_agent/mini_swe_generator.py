@@ -4,6 +4,9 @@ from omegaconf import DictConfig
 import yaml
 import traceback
 import os
+import json
+import threading
+from pathlib import Path
 
 from loguru import logger
 from minisweagent.models import get_model
@@ -12,12 +15,28 @@ from minisweagent.run.extra.swebench import (
     get_sb_environment,
 )
 from minisweagent.agents.default import DefaultAgent
+from minisweagent.run.utils.save import save_traj
 from minisweagent.config import builtin_config_dir, get_config_path
 
 from skyrl_train.generators.skyrl_gym_generator import AgentLoopOutput, SkyRLGymGenerator, GeneratorOutput, GeneratorInput
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from .eval import evaluate_result
 
+_OUTPUT_FILE_LOCK = threading.Lock()
+
+def update_preds_file(output_path: Path, instance_id: str, model_name: str, result: str):
+    """Update the output JSON file with results from a single instance."""
+    with _OUTPUT_FILE_LOCK:
+        output_data = {}
+        if output_path.exists():
+            output_data = json.loads(output_path.read_text())
+        output_data[instance_id] = {
+            "model_name_or_path": model_name,
+            "instance_id": instance_id,
+            "model_patch": result,
+        }
+        output_path.write_text(json.dumps(output_data, indent=2))
 
 class MiniSweAgentGenerator(SkyRLGymGenerator):
     def __init__(
@@ -54,7 +73,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         print("env extras", list(env_extras.keys()))
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
-        messages = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
+        messages, reward = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
+        if not len(messages):
+            return None, None, None, None, None, None
         response_messages = messages[2:]
 
         initial_input_ids = self.tokenizer.apply_chat_template(messages[:2], add_generation_prompt=False, tokenize=True)
@@ -97,30 +118,44 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 
-        return (response_ids, 0, stop_reason, loss_mask, prompt_ids, None)
+        return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
     
     def _init_and_run(self, sweagent_config, instance):
-        env = get_sb_environment(sweagent_config, instance)
         model_name = "hosted_vllm/" + self.model_name
-        model = get_model(model_name, **sweagent_config.get("model", {}))
+        model = get_model(model_name, sweagent_config.get("model", {}))
         print("model: ", model, flush=True)
-        agent =	DefaultAgent(model, env, **sweagent_config.get("agent", {}))
-        print("agent: ", agent, flush=True)
+        agent = None
+        env = None
         extra_info = None
+        result = None
+        reward = 0
         try:
+            env = get_sb_environment(sweagent_config, instance)
+            agent =	DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+            print("agent: ", agent, flush=True)
             exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
         except Exception as e:
-            logger.error(f"Error processing instance {instance}: {e}", exc_info=True)
+            logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
             exit_status, result = type(e).__name__, str(e)
             extra_info = {"traceback": traceback.format_exc()}
         finally:
-            path = self.generator_cfg.miniswe_traj_dir
-            os.makedirs(path, exist_ok=True)
-            path = os.path.join(path, str(instance["instance_id"]) + ".json")
+            path = Path(self.generator_cfg.miniswe_traj_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            path = path / (str(instance["instance_id"]) + ".json")
             print("save path", path, flush=True)
-            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
-        return agent.messages
+            if agent is not None:
+                save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
+                update_preds_file(path, instance_id=instance['instance_id'], model_name=model_name, result=result)
+                
+                try: 
+                    reward, error = evaluate_result(instance, result, instance['instance_id'], "swebench", sweagent_config)
+                    if error:
+                        print("error during evaluation: ", error)
+                except Exception as e:
+                    print("Error during evaluation", e)
 
+        return (agent.messages if agent is not None else [], reward)
+    
     async def generate_batched(
         self,
         prompts: List[ConversationType],
@@ -158,11 +193,11 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
  
         all_outputs = await asyncio.gather(*tasks)
 
-        responses = [output[0] for output in all_outputs]
-        rewards = [output[1] for output in all_outputs]
-        stop_reasons = [output[2] for output in all_outputs]
-        loss_masks = [output[3] for output in all_outputs]
-        prompt_token_ids = [output[4] for output in all_outputs]
+        responses = [output[0] for output in all_outputs if output[0] is not None]
+        rewards = [output[1] for output in all_outputs if output[1] is not None]
+        stop_reasons = [output[2] for output in all_outputs if output[2] is not None]
+        loss_masks = [output[3] for output in all_outputs if output[3] is not None]
+        prompt_token_ids = [output[4] for output in all_outputs if output[4] is not None]
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
         generator_output: GeneratorOutput = {
