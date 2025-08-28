@@ -222,7 +222,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                chat_history[initial_chat_history_length :],
+                chat_history[initial_chat_history_length:],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
