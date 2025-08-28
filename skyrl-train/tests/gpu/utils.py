@@ -85,6 +85,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
         loss_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         action_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         num_actions=num_actions,
+        rollout_logprobs=0.4 * torch.ones((B, num_actions), device="cpu"),
         info={},
     )
 
