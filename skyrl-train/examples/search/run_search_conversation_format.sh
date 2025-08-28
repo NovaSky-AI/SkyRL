@@ -11,7 +11,7 @@ set -x
 # follow the instructions in examples/search/README.md for setting up the dataset
 # and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/search/run_search.sh
+# bash examples/search/run_search_conversation_format.sh
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
