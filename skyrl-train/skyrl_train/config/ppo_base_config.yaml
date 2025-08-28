@@ -186,11 +186,17 @@ generator:
     min_p: 0.0
     top_k: -1
     logprobs: null
+    stop: null
 
   # whether to use a conversation based format for multi-turn generations
   # if false, append multi-turn model responses and env observations to the original assistant response
   # if true, each multi-turn model response and env observations is stored in a separate assistant/user message respectively
   use_conversation_multi_turn: true
+
+  # Used when use_conversation_multi_turn is true, and sampling_params.stop is not null.
+  # If true, append tokenizer.eos_token_id to the end of the generation if the generation ends
+  # with stop_reason "stop" and matched a stop string in sampling_params.stop.
+  append_eos_token_after_stop_str_in_multi_turn: true
 
   # sampling params for evaluation
   eval_sampling_params:
@@ -200,6 +206,7 @@ generator:
     min_p: 0.0
     top_k: -1
     logprobs: null
+    stop: null
 
   # number of samples per prompt for evaluation
   eval_n_samples_per_prompt: 1

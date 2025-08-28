@@ -128,6 +128,8 @@ Now that we have our dataset and database files, let's walk through the some of 
         #### generation sampling params (relevant to algorithm correctness)
         generator.sampling_params.temperature=0.6 \
         generator.sampling_params.top_p=0.95 \
+        generator.sampling_params.stop='["</sql>", "</solution>"]' \
+        generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
 
         #### training configuration
         trainer.policy.optimizer_config.lr=1.0e-6 \
@@ -146,6 +148,9 @@ Now that we have our dataset and database files, let's walk through the some of 
 - Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymGenerator`` class.
 
   - In the above example, we set ``use_conversation_multi_turn=false`` to enforce that the multi-turn conversation is formatted as a single assistant response.
+  - We also set ``stop='["</sql>", "</solution>"]'`` for both ``sampling_params`` and ``eval_sampling_params`` as a part
+    of the training recipe.
+  - If you are using ``generator.use_conversation_multi_turn=true``, you might want to append an EOS token ID to the end of the response after these stop strings to adhere to the model's behavior (i.e. ending generation with an EOS token ID rather than say ``</solution>``). This can be done by setting ``generator.append_eos_token_after_stop_str_in_multi_turn=true`` in the generator config. The full script is available in `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
   - If you want to use a conversation-based format, you can set ``use_conversation_multi_turn=true`` and the model will generate a separate assistant response for each turn. This is supported only with ``backend="vllm"`` as of now.
   - See :code_link:`skyrl_train/generators/skyrl_gym_generator.py` for more details on both options!
 

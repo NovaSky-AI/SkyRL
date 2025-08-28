@@ -1,5 +1,12 @@
 set -x
 
+# The exact same script as `run_search.sh` but with `use_conversation_multi_turn=true`
+# and hence `append_eos_token_after_stop_str_in_multi_turn=true`
+# See https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html on the
+# difference between the two options. You might want to change the data generation prompt
+# to let the model know that we are doing multi-turn conversations (i.e. user will provide
+# the search result for each turn).
+
 # Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SearchR1 data.
 # follow the instructions in examples/search/README.md for setting up the dataset
 # and for starting the local search server
@@ -42,12 +49,13 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=500 \
   generator.async_engine=true \
   generator.batched=false \
-  generator.use_conversation_multi_turn=false \
+  generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=4 \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   generator.sampling_params.stop='["</search>", "</answer>"]' \
+  generator.append_eos_token_after_stop_str_in_multi_turn=true \
   environment.env_class="search" \
   environment.skyrl_gym.max_env_workers=16 \
   environment.skyrl_gym.search.log_requests=false \
