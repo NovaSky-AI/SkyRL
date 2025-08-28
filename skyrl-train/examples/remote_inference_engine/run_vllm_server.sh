@@ -4,9 +4,9 @@ set -x
 
 # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
 # For standalone server, we use mp for now. 
-CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
-    --model Qwen/Qwen2.5-1.5B-Instruct \
-    --tensor-parallel-size 4 \
+CUDA_VISIBLE_DEVICES=3 uv run --isolated --extra vllm --env-file examples/mini_swe_agent/.env.miniswe -m skyrl_train.inference_engines.vllm.vllm_server \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --tensor-parallel-size 1 \
     --host 127.0.0.1 \
     --port 8001 \
     --seed 42 \
@@ -19,5 +19,5 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.infer
     --max-num_batched_tokens 8192 \
     --max-num-seqs 1024 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend ray \
     --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap

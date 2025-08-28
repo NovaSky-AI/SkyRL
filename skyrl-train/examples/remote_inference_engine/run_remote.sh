@@ -10,12 +10,12 @@ set -x
 DATA_DIR="$HOME/data/gsm8k"
 
 BACKEND="vllm" # or "sglang"
-TP=4
+TP=1
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm --env-file examples/mini_swe_agent/.env.miniswe  -m skyrl_train.entrypoints.main_base \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
-    trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
+    trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
     generator.run_engines_locally=False \
     generator.remote_inference_engine_urls="['127.0.0.1:8001']" \
     generator.inference_engine_tensor_parallel_size="$TP" \
@@ -24,19 +24,19 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     generator.sampling_params.top_p=0.95 \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.placement.colocate_all=False \
-    trainer.placement.policy_num_gpus_per_node=4 \
-    trainer.placement.ref_num_gpus_per_node=4 \
+    trainer.placement.policy_num_gpus_per_node=2 \
+    trainer.placement.ref_num_gpus_per_node=2 \
     trainer.strategy=fsdp2 \
-    trainer.train_batch_size=64 \
-    trainer.policy_mini_batch_size=64 \
-    trainer.micro_forward_batch_size_per_gpu=20 \
-    trainer.micro_train_batch_size_per_gpu=20 \
+    trainer.train_batch_size=8 \
+    trainer.policy_mini_batch_size=8 \
+    trainer.micro_forward_batch_size_per_gpu=2 \
+    trainer.micro_train_batch_size_per_gpu=2 \
     trainer.logger="wandb" \
     trainer.project_name="skyrl" \
     trainer.run_name="skyrl-remote" \
     trainer.resume_mode=null \
     trainer.ckpt_path="$HOME/ckpts/remote_ckpt" \
-    trainer.eval_batch_size=1024 \
-    trainer.eval_before_train=true \
+    trainer.eval_batch_size=32 \
+    trainer.eval_before_train=false \
     trainer.eval_interval=5 \
     $@
