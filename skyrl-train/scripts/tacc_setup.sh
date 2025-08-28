@@ -58,6 +58,6 @@ ray start --head || true
 # IMPT: 
 # 1) update the shell file with the correct number of available GPUs (and any other training configuration updates)
 # 2) Update the shell file’s uv command to the following in order to avoid picking up x86 deps: uv run --active --no-project --no-sync -m skyrl_train.entrypoints.main_base \
-# bash examples/gsm8k/run_gsm8k.sh
+# bash examples/gsm8k/run_arm_gsm8k.sh
 
 
