@@ -23,10 +23,10 @@ class Env(Generic[ObsType, ActType]):
     The main API methods that users of this class need to know are:
 
     - `step` - Perform actions (e.g. tool calls) in the environment.
-        Return the observation, the reward for taking that actions, and a boolean value `done`.
+        Return the observations, the reward for taking that actions, and a boolean value `done`.
 
     - `init` - Initializes the environment to an initial state, required before calling step.
-        Returns the first observation for a turn and information, i.e. metrics, debug info.
+        Returns the first observations for a turn and information, i.e. metrics, debug info.
 
     - `close` - Closes the environment.
         Important when external software is used, i.e. pygame for rendering, databases
@@ -42,9 +42,9 @@ class Env(Generic[ObsType, ActType]):
                 which must be parsed and executed accordingly.
 
         Returns:
-            observation (ObsType): The resulting observation after executing the action.
+            observations (ObsType): The resulting observations after executing the action.
                 For example, this could involve executing a SQL query derived from the LLM response
-                and observing {'role': 'user', 'content': 'str(observation)'} output or any error messages from database.
+                and observing {'role': 'user', 'content': 'str(observations)'} output or any error messages from database.
 
             reward (SupportsFloat): The reward obtained by taking the action.
 
@@ -62,7 +62,7 @@ class Env(Generic[ObsType, ActType]):
         Initialize the environment, returning initial observation and optional metadata.
 
         Returns:
-            observation (ObsType): Observation of the initial state. This is analogous to the observation returned by `step`.
+            observations (ObsType): Observations of the initial state. This is analogous to the observations returned by `step`.
             info (Dict:  This dictionary contains auxiliary information complementing ``observation``. It should be analogous to
                 the ``info`` returned by `step`.
         """

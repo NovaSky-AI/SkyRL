@@ -1,3 +1,7 @@
+"""
+uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_models.py
+"""
+
 from skyrl_train.models import Actor
 import torch
 from unittest.mock import MagicMock, patch
