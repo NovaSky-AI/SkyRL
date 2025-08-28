@@ -106,7 +106,8 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                 state_dict_config=ShardedStateDictConfig(),
             )
         params = self.model.model.state_dict()
-        print("Model update group: ", self._model_update_group)
+        if torch.distributed.get_rank() == 0:
+            print("Model update group: ", self._model_update_group)
 
         if not self.use_cuda_ipc:
             for name, param in params.items():

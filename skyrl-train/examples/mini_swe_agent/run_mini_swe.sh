@@ -6,7 +6,7 @@ set -x
 # add OPENAI_API_KEY and WANDB_API_KEY to .env.llm_judge
 # bash examples/llm_as_a_judge/run_llm_judge.sh
 
-DATA_DIR="/mnt/local_storage/skyrl_v0_293/"
+DATA_DIR="/mnt/user_storage/swebench"
 CKPT_PATH="$HOME/ckpts/llm_mini_swe"
 
 NUM_GPUS=2
@@ -27,14 +27,14 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=32 \
+  trainer.eval_batch_size=8 \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=32 \
-  trainer.policy_mini_batch_size=32 \
-  trainer.micro_forward_batch_size_per_gpu=40 \
-  trainer.micro_train_batch_size_per_gpu=40 \
+  trainer.train_batch_size=8 \
+  trainer.policy_mini_batch_size=8 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -46,13 +46,13 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
   generator.batched=true \
-  generator.n_samples_per_prompt=5 \
+  generator.n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="mini_swe" \
   trainer.run_name="gsm8k_mini_swe" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_mini_swe_1.5B_ckpt" \
-  +generator.miniswe_config_path="/home/ray/default/SkyRL/skyrl-train/examples/mini_swe_agent/swebench.yaml" \
+  +generator.miniswe_config_path="/home/ray/default/SkyRL_orig/skyrl-train/examples/mini_swe_agent/swebench.yaml" \
   +generator.miniswe_traj_dir="/mnt/local_storage/mini_swe_agent"
   $@

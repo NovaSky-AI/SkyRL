@@ -52,6 +52,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
         
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
+        print("env extras", list(env_extras.keys()))
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
         messages = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
         response_messages = messages[2:]
@@ -102,9 +103,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         env = get_sb_environment(sweagent_config, instance)
         model_name = "hosted_vllm/" + self.model_name
         model = get_model(model_name, **sweagent_config.get("model", {}))
-        print("model: ", model)
+        print("model: ", model, flush=True)
         agent =	DefaultAgent(model, env, **sweagent_config.get("agent", {}))
-        print("agent: ", agent)
+        print("agent: ", agent, flush=True)
         extra_info = None
         try:
             exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
@@ -116,7 +117,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             path = self.generator_cfg.miniswe_traj_dir
             os.makedirs(path, exist_ok=True)
             path = os.path.join(path, str(instance["instance_id"]) + ".json")
-            print("save path", path)
+            print("save path", path, flush=True)
             save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
         return agent.messages
 
