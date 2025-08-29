@@ -735,7 +735,7 @@ def test_validate_generator_output_all_loss_masked():
     with patch("skyrl_train.utils.trainer_utils.logger") as mock_logger:
         validate_generator_output(input_batch, generator_output)
         mock_logger.warning.assert_called_once_with(
-            "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
+            "All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
         )
 
 
