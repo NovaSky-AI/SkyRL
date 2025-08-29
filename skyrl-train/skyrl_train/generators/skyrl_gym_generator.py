@@ -362,7 +362,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                 loss_mask = loss_mask[:max_tokens]
 
             if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
+                if self.custom_chat_template:
+                    raise ValueError(
+                        "Requesting logprobs is not supported when a custom chat template is used, "
+                        "as it may re-tokenize the output."
+                    )
+                sample_logprobs = logprobs[i][:len(sample_response_ids)]
                 truncated_logprobs.append(sample_logprobs)
                 
             loss_masks.append(loss_mask)
