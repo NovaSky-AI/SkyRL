@@ -69,8 +69,13 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
     """
     if chat_template_config:
         source = chat_template_config.get("source")
+        if not source:
+            raise ValueError("'source' is required in chat_template_config")
+
         name_or_path = chat_template_config.get("name_or_path")
-        
+        if not name_or_path:
+            raise ValueError("'name_or_path' is required in chat_template_config")
+
         if source and name_or_path:
             if source == "name":
                 if name_or_path in CUSTOM_CHAT_TEMPLATES:
