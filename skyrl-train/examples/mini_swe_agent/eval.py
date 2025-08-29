@@ -1,43 +1,29 @@
-import asyncio
-from typing import Dict, List, Optional, Any, Tuple
-from omegaconf import DictConfig
-import yaml
-import traceback
+from typing import Tuple
 import time
 import os
-from pathlib import Path, PurePosixPath
-from loguru import logger 
+from loguru import logger
 import tempfile
 import shutil
 
-from loguru import logger
-from minisweagent.models import get_model
 from minisweagent.run.extra.swebench import (
-    DATASET_MAPPING,
     get_sb_environment,
 )
-from minisweagent.agents.default import DefaultAgent
-from minisweagent.run.utils.save import save_traj
-from minisweagent.config import builtin_config_dir, get_config_path
 
-from skyrl_train.generators.skyrl_gym_generator import AgentLoopOutput, SkyRLGymGenerator, GeneratorOutput, GeneratorInput
-from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
-import swebench
 import sys
 
 logger.add(sys.stderr, format="{time} {level} {message}", level=os.environ.get("SKYRL_LOGGING_LEVEL", "INFO"))
 
+
 def process_git_patch(patch):
     if not isinstance(patch, str):
-        return ''
+        return ""
 
     if not patch.strip():
         # skip empty patches
-        return ''
+        return ""
 
-    patch = patch.replace('\r\n', '\n')
+    patch = patch.replace("\r\n", "\n")
     # There might be some weird characters at the beginning of the patch
     # due to some OpenHands inference command outputs
 
@@ -49,14 +35,15 @@ def process_git_patch(patch):
     # index 0000000000..fc13db5948
 
     # We "find" the first line that starts with "diff" and then we remove lines before it
-    lines = patch.split('\n')
+    lines = patch.split("\n")
     for i, line in enumerate(lines):
-        if line.startswith('diff --git'):
-            patch = '\n'.join(lines[i:])
+        if line.startswith("diff --git"):
+            patch = "\n".join(lines[i:])
             break
 
-    patch = patch.rstrip() + '\n'  # Make sure the last line ends with a newline
+    patch = patch.rstrip() + "\n"  # Make sure the last line ends with a newline
     return patch
+
 
 def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config) -> Tuple[bool, str]:
     """Apply patch and evaluate the solution."""
@@ -68,12 +55,11 @@ def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config
     from swebench.harness.test_spec.test_spec import make_test_spec
 
     logger.debug(f"git patch: {model_patch}")
-    
+
     if not model_patch:
         raise Exception(f"No git patch found for instance {instance_id}")
 
     env = None
-    extra_info = None
     try:
         env = get_sb_environment(sweagent_config, instance)
         assert hasattr(env, "sandbox_dir"), "expected singularity env with 'sandbox_dir' attribute"
@@ -83,32 +69,31 @@ def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config
     test_spec = make_test_spec(instance=instance)
     model_patch = process_git_patch(model_patch)
     logger.debug(f"model patch after processing: {model_patch}")
-    
+
     # Get patch and save it to /tmp/patch.diff
     with tempfile.TemporaryDirectory() as temp_dir:
         # Patch file
-        patch_file_path = os.path.join(temp_dir, 'patch.diff')
-        with open(patch_file_path, 'w') as f:
+        patch_file_path = os.path.join(temp_dir, "patch.diff")
+        with open(patch_file_path, "w") as f:
             f.write(model_patch)
-        dst = os.path.join(str(env.sandbox_dir), "tmp")
-        shutil.copy(patch_file_path,  os.path.join(str(env.sandbox_dir), "tmp") )
+        shutil.copy(patch_file_path, os.path.join(str(env.sandbox_dir), "tmp"))
 
         # Eval script
-        eval_script_path = os.path.join(temp_dir, 'eval.sh')
-        with open(eval_script_path, 'w') as f:
+        eval_script_path = os.path.join(temp_dir, "eval.sh")
+        with open(eval_script_path, "w") as f:
             f.write(test_spec.eval_script)
-        shutil.copy(eval_script_path,  os.path.join(str(env.sandbox_dir), "tmp"))
+        shutil.copy(eval_script_path, os.path.join(str(env.sandbox_dir), "tmp"))
 
     # Set +x
     obs = env.execute("ls", cwd="/tmp")
     logger.debug(f"observation for ls: {obs}")
-    logger.info("chmod /tmp/eval.sh", extra={'msg_type': 'ACTION'})
-    obs = env.execute("chmod +x /tmp/eval.sh",  cwd="/")
-    logger.info(f"observation logs: {obs['output']}, {obs['returncode']}", extra={'msg_type': 'OBSERVATION'})
+    logger.info("chmod /tmp/eval.sh", extra={"msg_type": "ACTION"})
+    obs = env.execute("chmod +x /tmp/eval.sh", cwd="/")
+    logger.info(f"observation logs: {obs['output']}, {obs['returncode']}", extra={"msg_type": "OBSERVATION"})
     assert obs["returncode"] == 0, f"Got bad observation: {obs} for environment dir: {env.sandbox_dir}"
 
     # Apply patch
-    if 'swe-smith' in dataset:
+    if "swe-smith" in dataset:
         # need to fetch and checkout the branch first
         exec_command = (
             "cd /testbed && "
@@ -121,7 +106,7 @@ def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config
         )
     else:
         exec_command = (
-            'cd /testbed && '
+            "cd /testbed && "
             "(git apply -v /tmp/patch.diff && echo 'APPLY_PATCH_PASS' || "
             "(echo 'Failed to apply patch with git apply, trying with patch command...' && "
             "(patch --batch --fuzz=5 -p1 -i /tmp/patch.diff && echo 'APPLY_PATCH_PASS' || "
@@ -133,21 +118,19 @@ def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config
     logger.debug(f"Output for apply patch: {apply_patch_output}")
     # instance['test_result']['apply_patch_output'] = apply_patch_output
 
-    if 'APPLY_PATCH_FAIL' in apply_patch_output:
+    if "APPLY_PATCH_FAIL" in apply_patch_output:
         raise Exception(f"Instance {instance_id} {APPLY_PATCH_FAIL}:\n{apply_patch_output}")
-    elif 'APPLY_PATCH_PASS' in apply_patch_output:
-        logger.info(f'[{instance_id}] {APPLY_PATCH_PASS}:\n{apply_patch_output}')
+    elif "APPLY_PATCH_PASS" in apply_patch_output:
+        logger.info(f"[{instance_id}] {APPLY_PATCH_PASS}:\n{apply_patch_output}")
 
         # Run eval script in background and save output to log file
-        log_file = '/tmp/eval_output.log'
-        command=f'/tmp/eval.sh > {log_file} 2>&1 & echo $!'
+        log_file = "/tmp/eval_output.log"
+        command = f"/tmp/eval.sh > {log_file} 2>&1 & echo $!"
         obs = env.execute(command, cwd="/")
 
         if isinstance(obs, dict) and obs["returncode"] == 0:
             pid = obs["output"].split()[-1].strip()
-            logger.info(
-                f'[{instance_id}] Evaluation process started with PID: {pid}'
-            )
+            logger.info(f"[{instance_id}] Evaluation process started with PID: {pid}")
 
             # Poll for completion
             start_time = time.time()
@@ -155,27 +138,18 @@ def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config
             while True:
                 seconds_elapsed = time.time() - start_time
                 if seconds_elapsed > timeout:
-                    raise Exception(
-                        f'[{instance_id}] Evaluation timed out after {timeout} seconds'
-                    )
-                command=f'ps -p {pid} > /dev/null; echo $?'
+                    raise Exception(f"[{instance_id}] Evaluation timed out after {timeout} seconds")
+                command = f"ps -p {pid} > /dev/null; echo $?"
                 check_obs = env.execute(command, cwd="/")
-                if (
-                    isinstance(check_obs, dict)
-                    and check_obs["output"].split()[-1].strip() == '1'
-                ):
-                    logger.info(
-                        f'[{instance_id}] Evaluation process completed after {seconds_elapsed} seconds'
-                    )
+                if isinstance(check_obs, dict) and check_obs["output"].split()[-1].strip() == "1":
+                    logger.info(f"[{instance_id}] Evaluation process completed after {seconds_elapsed} seconds")
                     break
-                logger.info(
-                    f'[{instance_id}] [{seconds_elapsed:.0f}s] Evaluation still running, waiting...'
-                )
+                logger.info(f"[{instance_id}] [{seconds_elapsed:.0f}s] Evaluation still running, waiting...")
                 time.sleep(30)  # Wait for 30 seconds before checking again
 
             # Read the log file
-            command=f'cat {log_file}'
-            cat_obs = env.execute(command, cwd='/')
+            command = f"cat {log_file}"
+            cat_obs = env.execute(command, cwd="/")
 
             # Grade answer
             if isinstance(cat_obs, dict) and cat_obs["returncode"] == 0:
@@ -184,49 +158,45 @@ def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config
                 # instance['test_result']['test_output'] = test_output
 
                 # Get report from test output
-                logger.info(f'[{instance_id}] Grading answer...')
-                
+                logger.info(f"[{instance_id}] Grading answer...")
+
                 with tempfile.TemporaryDirectory() as temp_dir:
                     # Create a directory structure that matches the expected format
                     # NOTE: this is a hack to make the eval report format consistent
                     # with the original SWE-Bench eval script
-                    log_dir = os.path.join(temp_dir, 'logs', instance_id.lower())
+                    log_dir = os.path.join(temp_dir, "logs", instance_id.lower())
                     os.makedirs(log_dir, exist_ok=True)
-                    test_output_path = os.path.join(log_dir, 'test_output.txt')
-                    with open(test_output_path, 'w') as f:
+                    test_output_path = os.path.join(log_dir, "test_output.txt")
+                    with open(test_output_path, "w") as f:
                         f.write(test_output)
                     try:
                         extra_kwargs = {}
-                        extra_kwargs['test_log_path'] = test_output_path
-                        
-                        if 'swe-smith' in dataset:
-                            extra_kwargs['inst'] = instance
+                        extra_kwargs["test_log_path"] = test_output_path
+
+                        if "swe-smith" in dataset:
+                            extra_kwargs["inst"] = instance
                         else:
-                            extra_kwargs['test_spec'] = test_spec
-                            extra_kwargs['include_tests_status'] = True
-                        
+                            extra_kwargs["test_spec"] = test_spec
+                            extra_kwargs["include_tests_status"] = True
+
                         _report = get_eval_report(
                             prediction={
-                                'model_patch': model_patch,
-                                'instance_id': instance_id,
+                                "model_patch": model_patch,
+                                "instance_id": instance_id,
                             },
                             **extra_kwargs,
                         )
                         # in swe-smith, the report is a single dict
                         # in swe-gym and swe-bench, the report is a dict with instance_id
-                        report = _report if 'swe-smith' in dataset else _report[instance_id]
+                        report = _report if "swe-smith" in dataset else _report[instance_id]
                         logger.info(
                             f"[{instance_id}] report: {report}\nResult for [{instance_id}]: resolved: {report['resolved']}"
                         )
-                        return report['resolved'], "NOERROR"
+                        return report["resolved"], "NOERROR"
                     except Exception as e:
-                        logger.error(
-                            f'[{instance_id}] Error when getting eval report: {e}'
-                        )
+                        logger.error(f"[{instance_id}] Error when getting eval report: {e}")
                         return False, f"Error when getting eval report: {e}"
         else:
             raise Exception(f'[{instance_id}] Error when starting eval:\n{obs["output"]}')
     else:
-        raise Exception(
-            f'[{instance_id}] Unexpected output when applying patch:\n{apply_patch_output}'
-        )
+        raise Exception(f"[{instance_id}] Unexpected output when applying patch:\n{apply_patch_output}")

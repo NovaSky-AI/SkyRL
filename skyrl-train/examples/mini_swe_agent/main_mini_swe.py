@@ -1,7 +1,6 @@
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.generators.base import GeneratorInterface
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
 import ray
@@ -21,7 +20,7 @@ class MiniSWEPPOExp(BasePPOExp):
             model_name=self.cfg.trainer.policy.model.path,
         )
         return generator
-    
+
     def get_trainer(
         self,
         cfg,
@@ -49,6 +48,7 @@ class MiniSWEPPOExp(BasePPOExp):
             colocate_pg=colocate_pg,
         )
 
+
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
@@ -66,7 +66,7 @@ def main(cfg: DictConfig) -> None:
 
     initialize_ray(cfg)
     task = skyrl_entrypoint.remote(cfg)
-    try: 
+    try:
         ray.get(task)
     except KeyboardInterrupt:
         print("KeyboardInterrupt received, shutting down...")

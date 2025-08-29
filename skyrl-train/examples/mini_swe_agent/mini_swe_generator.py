@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Any, Tuple
 from omegaconf import DictConfig
 import yaml
 import traceback
-import os
 import json
 import threading
 from pathlib import Path
@@ -11,19 +10,19 @@ from pathlib import Path
 from loguru import logger
 from minisweagent.models import get_model
 from minisweagent.run.extra.swebench import (
-    DATASET_MAPPING,
     get_sb_environment,
 )
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.run.utils.save import save_traj
-from minisweagent.config import builtin_config_dir, get_config_path
+from minisweagent.config import get_config_path
 
-from skyrl_train.generators.skyrl_gym_generator import AgentLoopOutput, SkyRLGymGenerator, GeneratorOutput, GeneratorInput
-from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput
+from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from .eval import evaluate_result
 
 _OUTPUT_FILE_LOCK = threading.Lock()
+
 
 def update_preds_file(output_path: Path, instance_id: str, model_name: str, result: str):
     """Update the output JSON file with results from a single instance."""
@@ -38,25 +37,28 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
         }
         output_path.write_text(json.dumps(output_data, indent=2))
 
+
 class MiniSweAgentGenerator(SkyRLGymGenerator):
     def __init__(
-	self,
-	generator_cfg: DictConfig,
-	skyrl_gym_cfg: DictConfig,
-	inference_engine_client: InferenceEngineClient,
-	tokenizer,
-	model_name: str,
+        self,
+        generator_cfg: DictConfig,
+        skyrl_gym_cfg: DictConfig,
+        inference_engine_client: InferenceEngineClient,
+        tokenizer,
+        model_name: str,
     ):
-        # Call parent constructor first                                                                                                                                                                       
+        # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
-        
+
         self.http_server_inference_engine_client_host = generator_cfg.get(
-                "http_server_inference_engine_client_host", "127.0.0.1"
+            "http_server_inference_engine_client_host", "127.0.0.1"
         )
         self.http_server_inference_engine_client_port = generator_cfg.get(
-                "http_server_inference_engine_client_port", 8000
+            "http_server_inference_engine_client_port", 8000
         )
-        self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        self.base_url = (
+            f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        )
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -69,8 +71,8 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         max_tokens: int,
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
-        ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
-        
+    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
+
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
         messages, reward, error = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
@@ -81,7 +83,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         response_messages = messages[2:]
 
         for message in response_messages:
-            assert message['role'] in ("system", "user"), "Expected the first two messages to be system and user messages"
+            assert message["role"] in (
+                "system",
+                "user",
+            ), "Expected the first two messages to be system and user messages"
 
         initial_input_ids = self.tokenizer.apply_chat_template(messages[:2], add_generation_prompt=False, tokenize=True)
         initial_prompt_length = len(initial_input_ids)
@@ -91,15 +96,11 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         for message in response_messages:
             # Apply chat template and tokenize each message
-            msg_encoding = self.tokenizer.apply_chat_template(
-                [message],
-                add_generation_prompt=False,
-                tokenize=True
-            )
-            
+            msg_encoding = self.tokenizer.apply_chat_template([message], add_generation_prompt=False, tokenize=True)
+
             # Extend response_ids with the tokens
             response_ids.extend(msg_encoding)
-            
+
             # Extend loss_mask: 0s for user, 1s for assistant
             if message["role"] == "user":
                 loss_mask.extend([0] * len(msg_encoding))
@@ -107,24 +108,24 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
                 loss_mask.extend([1] * len(msg_encoding))
         # Extract prompt ids
         prompt_ids = initial_input_ids
-        
+
         # Calculate maximum response tokens allowed
-        if hasattr(self, 'max_turns') and self.max_turns > 1:
+        if hasattr(self, "max_turns") and self.max_turns > 1:
             max_response_tokens = max_tokens + max_input_length - initial_prompt_length
         else:
             max_response_tokens = max_tokens
-        
+
         # Determine stop reason
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
-        
+
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 
         return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
-    
+
     def _init_and_run(self, sweagent_config, instance):
         model = get_model(self.litellm_model_name, sweagent_config.get("model", {}))
 
@@ -136,7 +137,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         error = None
         try:
             env = get_sb_environment(sweagent_config, instance)
-            agent =	DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+            agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
             exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
@@ -149,17 +150,21 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             path = path / (str(instance["instance_id"]) + ".json")
             if agent is not None:
                 save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
-                update_preds_file(path, instance_id=instance['instance_id'], model_name=model_name, result=result)
-                
-                try: 
-                    reward, error = evaluate_result(instance, result, instance['instance_id'], "swebench", sweagent_config)
+                update_preds_file(
+                    path, instance_id=instance["instance_id"], model_name=self.litellm_model_name, result=result
+                )
+
+                try:
+                    reward, error = evaluate_result(
+                        instance, result, instance["instance_id"], "swebench", sweagent_config
+                    )
                     logger.debug(f"Error during evaluation {error}")
                     error = str(error)
                 except Exception as e:
                     logger.debug(f"Error during evaluation {e}")
 
         return (agent.messages if agent is not None else [], reward, error)
-    
+
     async def generate_batched(
         self,
         prompts: List[ConversationType],
@@ -190,11 +195,11 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
                     prompts[i],
                     env_extras[i],
                     self.generator_cfg.sampling_params.max_generate_length,
-                    max_input_length = self.generator_cfg.max_input_length,
+                    max_input_length=self.generator_cfg.max_input_length,
                     sampling_params=sampling_params,
                 )
             )
- 
+
         all_outputs = await asyncio.gather(*tasks)
 
         # Filter out the `None` entries, which means that trajectory generation failed
