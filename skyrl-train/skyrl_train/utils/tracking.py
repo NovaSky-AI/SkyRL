@@ -300,4 +300,4 @@ class ValidationGenerationsLogger:
                     json.dump(row_data, file)
                 mlflow.log_artifact(validation_gen_step_file)
         except Exception as e:
-            logger.warning(f"WARNING: save validation generation file to mlflow failed with error {e}")
+            logger.warning(f"save validation generation file to mlflow failed with error {e}")
