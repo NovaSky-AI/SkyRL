@@ -347,16 +347,16 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
     if hasattr(cfg.generator, "inference_engine_tensor_parallel_size"):
-        gpu_counts.append(int(cfg.generator.inference_engine_tensor_parallel_size))
+        gpu_counts.append(cfg.generator.inference_engine_tensor_parallel_size)
     if hasattr(cfg, "trainer") and hasattr(cfg.trainer, "placement"):
         placement = cfg.trainer.placement
         gpu_counts.extend(
-            list(map(int, [
+            [
                 placement.policy_num_gpus_per_node,
                 placement.critic_num_gpus_per_node,
                 placement.ref_num_gpus_per_node,
                 placement.reward_num_gpus_per_node,
-            ]))
+            ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
     if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):

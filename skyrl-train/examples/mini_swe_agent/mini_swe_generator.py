@@ -60,6 +60,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
+        self.litellm_model_name = "hosted_vllm/" + self.model_name
 
     async def minisweagent_agent_loop(
         self,
@@ -125,8 +126,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
     
     def _init_and_run(self, sweagent_config, instance):
-        model_name = "hosted_vllm/" + self.model_name
-        model = get_model(model_name, sweagent_config.get("model", {}))
+        model = get_model(self.litellm_model_name, sweagent_config.get("model", {}))
 
         agent = None
         env = None

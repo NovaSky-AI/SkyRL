@@ -25,6 +25,9 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, Conversatio
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 import swebench
+import sys
+
+logger.add(sys.stderr, format="{time} {level} {message}", level=os.environ.get("SKYRL_LOGGING_LEVEL", "INFO"))
 
 def process_git_patch(patch):
     if not isinstance(patch, str):
@@ -54,28 +57,6 @@ def process_git_patch(patch):
 
     patch = patch.rstrip() + '\n'  # Make sure the last line ends with a newline
     return patch
-
-def copy_to(src: str | Path, dst_in_container: str, sandbox_dir: Path) -> Path:
-    """Copy a file/dir from the host into the sandbox at the given container path."""
-    src = Path(src)
-    if not src.exists():
-        raise FileNotFoundError(src)
-
-    # Map container path (e.g. "/app/file.txt") to host path under sandbox_dir
-    dst_rel = PurePosixPath(dst_in_container).relative_to("/")  # strips leading "/"
-    host_dst = (sandbox_dir / Path(*dst_rel.parts)).resolve()
-
-    # Prevent path traversal outside sandbox
-    sandbox_root = sandbox_dir.resolve()
-    if not str(host_dst).startswith(str(sandbox_root)):
-        raise ValueError("Destination escapes sandbox_dir")
-
-    host_dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.is_dir():
-        shutil.copytree(src, host_dst, dirs_exist_ok=True)
-    else:
-        shutil.copy2(src, host_dst)
-    return host_dst
 
 def evaluate_result(instance, model_patch, instance_id, dataset, sweagent_config) -> Tuple[bool, str]:
     """Apply patch and evaluate the solution."""

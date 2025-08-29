@@ -10,6 +10,7 @@ import os
 from .mini_swe_generator import MiniSweAgentGenerator
 from .mini_swe_trainer import MiniSWEPPOTrainer
 
+
 class MiniSWEPPOExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         generator = MiniSweAgentGenerator(
