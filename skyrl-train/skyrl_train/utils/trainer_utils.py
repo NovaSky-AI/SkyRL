@@ -561,6 +561,4 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
 
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
-        logger.info(
-            "WARNING: All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
-        )
+        logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
