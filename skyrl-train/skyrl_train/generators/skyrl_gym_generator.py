@@ -361,7 +361,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if logprobs is not None:
                 if self.custom_chat_template:
-                    raise ValueError("Cannot get logprobs when custom chat template is used dueto misalignment in tokenization.")
+                    raise ValueError("Cannot get logprobs when custom chat template is used due to misalignment in tokenization.")
                 sample_logprobs = logprobs[i][:len(sample_response_ids)]
                 truncated_logprobs.append(sample_logprobs)
                 
