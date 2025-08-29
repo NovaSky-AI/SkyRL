@@ -148,11 +148,12 @@ def init_remote_inference_servers(
         ),
     )
 
-    return InferenceEngineClient(engines), server_process
+    return InferenceEngineClient(engines, tokenizer), server_process
 
 
 def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engine = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
@@ -182,10 +183,10 @@ def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineCli
                 }
             ),
         ),
-        tokenizer=AutoTokenizer.from_pretrained(MODEL),
+        tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(engine)
+    client = InferenceEngineClient(engine, tokenizer)
     return client
 
 

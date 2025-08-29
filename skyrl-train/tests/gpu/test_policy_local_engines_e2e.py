@@ -59,6 +59,7 @@ def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, 
     else:
         pg, sleep = None, False
 
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
     eps = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
@@ -76,10 +77,10 @@ def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, 
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         sampling_params=get_sampling_params_for_backend(backend, cfg.generator.sampling_params),
-        tokenizer=AutoTokenizer.from_pretrained(MODEL),
+        tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(eps)
+    client = InferenceEngineClient(eps, tokenizer)
     if sleep:
         asyncio.run(client.wake_up())
     return client, pg
