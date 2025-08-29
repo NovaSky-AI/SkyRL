@@ -329,8 +329,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            
-
             # NOTE (sumanthrh): We add a guard since response_ids is `None` with remote inference engine
             if all_response_ids is not None:
                 sample_response_ids = all_response_ids[i]
@@ -363,10 +361,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if logprobs is not None:
                 if self.custom_chat_template:
-                    raise ValueError(
-                        "Requesting logprobs is not supported when a custom chat template is used, "
-                        "as it may re-tokenize the output."
-                    )
+                    raise ValueError("Cannot get logprobs when custom chat template is used dueto misalignment in tokenization.")
                 sample_logprobs = logprobs[i][:len(sample_response_ids)]
                 truncated_logprobs.append(sample_logprobs)
                 
