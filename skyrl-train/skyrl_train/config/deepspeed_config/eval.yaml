@@ -5,6 +5,9 @@ zero_optimization:
   offload_param:
     device: cpu # set to cpu for offload, else none
     pin_memory: true
+# set true to use torch.autocast. If false, deepspeed uses its own mixed precision handling
+torch_autocast:
+  enabled: false
 gradient_clipping: 1.0
 prescale_gradient: false
 wall_clock_breakdown: false

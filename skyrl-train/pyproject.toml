@@ -69,7 +69,7 @@ flashinfer-python = [
 
 [project.optional-dependencies]
 deepspeed = [
-    "deepspeed==0.16.5"
+    "deepspeed==0.17.5"
 ]
 dev = [
     "ruff==0.11.9",

@@ -688,7 +688,7 @@ class PolicyWorkerBase(Worker):
         rollout_action_logprobs = experience.rollout_logprobs
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with self.strategy.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -805,7 +805,7 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), self.strategy.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
                 sequences,
                 response_length,
@@ -859,7 +859,7 @@ class CriticWorkerBase(Worker):
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
         self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), self.strategy.autocast(dtype=torch.bfloat16, device_type="cuda"):
             value = self.model(
                 sequences,
                 response_length,
@@ -940,7 +940,7 @@ class CriticWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
 
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with self.strategy.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # critic loss
             values, output = self.model(
                 sequences,
@@ -1012,7 +1012,7 @@ class RewardWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         attention_mask = micro_batch["attention_mask"]
         self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), self.strategy.autocast(dtype=torch.bfloat16, device_type="cuda"):
             reward = self.model(sequences, attention_mask)
         reward = reward.to("cpu")
         output = TrainingOutputBatch(
@@ -1033,7 +1033,7 @@ class RefWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), self.strategy.autocast(dtype=torch.bfloat16, device_type="cuda"):
             log_probs = self.model(sequences, response_length, attention_mask, return_output=False)
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(

@@ -1,6 +1,7 @@
 import random
 import os
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 from loguru import logger
 import numpy as np
@@ -102,6 +103,15 @@ class DistributedStrategy(ABC):
         model_config.save_pretrained(hf_config_tokenizer_path)
         if tokenizer is not None:
             tokenizer.save_pretrained(hf_config_tokenizer_path)
+
+    @contextmanager
+    def autocast(self, *args, **kwargs):
+        """
+        Context manager for automatic mixed precision using torch.autocast.
+        Passes all arguments directly to torch.autocast.
+        """
+        with torch.autocast(*args, **kwargs):
+            yield
 
     @staticmethod
     def get_rng_state():
