@@ -110,7 +110,8 @@ flashrl = [
     "torchvision",
 ]
 miniswe = [
-    "mini-swe-agent",
+    # TODO (sumanthrh): Shift to mini-swe-agent installed from upstream after merging changes
+    "mini-swe-agent @ git+https://github.com/SumanthRH/mini-swe-agent@add-eval-support",
     "litellm",
     "swebench@git+https://github.com/SWE-bench/SWE-bench"
 ]

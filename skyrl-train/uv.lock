@@ -1447,7 +1447,7 @@ requires-dist = [
     { name = "jinja2" },
     { name = "litellm", specifier = ">=1.75.5" },
     { name = "mike", marker = "extra == 'dev'" },
-    { name = "mini-swe-agent", extras = ["dev"], marker = "extra == 'full'" },
+    { name = "mini-swe-agent", extras = ["dev", "eval"], marker = "extra == 'full'" },
     { name = "mkdocs-glightbox", marker = "extra == 'dev'" },
     { name = "mkdocs-include-markdown-plugin", marker = "extra == 'dev'" },
     { name = "mkdocs-material", marker = "extra == 'dev'" },
@@ -1466,11 +1466,12 @@ requires-dist = [
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "swe-rex", marker = "extra == 'full'", specifier = ">=1.4.0" },
+    { name = "swebench", marker = "extra == 'eval'", git = "https://github.com/SWE-bench/SWE-bench" },
     { name = "tenacity" },
     { name = "textual" },
     { name = "typer" },
 ]
-provides-extras = ["full", "dev"]
+provides-extras = ["full", "dev", "eval"]
 
 [[package]]
 name = "mistral-common"
