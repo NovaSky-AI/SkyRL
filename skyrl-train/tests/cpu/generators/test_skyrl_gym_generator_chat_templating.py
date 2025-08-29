@@ -86,6 +86,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
             "chat_template": chat_template_config,
+            "append_eos_token_after_stop_str_in_multi_turn": True,
+
         }
     )
     env_cfg = DictConfig(
