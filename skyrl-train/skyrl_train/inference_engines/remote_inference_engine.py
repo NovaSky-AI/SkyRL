@@ -38,17 +38,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         prompt_token_ids: Optional[List[List[int]]] = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
 
-        # For token-in-token-out, convert prompts to token ids if needed
-        if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
-            raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
-        if prompt_token_ids is None:
-            prompt_token_ids = self.tokenizer.apply_chat_template(
-                prompts,
-                add_generation_prompt=True,
-                add_special_tokens=False,
-                return_dict=True,
-                tokenize=True,
-            )["input_ids"]
+        assert (
+            prompts is None and prompt_token_ids is not None
+        ), "RemoteInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
 
         sampling_params = request_sampling_params if request_sampling_params is not None else self.sampling_params
         if "n" in sampling_params and sampling_params["n"] > 1:
@@ -105,7 +97,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 output_ids.append(cur_output_ids)
                 # SGLang only returns tokens not text when skip_tokenizer_init is True, so
                 # we manually decode it.
-                outputs.append(self.tokenizer.decode(cur_output_ids))
+                outputs.append(self.tokenizer.decode(cur_output_ids, skip_special_tokens=True))
                 finish_reasons.append(output["meta_info"]["finish_reason"]["type"])
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")

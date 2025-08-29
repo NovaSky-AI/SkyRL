@@ -268,6 +268,32 @@ def validate_cfg(cfg: DictConfig):
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
+    if cfg.generator.backend == "sglang":
+        # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
+        if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
+            raise ValueError(
+                "`sampling_params.stop` and `eval_sampling_params.stop` are not supported for SGLang backend "
+                "since we always set `skip_tokenizer_init` to True. If you have to use these parameters, you can switch to vLLM. "
+                "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
+            )
+        if "min_new_tokens" in cfg.generator.sampling_params or "min_new_tokens" in cfg.generator.eval_sampling_params:
+            raise ValueError(
+                "`sampling_params.min_new_tokens` and `eval_sampling_params.min_new_tokens` are not "
+                "supported for SGLang backend since we always set `skip_tokenizer_init` to True. "
+                "If you have to use these parameters, you can switch to vLLM. "
+                "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
+            )
+
+    if cfg.generator.use_conversation_multi_turn:
+        if (
+            cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
+        ) and not cfg.generator.append_eos_token_after_stop_str_in_multi_turn:
+            logger.warning(
+                "WARNING: `sampling_params.stop` and `eval_sampling_params.stop` are specified and we "
+                "are using multi-turn generation. You might want to set `append_eos_token_after_stop_str_in_multi_turn` "
+                "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
+            )
+
 
 @ray.remote
 def get_all_env_variables():

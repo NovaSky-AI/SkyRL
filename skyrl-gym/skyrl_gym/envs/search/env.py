@@ -56,13 +56,14 @@ class SearchEnv(BaseTextEnv):
             return True
         return "<answer>" in action and "</answer>" in action
 
-    def _postprocess_action(self, action: str) -> str:
-        if "</search>" in action:
-            return action.split("</search>")[0] + "</search>"
-        elif "</answer>" in action:
-            return action.split("</answer>")[0] + "</answer>"
-        else:
-            return action
+    def _validate_action(self, action: str):
+        stop_tags = ["</search>", "</answer>"]
+        for tag in stop_tags:
+            if tag in action:
+                assert action.split(tag, 1)[1] == "", (
+                    f"{tag} detected in the response but it is not the last string generated. "
+                    f"Use {stop_tags} as stop strings in the configuration."
+                )
 
     def _execute_tool(self, tool_group_name: str, tool_name: str, tool_input: Any) -> str:
         tool_output = super()._execute_tool(tool_group_name, tool_name, tool_input)
@@ -71,7 +72,7 @@ class SearchEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
-        action = self._postprocess_action(action)
+        self._validate_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None
@@ -79,9 +80,7 @@ class SearchEnv(BaseTextEnv):
         reward = self._get_reward(action, done)
 
         if done:
-            return BaseTextEnvStepOutput(
-                observations=[], reward=reward, done=done, metadata={}, postprocessed_action=action
-            )
+            return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
 
         try:
             query = self._parse_action(action)
@@ -114,5 +113,4 @@ class SearchEnv(BaseTextEnv):
             reward=reward,
             done=done,
             metadata=info,
-            postprocessed_action=action,
         )

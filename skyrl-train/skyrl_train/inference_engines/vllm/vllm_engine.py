@@ -159,7 +159,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
-        self.tokenizer = kwargs.pop("tokenizer", None)
         sampling_params_dict = kwargs.pop("sampling_params", None)
         self.sampling_params = (
             SamplingParams(**sampling_params_dict) if sampling_params_dict is not None else SamplingParams()
@@ -182,21 +181,13 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
 
-        if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
-            raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
+        assert (
+            prompts is None and prompt_token_ids is not None
+        ), "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
 
         sampling_params = (
             SamplingParams(**request_sampling_params) if request_sampling_params is not None else self.sampling_params
         )
-
-        if prompt_token_ids is None:
-            prompt_token_ids = self.tokenizer.apply_chat_template(
-                prompts,
-                add_generation_prompt=True,
-                add_special_tokens=False,
-                return_dict=True,
-                tokenize=True,
-            )["input_ids"]
 
         return prompt_token_ids, sampling_params
 

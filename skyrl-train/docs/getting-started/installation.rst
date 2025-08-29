@@ -56,7 +56,31 @@ The only packages required are `build-essential` and `libnuma <https://github.co
 
     sudo apt update && sudo apt-get install build-essential libnuma-dev
 
-This will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile.
+.. note::
+   Installing ``libnuma-dev`` will require sudo privileges. If you are running on a machine without sudo access, we recommend using the Dockerfile. However, you can install from source using:
+   
+   .. code-block:: bash
+
+       # Get the source
+       wget https://github.com/numactl/numactl/releases/download/v2.0.16/numactl-2.0.16.tar.gz
+       tar xzf numactl-2.0.16.tar.gz
+       cd numactl-2.0.16
+       
+       # Build to a local prefix
+       ./configure --prefix=$HOME/.local
+       make
+       make install
+       
+       # Point compiler and linker to it (add to ~/.bashrc for persistence)
+       export CPATH=$HOME/.local/include:$CPATH
+       export LIBRARY_PATH=$HOME/.local/lib:$LIBRARY_PATH
+       export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH
+
+   If ``libnuma`` is not installed, you might run into errors such as the following when running SkyRL:
+
+   .. code-block:: bash
+
+       AttributeError: ray::FSDPRefRayActorBase.offload_to_cpu: undefined symbol: numa_parse_nodestring. Did you mean: '_return_value'?
 
 Installing SkyRL-Train
 ~~~~~~~~~~~~~~~~~~~~~~

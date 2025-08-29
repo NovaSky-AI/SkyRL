@@ -7,14 +7,14 @@ ConversationType = List[MessageType]
 
 
 class BaseTextEnvStepOutput(TypedDict):
-    observations: List[Dict[str, str]]  # OpenAI API Messages Format
+    observations: ConversationType  # OpenAI API Messages Format
     reward: float
     done: bool
     metadata: Dict[str, Any]
     postprocessed_action: Optional[str] = None
 
 
-class BaseTextEnv(Env[str, str]):
+class BaseTextEnv(Env[ConversationType, str]):
     """
     Base environment class for all text-in / text-out environments.
     Supports tool-calling and multi-turn trajectories.
@@ -22,7 +22,7 @@ class BaseTextEnv(Env[str, str]):
     Exposes only `step`, `init` and `close`.
 
     Input Types:
-        - ObsType: str (tool output, LLM input)
+        - ObsType: ConversationType (tool output, LLM input)
         - ActType: str (LLM output)
     """
 
@@ -62,11 +62,11 @@ class BaseTextEnv(Env[str, str]):
         Runs one environment step.
 
         Return:
-        - new_obs: [{"role": "user", "content": observation}]
+        - observations: [{"role": "user", "content": observation}]
         - reward: float
         - done: bool
         - postprocessed_action: Optional[str]
-        - Dict[str, Any]: any metadata
+        - metadata: Dict[str, Any] any metadata
         """
         pass
 
