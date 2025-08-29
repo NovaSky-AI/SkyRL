@@ -126,7 +126,7 @@ class Tracking:
             if "tensorboard" in self.logger:
                 self.logger["tensorboard"].finish()
         except Exception as e:
-            logger.warning(f"WARNING: Attempted to finish tracking but got error {e}")
+            logger.warning(f"Attempted to finish tracking but got error {e}")
 
 
 class ConsoleLogger:
