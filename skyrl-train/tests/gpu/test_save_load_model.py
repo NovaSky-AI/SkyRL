@@ -20,6 +20,7 @@ from tests.gpu.utils import (
     make_dummy_experience,
     get_model_logits_from_actor,
     ray_init_for_tests,
+    validate_cfg,
 )
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -38,6 +39,8 @@ def get_test_actor_config(strategy: str) -> DictConfig:
     # Use temporary directories for testing
     cfg.trainer.ckpt_path = tempfile.mkdtemp(prefix="model_test_ckpt_")
     cfg.trainer.export_path = tempfile.mkdtemp(prefix="model_test_save_")
+
+    validate_cfg(cfg)
 
     return cfg
 

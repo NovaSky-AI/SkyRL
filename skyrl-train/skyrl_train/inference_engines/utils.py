@@ -3,6 +3,7 @@ from omegaconf import DictConfig, ListConfig
 
 
 def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
+    stop_val = sampling_params.get("stop", None)
     vllm_sampling_params = {
         "min_tokens": 1,
         "skip_special_tokens": True,
@@ -13,7 +14,7 @@ def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
         "top_k": sampling_params.top_k,
         "min_p": sampling_params.min_p,
         "logprobs": sampling_params.logprobs,
-        "stop": list(sampling_params.stop) if sampling_params.stop is not None else None,
+        "stop": list(stop_val) if stop_val is not None else None,
     }
     exclude_keys = ["max_generate_length"]
     for key, value in sampling_params.items():

@@ -20,7 +20,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
-from skyrl_train.utils.utils import peer_access_supported
+from skyrl_train.utils.utils import peer_access_supported, validate_cfg
 
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
@@ -32,6 +32,8 @@ def get_test_actor_config() -> DictConfig:
         cfg = hydra.compose(config_name="ppo_base_config")
 
         cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
+        cfg.trainer.logger = "console"
+        validate_cfg(cfg)
 
         return cfg
 
