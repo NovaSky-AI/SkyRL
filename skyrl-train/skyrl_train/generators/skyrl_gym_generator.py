@@ -14,6 +14,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
 from dataclasses import dataclass
+from loguru import logger
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -201,7 +202,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
-                print(
+                logger.warning(
                     "WARNING: postprocessed action may violate token-in-token-out. Ideally you "
                     "post-process it in the token space rather than string space. "
                     "A better solution coming soon."
