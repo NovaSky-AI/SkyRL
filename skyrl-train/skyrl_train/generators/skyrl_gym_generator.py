@@ -329,14 +329,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-                
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
-            if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
-                truncated_logprobs.append(sample_logprobs)
+            
 
             # NOTE (sumanthrh): We add a guard since response_ids is `None` with remote inference engine
             if all_response_ids is not None:
@@ -368,6 +361,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                 sample_response_ids = sample_response_ids[:max_tokens]
                 loss_mask = loss_mask[:max_tokens]
 
+            if logprobs is not None:
+                sample_logprobs = logprobs[i][: len(response_ids)]
+                truncated_logprobs.append(sample_logprobs)
+                
             loss_masks.append(loss_mask)
             truncated_responses.append(sample_response_ids)
 
