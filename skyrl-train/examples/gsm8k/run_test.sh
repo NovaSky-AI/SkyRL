@@ -38,6 +38,7 @@ COMMON_ARGS="
   generator.async_engine=false \
   generator.batched=true \
   environment.env_class=gsm8k \
+  generator.apply_overlong_filtering=false \
   generator.n_samples_per_prompt=1 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger=$LOGGER \
