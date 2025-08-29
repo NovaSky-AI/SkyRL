@@ -97,7 +97,7 @@ class DistributedStrategy(ABC):
             except Exception as e:
                 # if the generation config isn't available, we don't save it
                 logger.warning(
-                    f"Warning: Could not save generation config for '{model_config.name_or_path}'. Error: {e}"
+                    f"Could not save generation config for '{model_config.name_or_path}'. Error: {e}"
                 )
                 pass
 
