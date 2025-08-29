@@ -10,7 +10,7 @@ CUDA_VISIBLE_DEVICES=3 uv run --isolated --extra vllm --env-file examples/mini_s
     --host 127.0.0.1 \
     --port 8001 \
     --seed 42 \
-    --max-model-len 4096 \
+    --max-model-len 32768 \
     --enable-prefix-caching \
     --enable-chunked-prefill \
     --dtype bfloat16 \

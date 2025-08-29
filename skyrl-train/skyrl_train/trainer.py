@@ -162,7 +162,7 @@ class RayPPOTrainer:
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])
             concat_uids.extend(uids)
-            breakpoint()
+
         concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
         # Extract data_sources from env_extras
@@ -732,7 +732,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        # validate_generator_output(input_batch, generator_output)
+        validate_generator_output(input_batch, generator_output)
 
         return generator_output
 

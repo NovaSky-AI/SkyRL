@@ -8,6 +8,7 @@ import ray
 import os
 
 from .mini_swe_generator import MiniSweAgentGenerator
+from .mini_swe_trainer import MiniSWEPPOTrainer
 
 class MiniSWEPPOExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
@@ -19,6 +20,33 @@ class MiniSWEPPOExp(BasePPOExp):
             model_name=self.cfg.trainer.policy.model.path,
         )
         return generator
+    
+    def get_trainer(
+        self,
+        cfg,
+        tracker,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        inference_engine_client,
+        generator: GeneratorInterface,
+        colocate_pg,
+    ):
+        """Initializes the trainer.
+
+        Returns:
+            RayPPOTrainer: The trainer.
+        """
+        return MiniSWEPPOTrainer(
+            cfg=cfg,
+            tracker=tracker,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=colocate_pg,
+        )
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
@@ -29,7 +57,9 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    print("hosted vllm base", os.environ.get("HOSTED_VLLM_API_BASE", "NOTFOUND"))
+    from loguru import logger
+
+    logger.info("hosted vllm base", os.environ.get("HOSTED_VLLM_API_BASE", "NOTFOUND"))
     # validate the arguments
     validate_cfg(cfg)
 

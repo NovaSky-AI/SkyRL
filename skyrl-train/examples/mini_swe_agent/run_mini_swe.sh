@@ -50,9 +50,9 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="mini_swe" \
-  trainer.run_name="gsm8k_mini_swe" \
+  trainer.run_name="gsm8k_mini_swe_4B" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_mini_swe_1.5B_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_mini_swe_4B_ckpt" \
   +generator.miniswe_config_path="/home/ray/default/SkyRL_orig/skyrl-train/examples/mini_swe_agent/swebench.yaml" \
   +generator.miniswe_traj_dir="/mnt/local_storage/mini_swe_agent"
   $@

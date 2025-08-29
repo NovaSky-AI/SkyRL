@@ -71,12 +71,16 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
         
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
-        print("env extras", list(env_extras.keys()))
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
-        messages, reward = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
+        messages, reward, error = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
         if not len(messages):
             return None, None, None, None, None, None
+
+        # TODO (sumanthrh):This is currently hardcoded for SWEBench with 2 initial messages.
         response_messages = messages[2:]
+
+        for message in response_messages:
+            assert message['role'] in ("system", "user"), "Expected the first two messages to be system and user messages"
 
         initial_input_ids = self.tokenizer.apply_chat_template(messages[:2], add_generation_prompt=False, tokenize=True)
         initial_prompt_length = len(initial_input_ids)
@@ -123,38 +127,38 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
     def _init_and_run(self, sweagent_config, instance):
         model_name = "hosted_vllm/" + self.model_name
         model = get_model(model_name, sweagent_config.get("model", {}))
-        print("model: ", model, flush=True)
+
         agent = None
         env = None
         extra_info = None
         result = None
         reward = 0
+        error = None
         try:
             env = get_sb_environment(sweagent_config, instance)
             agent =	DefaultAgent(model, env, **sweagent_config.get("agent", {}))
-            print("agent: ", agent, flush=True)
             exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
         except Exception as e:
             logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
             exit_status, result = type(e).__name__, str(e)
+            error = str(e)
             extra_info = {"traceback": traceback.format_exc()}
         finally:
             path = Path(self.generator_cfg.miniswe_traj_dir)
             path.mkdir(parents=True, exist_ok=True)
             path = path / (str(instance["instance_id"]) + ".json")
-            print("save path", path, flush=True)
             if agent is not None:
                 save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
                 update_preds_file(path, instance_id=instance['instance_id'], model_name=model_name, result=result)
                 
                 try: 
                     reward, error = evaluate_result(instance, result, instance['instance_id'], "swebench", sweagent_config)
-                    if error:
-                        print("error during evaluation: ", error)
+                    logger.debug(f"Error during evaluation {error}")
+                    error = str(error)
                 except Exception as e:
-                    print("Error during evaluation", e)
+                    logger.debug(f"Error during evaluation {e}")
 
-        return (agent.messages if agent is not None else [], reward)
+        return (agent.messages if agent is not None else [], reward, error)
     
     async def generate_batched(
         self,
@@ -193,6 +197,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
  
         all_outputs = await asyncio.gather(*tasks)
 
+        # Filter out the `None` entries, which means that trajectory generation failed
         responses = [output[0] for output in all_outputs if output[0] is not None]
         rewards = [output[1] for output in all_outputs if output[1] is not None]
         stop_reasons = [output[2] for output in all_outputs if output[2] is not None]
