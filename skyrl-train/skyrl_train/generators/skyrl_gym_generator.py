@@ -43,7 +43,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
-        model_name: str,
+        model_name: str = None
     ):
         """
         Args:
@@ -55,12 +55,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
+        self.model_name = model_name
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-
-        # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        self.custom_chat_template = get_custom_chat_template(model_name)
+        self.chat_template_config = generator_cfg.chat_template
+        
+        self.custom_chat_template = get_custom_chat_template(self.chat_template_config)
+        
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:
@@ -328,17 +330,52 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
+            # NOTE (sumanthrh): We add a guard since response_ids is `None` with remote inference engine
+            if all_response_ids is not None:
+                sample_response_ids = all_response_ids[i]
+            else:
+                sample_response_ids = self.tokenizer.encode(response)
+
+            # apply custom chat template masking if configured for batch mode
+            if self.custom_chat_template:
+                response_chat_history = [{"role": "assistant", "content": response}]
+                
+                response_encodings = self.tokenizer.apply_chat_template(
+                    response_chat_history,
+                    chat_template=self.custom_chat_template,
+                    add_generation_prompt=False,
+                    return_dict=True,
+                    return_assistant_tokens_mask=True,
+                    tokenize=True,
+                )
+                # update response IDs and loss mask from custom template (no length assertion fail)
+                loss_mask = response_encodings["assistant_masks"]
+                sample_response_ids = response_encodings["input_ids"]
+            else:
+                # keep original default masking behaviour
+                loss_mask = [1] * len(sample_response_ids)
+
+            # apply max_tokens truncation to both response and mask
+            if len(sample_response_ids) > max_tokens:
+                sample_response_ids = sample_response_ids[:max_tokens]
+                loss_mask = loss_mask[:max_tokens]
+
             if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
+                if self.custom_chat_template:
+                    raise ValueError("Cannot get logprobs when custom chat template is used due to misalignment in tokenization.")
+                sample_logprobs = logprobs[i][:len(sample_response_ids)]
                 truncated_logprobs.append(sample_logprobs)
+                
+            loss_masks.append(loss_mask)
+            truncated_responses.append(sample_response_ids)
 
             env.close()
 
-        prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
+        # apply tokenizer to each prompt in batch independently
+        prompt_token_ids = [
+            self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            for prompt in prompts
+        ]
         responses = truncated_responses
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
