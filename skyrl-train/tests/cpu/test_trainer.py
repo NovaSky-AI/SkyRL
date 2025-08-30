@@ -276,7 +276,7 @@ def test_normalize_mini_batch_size():
         )
 
         # Mock mesh_rank
-        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size)
+        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1)
 
         return worker
 
@@ -308,7 +308,7 @@ def test_normalize_mini_batch_size():
         )
 
         # Mock mesh_rank
-        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size)
+        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1)
 
         return worker
 

@@ -36,7 +36,10 @@ class RayActorGroup:
         self.actors = [RayActor.remote(i, i % dp_size) for i in range(num_actors)]
         self.actor_infos = [
             ActorInfo(
-                actor, MeshRank(dp=i % dp_size, sp=i // dp_size, tp=0, pp=0, world_size=num_actors, dp_size=dp_size)
+                actor,
+                MeshRank(
+                    dp=i % dp_size, sp=i // dp_size, tp=0, pp=0, world_size=num_actors, dp_size=dp_size, pp_size=1
+                ),
             )
             for i, actor in enumerate(self.actors)
         ]
