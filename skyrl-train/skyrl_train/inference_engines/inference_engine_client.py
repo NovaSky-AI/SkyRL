@@ -18,17 +18,20 @@ class InferenceEngineClient(InferenceEngineInterface):
     Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single engine.
     """
 
-    def __init__(
-        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, generator_config: DictConfig
-    ):
+    def __init__(self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, config: DictConfig):
+        """
+        Args:
+            engines: List[InferenceEngineInterface] - The inference engines, remote or local.
+            tokenizer: PreTrainedTokenizerBase - The tokenizer to use.
+            config: DictConfig - See ppo_base_config.yaml
+        """
         self.engines = engines
         self.tokenizer = tokenizer
-        self.generator_cfg = generator_config
-        self.model_name = generator_config.model_name
-        self.backend = generator_config.backend
-        self.use_http_server_inference_engine_client = generator_config.use_http_server_inference_engine_client
-        self.http_server_inference_engine_client_host = generator_config.http_server_inference_engine_client_host
-        self.http_server_inference_engine_client_port = generator_config.http_server_inference_engine_client_port
+        self.model_name = config.trainer.policy.model.path
+        self.backend = config.generator.backend
+        self.use_http_server_inference_engine_client = config.generator.use_http_server_inference_engine_client
+        self.http_server_inference_engine_client_host = config.generator.http_server_inference_engine_client_host
+        self.http_server_inference_engine_client_port = config.generator.http_server_inference_engine_client_port
         if self.use_http_server_inference_engine_client:
             self._spin_up_http_server()
 

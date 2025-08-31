@@ -129,6 +129,10 @@ async def run_generator_end_to_end(
             "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
+            "backend": "vllm",
+            "use_http_server_inference_engine_client": False,
+            "http_server_inference_engine_client_host": "127.0.0.1",
+            "http_server_inference_engine_client_port": 8000,
         }
     )
 
@@ -144,10 +148,13 @@ async def run_generator_end_to_end(
         }
     )
 
+    cfg = get_test_actor_config()
+    cfg.trainer.policy.model.path = model
+    cfg.generator = generator_cfg
     inference_engine_client = InferenceEngineClient(
         inference_engines,
         tokenizer,
-        generator_cfg,
+        cfg,
     )
 
     await inference_engine_client.wake_up()
