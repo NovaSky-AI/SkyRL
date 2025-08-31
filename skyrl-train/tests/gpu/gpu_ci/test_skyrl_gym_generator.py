@@ -111,6 +111,7 @@ async def run_generator_end_to_end(
                     "max_generate_length": max_generate_length,
                     "min_p": 0.0,
                     "logprobs": None,
+                    "stop": ["</search>", "</answer>"] if env_class == "search" else None,
                 }
             ),
         ),
@@ -130,6 +131,7 @@ async def run_generator_end_to_end(
                 "max_generate_length": max_generate_length,
                 "logprobs": None,
             },
+            "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
             "max_input_length": max_input_length,
             "batched": batched,
             "max_turns": max_turns,
