@@ -12,7 +12,7 @@ from skyrl_train.inference_engines.openai_api_protocol import (
     check_unsupported_fields,
 )
 from skyrl_train.inference_engines.base import InferenceEngineOutput
-from skyrl_train.inference_engines.launch_inference_engine_client_http_server import (
+from skyrl_train.inference_engines.launch_inference_http_server import (
     convert_openai_to_inference_input,
     convert_inference_output_to_openai,
 )

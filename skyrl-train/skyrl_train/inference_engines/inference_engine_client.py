@@ -29,10 +29,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.tokenizer = tokenizer
         self.model_name = config.trainer.policy.model.path
         self.backend = config.generator.backend
-        self.use_http_server_inference_engine_client = config.generator.use_http_server_inference_engine_client
-        self.http_server_inference_engine_client_host = config.generator.http_server_inference_engine_client_host
-        self.http_server_inference_engine_client_port = config.generator.http_server_inference_engine_client_port
-        if self.use_http_server_inference_engine_client:
+        self.use_inference_http_server = config.generator.use_inference_http_server
+        self.inference_http_server_host = config.generator.inference_http_server_host
+        self.inference_http_server_port = config.generator.inference_http_server_port
+        if self.use_inference_http_server:
             self._spin_up_http_server()
 
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")
@@ -49,18 +49,18 @@ class InferenceEngineClient(InferenceEngineInterface):
         # when the `_handle_termination` flow is implemented. See `skyrl_train/workers/worker.py`
         # comments on `_handle_termination` for more details.
         if (
-            self.use_http_server_inference_engine_client
+            self.use_inference_http_server
             and hasattr(
                 self, "_server_thread"
             )  # don't want to shut down the server when it is pickled as a ray method argument.
             and self._server_thread is not None
         ):
             try:
-                from skyrl_train.inference_engines.launch_inference_engine_client_http_server import shutdown_server
+                from skyrl_train.inference_engines.launch_inference_http_server import shutdown_server
 
                 shutdown_server(
-                    host=self.http_server_inference_engine_client_host,
-                    port=self.http_server_inference_engine_client_port,
+                    host=self.inference_http_server_host,
+                    port=self.inference_http_server_port,
                     max_wait_seconds=10,
                 )
                 if hasattr(self, "_server_thread") and self._server_thread.is_alive():
@@ -78,7 +78,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         return state
 
     def _spin_up_http_server(self):
-        from skyrl_train.inference_engines.launch_inference_engine_client_http_server import (
+        from skyrl_train.inference_engines.launch_inference_http_server import (
             serve,
             wait_for_server_ready,
         )
@@ -87,20 +87,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             target=serve,
             args=(self,),
             kwargs={
-                "host": self.http_server_inference_engine_client_host,
-                "port": self.http_server_inference_engine_client_port,
+                "host": self.inference_http_server_host,
+                "port": self.inference_http_server_port,
                 "log_level": "warning",
             },
             daemon=True,
         )
         self._server_thread.start()
         wait_for_server_ready(
-            host=self.http_server_inference_engine_client_host,
-            port=self.http_server_inference_engine_client_port,
+            host=self.inference_http_server_host,
+            port=self.inference_http_server_port,
             max_wait_seconds=30,
         )
         print(
-            f"InferenceEngineClient HTTP server started on {self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+            f"InferenceEngineClient HTTP server started on {self.inference_http_server_host}:{self.inference_http_server_port}"
         )
 
     # ----------------------------

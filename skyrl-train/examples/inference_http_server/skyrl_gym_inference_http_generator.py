@@ -23,16 +23,16 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
         self.model_name = model_name
 
-        self.use_http_server_inference_engine_client = generator_cfg.use_http_server_inference_engine_client
-        self.http_server_inference_engine_client_host = generator_cfg.http_server_inference_engine_client_host
-        self.http_server_inference_engine_client_port = generator_cfg.http_server_inference_engine_client_port
+        self.use_inference_http_server = generator_cfg.use_inference_http_server
+        self.inference_http_server_host = generator_cfg.inference_http_server_host
+        self.inference_http_server_port = generator_cfg.inference_http_server_port
 
-        if self.use_http_server_inference_engine_client:
+        if self.use_inference_http_server:
             assert (
                 self.use_conversation_multi_turn
             ), "HTTP server inference engine client in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
             # Store the base URL for direct HTTP requests
-            self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+            self.base_url = f"http://{self.inference_http_server_host}:{self.inference_http_server_port}"
         else:
             self.base_url = None
 

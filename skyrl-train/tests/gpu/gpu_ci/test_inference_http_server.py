@@ -5,9 +5,9 @@ This uses the same workflow as test_policy_local_engines_e2e.py, but with the HT
 the inference client engine. Only requires 1 GPU.
 
 # Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_http_inference_engine_client.py -m "vllm"
+uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_inference_http_server.py -m "vllm"
 # Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_http_inference_engine_client.py -m "sglang"
+uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_inference_http_server.py -m "sglang"
 """
 
 import json
@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.inference_engines.launch_inference_engine_client_http_server import (
+from skyrl_train.inference_engines.launch_inference_http_server import (
     serve,
     wait_for_server_ready,
     shutdown_server,
@@ -361,7 +361,7 @@ def test_http_server_error_handling():
             model=MODEL,
         )
 
-        from skyrl_train.inference_engines.launch_inference_engine_client_http_server import (
+        from skyrl_train.inference_engines.launch_inference_http_server import (
             serve,
             wait_for_server_ready,
         )

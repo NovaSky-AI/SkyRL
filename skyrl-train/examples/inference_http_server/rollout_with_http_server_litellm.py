@@ -6,9 +6,9 @@ When you want to use the HTTP server, set the following configs in your bash scr
 `run_gsm8k_with_http_server.sh`:
 ```
 generator:
-  use_http_server_inference_engine_client: true
-  http_server_inference_engine_client_host: "127.0.0.1"
-  http_server_inference_engine_client_port: 8000
+  use_inference_http_server: true
+  inference_http_server_host: "127.0.0.1"
+  inference_http_server_port: 8000
 ```
 
 Note that `init_to_simulate_trainer()` is not needed in your custom generator, we
@@ -18,7 +18,7 @@ Also note that `trajectory_id` is important for better trajectory routing for pr
 
 Run with:
 uv add litellm
-uv run --isolated --extra dev --extra vllm python examples/http_server_inference_engine/rollout_with_http_server_litellm.py
+uv run --isolated --extra dev --extra vllm python examples/inference_http_server/rollout_with_http_server_litellm.py
 """
 
 import threading
@@ -27,7 +27,7 @@ import hydra
 from omegaconf import DictConfig
 from litellm import completion
 from concurrent.futures import ThreadPoolExecutor
-from skyrl_train.inference_engines.launch_inference_engine_client_http_server import (
+from skyrl_train.inference_engines.launch_inference_http_server import (
     serve,
     wait_for_server_ready,
     shutdown_server,
@@ -118,7 +118,7 @@ def agent_loop(prompt: str, base_url: str):
 def main():
     try:
         # 1. This method simulates what the trainer will do. When you set
-        # `generator.use_http_server_inference_engine_client=True` in bash script,
+        # `generator.use_inference_http_server=True` in bash script,
         # you do not need to write these code at all. In your custom generator,
         # you can simply post request to `base_url`. The server will be ready automatically
         # before `CustomGenerator.generate()` is called.
