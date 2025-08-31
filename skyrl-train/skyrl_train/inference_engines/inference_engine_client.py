@@ -7,6 +7,8 @@ from skyrl_train.inference_engines.base import (
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional
+from omegaconf import DictConfig
+import threading
 
 
 class InferenceEngineClient(InferenceEngineInterface):
@@ -16,10 +18,91 @@ class InferenceEngineClient(InferenceEngineInterface):
     Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single engine.
     """
 
-    def __init__(self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase):
+    def __init__(
+        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, generator_config: DictConfig
+    ):
         self.engines = engines
         self.tokenizer = tokenizer
+        self.generator_cfg = generator_config
+        self.model_name = generator_config.model_name
+        self.backend = generator_config.backend
+        self.use_http_server_inference_engine_client = generator_config.use_http_server_inference_engine_client
+        self.http_server_inference_engine_client_host = generator_config.http_server_inference_engine_client_host
+        self.http_server_inference_engine_client_port = generator_config.http_server_inference_engine_client_port
+        if self.use_http_server_inference_engine_client:
+            self._spin_up_http_server()
+
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")
+
+    # ----------------------------
+    # HTTP server related methods
+    # ----------------------------
+
+    def __del__(self):
+        """
+        Destructor to shut down the HTTP server if it was started.
+        """
+        # TODO(Charlie): __del__ is not guaranteed to be called in general. Add to `teardown` method
+        # when the `_handle_termination` flow is implemented. See `skyrl_train/workers/worker.py`
+        # comments on `_handle_termination` for more details.
+        if (
+            self.use_http_server_inference_engine_client
+            and hasattr(
+                self, "_server_thread"
+            )  # don't want to shut down the server when it is pickled as a ray method argument.
+            and self._server_thread is not None
+        ):
+            try:
+                from skyrl_train.inference_engines.launch_inference_engine_client_http_server import shutdown_server
+
+                shutdown_server(
+                    host=self.http_server_inference_engine_client_host,
+                    port=self.http_server_inference_engine_client_port,
+                    max_wait_seconds=10,
+                )
+                if hasattr(self, "_server_thread") and self._server_thread.is_alive():
+                    self._server_thread.join(timeout=10)
+            except Exception as e:
+                print(f"Error shutting down HTTP server: {e}")
+
+    def __getstate__(self):
+        """
+        Override to avoid pickling the server thread, which is not picklable.
+        Needed when passing InferenceEngineClient as an argument to async_run_ray_method().
+        """
+        state = self.__dict__.copy()
+        state["_server_thread"] = None
+        return state
+
+    def _spin_up_http_server(self):
+        from skyrl_train.inference_engines.launch_inference_engine_client_http_server import (
+            serve,
+            wait_for_server_ready,
+        )
+
+        self._server_thread = threading.Thread(
+            target=serve,
+            args=(self,),
+            kwargs={
+                "host": self.http_server_inference_engine_client_host,
+                "port": self.http_server_inference_engine_client_port,
+                "log_level": "warning",
+            },
+            daemon=True,
+        )
+        self._server_thread.start()
+        wait_for_server_ready(
+            host=self.http_server_inference_engine_client_host,
+            port=self.http_server_inference_engine_client_port,
+            max_wait_seconds=30,
+        )
+        print(
+            f"InferenceEngineClient HTTP server started on {self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        )
+
+    # ----------------------------
+    # Engine related methods
+    # ----------------------------
 
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """

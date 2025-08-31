@@ -116,13 +116,6 @@ async def run_generator_end_to_end(
         ),
     )
 
-    inference_engine_client = InferenceEngineClient(
-        inference_engines,
-        tokenizer,
-    )
-
-    await inference_engine_client.wake_up()
-
     # Create a mock generator config
     generator_cfg = DictConfig(
         {
@@ -150,6 +143,14 @@ async def run_generator_end_to_end(
             "max_env_workers": max_env_workers,
         }
     )
+
+    inference_engine_client = InferenceEngineClient(
+        inference_engines,
+        tokenizer,
+        generator_cfg,
+    )
+
+    await inference_engine_client.wake_up()
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,

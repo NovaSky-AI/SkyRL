@@ -294,6 +294,11 @@ def validate_cfg(cfg: DictConfig):
                 "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
             )
 
+    if cfg.generator.use_http_server_inference_engine_client and not cfg.generator.async_engine:
+        raise ValueError(
+            "In your config, generator.async_engine must be True when using http server inference engine client."
+        )
+
 
 @ray.remote
 def get_all_env_variables():
