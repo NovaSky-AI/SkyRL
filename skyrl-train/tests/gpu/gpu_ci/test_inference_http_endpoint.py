@@ -22,6 +22,7 @@ import aiohttp
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from litellm import completion as litellm_completion
+from litellm import acompletion as litellm_async_completion
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
@@ -127,6 +128,7 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
                     },
                 ).json()
 
+            # Default concurrency is low. Increase concurrency with max_workers arg in ThreadPoolExecutor.
             with ThreadPoolExecutor() as executor:
                 output_tasks = [executor.submit(generate_output, prompt) for prompt in test_prompts]
                 outputs = [task.result() for task in output_tasks]
@@ -134,7 +136,9 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
         elif test_type == "aiohttp_client_session":
             # 1.2 Test aiohttp.ClientSession
             async def generate_outputs_async():
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+                # limit=0 means no limit; without conn, it has a cap of 100 concurrent connections
+                conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)
+                async with aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=None)) as session:
                     headers = {"Content-Type": "application/json"}
                     output_tasks = []
 
@@ -153,19 +157,22 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
 
         elif test_type == "litellm":
             # 1.3 Test litellm
-            def generate_output(prompt):
-                return litellm_completion(
-                    model=f"openai/{MODEL}",  # Add openai/ prefix for custom endpoints
-                    messages=prompt,
-                    api_base=base_url,
-                    # Otherwise runs into: litellm.llms.openai.common_utils.OpenAIError
-                    api_key="DUMMY_KEY",
-                    **sampling_params,
-                )
+            # Default concurrency limit is 100 due to HTTP client pool capacity.
+            async def generate_outputs_async():
+                async def generate_output(prompt):
+                    return await litellm_async_completion(
+                        model=f"openai/{MODEL}",  # Add openai/ prefix for custom endpoints
+                        messages=prompt,
+                        api_base=base_url,
+                        # Otherwise runs into: litellm.llms.openai.common_utils.OpenAIError
+                        api_key="DUMMY_KEY",
+                        **sampling_params,
+                    )
 
-            with ThreadPoolExecutor() as executor:
-                output_tasks = [executor.submit(generate_output, prompt) for prompt in test_prompts]
-                outputs = [task.result() for task in output_tasks]
+                tasks = [generate_output(prompt) for prompt in test_prompts]
+                return await asyncio.gather(*tasks)
+
+            outputs = asyncio.run(generate_outputs_async())
 
         else:
             raise ValueError(f"Invalid test type: {test_type}")
