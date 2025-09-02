@@ -21,6 +21,7 @@ import requests
 import aiohttp
 from omegaconf import DictConfig
 from pydantic import BaseModel
+from litellm import completion as litellm_completion
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
@@ -63,7 +64,9 @@ def get_test_actor_config() -> DictConfig:
 
 
 @pytest.mark.vllm
-@pytest.mark.parametrize("test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session"])
+@pytest.mark.parametrize(
+    "test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session", "litellm"]
+)
 def test_http_endpoint_openai_api_with_weight_sync(test_type):
     """
     Test the HTTP endpoint with OpenAI client and policy weight sync.
@@ -162,6 +165,22 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
                     return [await response.json() for response in responses]
 
             outputs = asyncio.run(generate_outputs_async())
+
+        elif test_type == "litellm":
+            # 1.4 Test litellm
+            def generate_output(prompt):
+                return litellm_completion(
+                    model=f"openai/{MODEL}",  # Add openai/ prefix for custom endpoints
+                    messages=prompt,
+                    api_base=base_url,
+                    # Otherwise runs into: litellm.llms.openai.common_utils.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable
+                    api_key="DUMMY_KEY",
+                )
+
+            with ThreadPoolExecutor() as executor:
+                output_tasks = [executor.submit(generate_output, prompt) for prompt in test_prompts]
+                outputs = [task.result() for task in output_tasks]
+
         else:
             raise ValueError(f"Invalid test type: {test_type}")
 
@@ -181,6 +200,8 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
                 assert "index" in choice and "message" in choice and "finish_reason" in choice
                 assert choice["index"] == 0 and choice["finish_reason"] in ["stop", "length"]
                 message = choice["message"]
+                if test_type == "litellm":
+                    message = message.model_dump()  # litellm returns a pydantic object
                 assert "role" in message and "content" in message and message["role"] == "assistant"
 
         # Shutdown server

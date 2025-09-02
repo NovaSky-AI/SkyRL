@@ -79,6 +79,7 @@ dev = [
     "pre-commit",
     "fastapi",
     "uvicorn",
+    "litellm",
 ]
 docs = [
     "sphinx>=7.0.0",
