@@ -295,9 +295,7 @@ def validate_cfg(cfg: DictConfig):
             )
 
     if cfg.generator.use_inference_http_server and not cfg.generator.async_engine:
-        raise ValueError(
-            "In your config, generator.async_engine must be True when using http server inference engine client."
-        )
+        raise ValueError("generator.async_engine must be True when generator.use_inference_http_server==True.")
 
 
 @ray.remote
