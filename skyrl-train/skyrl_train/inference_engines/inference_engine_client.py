@@ -25,7 +25,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
             tokenizer: PreTrainedTokenizerBase - The tokenizer to use.
-            config: DictConfig - See ppo_base_config.yaml
+            full_config: DictConfig - See ppo_base_config.yaml
         """
         self.engines = engines
         self.tokenizer = tokenizer
@@ -235,7 +235,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             and self._server_thread is not None
         ):
             try:
-                from skyrl_train.inference_engines.inference_http_endpoint import shutdown_server
+                from skyrl_train.inference_engines.inference_engine_client_http_endpoint import shutdown_server
 
                 shutdown_server(
                     host=self.http_endpoint_host,
@@ -257,7 +257,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         return state
 
     def _spin_up_http_endpoint(self):
-        from skyrl_train.inference_engines.inference_http_endpoint import (
+        from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
             serve,
             wait_for_server_ready,
         )
