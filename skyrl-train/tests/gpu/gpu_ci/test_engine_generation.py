@@ -38,7 +38,7 @@ def get_test_actor_config() -> DictConfig:
 
 
 def init_remote_inference_servers(
-    tp_size: int, backend: str, tokenizer: PreTrainedTokenizerBase
+    tp_size: int, backend: str, tokenizer: PreTrainedTokenizerBase, config: DictConfig
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()
     assert (
@@ -148,10 +148,10 @@ def init_remote_inference_servers(
         ),
     )
 
-    return InferenceEngineClient(engines, tokenizer), server_process
+    return InferenceEngineClient(engines, tokenizer, config), server_process
 
 
-def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineClient:
+def init_ray_inference_engines(backend: str, tp_size: int, config: DictConfig) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engine = create_ray_wrapped_inference_engines(
@@ -186,7 +186,7 @@ def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineCli
         tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(engine, tokenizer)
+    client = InferenceEngineClient(engine, tokenizer, config)
     return client
 
 
@@ -260,7 +260,7 @@ def test_inference_engines_generation(backend: str, tp_size: int):
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         try:
-            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer)
+            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg)
 
             # Batched generation
             remote_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
@@ -292,7 +292,7 @@ def test_inference_engines_generation(backend: str, tp_size: int):
             remote_server_process.wait()
 
         # Get responses from Ray engine
-        llm_client = init_ray_inference_engines(backend, tp_size)
+        llm_client = init_ray_inference_engines(backend, tp_size, cfg)
 
         # Batched generation
         local_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
@@ -353,7 +353,7 @@ def test_token_based_generation(backend: str, tp_size: int):
             prompts, add_generation_prompt=True, tokenize=True, return_dict=True
         )["input_ids"]
 
-        llm_client = init_ray_inference_engines(backend, tp_size)
+        llm_client = init_ray_inference_engines(backend, tp_size, cfg)
 
         # Test batch generation with tokens
         token_batch_responses, _ = asyncio.run(run_batch_generation_with_tokens(llm_client, prompt_token_ids))

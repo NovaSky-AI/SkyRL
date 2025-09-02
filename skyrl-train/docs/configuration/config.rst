@@ -461,6 +461,9 @@ Inference Engine Placement Configuration
 - ``generator.run_engines_locally``: Whether to use local inference engines. If ``true``, the inference engine will be initialized during the training run in the current Ray cluster. We use one Ray actor per inference replica and communication will happen via Ray object store.  If set to ``false``, then the generator expects a list of remote urls and communication will happen over HTTP.
 - ``generator.num_inference_engines``: Number of inference engines to use. If ``run_engines_locally`` is ``false``, then this number should match the number of remote urls.
 - ``generator.remote_inference_engine_urls``: List of remote urls to use. Applicable only when ``run_engines_locally`` is ``false``.
+- ``generator.enable_http_endpoint``: When ``true``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.
+- ``generator.http_endpoint_host``: Host for the inference HTTP endpoint.
+- ``generator.http_endpoint_port``: Port for the inference HTTP endpoint.
 
 For more details on how different placement options work, please refer to the :doc:`placement guide <placement>`.
 

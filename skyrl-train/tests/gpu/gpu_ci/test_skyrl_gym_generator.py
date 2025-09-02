@@ -117,13 +117,6 @@ async def run_generator_end_to_end(
         ),
     )
 
-    inference_engine_client = InferenceEngineClient(
-        inference_engines,
-        tokenizer,
-    )
-
-    await inference_engine_client.wake_up()
-
     # Create a mock generator config
     generator_cfg = DictConfig(
         {
@@ -138,6 +131,10 @@ async def run_generator_end_to_end(
             "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
+            "backend": "vllm",
+            "enable_http_endpoint": False,
+            "http_endpoint_host": "127.0.0.1",
+            "http_endpoint_port": 8000,
         }
     )
 
@@ -152,6 +149,17 @@ async def run_generator_end_to_end(
             "max_env_workers": max_env_workers,
         }
     )
+
+    cfg = get_test_actor_config()
+    cfg.trainer.policy.model.path = model
+    cfg.generator = generator_cfg
+    inference_engine_client = InferenceEngineClient(
+        inference_engines,
+        tokenizer,
+        cfg,
+    )
+
+    await inference_engine_client.wake_up()
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,

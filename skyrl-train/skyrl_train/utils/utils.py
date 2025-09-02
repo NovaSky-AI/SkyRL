@@ -294,6 +294,9 @@ def validate_cfg(cfg: DictConfig):
                 "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
             )
 
+    if cfg.generator.enable_http_endpoint and not cfg.generator.async_engine:
+        raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
+
 
 @ray.remote
 def get_all_env_variables():

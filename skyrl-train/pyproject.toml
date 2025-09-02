@@ -77,6 +77,9 @@ dev = [
     "pytest>=6.2.5",
     "pytest-asyncio",
     "pre-commit",
+    "fastapi",
+    "uvicorn",
+    "litellm",
 ]
 docs = [
     "sphinx>=7.0.0",

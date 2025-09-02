@@ -1,3 +1,4 @@
+import asyncio
 import os
 import ray
 import torch
@@ -20,7 +21,11 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
+from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import peer_access_supported, validate_cfg
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
@@ -341,3 +346,41 @@ def ray_init_for_tests():
         log_once("Disabling NCCL P2P for test environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
     ray.init(runtime_env={"env_vars": env_vars})
+
+
+def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, backend, model):
+    assert use_local, "This test does not yet support remote engines."
+    assert backend in ["vllm", "sglang"]
+    initialize_ray(cfg)
+    if colocate_all:
+        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
+        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        sleep = True
+    else:
+        pg, sleep = None, False
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eps = create_ray_wrapped_inference_engines(
+        num_inference_engines=1,
+        tensor_parallel_size=tp_size,
+        model_dtype="bfloat16",
+        pretrain=model,
+        seed=42,
+        vllm_v1_disable_multiproc=True,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+        max_model_len=1536,
+        shared_pg=pg,
+        gpu_memory_utilization=0.6,
+        inference_engine_enable_sleep=sleep,
+        async_engine=async_engine,
+        max_num_batched_tokens=8192,
+        max_num_seqs=1024,
+        sampling_params=get_sampling_params_for_backend(backend, cfg.generator.sampling_params),
+        tokenizer=tokenizer,
+        backend=backend,
+    )
+    client = InferenceEngineClient(eps, tokenizer, cfg)
+    if sleep:
+        asyncio.run(client.wake_up())
+    return client, pg
