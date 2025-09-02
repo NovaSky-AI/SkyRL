@@ -153,6 +153,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
+            chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
         )
 
@@ -511,7 +512,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # re-apply whole chat template so length check is correct
         input_ids = self.tokenizer.apply_chat_template(
-            chat_history[:chat_end_index], add_generation_prompt=False, tokenize=True
+            chat_history[:chat_end_index],
+            chat_template=self.custom_chat_template,
+            add_generation_prompt=False,
+            tokenize=True,
         )
         return chat_history, chat_end_index, input_ids
 
