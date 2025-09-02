@@ -276,6 +276,4 @@ class InferenceEngineClient(InferenceEngineInterface):
             port=self.http_endpoint_port,
             max_wait_seconds=30,
         )
-        print(
-            f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}"
-        )
+        print(f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}")
