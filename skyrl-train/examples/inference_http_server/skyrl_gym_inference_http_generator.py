@@ -51,6 +51,8 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         """
         envs = []
         init_prompts = []
+        trajectory_ids = []  # for load balancing
+        counter = 0
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
             env_extra["max_turns"] = self.max_turns
             env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
@@ -58,9 +60,11 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             init_prompt, _ = env.init(prompt)
             init_prompts.append(init_prompt)
             envs.append(env)
+            trajectory_ids.append(counter)
+            counter += 1
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
+        engine_input = InferenceEngineInput(prompts=init_prompts, trajectory_ids=trajectory_ids, sampling_params=sampling_params)
 
         # The only line different from SkyRLGymGenerator.generate_batched
         engine_output = await _generate_with_http_server(self.base_url, self.model_name, engine_input)
@@ -130,8 +134,9 @@ async def _generate_with_http_server(
     if trajectory_ids is not None:
         assert len(prompts) == len(trajectory_ids), "prompts and trajectory_ids must have the same length"
 
-    # Use aiohttp session for direct HTTP requests (no concurrency limiting)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+    # Use aiohttp session for direct HTTP requests
+    conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)  # 0 = no limit; without conn, has 100
+    async with aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=None)) as session:
         headers = {"Content-Type": "application/json"}
         output_tasks = []
 
