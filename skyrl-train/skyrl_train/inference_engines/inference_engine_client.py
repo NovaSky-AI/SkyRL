@@ -18,7 +18,7 @@ class InferenceEngineClient(InferenceEngineInterface):
     Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single engine.
     """
 
-    def __init__(self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, config: DictConfig):
+    def __init__(self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: DictConfig):
         """
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
@@ -27,11 +27,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         self.engines = engines
         self.tokenizer = tokenizer
-        self.model_name = config.trainer.policy.model.path
-        self.backend = config.generator.backend
-        self.enable_http_endpoint = config.generator.enable_http_endpoint
-        self.http_endpoint_host = config.generator.http_endpoint_host
-        self.http_endpoint_port = config.generator.http_endpoint_port
+        self.model_name = full_config.trainer.policy.model.path
+        self.backend = full_config.generator.backend
+        self.enable_http_endpoint = full_config.generator.enable_http_endpoint
+        self.http_endpoint_host = full_config.generator.http_endpoint_host
+        self.http_endpoint_port = full_config.generator.http_endpoint_port
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
