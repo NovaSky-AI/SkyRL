@@ -1,5 +1,5 @@
 """
-Test the HTTP endpoint with OpenAI client and policy weight sync.
+Test the HTTP endpoint with LiteLLM and policy weight sync.
 
 This uses the same workflow as test_policy_local_engines_e2e.py, but with the HTTP endpoint instead of
 the inference client engine. Only requires 1 GPU.
@@ -25,12 +25,12 @@ from litellm import completion as litellm_completion
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.inference_http_endpoint import (
     serve,
     wait_for_server_ready,
     shutdown_server,
 )
-from openai import OpenAI
 from tests.gpu.utils import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
 from skyrl_train.inference_engines.openai_api_protocol import (
@@ -63,20 +63,21 @@ def get_test_actor_config() -> DictConfig:
         return cfg
 
 
+# NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
+# are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
+# while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
 @pytest.mark.vllm
-@pytest.mark.parametrize(
-    "test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session", "litellm"]
-)
+@pytest.mark.parametrize("test_type", ["request_posting", "aiohttp_client_session", "litellm"])
 def test_http_endpoint_openai_api_with_weight_sync(test_type):
     """
-    Test the HTTP endpoint with OpenAI client and policy weight sync.
+    Test the HTTP endpoint with LiteLLM and policy weight sync.
     """
     try:
         cfg = get_test_actor_config()
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-
+        sampling_params = get_sampling_params_for_backend("vllm", cfg.generator.sampling_params)
         client, pg = init_inference_engines(
             cfg=cfg,
             use_local=True,
@@ -114,32 +115,15 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
         test_prompts = get_test_prompts(MODEL, num_samples=num_samples)
 
         # Generate outputs based on test type
-        if test_type == "chat_completions_create":
-            # 1.1 Test chat.completions.create
-            # Create OpenAI client (with dummy API key since we don't authenticate)
-            openai_client = OpenAI(
-                base_url=base_url,
-                api_key="dummy-key",  # Our server doesn't authenticate, but OpenAI client requires a key
-            )
-
-            def generate_output(prompt):
-                return openai_client.chat.completions.create(
-                    model=MODEL,
-                    messages=prompt,
-                ).model_dump()
-
-            with ThreadPoolExecutor() as executor:
-                output_tasks = [executor.submit(generate_output, prompt) for prompt in test_prompts]
-                outputs = [task.result() for task in output_tasks]
-
-        elif test_type == "request_posting":
-            # 1.2 Test request posting
+        if test_type == "request_posting":
+            # 1.1 Test request posting
             def generate_output(prompt):
                 return requests.post(
                     f"{base_url}/chat/completions",
                     json={
                         "model": MODEL,
                         "messages": prompt,
+                        **sampling_params,
                     },
                 ).json()
 
@@ -148,7 +132,7 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
                 outputs = [task.result() for task in output_tasks]
 
         elif test_type == "aiohttp_client_session":
-            # 1.3 Test aiohttp.ClientSession
+            # 1.2 Test aiohttp.ClientSession
             async def generate_outputs_async():
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     headers = {"Content-Type": "application/json"}
@@ -158,6 +142,7 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
                         payload = {
                             "model": MODEL,
                             "messages": prompt,
+                            **sampling_params,
                         }
                         output_tasks.append(session.post(f"{base_url}/chat/completions", json=payload, headers=headers))
 
@@ -167,14 +152,15 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
             outputs = asyncio.run(generate_outputs_async())
 
         elif test_type == "litellm":
-            # 1.4 Test litellm
+            # 1.3 Test litellm
             def generate_output(prompt):
                 return litellm_completion(
                     model=f"openai/{MODEL}",  # Add openai/ prefix for custom endpoints
                     messages=prompt,
                     api_base=base_url,
-                    # Otherwise runs into: litellm.llms.openai.common_utils.OpenAIError: The api_key client option must be set either by passing api_key to the client or by setting the OPENAI_API_KEY environment variable
+                    # Otherwise runs into: litellm.llms.openai.common_utils.OpenAIError
                     api_key="DUMMY_KEY",
+                    **sampling_params,
                 )
 
             with ThreadPoolExecutor() as executor:
@@ -321,12 +307,6 @@ def test_structured_generation():
         wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
         base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
 
-        # Create OpenAI client (with dummy API key since we don't authenticate)
-        openai_client = OpenAI(
-            base_url=base_url,
-            api_key="dummy-key",  # Our server doesn't authenticate, but OpenAI client requires a key
-        )
-
         class TestSchema(BaseModel):
             name: str
             job: str
@@ -338,8 +318,10 @@ def test_structured_generation():
             },
         ]
 
-        output = openai_client.chat.completions.create(
-            model=MODEL,
+        output = litellm_completion(
+            model=f"openai/{MODEL}",
+            api_base=base_url,
+            api_key="DUMMY_KEY",
             messages=prompt,
             max_tokens=1024,
             response_format={
