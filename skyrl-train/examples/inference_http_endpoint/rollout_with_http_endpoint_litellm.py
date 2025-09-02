@@ -2,13 +2,13 @@
 Example of using LiteLLM with SkyRL's HTTP inference server. This simulates what your custom
 generator looks like when posting requests to the server (as opposed to using `skyrl_gym_generator.py`).
 
-When you want to use the HTTP server, set the following configs in your bash script, as shown in
-`run_gsm8k_with_http_server.sh`:
+When you want to use the HTTP endpoint, set the following configs in your bash script, as shown in
+`run_gsm8k_with_inference_http_endpoint.sh`:
 ```
 generator:
-  use_inference_http_server: true
-  inference_http_server_host: "127.0.0.1"
-  inference_http_server_port: 8000
+  enable_http_endpoint: true
+  http_endpoint_host: "127.0.0.1"
+  http_endpoint_port: 8000
 ```
 
 Note that `init_to_simulate_trainer()` is not needed in your custom generator, we
@@ -18,7 +18,7 @@ Also note that `trajectory_id` is important for better trajectory routing for pr
 
 Run with:
 uv add litellm
-uv run --isolated --extra dev --extra vllm python examples/inference_http_server/rollout_with_http_server_litellm.py
+uv run --isolated --extra dev --extra vllm python examples/inference_http_endpoint/rollout_with_http_endpoint_litellm.py
 """
 
 import threading
@@ -27,7 +27,7 @@ import hydra
 from omegaconf import DictConfig
 from litellm import completion
 from concurrent.futures import ThreadPoolExecutor
-from skyrl_train.inference_engines.launch_inference_http_server import (
+from skyrl_train.inference_engines.inference_http_endpoint import (
     serve,
     wait_for_server_ready,
     shutdown_server,
@@ -118,7 +118,7 @@ def agent_loop(prompt: str, base_url: str):
 def main():
     try:
         # 1. This method simulates what the trainer will do. When you set
-        # `generator.use_inference_http_server=True` in bash script,
+        # `generator.enable_http_endpoint=True` in bash script,
         # you do not need to write these code at all. In your custom generator,
         # you can simply post request to `base_url`. The server will be ready automatically
         # before `CustomGenerator.generate()` is called.

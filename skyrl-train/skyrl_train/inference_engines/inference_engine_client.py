@@ -29,11 +29,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.tokenizer = tokenizer
         self.model_name = config.trainer.policy.model.path
         self.backend = config.generator.backend
-        self.use_inference_http_server = config.generator.use_inference_http_server
-        self.inference_http_server_host = config.generator.inference_http_server_host
-        self.inference_http_server_port = config.generator.inference_http_server_port
-        if self.use_inference_http_server:
-            self._spin_up_http_server()
+        self.enable_http_endpoint = config.generator.enable_http_endpoint
+        self.http_endpoint_host = config.generator.http_endpoint_host
+        self.http_endpoint_port = config.generator.http_endpoint_port
+        if self.enable_http_endpoint:
+            self._spin_up_http_endpoint()
 
         print(f"InferenceEngineClient initialized with {len(engines)} engines.")
 
@@ -215,35 +215,35 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await self._run_on_all_engines("teardown")
 
     # ----------------------------
-    # HTTP server related methods
+    # HTTP endpoint related methods
     # ----------------------------
 
     def __del__(self):
         """
-        Destructor to shut down the HTTP server if it was started.
+        Destructor to shut down the HTTP endpoint if it was started.
         """
         # TODO(Charlie): __del__ is not guaranteed to be called in general. Add to `teardown` method
         # when the `_handle_termination` flow is implemented. See `skyrl_train/workers/worker.py`
         # comments on `_handle_termination` for more details.
         if (
-            self.use_inference_http_server
+            self.enable_http_endpoint
             and hasattr(
                 self, "_server_thread"
             )  # don't want to shut down the server when it is pickled as a ray method argument.
             and self._server_thread is not None
         ):
             try:
-                from skyrl_train.inference_engines.launch_inference_http_server import shutdown_server
+                from skyrl_train.inference_engines.inference_http_endpoint import shutdown_server
 
                 shutdown_server(
-                    host=self.inference_http_server_host,
-                    port=self.inference_http_server_port,
+                    host=self.http_endpoint_host,
+                    port=self.http_endpoint_port,
                     max_wait_seconds=10,
                 )
                 if hasattr(self, "_server_thread") and self._server_thread.is_alive():
                     self._server_thread.join(timeout=10)
             except Exception as e:
-                print(f"Error shutting down HTTP server: {e}")
+                print(f"Error shutting down HTTP endpoint: {e}")
 
     def __getstate__(self):
         """
@@ -254,8 +254,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         state["_server_thread"] = None
         return state
 
-    def _spin_up_http_server(self):
-        from skyrl_train.inference_engines.launch_inference_http_server import (
+    def _spin_up_http_endpoint(self):
+        from skyrl_train.inference_engines.inference_http_endpoint import (
             serve,
             wait_for_server_ready,
         )
@@ -264,18 +264,18 @@ class InferenceEngineClient(InferenceEngineInterface):
             target=serve,
             args=(self,),
             kwargs={
-                "host": self.inference_http_server_host,
-                "port": self.inference_http_server_port,
+                "host": self.http_endpoint_host,
+                "port": self.http_endpoint_port,
                 "log_level": "warning",
             },
             daemon=True,
         )
         self._server_thread.start()
         wait_for_server_ready(
-            host=self.inference_http_server_host,
-            port=self.inference_http_server_port,
+            host=self.http_endpoint_host,
+            port=self.http_endpoint_port,
             max_wait_seconds=30,
         )
         print(
-            f"InferenceEngineClient HTTP server started on {self.inference_http_server_host}:{self.inference_http_server_port}"
+            f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}"
         )

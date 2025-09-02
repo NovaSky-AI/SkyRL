@@ -1,5 +1,5 @@
 """
-A minimal set of OpenAI API protocol for inference engine http server.
+A minimal set of OpenAI API protocol for inference HTTP endpoint.
 """
 
 import time

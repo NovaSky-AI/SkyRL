@@ -130,9 +130,9 @@ async def run_generator_end_to_end(
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
             "backend": "vllm",
-            "use_inference_http_server": False,
-            "inference_http_server_host": "127.0.0.1",
-            "inference_http_server_port": 8000,
+            "enable_http_endpoint": False,
+            "http_endpoint_host": "127.0.0.1",
+            "http_endpoint_port": 8000,
         }
     )
 

@@ -1,13 +1,13 @@
 """
-Test the HTTP server with OpenAI client and policy weight sync.
+Test the HTTP endpoint with OpenAI client and policy weight sync.
 
-This uses the same workflow as test_policy_local_engines_e2e.py, but with the HTTP server instead of
+This uses the same workflow as test_policy_local_engines_e2e.py, but with the HTTP endpoint instead of
 the inference client engine. Only requires 1 GPU.
 
 # Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_inference_http_server.py -m "vllm"
+uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_inference_http_endpoint.py -m "vllm"
 # Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_inference_http_server.py -m "sglang"
+uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_inference_http_endpoint.py -m "sglang"
 """
 
 import json
@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.inference_engines.launch_inference_http_server import (
+from skyrl_train.inference_engines.inference_http_endpoint import (
     serve,
     wait_for_server_ready,
     shutdown_server,
@@ -64,9 +64,9 @@ def get_test_actor_config() -> DictConfig:
 
 @pytest.mark.vllm
 @pytest.mark.parametrize("test_type", ["chat_completions_create", "request_posting", "aiohttp_client_session"])
-def test_http_server_openai_api_with_weight_sync(test_type):
+def test_http_endpoint_openai_api_with_weight_sync(test_type):
     """
-    Test the HTTP server with OpenAI client and policy weight sync.
+    Test the HTTP endpoint with OpenAI client and policy weight sync.
     """
     try:
         cfg = get_test_actor_config()
@@ -341,7 +341,7 @@ def test_structured_generation():
 
 
 @pytest.mark.vllm
-def test_http_server_error_handling():
+def test_http_endpoint_error_handling():
     """
     Test error handling for various invalid requests.
     """
@@ -361,7 +361,7 @@ def test_http_server_error_handling():
             model=MODEL,
         )
 
-        from skyrl_train.inference_engines.launch_inference_http_server import (
+        from skyrl_train.inference_engines.inference_http_endpoint import (
             serve,
             wait_for_server_ready,
         )

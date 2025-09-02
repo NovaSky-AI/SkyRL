@@ -23,16 +23,16 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
         self.model_name = model_name
 
-        self.use_inference_http_server = generator_cfg.use_inference_http_server
-        self.inference_http_server_host = generator_cfg.inference_http_server_host
-        self.inference_http_server_port = generator_cfg.inference_http_server_port
+        self.enable_http_endpoint = generator_cfg.enable_http_endpoint
+        self.http_endpoint_host = generator_cfg.http_endpoint_host
+        self.http_endpoint_port = generator_cfg.http_endpoint_port
 
-        if self.use_inference_http_server:
+        if self.enable_http_endpoint:
             assert (
                 self.use_conversation_multi_turn
-            ), "HTTP server inference engine client in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
+            ), "HTTP endpoint in SkyRLGymGenerator does not support use_conversation_multi_turn being False."
             # Store the base URL for direct HTTP requests
-            self.base_url = f"http://{self.inference_http_server_host}:{self.inference_http_server_port}"
+            self.base_url = f"http://{self.http_endpoint_host}:{self.http_endpoint_port}"
         else:
             self.base_url = None
 
@@ -46,7 +46,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> GeneratorOutput:
         """
-        Exactly the same as SkyRLGymGenerator.generate_batched, but uses the HTTP server inference engine client.
+        Exactly the same as SkyRLGymGenerator.generate_batched, but uses the HTTP endpoint.
         We also have to re-encode the string responses to token ids, meaning it is not token-in-token-out.
         """
         envs = []
@@ -69,7 +69,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         )
 
         # The only line different from SkyRLGymGenerator.generate_batched
-        engine_output = await _generate_with_http_server(self.base_url, self.model_name, engine_input)
+        engine_output = await _generate_with_http_endpoint(self.base_url, self.model_name, engine_input)
 
         responses = engine_output["responses"]
         stop_reasons = engine_output["stop_reasons"]
@@ -120,15 +120,15 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         return generator_output
 
 
-async def _generate_with_http_server(
+async def _generate_with_http_endpoint(
     base_url: str,
     model_name: str,
     input_batch: InferenceEngineInput,
 ) -> InferenceEngineOutput:
     """
-    Generate responses using direct ClientSession.post calls with the InferenceEngineClient HTTP server.
+    Generate responses using direct ClientSession.post calls with the InferenceEngineClient HTTP endpoint.
 
-    Equivalent to running `self.inference_engine_client.generate()`, but with the HTTP server.
+    Equivalent to running `self.inference_engine_client.generate()`, but with the HTTP endpoint.
     """
     prompts = input_batch.get("prompts")
     trajectory_ids = input_batch.get("trajectory_ids")

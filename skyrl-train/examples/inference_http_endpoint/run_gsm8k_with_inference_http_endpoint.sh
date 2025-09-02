@@ -1,14 +1,14 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K with HTTP server.
+# Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K with HTTP endpoint.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-# bash examples/inference_http_server/run_gsm8k_with_http_server.sh
+# bash examples/inference_http_endpoint/run_gsm8k_with_inference_http_endpoint.sh
 
 # NOTE (charlie): The only difference between this and the original run_gsm8k.sh is that we set
-# `generator.use_inference_http_server` to true and set the HTTP server host and port.
+# `generator.enable_http_endpoint` to true and set the HTTP endpoint host and port.
 # Besides, we run `main.py` in this folder which uses the SkyRLGymHTTPGenerator, a simple wrapper
-# of SkyRLGymGenerator that uses the HTTP server for rollout as a demonstration.
+# of SkyRLGymGenerator that uses the HTTP endpoint for rollout as a demonstration.
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
@@ -16,7 +16,7 @@ LOGGER="console"  # change to "console" to print to stdout
 
 INFERENCE_BACKEND="vllm"
 # INFERENCE_BACKEND="sglang"
-uv run --isolated --extra $INFERENCE_BACKEND -m examples.inference_http_server.main \
+uv run --isolated --extra $INFERENCE_BACKEND -m examples.inference_http_endpoint.main \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -49,9 +49,9 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.inference_http_server.m
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
-  generator.use_inference_http_server=true \
-  generator.inference_http_server_host="127.0.0.1" \
-  generator.inference_http_server_port=8000 \
+  generator.enable_http_endpoint=true \
+  generator.http_endpoint_host="127.0.0.1" \
+  generator.http_endpoint_port=8000 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k" \
   trainer.run_name="gsm8k_test" \

@@ -12,7 +12,7 @@ class HTTPExp(BasePPOExp):
         Returns:
             GeneratorInterface: The generator.
         """
-        from .skyrl_gym_inference_http_generator import SkyRLGymHTTPGenerator
+        from .skyrl_gym_http_generator import SkyRLGymHTTPGenerator
 
         return SkyRLGymHTTPGenerator(
             generator_cfg=cfg.generator,

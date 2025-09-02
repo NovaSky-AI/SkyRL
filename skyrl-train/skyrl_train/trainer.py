@@ -117,8 +117,8 @@ class RayPPOTrainer:
             batch_size=batch_size,
             shuffle=True if is_train else False,
             collate_fn=dataset.collate_fn,
-            # TODO(Charlie): debug why inference http server is slow when num_workers is 8
-            num_workers=0 if self.cfg.generator.use_inference_http_server else 8,
+            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+            num_workers=0 if self.cfg.generator.enable_http_endpoint else 8,
             drop_last=True if is_train else False,
             generator=seeded_generator,
         )

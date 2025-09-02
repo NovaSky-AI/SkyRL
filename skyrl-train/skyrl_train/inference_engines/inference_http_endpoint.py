@@ -1,11 +1,11 @@
 """
-OpenAI-compatible HTTP server using InferenceEngineClient as backend.
+OpenAI-compatible HTTP endpoint using InferenceEngineClient as backend.
 
-This module provides a FastAPI-based HTTP server that exposes OpenAI's chat completion API
+This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's chat completion API
 while routing requests to our internal InferenceEngineClient system.
 
 Main functions:
-- serve(): Start the HTTP server.
+- serve(): Start the HTTP endpoint.
 - wait_for_server_ready(): Wait for server to be ready.
 - shutdown_server(): Shutdown the server.
 """
@@ -152,7 +152,7 @@ def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds:
 
 def wait_for_server_ready(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
     """
-    Wait for the HTTP server to be ready by polling the health endpoint.
+    Wait for the HTTP endpoint to be ready by polling the health endpoint.
 
     Args:
         host: Host where the server is running
@@ -182,7 +182,7 @@ def create_app() -> fastapi.FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
-        logger.info("Starting inference engine HTTP server...")
+        logger.info("Starting inference HTTP endpoint...")
         yield
 
     app = fastapi.FastAPI(
@@ -238,7 +238,7 @@ def serve(
     log_level: str = "info",
 ):
     """
-    Start the HTTP server.
+    Start the HTTP endpoint.
 
     Args:
         inference_engine_client: The InferenceEngineClient to use as backend
