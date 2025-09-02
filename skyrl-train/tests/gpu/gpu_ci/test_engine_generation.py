@@ -34,6 +34,13 @@ def get_test_actor_config() -> DictConfig:
 
         cfg.trainer.policy.model.path = MODEL
 
+        cfg.generator.sampling_params.temperature = 0.0
+        cfg.generator.sampling_params.top_p = 1
+        cfg.generator.sampling_params.top_k = -1
+        cfg.generator.sampling_params.max_generate_length = 1024
+        cfg.generator.sampling_params.min_p = 0.0
+        cfg.generator.sampling_params.logprobs = None
+
         return cfg
 
 
@@ -133,22 +140,10 @@ def init_remote_inference_servers(
         tokenizer=tokenizer,
         engine_backend=backend,
         tensor_parallel_size=tp_size,
-        sampling_params=get_sampling_params_for_backend(
-            backend,
-            DictConfig(
-                {
-                    "temperature": 0.0,
-                    "top_p": 1,
-                    "top_k": -1,
-                    "max_generate_length": 1024,
-                    "min_p": 0.0,
-                    "logprobs": None,
-                }
-            ),
-        ),
     )
 
-    return InferenceEngineClient(engines, tokenizer, config), server_process
+    client = InferenceEngineClient(engines, tokenizer, config)
+    return client, server_process
 
 
 def init_ray_inference_engines(backend: str, tp_size: int, config: DictConfig) -> InferenceEngineClient:
@@ -170,19 +165,6 @@ def init_ray_inference_engines(backend: str, tp_size: int, config: DictConfig) -
         async_engine=True,
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
-        sampling_params=get_sampling_params_for_backend(
-            backend,
-            DictConfig(
-                {
-                    "temperature": 0.0,
-                    "top_p": 1,
-                    "top_k": -1,
-                    "max_generate_length": 1024,
-                    "min_p": 0.0,
-                    "logprobs": None,
-                }
-            ),
-        ),
         tokenizer=tokenizer,
         backend=backend,
     )
@@ -190,16 +172,16 @@ def init_ray_inference_engines(backend: str, tp_size: int, config: DictConfig) -
     return client
 
 
-async def run_batch_generation(client, prompts):
-    engine_input = InferenceEngineInput(prompts=prompts)
+async def run_batch_generation(client, prompts, sampling_params):
+    engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     engine_output = await client.generate(engine_input)
     return engine_output["responses"], engine_output["stop_reasons"]
 
 
-async def run_single_generation(client, prompts):
+async def run_single_generation(client, prompts, sampling_params):
     tasks = []
     for prompt in prompts:
-        engine_input = InferenceEngineInput(prompts=[prompt])
+        engine_input = InferenceEngineInput(prompts=[prompt], sampling_params=sampling_params)
         task = client.generate(engine_input)
         tasks.append(task)
 
@@ -214,16 +196,16 @@ async def run_single_generation(client, prompts):
     return responses, finish_reasons
 
 
-async def run_batch_generation_with_tokens(client, prompt_token_ids):
-    engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids)
+async def run_batch_generation_with_tokens(client, prompt_token_ids, sampling_params):
+    engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     engine_output = await client.generate(engine_input)
     return engine_output["responses"], engine_output["stop_reasons"]
 
 
-async def run_single_generation_with_tokens(client, prompt_token_ids):
+async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_params):
     tasks = []
     for tokens in prompt_token_ids:
-        engine_input = InferenceEngineInput(prompt_token_ids=[tokens])
+        engine_input = InferenceEngineInput(prompt_token_ids=[tokens], sampling_params=sampling_params)
         task = client.generate(engine_input)
         tasks.append(task)
 
@@ -293,9 +275,12 @@ def test_inference_engines_generation(backend: str, tp_size: int):
 
         # Get responses from Ray engine
         llm_client = init_ray_inference_engines(backend, tp_size, cfg)
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Batched generation
-        local_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
+        local_batch_responses, batch_finish_reasons = asyncio.run(
+            run_batch_generation(llm_client, prompts, sampling_params)
+        )
         assert len(local_batch_responses) == len(
             prompts
         ), f"Number of responses should match number of prompts, got {len(local_batch_responses)} responses but {len(prompts)} prompts"
@@ -304,7 +289,9 @@ def test_inference_engines_generation(backend: str, tp_size: int):
         ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
 
         # Single generation (ie, submit individual requests)
-        local_single_responses, single_finish_reasons = asyncio.run(run_single_generation(llm_client, prompts))
+        local_single_responses, single_finish_reasons = asyncio.run(
+            run_single_generation(llm_client, prompts, sampling_params)
+        )
         assert len(local_single_responses) == len(
             prompts
         ), f"Number of responses should match number of prompts, got {len(local_single_responses)} responses but {len(prompts)} prompts"
@@ -354,17 +341,22 @@ def test_token_based_generation(backend: str, tp_size: int):
         )["input_ids"]
 
         llm_client = init_ray_inference_engines(backend, tp_size, cfg)
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Test batch generation with tokens
-        token_batch_responses, _ = asyncio.run(run_batch_generation_with_tokens(llm_client, prompt_token_ids))
+        token_batch_responses, _ = asyncio.run(
+            run_batch_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
         assert len(token_batch_responses) == len(prompts)
 
         # Test single generation with tokens
-        token_single_responses, _ = asyncio.run(run_single_generation_with_tokens(llm_client, prompt_token_ids))
+        token_single_responses, _ = asyncio.run(
+            run_single_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
         assert len(token_single_responses) == len(prompts)
 
         # Compare with prompt-based generation
-        prompt_responses, _ = asyncio.run(run_batch_generation(llm_client, prompts))
+        prompt_responses, _ = asyncio.run(run_batch_generation(llm_client, prompts, sampling_params))
 
         # Outputs should be similar since we're using the same inputs
         for i in range(len(prompts)):

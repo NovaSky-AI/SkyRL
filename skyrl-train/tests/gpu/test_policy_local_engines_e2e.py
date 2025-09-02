@@ -14,6 +14,7 @@ from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines
 from skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
 
@@ -36,8 +37,8 @@ def get_test_actor_config() -> DictConfig:
         return cfg
 
 
-async def run_inference(client, prompts):
-    engine_input = InferenceEngineInput(prompts=prompts)
+async def run_inference(client, prompts, sampling_params):
+    engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     return await client.generate(engine_input)
 
 
@@ -110,7 +111,8 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL)))
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:

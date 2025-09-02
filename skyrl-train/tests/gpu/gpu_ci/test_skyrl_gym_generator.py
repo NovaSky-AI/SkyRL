@@ -101,20 +101,6 @@ async def run_generator_end_to_end(
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         tokenizer=tokenizer,
-        sampling_params=get_sampling_params_for_backend(
-            "vllm",
-            DictConfig(
-                {
-                    "temperature": 1.0,
-                    "top_p": 1.0,
-                    "top_k": -1,
-                    "max_generate_length": max_generate_length,
-                    "min_p": 0.0,
-                    "logprobs": None,
-                    "stop": ["</search>", "</answer>"] if env_class == "search" else None,
-                }
-            ),
-        ),
     )
 
     # Create a mock generator config
@@ -176,6 +162,21 @@ async def run_generator_end_to_end(
         max_prompt_length=max_prompt_length,
         data_path=data_path,
         env_class=env_class,
+    )
+    # Attach request-time sampling params into the generator input
+    input_batch["sampling_params"] = get_sampling_params_for_backend(
+        "vllm",
+        DictConfig(
+            {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "max_generate_length": max_generate_length,
+                "min_p": 0.0,
+                "logprobs": None,
+                "stop": ["</search>", "</answer>"] if env_class == "search" else None,
+            }
+        ),
     )
 
     with Timer(f"generate_responses_async_engine_{use_async_engine}"):

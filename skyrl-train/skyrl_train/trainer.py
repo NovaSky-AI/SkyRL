@@ -264,7 +264,7 @@ class RayPPOTrainer:
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
                     generator_input, uids = self._prepare_generator_input(
-                        self.cfg.generator.n_samples_per_prompt, rand_prompts
+                        self.cfg.generator.n_samples_per_prompt, rand_prompts, self.cfg.generator.sampling_params
                     )
 
                     # if we are continuing sampling, we don't want to trigger weight management
@@ -393,7 +393,7 @@ class RayPPOTrainer:
         return entries[: (len(entries) // dp_size) * dp_size]
 
     def _prepare_generator_input(
-        self, n_samples_per_prompt: int, rand_prompts: List[Any], sampling_params: Optional[Dict[str, Any]] = None
+        self, n_samples_per_prompt: int, rand_prompts: List[Any], sampling_params: Dict[str, Any]
     ) -> Tuple[GeneratorInput, List[str]]:
         """
         Replicate prompts if needed and generate uids.
@@ -414,11 +414,7 @@ class RayPPOTrainer:
             [[prompt["env_extras"]] * n_samples_per_prompt for prompt in rand_prompts],
             [],
         )
-        request_sampling_params = (
-            get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
-            if sampling_params is not None
-            else None
-        )
+        request_sampling_params = get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
         generator_input: GeneratorInput = {
             "prompts": all_prompts,
             "env_classes": all_envs,

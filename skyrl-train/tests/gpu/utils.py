@@ -25,7 +25,6 @@ from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import peer_access_supported, validate_cfg
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
@@ -376,7 +375,6 @@ def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, 
         async_engine=async_engine,
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
-        sampling_params=get_sampling_params_for_backend(backend, cfg.generator.sampling_params),
         tokenizer=tokenizer,
         backend=backend,
     )
