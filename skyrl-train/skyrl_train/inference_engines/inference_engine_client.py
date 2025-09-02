@@ -18,7 +18,9 @@ class InferenceEngineClient(InferenceEngineInterface):
     Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single engine.
     """
 
-    def __init__(self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: DictConfig):
+    def __init__(
+        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: DictConfig
+    ):
         """
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
