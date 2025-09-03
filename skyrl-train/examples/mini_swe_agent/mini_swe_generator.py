@@ -9,13 +9,10 @@ import threading
 from pathlib import Path
 
 from minisweagent.models import get_model
-from minisweagent.run.extra.swebench import (
-    get_sb_environment,
-)
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
-from .mini_swe_eval import evaluate_trajectory
+from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput
 from skyrl_train.inference_engines.base import ConversationType
@@ -40,7 +37,7 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
 
 
 @ray.remote
-def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
+def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, data_source):
     from loguru import logger
 
     model_config = sweagent_config.get("model", {})
@@ -56,7 +53,7 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
     reward = 0
     error = None
     try:
-        env = get_sb_environment(sweagent_config, instance)
+        env = get_sb_environment(sweagent_config, instance, data_source)
         agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
         exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
     except Exception as e:
@@ -69,10 +66,10 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
         path.mkdir(parents=True, exist_ok=True)
         path = path / (str(instance["instance_id"]) + ".json")
         if agent is not None:
-            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
-
+            reward = None
+            eval_error = None
             try:
-                result = evaluate_trajectory(instance, result, sweagent_config)
+                result = evaluate_trajectory(instance, result, sweagent_config, data_source)
                 reward = int(result["resolved"])
                 error = result["eval_error"]
                 if error:
@@ -80,7 +77,10 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
             except Exception as e:
                 logger.debug(f"Error during evaluation {e}")
                 logger.debug(f"traceback: {traceback.format_exc()}")
+                eval_error = str(e)
                 error = str(e)
+
+            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info, reward=reward, eval_error=eval_error)  # type: ignore[arg-type]
 
     return (agent.messages if agent is not None else [], reward, error)
 
@@ -124,7 +124,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
         messages, reward, error = await init_and_run.remote(
-            instance, self.litellm_model_name, sweagent_config, self.generator_cfg
+            instance, self.litellm_model_name, sweagent_config, self.generator_cfg, env_extras["data_source"]
         )
         if not len(messages):
             return None, None, None, None, None, None

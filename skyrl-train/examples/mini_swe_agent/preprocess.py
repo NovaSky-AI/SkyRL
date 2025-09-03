@@ -9,26 +9,34 @@ import datasets
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="~/data/swebench")
+    parser.add_argument("--output_dir", default="~/data/swe_gym")
 
     args = parser.parse_args()
 
     args.output_dir = os.path.expanduser(args.output_dir)
 
-    data_source = "SumanthRH/SWE-bench_Verified"
+    data_source = "SumanthRH/SWE-Gym"
+    eval_data_source = "SumanthRH/SWE-bench_Verified"
 
     dataset = datasets.load_dataset(data_source, "default")
+    train_dataset = dataset["train"]
+    # Use only the instance ids in SkyRL-v0-293-data
+    from huggingface_hub import snapshot_download
+    import tempfile
 
-    # this is just for demonstration
-    # TODO: Use Swe Gym as a training set
-    train_dataset = dataset["test"]
-    val_dataset = dataset["test"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        snapshot_download("NovaSky-AI/SkyRL-v0-293-data", local_dir=tmpdir, repo_type="dataset")
+        skyrl_v0_dataset = datasets.load_dataset("parquet", data_files=[os.path.join(tmpdir, "train.parquet")])["train"]
+        valid_instance_ids = set([skyrl_v0_dataset["instance"][i]["instance_id"] for i in range(len(skyrl_v0_dataset))])
+    train_dataset = train_dataset.filter(lambda x: x["instance_id"] in valid_instance_ids)
+
+    val_dataset = datasets.load_dataset(eval_data_source, "default")["test"]
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
             data = {
-                "data_source": data_source,
+                "data_source": data_source if split == "train" else eval_data_source,
                 "prompt": [
                     {
                         "role": "user",

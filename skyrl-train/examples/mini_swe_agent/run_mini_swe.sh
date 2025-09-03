@@ -6,7 +6,7 @@ set -x
 # add OPENAI_API_KEY and WANDB_API_KEY to .env.llm_judge
 # bash examples/llm_as_a_judge/run_llm_judge.sh
 
-DATA_DIR="/mnt/user_storage/swebench"
+DATA_DIR="/mnt/user_storage/swe_gym"
 CKPT_PATH="$HOME/ckpts/llm_mini_swe"
 
 NUM_GPUS=2
