@@ -127,7 +127,8 @@ To use a tool and get the result, you can call the ``_execute_tool`` (provided b
             observations=[{"role": "user", "content": observation}],
             reward=reward,
             done=done,
-            metadata=info
+            metadata=info,
+            metrics=metrics
         )
 
 Action Parsing

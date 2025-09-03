@@ -30,6 +30,7 @@ SkyRL-Gym includes a simple text-in/text-out environment interface for LLM tasks
             - reward: Float reward for the action  
             - done: Whether the episode is finished
             - metadata: Additional info (optional)
+            - metrics: Evaluation metrics for the action (optional)
          """
          pass
 
@@ -74,7 +75,8 @@ So, the environment ``step`` must simply parse the answer out of ``\\boxed{answe
             observations=[],
             reward=1.0 if is_correct else 0.0,
             done=True,
-            metadata={"parsed_answer": answer}
+            metadata={"parsed_answer": answer},
+            metrics={"accuracy": float(is_correct)}
          )
 
 That's it! The environment checks if the model's answer matches the ground truth and gives a reward of 1.0 for correct answers, 0.0 for incorrect ones.
@@ -123,7 +125,8 @@ We will make a few simple extensions to our ``step()`` method:
                 observations=[],
                 reward=reward,
                 done=True,
-                metadata={"parsed_answer": answer}
+                metadata={"parsed_answer": answer},
+                metrics={"accuracy": float(is_correct)}
             )
             
         # Give feedback for another attempt
@@ -136,7 +139,8 @@ We will make a few simple extensions to our ``step()`` method:
             observations=[{"role": "user", "content": feedback}],
             reward=0.0,
             done=False,
-            metadata={"parsed_answer": answer}
+            metadata={"parsed_answer": answer},
+            metrics={"accuracy": float(is_correct)}
         )
 
 The multi-turn version gives partial credit for formatting the answer correctly, even if it's wrong. This helps the model learn the expected output format.
