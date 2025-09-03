@@ -243,9 +243,12 @@ def test_inference_engines_generation(backend: str, tp_size: int):
 
         try:
             llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg)
+            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
             # Batched generation
-            remote_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
+            remote_batch_responses, batch_finish_reasons = asyncio.run(
+                run_batch_generation(llm_client, prompts, sampling_params)
+            )
             assert len(remote_batch_responses) == len(
                 prompts
             ), f"Number of responses should match number of prompts, got {len(remote_batch_responses)} responses but {len(prompts)} prompts"
@@ -254,7 +257,9 @@ def test_inference_engines_generation(backend: str, tp_size: int):
             ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
 
             # Single generation (ie, submit individual requests)
-            remote_single_responses, single_finish_reasons = asyncio.run(run_single_generation(llm_client, prompts))
+            remote_single_responses, single_finish_reasons = asyncio.run(
+                run_single_generation(llm_client, prompts, sampling_params)
+            )
             assert len(remote_single_responses) == len(
                 prompts
             ), f"Number of responses should match number of prompts, got {len(remote_single_responses)} responses but {len(prompts)} prompts"
@@ -270,8 +275,9 @@ def test_inference_engines_generation(backend: str, tp_size: int):
                     )
 
         finally:
-            remote_server_process.terminate()
-            remote_server_process.wait()
+            if "remote_server_process" in locals():
+                remote_server_process.terminate()
+                remote_server_process.wait()
 
         # Get responses from Ray engine
         llm_client = init_ray_inference_engines(backend, tp_size, cfg)
