@@ -20,6 +20,7 @@ from .mini_swe_eval import evaluate_trajectory
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 _OUTPUT_FILE_LOCK = threading.Lock()
 
@@ -42,7 +43,11 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
 def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
     from loguru import logger
 
-    model = get_model(litellm_model_name, sweagent_config.get("model", {}))
+    model_config = sweagent_config.get("model", {})
+    model_config.setdefault("model_kwargs", {}).update(
+        get_sampling_params_for_backend(generator_cfg.backend, generator_cfg.sampling_params)
+    )
+    model = get_model(litellm_model_name, model_config)
 
     agent = None
     env = None
@@ -105,7 +110,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
-        self.litellm_model_name = "hosted_vllm/" + self.model_name
+        self.litellm_model_name = "openai/" + self.model_name
 
     async def minisweagent_agent_loop(
         self,
@@ -214,6 +219,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         stop_reasons = [output[2] for output in all_outputs if output[2] is not None]
         loss_masks = [output[3] for output in all_outputs if output[3] is not None]
         prompt_token_ids = [output[4] for output in all_outputs if output[4] is not None]
+        if not len(responses):
+            raise ValueError(
+                "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
+            )
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
         generator_output: GeneratorOutput = {

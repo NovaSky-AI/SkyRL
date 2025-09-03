@@ -4,7 +4,6 @@ from skyrl_train.generators.base import GeneratorInterface
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
 import ray
-import os
 
 from .mini_swe_generator import MiniSweAgentGenerator
 from .mini_swe_trainer import MiniSWEPPOTrainer
@@ -58,9 +57,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    from loguru import logger
 
-    logger.info("hosted vllm base", os.environ.get("HOSTED_VLLM_API_BASE", "NOTFOUND"))
     # validate the arguments
     validate_cfg(cfg)
 
