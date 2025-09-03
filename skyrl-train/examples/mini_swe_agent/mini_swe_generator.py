@@ -14,7 +14,7 @@ from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
 from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
-from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -37,13 +37,11 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
 
 
 @ray.remote
-def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, data_source):
+def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, data_source, sampling_params):
     from loguru import logger
 
     model_config = sweagent_config.get("model", {})
-    model_config.setdefault("model_kwargs", {}).update(
-        get_sampling_params_for_backend(generator_cfg.backend, generator_cfg.sampling_params)
-    )
+    model_config.setdefault("model_kwargs", {}).update(sampling_params)
     model = get_model(litellm_model_name, model_config)
 
     agent = None
@@ -118,13 +116,19 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         env_extras: Dict[str, Any],
         max_tokens: int,
         max_input_length: int,
-        sampling_params: Optional[Dict[str, Any]] = None,
+        sampling_params: Dict[str, Any],
     ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
 
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
+        # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         messages, reward, error = await init_and_run.remote(
-            instance, self.litellm_model_name, sweagent_config, self.generator_cfg, env_extras["data_source"]
+            instance,
+            self.litellm_model_name,
+            sweagent_config,
+            self.generator_cfg,
+            env_extras["data_source"],
+            sampling_params,
         )
         if not len(messages):
             return None, None, None, None, None, None
@@ -176,28 +180,24 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
 
-    async def generate_batched(
-        self,
-        prompts: List[ConversationType],
-        env_classes: List[str],
-        env_extras: List[Dict[str, Any]],
-        max_tokens: int,
-        max_input_length: int,
-        sampling_params: Optional[Dict[str, Any]] = None,
-    ) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
-        Single-turn batched generation (can use the synchronous offline engine)
+        Generate trajectories for the input batch.
 
+        Returns outputs in the same order as the input batch.
         Args:
-            prompts: List[ConversationType]
-            env_classes: List[str]
-            env_extras: List[Dict[str, Any]]
-            max_tokens: int
-            max_input_length: int --> Currently unused as we assume batched is used only for single-turn.
-            sampling_params: Optional[Dict[str, Any]]
+            input_batch: GeneratorInput
         Returns:
             GeneratorOutput
         """
+        prompts = input_batch["prompts"]
+        env_extras = input_batch["env_extras"]
+        max_tokens = self.generator_cfg.sampling_params.max_generate_length
+        max_input_length = self.generator_cfg.max_input_length
+        sampling_params = get_sampling_params_for_backend(
+            self.generator_cfg.backend, self.generator_cfg.sampling_params
+        )
+
         tasks = []
 
         for i in range(len(prompts)):
@@ -205,8 +205,8 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
                 self.minisweagent_agent_loop(
                     prompts[i],
                     env_extras[i],
-                    self.generator_cfg.sampling_params.max_generate_length,
-                    max_input_length=self.generator_cfg.max_input_length,
+                    max_tokens=max_tokens,
+                    max_input_length=max_input_length,
                     sampling_params=sampling_params,
                 )
             )
