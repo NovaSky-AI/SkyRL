@@ -1,15 +1,16 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-Coder-1.5B-Instruct on GSM8k dataset.
+# Colocated GRPO training+generation for Qwen3-4B on the SWE-Bench task.
 # Uses 1 node with 4 GPUs.
-# uv run examples/llm_as_a_judge/gsm8k_dataset_judge.py --output_dir $HOME/data/gsm8k_llm_judge
-# add OPENAI_API_KEY and WANDB_API_KEY to .env.llm_judge
-# bash examples/llm_as_a_judge/run_llm_judge.sh
+# uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
+# bash examples/mini_swe_agent/run_mini_swe.sh
 
-DATA_DIR="/mnt/user_storage/swe_gym"
+DATA_DIR="$HOME/data/swe_gym"
 CKPT_PATH="$HOME/ckpts/llm_mini_swe"
+# save trajectories here
+MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
 
-NUM_GPUS=2
+NUM_GPUS=4
 NUM_INFERENCE_ENGINES=1
 TP_SIZE=1
 LOGGER=wandb
@@ -58,5 +59,5 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_mini_swe_4B_ckpt" \
   +generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \
-  +generator.miniswe_traj_dir="/mnt/local_storage/mini_swe_agent"
+  +generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR
   $@
