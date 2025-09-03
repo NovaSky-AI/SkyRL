@@ -1,6 +1,6 @@
 SkyRL + Mini-SWE-Agent: Training a SWE-Agent for SWE-Bench
 
-========================================================
+===========================================================
 
 In this example, we walk through how to train a SWE-Agent on the SWE-Bench task by leveraging [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent)
 
