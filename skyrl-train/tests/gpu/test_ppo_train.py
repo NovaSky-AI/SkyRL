@@ -9,7 +9,7 @@ import pytest
 import ray
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_test_actor_config
+from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_test_actor_config, validate_cfg
 
 
 @pytest.fixture
@@ -22,6 +22,8 @@ def cfg() -> DictConfig:
     cfg.trainer.policy_mini_batch_size = 2
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.logger = "console"
+    validate_cfg(cfg)
 
     return cfg
 

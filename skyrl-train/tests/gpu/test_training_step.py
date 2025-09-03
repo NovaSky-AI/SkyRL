@@ -8,7 +8,7 @@ import pytest
 import hydra
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience
+from tests.gpu.utils import init_worker_with_type, make_dummy_experience, validate_cfg
 from skyrl_train.utils.utils import print_mem
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -49,6 +49,8 @@ async def test_policy_training_step(cfg, packed, strategy):
     """
     cfg.trainer.use_sample_packing = packed
     cfg.trainer.strategy = strategy
+    validate_cfg(cfg)
+
     try:
         actor_group = init_worker_with_type(
             "policy",
@@ -103,7 +105,7 @@ async def test_critic_training_step(cfg, packed, strategy):
     """
     cfg.trainer.use_sample_packing = packed
     cfg.trainer.strategy = strategy
-
+    validate_cfg(cfg)
     try:
         actor_group = init_worker_with_type(
             "critic",

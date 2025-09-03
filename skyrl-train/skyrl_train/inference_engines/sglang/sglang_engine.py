@@ -179,10 +179,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             )
         self.tokenizer = kwargs.pop("tokenizer", None)
 
-        # Extract sampling params
-        sampling_params_dict = kwargs.pop("sampling_params", None)
-        self.sampling_params = sampling_params_dict or {}
-
         # Unused kwargs
         _ = kwargs.pop("num_gpus", 1)
 
@@ -208,20 +204,12 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
 
-        if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
-            raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
+        assert (
+            prompts is None and prompt_token_ids is not None
+        ), "SGLangInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
 
-        # Use request sampling params if provided, otherwise use defaults
-        sampling_params = request_sampling_params if request_sampling_params is not None else self.sampling_params
-
-        if prompt_token_ids is None:
-            prompt_token_ids = self.tokenizer.apply_chat_template(
-                prompts,
-                add_generation_prompt=True,
-                add_special_tokens=False,
-                return_dict=True,
-                tokenize=True,
-            )["input_ids"]
+        # Use request sampling params if provided.
+        sampling_params = request_sampling_params if request_sampling_params is not None else {}
 
         return prompt_token_ids, sampling_params
 

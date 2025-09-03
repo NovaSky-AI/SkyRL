@@ -50,9 +50,10 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=5 \
-  generator.use_conversation_multi_turn=false \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
+  generator.sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \

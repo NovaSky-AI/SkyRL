@@ -14,7 +14,6 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
@@ -55,7 +54,6 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         async_engine=cfg.generator.async_engine,
         max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
         max_num_seqs=cfg.generator.max_num_seqs,
-        sampling_params=get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params),
         tokenizer=tokenizer,
         backend=cfg.generator.backend,
     )
@@ -69,7 +67,6 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         engine_backend=cfg.generator.backend,
         tokenizer=tokenizer,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
-        sampling_params=get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params),
     )
 
 
@@ -250,7 +247,7 @@ class BasePPOExp:
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
 
-        inference_engine_client = InferenceEngineClient(inference_engines)
+        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 

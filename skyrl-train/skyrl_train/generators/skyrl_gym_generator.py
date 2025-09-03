@@ -1,3 +1,10 @@
+"""
+This file implements ``SkyRLGymGenerator``, an implementation of the `GeneratorInterface` that
+uses SkyRL-Gym as the environment.
+
+For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html
+"""
+
 import asyncio
 import copy
 from uuid import uuid4
@@ -7,6 +14,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
 from dataclasses import dataclass
+from loguru import logger
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -66,7 +74,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
-        # correctly format and tokenize observations.
+        # correctly format and tokenize observations into `observation_ids`.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -78,18 +86,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             add_generation_prompt=False,
             tokenize=True,
         )
-        # For Qwen2.5 and Qwen3, the above would generate
-        # <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
-        # <|im_start|>user\nI am a user.<|im_end|>\n
-        # <|im_start|>assistant\nI am an assistant.<|im_end|>\n
-
-        # Note that there is a `\n` in assistant's line before next user's messsage starts.
-        # If we do token-in-token-out, there is no way for LLM engine to generate `\n` since the
-        # EOS token is `<|im_end|>`. Therefore, we need to add it during `observation_ids`.
-        # By cutting `\n` out in `base_conversation_token_ids`, `observation_ids` in
-        # `_get_next_input_ids_with_multiturn_chat_template()` will be `\n<|im_start|>user\nObservation here<|im_end|>\n`.
-        # Note the `\n` at the final assistant turn will still be missing, but this is fine.
-        # See tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py for more details.
+        # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
+        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
         if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
             last_eos_token_index = (
                 len(self.base_conversation_token_ids)
@@ -148,12 +146,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = env.init(chat_history)
+        initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
+            chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
         )
 
@@ -177,6 +177,20 @@ class SkyRLGymGenerator(GeneratorInterface):
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
 
+            # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
+            # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
+            current_sampling_params = (
+                sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+            )
+            stop_strs = current_sampling_params.get("stop", None)
+            if (
+                stop_strs is not None
+                and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
+                and self.use_conversation_multi_turn
+            ):
+                if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                    output_ids.append(self.tokenizer.eos_token_id)
+
             # 2. Environment step
             if self.env_executor is not None:
                 loop = asyncio.get_running_loop()
@@ -189,7 +203,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
-                print(
+                logger.warning(
                     "WARNING: postprocessed action may violate token-in-token-out. Ideally you "
                     "post-process it in the token space rather than string space. "
                     "A better solution coming soon."
@@ -224,7 +238,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                chat_history[len(prompt) :],
+                chat_history[initial_chat_history_length:],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
@@ -498,7 +512,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # re-apply whole chat template so length check is correct
         input_ids = self.tokenizer.apply_chat_template(
-            chat_history[:chat_end_index], add_generation_prompt=False, tokenize=True
+            chat_history[:chat_end_index],
+            chat_template=self.custom_chat_template,
+            add_generation_prompt=False,
+            tokenize=True,
         )
         return chat_history, chat_end_index, input_ids
 
@@ -559,8 +576,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
-            # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the first `\n`
-            # is generated due to `self.base_conversation_token_ids[: last_eos_token_index + 1]` in `__init__()`.
+            # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
+            # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,

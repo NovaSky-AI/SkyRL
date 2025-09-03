@@ -1,4 +1,4 @@
-from typing import List, Any, Dict, Optional
+from typing import List
 import ray
 import vllm
 from skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
@@ -41,7 +41,6 @@ def create_ray_wrapped_inference_engines_flashrl(
     async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
-    sampling_params: Optional[Dict[str, Any]] = None,
     tokenizer=None,
     backend="vllm",
 ) -> List[InferenceEngineInterface]:
@@ -109,7 +108,6 @@ def create_ray_wrapped_inference_engines_flashrl(
                 noset_visible_devices=noset_visible_devices,
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_num_seqs=max_num_seqs,
-                sampling_params=sampling_params,
                 tokenizer=tokenizer,
                 # only need the logprobs for the chosen token if any
                 max_logprobs=1,

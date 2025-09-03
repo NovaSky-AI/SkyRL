@@ -12,16 +12,10 @@ import ray
 import hydra
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, get_test_prompts
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from transformers import AutoTokenizer
-from ray.util.placement_group import placement_group
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines
 from skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -43,46 +37,9 @@ def get_test_actor_config() -> DictConfig:
         return cfg
 
 
-async def run_inference(client, prompts):
-    engine_input = InferenceEngineInput(prompts=prompts)
+async def run_inference(client, prompts, sampling_params):
+    engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     return await client.generate(engine_input)
-
-
-def init_inference_engines(cfg, use_local, async_engine, tp_size, colocate_all, backend):
-    assert use_local, "This test does not yet support remote engines."
-    assert backend in ["vllm", "sglang"]
-    initialize_ray(cfg)
-    if colocate_all:
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
-        sleep = True
-    else:
-        pg, sleep = None, False
-
-    eps = create_ray_wrapped_inference_engines(
-        num_inference_engines=1,
-        tensor_parallel_size=tp_size,
-        model_dtype="bfloat16",
-        pretrain=MODEL,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        max_model_len=1536,
-        shared_pg=pg,
-        gpu_memory_utilization=0.6,
-        inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
-        max_num_batched_tokens=8192,
-        max_num_seqs=1024,
-        sampling_params=get_sampling_params_for_backend(backend, cfg.generator.sampling_params),
-        tokenizer=AutoTokenizer.from_pretrained(MODEL),
-        backend=backend,
-    )
-    client = InferenceEngineClient(eps)
-    if sleep:
-        asyncio.run(client.wake_up())
-    return client, pg
 
 
 @pytest.mark.parametrize(
@@ -141,6 +98,7 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend=backend,
+            model=MODEL,
         )
 
         policy = init_worker_with_type(
@@ -153,7 +111,8 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL)))
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:

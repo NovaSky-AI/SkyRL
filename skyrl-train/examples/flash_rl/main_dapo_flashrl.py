@@ -17,7 +17,6 @@ from skyrl_train.entrypoints.main_base import (
     create_remote_inference_engines_from_config,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.base import GeneratorInterface
 from loguru import logger
 from skyrl_train.generators.base import GeneratorOutput
@@ -42,7 +41,6 @@ def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: DictConfig, co
         async_engine=cfg.generator.async_engine,
         max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
         max_num_seqs=cfg.generator.max_num_seqs,
-        sampling_params=get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params),
         tokenizer=tokenizer,
         backend=cfg.generator.backend,
     )
@@ -148,7 +146,7 @@ class DAPOExp(BasePPOExp):
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg)
 
-        inference_engine_client = InferenceEngineClient(inference_engines)
+        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 

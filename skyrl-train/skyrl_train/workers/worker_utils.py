@@ -61,7 +61,7 @@ class BatchIterator:
             loss_mask=batch["loss_mask"],
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],  # int
-            rollout_logprobs=batch["rollout_logprobs"],
+            rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},

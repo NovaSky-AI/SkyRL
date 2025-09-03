@@ -133,36 +133,6 @@ def test_parse_action(search_env, action, expected_input):
 
 
 # =============================================================================
-# ACTION POSTPROCESSING FUNCTIONALITY TESTS
-# =============================================================================
-
-
-@pytest.mark.parametrize(
-    "action, expected",
-    [
-        # Search with extra content after closing tag
-        ("<search>Query</search> extra content", "<search>Query</search>"),
-        # Answer with extra content after closing tag
-        ("<answer>Answer</answer> extra content", "<answer>Answer</answer>"),
-        # Both search and answer tags
-        ("<search>Query</search> <answer>Answer</answer> extra", "<search>Query</search>"),
-        # Only search tag (no extra content)
-        ("<search>Query</search>", "<search>Query</search>"),
-        # Only answer tag (no extra content)
-        ("<answer>Answer</answer>", "<answer>Answer</answer>"),
-        # No special tags
-        ("Just plain text", "Just plain text"),
-        # end tag before start tag
-        ("</search><search>Query</search>", "</search>"),
-    ],
-)
-def test_postprocess_action(search_env, action, expected):
-    """Test action postprocessing."""
-    result = search_env._postprocess_action(action)
-    assert result == expected
-
-
-# =============================================================================
 # EPISODE TERMINATION CONDITIONS TESTS
 # =============================================================================
 
@@ -313,8 +283,6 @@ def test_invalid_search_parsing(search_env, mock_search_api):
         ("<answer>emmanuel macron</answer>", {"target": "Emmanuel Macron"}, 1.0, True),
         # Answer without articles
         ("<answer>Emmanuel Macron</answer>", {"target": "The Emmanuel Macron"}, 1.0, True),
-        # Multiple answer tags (should use first one)
-        ("<answer>Wrong</answer> <answer>Emmanuel Macron</answer>", {"target": "Emmanuel Macron"}, 0.0, True),
         # No answer tag
         ("Just text without answer tag", {"target": "Emmanuel Macron"}, 0.0, False),
     ],

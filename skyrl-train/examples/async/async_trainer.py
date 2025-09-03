@@ -167,7 +167,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 # truncate data to have even shards
                 rand_prompts = self._remove_tail_data(rand_prompts)
                 generator_input, uids = self._prepare_generator_input(
-                    self.cfg.generator.n_samples_per_prompt, rand_prompts
+                    self.cfg.generator.n_samples_per_prompt, rand_prompts, self.cfg.generator.sampling_params
                 )
 
                 # generation phase

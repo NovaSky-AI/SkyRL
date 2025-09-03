@@ -89,17 +89,18 @@ class SQLEnv(BaseTextEnv):
             return True
         return "<solution>" in action and "</solution>" in action
 
-    def _postprocess_action(self, action: str) -> str:
-        if "</sql>" in action:
-            return action.split("</sql>")[0] + "</sql>"
-        elif "</solution>" in action:
-            return action.split("</solution>")[0] + "</solution>"
-        else:
-            return action
+    def _validate_action(self, action: str):
+        stop_tags = ["</sql>", "</solution>"]
+        for tag in stop_tags:
+            if tag in action:
+                assert action.split(tag, 1)[1] == "", (
+                    f"{tag} detected in the response but it is not the last string generated. "
+                    f"Use {stop_tags} as stop strings in the configuration."
+                )
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
-        action = self._postprocess_action(action)
+        self._validate_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None
@@ -107,9 +108,7 @@ class SQLEnv(BaseTextEnv):
         reward = self._get_reward(action, done)
 
         if done:
-            return BaseTextEnvStepOutput(
-                observations=[], reward=reward, done=done, metadata={}, postprocessed_action=action
-            )
+            return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
 
         try:
             tool_group_name, tool_name, tool_input = self._parse_action(action)
@@ -140,5 +139,4 @@ class SQLEnv(BaseTextEnv):
             reward=reward,
             done=done,
             metadata=info,
-            postprocessed_action=action,
         )
