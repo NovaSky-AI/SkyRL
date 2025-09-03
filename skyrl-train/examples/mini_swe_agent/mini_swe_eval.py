@@ -4,19 +4,16 @@ import uuid
 
 from typing import Dict, Any
 from loguru import logger
-from minisweagent.models import get_model
 from minisweagent.run.extra.swebench import (
     get_sb_environment,
 )
-from minisweagent.agents.default import DefaultAgent
-from minisweagent.run.utils.save import save_traj
-from minisweagent.config import get_config_path
 
 
 class MiniSWEEvaluationResult(TypedDict):
     instance_id: str
     resolved: bool
     eval_error: Optional[str]
+
 
 def evaluate_trajectory(instance: Dict[str, Any], model_patch, sweagent_config) -> MiniSWEEvaluationResult:
     instance_id = instance["instance_id"]

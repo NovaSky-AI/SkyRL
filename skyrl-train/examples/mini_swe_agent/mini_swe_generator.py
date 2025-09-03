@@ -37,6 +37,7 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
         }
         output_path.write_text(json.dumps(output_data, indent=2))
 
+
 @ray.remote
 def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
     from loguru import logger
@@ -66,9 +67,7 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
             save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
 
             try:
-                result = evaluate_trajectory(
-                    instance, result, sweagent_config
-                )
+                result = evaluate_trajectory(instance, result, sweagent_config)
                 reward = int(result["resolved"])
                 error = result["eval_error"]
                 if error:
@@ -90,7 +89,6 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         tokenizer,
         model_name: str,
     ):
-        from loguru import logger
 
         # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
@@ -118,11 +116,11 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
 
-        from loguru import logger
-
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
-        messages, reward, error = await init_and_run.remote(instance, self.litellm_model_name, sweagent_config, self.generator_cfg)
+        messages, reward, error = await init_and_run.remote(
+            instance, self.litellm_model_name, sweagent_config, self.generator_cfg
+        )
         if not len(messages):
             return None, None, None, None, None, None
 
