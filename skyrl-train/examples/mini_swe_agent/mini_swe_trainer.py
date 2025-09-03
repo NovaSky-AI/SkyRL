@@ -1,4 +1,5 @@
 import torch
+import math
 
 from skyrl_train.generators.base import (
     GeneratorInput,
@@ -27,9 +28,25 @@ class MiniSWEPPOTrainer(RayPPOTrainer):
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        # NOTE (sumanthrh): We filter out instances that failed, so the number of prompts at input can differ from number of trajectories at output
+        # NOTE (sumanthrh): We filter out instances that failed due to , so the number of prompts at input can differ from number of trajectories at output
         # we simply ignore validation for now
         # validate_generator_output(input_batch, generator_output)
+
+        # ensure that the number of trajectories meets the minimum required
+        num_trajectories = len(generator_output['response_ids'])
+        dp_size = self.policy_model.actor_infos[0].rank.dp_size
+        assert num_trajectories >= self.policy_model.actor_infos[0].rank.dp_size, f"Expected atleast {dp_size} valid trajectories for num policy workers {dp_size}, but got {num_trajectories} trajectories" 
+        if self.critic_model is not None:
+            dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
+            assert num_trajectories >= self.critic_model.actor_infos[0].rank.dp_size, f"Expected atleast {self.critic_model.actor_infos[0].rank.dp_size} valid trajectories for num critic workers {self.critic_model.actor_infos[0].rank.dp_size}, but got {num_trajectories} trajectories" 
+        if self.ref_model is not None:
+            dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
+            assert num_trajectories >= self.ref_model.actor_infos[0].rank.dp_size, f"Expected atleast {self.ref_model.actor_infos[0].rank.dp_size} valid trajectories for num ref workers {self.ref_model.actor_infos[0].rank.dp_size}, but got {num_trajectories} trajectories" 
+        
+        # removes tail data so that workers get even shards
+        for key in generator_output.keys():
+            if isinstance(generator_output[key], list):
+                generator_output[key] = generator_output[key][: (num_trajectories // dp_size) * dp_size]
 
         if not len(generator_output["prompt_token_ids"]):
             raise ValueError(

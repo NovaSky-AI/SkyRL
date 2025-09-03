@@ -214,7 +214,7 @@ agent:
 
 environment:
   cwd: "/testbed"
-  timeout: 120
+  timeout: 3600
   env:
     PAGER: cat
     MANPAGER: cat
@@ -222,7 +222,7 @@ environment:
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
   environment_class: singularity
-  executable: apptainer
+  # executable: apptainer
 
 model:
   model_name: "Qwen/Qwen3-4B"

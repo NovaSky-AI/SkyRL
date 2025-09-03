@@ -3,11 +3,11 @@ from typing import Dict, List, Optional, Any, Tuple
 from omegaconf import DictConfig
 import yaml
 import traceback
+import ray
 import json
 import threading
 from pathlib import Path
 
-from loguru import logger
 from minisweagent.models import get_model
 from minisweagent.run.extra.swebench import (
     get_sb_environment,
@@ -15,11 +15,11 @@ from minisweagent.run.extra.swebench import (
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
+from .mini_swe_eval import evaluate_trajectory
 
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from .eval import evaluate_result
 
 _OUTPUT_FILE_LOCK = threading.Lock()
 
@@ -37,6 +37,49 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
         }
         output_path.write_text(json.dumps(output_data, indent=2))
 
+@ray.remote
+def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg):
+    from loguru import logger
+
+    model = get_model(litellm_model_name, sweagent_config.get("model", {}))
+
+    agent = None
+    env = None
+    extra_info = None
+    result = None
+    reward = 0
+    error = None
+    try:
+        env = get_sb_environment(sweagent_config, instance)
+        agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+        exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+    except Exception as e:
+        logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
+        exit_status, result = type(e).__name__, str(e)
+        error = str(e)
+        extra_info = {"traceback": traceback.format_exc()}
+    finally:
+        path = Path(generator_cfg.miniswe_traj_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        path = path / (str(instance["instance_id"]) + ".json")
+        if agent is not None:
+            save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
+
+            try:
+                result = evaluate_trajectory(
+                    instance, result, sweagent_config
+                )
+                reward = int(result["resolved"])
+                error = result["eval_error"]
+                if error:
+                    logger.debug(f"Error during evaluation {error}")
+            except Exception as e:
+                logger.debug(f"Error during evaluation {e}")
+                logger.debug(f"traceback: {traceback.format_exc()}")
+                error = str(e)
+
+    return (agent.messages if agent is not None else [], reward, error)
+
 
 class MiniSweAgentGenerator(SkyRLGymGenerator):
     def __init__(
@@ -47,6 +90,8 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         tokenizer,
         model_name: str,
     ):
+        from loguru import logger
+
         # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
@@ -73,16 +118,18 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
 
+        from loguru import logger
+
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
-        messages, reward, error = await asyncio.to_thread(self._init_and_run, sweagent_config, instance)
+        messages, reward, error = await init_and_run.remote(instance, self.litellm_model_name, sweagent_config, self.generator_cfg)
         if not len(messages):
             return None, None, None, None, None, None
 
         # TODO (sumanthrh):This is currently hardcoded for SWEBench with 2 initial messages.
         response_messages = messages[2:]
 
-        for message in response_messages:
+        for message in messages[:2]:
             assert message["role"] in (
                 "system",
                 "user",
@@ -125,45 +172,6 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         loss_mask = loss_mask[:max_response_tokens]
 
         return (response_ids, reward, stop_reason, loss_mask, prompt_ids, None)
-
-    def _init_and_run(self, sweagent_config, instance):
-        model = get_model(self.litellm_model_name, sweagent_config.get("model", {}))
-
-        agent = None
-        env = None
-        extra_info = None
-        result = None
-        reward = 0
-        error = None
-        try:
-            env = get_sb_environment(sweagent_config, instance)
-            agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
-            exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
-        except Exception as e:
-            logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
-            exit_status, result = type(e).__name__, str(e)
-            error = str(e)
-            extra_info = {"traceback": traceback.format_exc()}
-        finally:
-            path = Path(self.generator_cfg.miniswe_traj_dir)
-            path.mkdir(parents=True, exist_ok=True)
-            path = path / (str(instance["instance_id"]) + ".json")
-            if agent is not None:
-                save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
-                update_preds_file(
-                    path, instance_id=instance["instance_id"], model_name=self.litellm_model_name, result=result
-                )
-
-                try:
-                    reward, error = evaluate_result(
-                        instance, result, instance["instance_id"], "swebench", sweagent_config
-                    )
-                    logger.debug(f"Error during evaluation {error}")
-                    error = str(error)
-                except Exception as e:
-                    logger.debug(f"Error during evaluation {e}")
-
-        return (agent.messages if agent is not None else [], reward, error)
 
     async def generate_batched(
         self,
