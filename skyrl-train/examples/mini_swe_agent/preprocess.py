@@ -1,34 +1,11 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """
-Preprocess the GSM8k dataset to parquet format
+Preprocess the SWEBench dataset to SkyRL format
 """
 
 import argparse
-import re
 import os
 
 import datasets
-
-
-def extract_solution(solution_str):
-    solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
-    assert solution is not None
-    final_solution = solution.group(0)
-    final_solution = final_solution.split("#### ")[1].replace(",", "")
-    return final_solution
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -42,6 +19,8 @@ if __name__ == "__main__":
 
     dataset = datasets.load_dataset(data_source, "default")
 
+    # this is just for demonstration
+    # TODO: Use Swe Gym as a training set
     train_dataset = dataset["test"]
     val_dataset = dataset["test"]
 
