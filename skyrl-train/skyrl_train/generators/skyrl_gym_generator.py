@@ -145,7 +145,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, _ = env.init(chat_history)
+        if self.env_executor is not None:
+            loop = asyncio.get_running_loop()
+            chat_history, _ = await loop.run_in_executor(self.env_executor, env.init, chat_history)
+        else:
+            chat_history, _ = env.init(chat_history)
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
