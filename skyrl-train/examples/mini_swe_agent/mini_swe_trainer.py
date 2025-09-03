@@ -28,7 +28,7 @@ class MiniSWEPPOTrainer(RayPPOTrainer):
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        # NOTE (sumanthrh): We filter out instances that failed due to , so the number of prompts at input can differ from number of trajectories at output
+        # NOTE (sumanthrh): We filter out instances that failed during generation, so the number of prompts at input can differ from number of trajectories at output
         # we simply ignore validation for now
         # validate_generator_output(input_batch, generator_output)
 
