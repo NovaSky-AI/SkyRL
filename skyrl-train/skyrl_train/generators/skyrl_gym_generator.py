@@ -9,7 +9,7 @@ import asyncio
 import copy
 from uuid import uuid4
 import skyrl_gym
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Tuple
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
@@ -29,7 +29,7 @@ class AgentLoopOutput:
     """Output from a single agent_loop execution."""
 
     response_ids: List[int]
-    reward: float
+    reward: Union[List[float], float]
     stop_reason: str
     loss_mask: List[int]
     prompt_ids: List[int]
@@ -107,7 +107,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self,
         prompt: ConversationType,
         env_class: str,
-        env_extras: List[Dict[str, Any]],
+        env_extras: Dict[str, Any],
         max_tokens: int,
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
@@ -125,13 +125,13 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         Args:
             prompt: ConversationType
-            env_extras: List[Dict[str, Any]]
+            env_extras: Dict[str, Any]
             max_tokens: int
             max_input_length: int
             sampling_params: Optional[Dict[str, Any]]
         Returns:
             response_ids: List[int]
-            reward: float
+            reward: Union[float, List[float]]
             stop_reason: str
             loss_mask: List[int]
             prompt_token_ids: List[int]
@@ -167,6 +167,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         initial_prompt_length = len(input_ids)
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
+        # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
+        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
 
         while not done:
             # 1. Generate output
@@ -201,7 +203,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
-            reward = env_step_output["reward"]
+            step_reward: Optional[float] = env_step_output["reward"]
             done = env_step_output["done"]
 
             if env_step_output.get("postprocessed_action", None) is not None:
@@ -221,16 +223,22 @@ class SkyRLGymGenerator(GeneratorInterface):
                 chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
                     chat_history, chat_end_index, output, new_obs
                 )
+                # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
+                per_step_rewards.append((step_reward, None))
             elif self.use_conversation_multi_turn:
                 # b. Token-in-token-out. Follow multi-turn chat history format.
-                input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
+                input_ids, loss_mask, response_end_idx = self._get_next_input_ids_with_multiturn_chat_template(
                     input_ids, loss_mask, output_ids, new_obs, done
                 )
+                per_step_rewards.append((step_reward, response_end_idx))
             else:
                 # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
-                loss_mask, input_ids, rollout_logprobs = self._get_next_input_ids_with_single_turn_chat_template(
-                    output_ids, new_obs, loss_mask, input_ids, rollout_logprobs
+                loss_mask, input_ids, rollout_logprobs, response_end_idx = (
+                    self._get_next_input_ids_with_single_turn_chat_template(
+                        output_ids, new_obs, loss_mask, input_ids, rollout_logprobs
+                    )
                 )
+                per_step_rewards.append((step_reward, response_end_idx))
 
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
@@ -252,6 +260,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             response_ids = response_encodings["input_ids"]
         else:
             response_ids = input_ids[initial_prompt_length:]
+            per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         if not self.use_conversation_multi_turn:
@@ -272,9 +281,23 @@ class SkyRLGymGenerator(GeneratorInterface):
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 
+        # Build reward output
+        if retokenize_chat_history:
+            reward_out = per_step_rewards[-1][0]
+        else:
+            # Build token-level rewards placed at assistant turn boundaries
+            token_level_rewards: List[float] = [0.0] * len(response_ids)
+            for step_reward, idx in per_step_rewards:
+                if step_reward is None:
+                    continue
+                if idx >= len(response_ids):
+                    break
+                token_level_rewards[idx] += step_reward
+            reward_out = token_level_rewards
+
         return AgentLoopOutput(
             response_ids=response_ids,
-            reward=reward,
+            reward=reward_out,
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
@@ -445,8 +468,16 @@ class SkyRLGymGenerator(GeneratorInterface):
 
     def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]):
         num_tokens_arr = np.array([len(response) for response in responses])
-        non_zero_rewards_arr = np.array([reward > 0.0 for reward in rewards])
-        zero_rewards_arr = np.array([reward == 0.0 for reward in rewards])
+        # Support both response-level and token-level rewards
+        flat_rewards = []
+        for r in rewards:
+            if isinstance(r, list):
+                flat_rewards.append(float(np.sum(r)))
+            else:
+                flat_rewards.append(float(r))
+        flat_rewards_arr = np.array(flat_rewards)
+        non_zero_rewards_arr = flat_rewards_arr > 0.0
+        zero_rewards_arr = flat_rewards_arr == 0.0
         # average tokens for non zero rewards
         avg_tokens_non_zero_rewards = (
             np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
@@ -474,7 +505,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         """
         for i, stop_reason in enumerate(stop_reasons):
             if stop_reason != "stop":
-                rewards[i] = 0.0
+                if isinstance(rewards[i], list):
+                    rewards[i] = [0.0] * len(rewards[i])
+                else:
+                    rewards[i] = 0.0
         return rewards
 
     # ----------------------------------------------------------------------------
@@ -575,6 +609,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # 1. Directly append generated output
         input_ids += output_ids
+        response_end_idx = len(input_ids) - 1
         loss_mask += [1] * len(output_ids)
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
@@ -593,7 +628,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 input_ids += self.generation_prompt_ids
                 loss_mask += [0] * len(self.generation_prompt_ids)
 
-        return input_ids, loss_mask
+        return input_ids, loss_mask, response_end_idx
 
     def _get_next_input_ids_with_single_turn_chat_template(
         self,
@@ -645,6 +680,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             new_resp_tokens = new_resp_tokens[:-1]
         loss_mask += [1] * len(new_resp_tokens)
         input_ids += new_resp_tokens
+        response_end_idx = len(input_ids) - 1
 
         if len(new_obs) > 0:
             for obs in new_obs:
@@ -655,4 +691,4 @@ class SkyRLGymGenerator(GeneratorInterface):
                     logprobs += [1] * len(obs_tokens)
                 input_ids += obs_tokens
 
-        return loss_mask, input_ids, logprobs
+        return loss_mask, input_ids, logprobs, response_end_idx
