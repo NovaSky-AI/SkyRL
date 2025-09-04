@@ -38,7 +38,6 @@ def get_docker_image_name(instance: dict, data_source: str) -> str:
     image_name = instance.get("image_name", None)
     if image_name is None:
         iid = instance["instance_id"]
-        print("data source: ", data_source, "instance id: ", iid)
         if "swe-gym" in data_source.lower():
             id_docker_compatible = iid.replace("__", "_s_")  # to comply with docker image naming convention
             image_name = f"xingyaoww/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
