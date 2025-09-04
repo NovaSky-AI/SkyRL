@@ -36,7 +36,7 @@ def update_preds_file(output_path: Path, instance_id: str, model_name: str, resu
         output_path.write_text(json.dumps(output_data, indent=2))
 
 
-@ray.remote
+@ray.remote(num_cpus=0.01)
 def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, data_source, sampling_params):
     from loguru import logger
 
@@ -215,10 +215,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         # Filter out the `None` entries, which means that trajectory generation failed
         responses = [output[0] for output in all_outputs if output[0] is not None]
-        rewards = [output[1] for output in all_outputs if output[1] is not None]
-        stop_reasons = [output[2] for output in all_outputs if output[2] is not None]
-        loss_masks = [output[3] for output in all_outputs if output[3] is not None]
-        prompt_token_ids = [output[4] for output in all_outputs if output[4] is not None]
+        rewards = [output[1] for output in all_outputs if output[0] is not None]
+        stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
+        loss_masks = [output[3] for output in all_outputs if output[0] is not None]
+        prompt_token_ids = [output[4] for output in all_outputs if output[0] is not None]
         if not len(responses):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."

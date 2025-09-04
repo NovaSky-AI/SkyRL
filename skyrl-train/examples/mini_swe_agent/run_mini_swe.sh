@@ -1,6 +1,6 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen3-4B on the SWE-Bench task.
+# Colocated GRPO training+generation for Qwen3-8B on the SWE-Bench task.
 # Uses 1 node with 4 GPUs.
 # uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
 # bash examples/mini_swe_agent/run_mini_swe.sh
@@ -15,6 +15,10 @@ NUM_INFERENCE_ENGINES=1
 TP_SIZE=1
 LOGGER=wandb
 
+# apply dynamic sampling
+DYNAMIC_SAMPLING_TYPE=filter
+DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=10
+
 # We use a smaller batch size here for demonstration
 uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -27,6 +31,8 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
+  trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
+  trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
   trainer.epochs=20 \
   trainer.eval_batch_size=8 \
   trainer.eval_before_train=false \
