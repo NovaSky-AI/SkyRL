@@ -107,10 +107,10 @@ class BasePPOExp:
             PromptDataset: The training dataset.
         """
         prompts_dataset = PromptDataset(
-            self.cfg.data.train_data,
-            self.tokenizer,
-            self.cfg.trainer.max_prompt_length,
-            num_processors=8,
+            datasets=self.cfg.data.train_data,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            num_workers=8,
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -126,10 +126,10 @@ class BasePPOExp:
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
             prompts_dataset = PromptDataset(
-                self.cfg.data.val_data,
-                self.tokenizer,
-                self.cfg.trainer.max_prompt_length,
-                num_processors=8,
+                datasets=self.cfg.data.val_data,
+                tokenizer=self.tokenizer,
+                max_prompt_length=self.cfg.trainer.max_prompt_length,
+                num_workers=8,
             )
             return prompts_dataset
         return None
