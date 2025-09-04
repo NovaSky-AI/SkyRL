@@ -10,6 +10,7 @@ import copy
 from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional
+
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
@@ -22,6 +23,18 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, Conversatio
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import get_custom_chat_template, get_generation_prompt_ids, apply_overlong_filtering
+from skyrl_train.generators.trajectory_logger import TrajectoryLogger, Trajectory, create_trajectory_logger_from_config
+
+
+class AgentLoopOutput(NamedTuple):
+    """Return value from agent_loop for better maintainability and readability."""
+    response_ids: List[int]
+    reward: float
+    stop_reason: str
+    loss_mask: List[int]
+    prompt_token_ids: List[int]
+    rollout_logprobs: Optional[List[float]]
+    trajectory: Optional[Trajectory]
 
 
 @dataclass
@@ -44,6 +57,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
+        trajectory_logger: Optional[TrajectoryLogger] = None,
     ):
         """
         Args:
@@ -69,6 +83,28 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         else:
             self.env_executor = None
+        
+        # Initialize trajectory logging components
+        self.trajectory_batch = []
+        self.batch_count = 0  # Internal counter for logging intervals
+        
+        # Use injected logger or create from config
+        if trajectory_logger:
+            self.trajectory_logger = trajectory_logger
+            self.collect_trajectories = True
+            # Get log interval from config if available
+            self.log_interval = generator_cfg.trajectory_logging.get('log_interval', 100) if hasattr(generator_cfg, 'trajectory_logging') else 100
+        elif hasattr(generator_cfg, 'trajectory_logging'):
+            self.trajectory_logger = create_trajectory_logger_from_config(
+                generator_cfg.trajectory_logging
+            )
+            self.collect_trajectories = self.trajectory_logger is not None
+            self.log_interval = generator_cfg.trajectory_logging.get('log_interval', 100)
+        else:
+            self.trajectory_logger = None
+            self.collect_trajectories = False
+            self.log_interval = None
+    
 
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
@@ -130,12 +166,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_input_length: int
             sampling_params: Optional[Dict[str, Any]]
         Returns:
-            response_ids: List[int]
-            reward: float
-            stop_reason: str
-            loss_mask: List[int]
-            prompt_token_ids: List[int]
-            rollout_logprobs: Optional[List[float]]
+            AgentLoopOutput containing:
+                response_ids: List[int]
+                reward: float
+                stop_reason: str
+                loss_mask: List[int]
+                prompt_token_ids: List[int]
+                rollout_logprobs: Optional[List[float]]
+                trajectory: Optional[Trajectory]
         """
         retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
 
@@ -271,6 +309,24 @@ class SkyRLGymGenerator(GeneratorInterface):
             stop_reason = "length"
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
+        
+        # Create trajectory object if logging is enabled
+        trajectory = None
+        if self.trajectory_logger and self.collect_trajectories:
+            # Decode response for logging
+            response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+            
+            trajectory = Trajectory(
+                prompt=prompt,
+                chat_history=chat_history,
+                response=response_text,
+                reward=reward,
+                stop_reason=stop_reason,
+                env_class=env_class,
+                env_extras=env_extras,
+                loss_mask=loss_mask,
+                metadata={'trajectory_id': trajectory_id}
+            )
 
         return AgentLoopOutput(
             response_ids=response_ids,
@@ -279,6 +335,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             rollout_logprobs=rollout_logprobs,
+            trajectory=trajectory
+
         )
 
     async def generate_batched(
@@ -410,6 +468,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_masks = [output.loss_mask for output in all_outputs]
         prompt_token_ids = [output.prompt_ids for output in all_outputs]
 
+
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
             # TODO: this might have to change when we support logprobs for sglang
@@ -421,6 +480,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:
             rollout_logprobs = None
+        
+        # Collect and potentially flush trajectories if logging is enabled
+        self._handle_trajectory_logging(all_outputs)
 
         rollout_metrics = self._rollout_metrics(responses, rewards)
 
@@ -442,6 +504,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         }
 
         return generator_output
+    
 
     def _rollout_metrics(self, responses: List[List[int]], rewards: List[float]):
         num_tokens_arr = np.array([len(response) for response in responses])
@@ -656,3 +719,40 @@ class SkyRLGymGenerator(GeneratorInterface):
                 input_ids += obs_tokens
 
         return loss_mask, input_ids, logprobs
+
+    def _handle_trajectory_logging(self, all_outputs) -> None:
+        """
+        Collect trajectories and flush them based on configuration.
+        
+        This method handles all trajectory logging internally without
+        requiring external control from the trainer.
+        
+        Args:
+            all_outputs: List of outputs from agent_loop calls
+        """
+        if not (self.trajectory_logger and self.collect_trajectories):
+            return
+            
+        # Collect new trajectories
+        trajectories = [output.trajectory for output in all_outputs if output.trajectory is not None]
+        if trajectories:
+            self.trajectory_batch.extend(trajectories)
+        
+        # Increment batch counter
+        self.batch_count += 1
+        
+        # Check if we should flush based on log interval
+        should_flush = False
+        if self.log_interval == 1:
+            # Log every batch
+            should_flush = True
+        elif self.log_interval and self.batch_count % self.log_interval == 0:
+            # Log every N batches
+            should_flush = True
+        
+        if should_flush and self.trajectory_batch:
+            # Note: Using batch_count as step since we don't differentiate train/eval
+            # Future work will pass is_eval flag to handle this properly
+            self.trajectory_logger.log(self.trajectory_batch, self.batch_count, "generation")
+            self.trajectory_batch.clear()
+
