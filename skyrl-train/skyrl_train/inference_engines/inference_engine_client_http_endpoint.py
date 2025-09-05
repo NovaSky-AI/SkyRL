@@ -11,6 +11,7 @@ Main functions:
 """
 
 import asyncio
+import json
 import logging
 import time
 import requests
@@ -123,6 +124,16 @@ async def handle_chat_completion(raw_request: Request) -> JSONResponse:
         else:
             return JSONResponse(content=response)
 
+    except json.JSONDecodeError as e:
+        # To catch possible raw_request.json() errors
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Invalid JSON error: {str(e)}",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
     except Exception as e:
         error_response = ErrorResponse(
             error=ErrorInfo(

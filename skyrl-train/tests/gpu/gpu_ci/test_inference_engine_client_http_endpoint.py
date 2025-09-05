@@ -464,12 +464,12 @@ def test_http_endpoint_error_handling():
 
         # Test 4: Invalid request - malformed JSON, raised by SkyRL
         response = requests.post(
-            f"{base_url}/v1/chat/completions", data="invalid json", headers={"Content-Type": "application/json"}
+            f"{base_url}/v1/chat/completions", data="some invalid json", headers={"Content-Type": "application/json"}
         )
-        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR  # 500
+        assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
         print(f"Error data: {error_data}")
-        assert "Expecting value: line 1 " in error_data["error"]["message"]  # JSON decode error
+        assert "Invalid JSON error" in error_data["error"]["message"]  # JSON decode error
 
         # Test 5: Invalid request - empty messages array, raised by vLLM
         response = requests.post(f"{base_url}/v1/chat/completions", json={"model": MODEL, "messages": []})
