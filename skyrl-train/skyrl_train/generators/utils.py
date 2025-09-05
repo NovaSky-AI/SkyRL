@@ -35,25 +35,7 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endgeneration %}"
         "{% endif %}"
         "{% endfor %}"
-    ),
-    # custom template that removes thinking tokens with Q/A format
-    "custom_thinking_remover": (
-        "{% for message in messages %}"
-        "{% if message['role'] == 'user' %}"
-        "Q: {{message['content']}}"
-        "{% elif message['role'] == 'assistant' %}"
-        "A: {% generation %}"
-        "{% set content = message['content'] %}"
-        "{% if '</think>' in content %}"
-        "{% set answer = content.split('</think>')[-1].strip() %}"
-        "{{answer}}"
-        "{% else %}"
-        "{{content}}"
-        "{% endif %}"
-        "{% endgeneration %}"
-        "{% endif %}"
-        "{% endfor %}"
-    ),
+    )
 }
 
 
@@ -84,7 +66,7 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
         else:
             raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
     
-    elif source == "file":
+    if source == "file":
         try:
             with open(name_or_path, 'r', encoding='utf-8') as f:
                 return f.read()
@@ -92,10 +74,8 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
             raise ValueError(f"Template file '{name_or_path}' not found")
         except Exception as e:
             raise ValueError(f"Error reading template file '{name_or_path}': {e}")
-    else:
-        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
-
-    return None
+    
+    raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
