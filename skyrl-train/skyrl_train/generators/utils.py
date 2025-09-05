@@ -67,32 +67,33 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
     Returns:
         Chat template string or None
     """
-    if chat_template_config:
-        source = chat_template_config.get("source")
-        if not source:
-            raise ValueError("'source' is required in chat_template_config")
+    if chat_template_config is None: 
+        return None
+    
+    source = chat_template_config.get("source")
+    if not source:
+        raise ValueError("'source' is required in chat_template_config")
 
-        name_or_path = chat_template_config.get("name_or_path")
-        if not name_or_path:
-            raise ValueError("'name_or_path' is required in chat_template_config")
+    name_or_path = chat_template_config.get("name_or_path")
+    if not name_or_path:
+        raise ValueError("'name_or_path' is required in chat_template_config")
 
-        if source and name_or_path:
-            if source == "name":
-                if name_or_path in CUSTOM_CHAT_TEMPLATES:
-                    return CUSTOM_CHAT_TEMPLATES[name_or_path]
-                else:
-                    raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
-            
-            elif source == "file":
-                try:
-                    with open(name_or_path, 'r', encoding='utf-8') as f:
-                        return f.read()
-                except FileNotFoundError:
-                    raise ValueError(f"Template file '{name_or_path}' not found")
-                except Exception as e:
-                    raise ValueError(f"Error reading template file '{name_or_path}': {e}")
-            else:
-                raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
+        else:
+            raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
+    
+    elif source == "file":
+        try:
+            with open(name_or_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            raise ValueError(f"Template file '{name_or_path}' not found")
+        except Exception as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}")
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
     return None
 
