@@ -184,6 +184,7 @@ class _MlflowLoggingAdapter:
 
     def finish(self):
         import mlflow
+
         mlflow.end_run()
 
 
