@@ -100,7 +100,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
             else None
         ),
     }
-    if "stop_reasons" in generator_outputs[0]:
+    if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     return result

@@ -148,6 +148,7 @@ async def _generate_with_http_endpoint(
                 "model": model_name,
                 "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
                 "trajectory_id": trajectory_id,
+                # "add_generation_prompt": True, # TODO(Charlie): is it needed?
                 **(sampling_params or {}),
             }
             output_tasks.append(session.post(f"{base_url}/v1/chat/completions", json=payload, headers=headers))

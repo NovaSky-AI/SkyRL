@@ -7,6 +7,10 @@ import asyncio
 import vllm
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ChatCompletionResponse, ErrorResponse
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
@@ -311,17 +315,40 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         # TODO (erictang000): potentially enable log requests for a debugging mode
         engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
-        return vllm.AsyncLLMEngine.from_engine_args(engine_args)
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+
+        # Adapted from veRL vllm_async_server.py: build serving chat
+        model_config = engine.model_config
+        model_path = kwargs.get("model")
+        model_name = "/".join(model_path.split("/")[-2:])
+
+        BASE_MODEL_PATHS = [BaseModelPath(name=model_name, model_path=model_path)]
+        models = OpenAIServingModels(engine, model_config, BASE_MODEL_PATHS)
+        self.openai_serving_chat = OpenAIServingChat(
+            engine,
+            model_config,
+            models,
+            "assistant",
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            # enable_auto_tools=config.multi_turn.tool_config_path is not None,
+            # tool_parser=config.multi_turn.format,  # hermes, llama3_json, ...
+        )
+        return engine
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
         final_output = None
+        print(f"Sampling params observed by vllm: {sampling_params}")
         async for request_output in self.llm.generate(
             prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
             sampling_params=sampling_params,
             request_id=request_id,
         ):
             final_output = request_output
+
+        print(f"Final output observed by vllm: {final_output}")
 
         return final_output
 
@@ -403,6 +430,42 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def _destroy_weights_update_group(self):
         engine = self._get_engine()
         return await engine.collective_rpc("destroy_weights_update_group")
+
+    async def chat_completion(self, payload):
+        """OpenAI-compatible HTTP endpoint.
+
+        Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
+        Constructs a minimal request-like object for vLLM's openai_serving_chat.
+        Returns a plain dict that is JSON-serializable.
+        """
+        body = payload.get("json", {})
+        headers = payload.get("headers", {})
+
+        # Build request model
+        request = ChatCompletionRequest(**body)
+
+        # Create a minimal request-like object with attributes used by vLLM
+        from types import SimpleNamespace
+
+        class _MinimalRequest:
+            def __init__(self, headers):
+                # Expect a mapping with .get support
+                self.headers = headers
+                # vLLM sets raw_request.state.request_metadata
+                self.state = SimpleNamespace()
+                # Some code paths access client.host
+                # self.client = SimpleNamespace(host="127.0.0.1", port=0)
+
+        minimal_request = _MinimalRequest(headers)
+        generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+
+        if isinstance(generator, ErrorResponse):
+            return {"__error__": True, "payload": generator.model_dump(), "status_code": generator.code}
+        if request.stream:
+            raise ValueError("Streaming is not supported")
+        else:
+            assert isinstance(generator, ChatCompletionResponse)
+            return generator.model_dump()
 
 
 VLLMRayActor = ray.remote(VLLMInferenceEngine)

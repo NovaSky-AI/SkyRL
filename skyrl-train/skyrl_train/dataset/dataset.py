@@ -26,7 +26,7 @@ class PromptDataset:
             self.datasets = [self.datasets]
 
         self._read_files_and_tokenize()
-
+ 
     def _read_files_and_tokenize(self):
         loaded_datasets = []
         for source in self.datasets:

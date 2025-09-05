@@ -154,6 +154,7 @@ trainer:
 
 
 generator:
+  model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16" # should match dtype for inference engine
   run_engines_locally: true
   num_inference_engines: 1
@@ -184,6 +185,7 @@ generator:
   # sampling params for generation phase
   sampling_params:
     max_generate_length: 1024
+    repetition_penalty: 1.0
     temperature: 1.0
     top_p: 1.0
     min_p: 0.0
@@ -204,6 +206,7 @@ generator:
   # sampling params for evaluation
   eval_sampling_params:
     max_generate_length: ${generator.sampling_params.max_generate_length}
+    repetition_penalty: 1.0
     temperature: 0.0
     top_p: 1.0
     min_p: 0.0

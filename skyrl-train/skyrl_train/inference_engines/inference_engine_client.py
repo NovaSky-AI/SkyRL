@@ -73,6 +73,16 @@ class InferenceEngineClient(InferenceEngineInterface):
             # Split evenly across engines
             return await self._generate_batched(prompt_token_ids, sampling_params)
 
+    async def chat_completion(self, request_payload):
+        # Use trajectory id routing if present in payload
+        trajectory_id = 0
+        try:
+            trajectory_id = request_payload.get("json", {}).get("trajectory_id", 0)
+        except Exception:
+            trajectory_id = 0
+        engine_idx = abs(hash(str(trajectory_id))) % len(self.engines)
+        return await self.engines[engine_idx].chat_completion(request_payload)
+
     async def _generate_with_trajectory_routing(
         self, prompt_token_ids, trajectory_ids, sampling_params
     ) -> InferenceEngineOutput:

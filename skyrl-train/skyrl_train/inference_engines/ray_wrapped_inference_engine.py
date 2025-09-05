@@ -50,6 +50,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def reset_prefix_cache(self):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
 
+    async def chat_completion(self, request_payload):
+        return await self.inference_engine_actor.chat_completion.remote(request_payload)
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,

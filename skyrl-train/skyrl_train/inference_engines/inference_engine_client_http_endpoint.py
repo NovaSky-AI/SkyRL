@@ -25,20 +25,10 @@ import uvicorn
 from fastapi import HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput, ConversationType
+# from vllm.entrypoints.openai.protocol import ChatCompletionResponse, ChatCompletionRequest, ErrorResponse
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.openai_api_protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionResponseChoice,
-    ChatMessage,
-    ErrorResponse,
-    check_unsupported_fields,
-    build_sampling_params,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -55,71 +45,31 @@ def set_global_state(inference_engine_client: "InferenceEngineClient", uvicorn_s
     _global_uvicorn_server = uvicorn_server
 
 
-def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: str) -> InferenceEngineInput:
-    """Convert OpenAI request to InferenceEngineInput format."""
-    # Convert messages to our ConversationType format
-    conversation: ConversationType = []
-    for msg in request.messages:
-        conversation.append({"role": msg.role, "content": msg.content})
-
-    sampling_params = build_sampling_params(request, backend)
-
-    engine_input: InferenceEngineInput = {
-        "prompts": [conversation],
-        "prompt_token_ids": None,
-        "sampling_params": sampling_params if sampling_params else None,
-        "trajectory_ids": [request.trajectory_id] if request.trajectory_id else None,
-    }
-    return engine_input
-
-
-def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, model_name: str) -> ChatCompletionResponse:
-    """Convert InferenceEngineOutput to OpenAI response format."""
-    response_text = engine_output["responses"][0]
-    stop_reason = engine_output["stop_reasons"][0]
-
-    choice = ChatCompletionResponseChoice(
-        index=0,
-        message=ChatMessage(role="assistant", content=response_text),
-        finish_reason=stop_reason,
-    )
-
-    return ChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        model=model_name,
-        choices=[choice],
-    )
-
-
-async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Request) -> ChatCompletionResponse:
+# TODO(Charlie): add type hints (e.g. union of sglang and vllm ChatCompletionRequest/Response)
+async def handle_chat_completion(raw_request: Request) -> JSONResponse:
     """Handle chat completion request."""
+    request_json = await raw_request.json()
     if _global_inference_engine_client is None:
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized"
         )
-    if _global_inference_engine_client.model_name != request.model:
+    if _global_inference_engine_client.model_name != request_json["model"]:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}",
+            detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request_json["model"]}",
         )
 
     try:
-        check_unsupported_fields(request)
-        # Convert to our internal format
-        engine_input = convert_openai_to_inference_input(request, _global_inference_engine_client.backend)
-
-        # Call the inference engine
-        engine_output = await _global_inference_engine_client.generate(engine_input)
-
-        # Convert back to OpenAI format
-        response = convert_inference_output_to_openai(engine_output, _global_inference_engine_client.model_name)
-
+        payload = {
+            "json": request_json,
+            "headers": dict(raw_request.headers) if hasattr(raw_request, "headers") else {},
+        }
+        response = await _global_inference_engine_client.chat_completion(payload)
         return response
 
     except Exception as e:
         logger.error(f"Error in chat completion: {str(e)}\n{traceback.format_exc()}")
         raise e
-
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
     """Shutdown the server.
@@ -202,9 +152,11 @@ def create_app() -> fastapi.FastAPI:
     )
 
     # Chat completion endpoint
-    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-    async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
-        return await handle_chat_completion(request, raw_request)
+    # TODO(Charlie): how to support say a union of sglang and vllm ChatCompletionResponse?
+    # can we delete response_model? Or should we use openai's ChatCompletionResponse?
+    @app.post("/v1/chat/completions")
+    async def chat_completion(raw_request: Request):
+        return await handle_chat_completion(raw_request)
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
@@ -216,17 +168,17 @@ def create_app() -> fastapi.FastAPI:
     # Exception handler for unhandled server errors
     # Note: Pydantic validation errors (400-level) are handled automatically by FastAPI
     # This handler only catches unexpected server-side exceptions
-    @app.exception_handler(Exception)
-    async def general_exception_handler(request: Request, exc: Exception):
-        logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()}")
-        return JSONResponse(
-            status_code=500,
-            content=ErrorResponse(
-                message=f"Internal server error: {str(exc)}",
-                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            ).model_dump(),
-        )
+    # @app.exception_handler(Exception)
+    # async def general_exception_handler(request: Request, exc: Exception):
+    #     logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()}")
+    #     return JSONResponse(
+    #         status_code=500,
+    #         content=ErrorResponse(
+    #             message=f"Internal server error: {str(exc)}",
+    #             type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+    #             code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    #         ).model_dump(),
+    #     )
 
     return app
 

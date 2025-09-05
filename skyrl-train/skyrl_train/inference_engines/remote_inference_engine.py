@@ -104,6 +104,20 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=None
         )
 
+    async def chat_completion(self, payload):
+        body = payload.get("json", {})
+        # NOTE(Charlie): cannot reuse payload.get("headers", {}) since we are posting
+        # a new request. Will lead to json decode error.
+        headers = {"Content-Type": "application/json"}
+        response = None
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            request_url = f"{self.url}/v1/chat/completions"
+            async with session.post(request_url, json=body, headers=headers) as resp:
+                response = await resp.json()
+
+        return response
+
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
             resp = await session.post(f"{self.url}/wake_up", json={"tags": kwargs.get("tags", 1)})

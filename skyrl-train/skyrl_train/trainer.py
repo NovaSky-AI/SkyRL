@@ -203,6 +203,8 @@ class RayPPOTrainer:
 
         # 5. Restore self.all_metrics
         self.all_metrics = all_metrics_copy
+        
+        print(f"Eval metrics: {eval_metrics}")
 
         return eval_metrics
 
@@ -421,7 +423,7 @@ class RayPPOTrainer:
             "env_extras": env_extras,
             "sampling_params": request_sampling_params,
         }
-
+        
         # uids for each sample - NOTE: we assume that generate returns samples in the same order as passed in
         uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
         return generator_input, uids
