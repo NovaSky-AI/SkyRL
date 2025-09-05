@@ -266,9 +266,6 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
         return port
 
     server_port = None
-    import litellm
-
-    litellm._turn_on_debug()
 
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
