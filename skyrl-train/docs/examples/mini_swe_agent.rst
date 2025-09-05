@@ -1,8 +1,76 @@
 SkyRL + Mini-SWE-Agent: Training a SWE-Agent for SWE-Bench
-
 ===========================================================
 
-In this example, we walk through how to train a SWE-Agent on the SWE-Bench task by leveraging [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent)
+In this example, we walk through how to train a SWE-Agent on the SWE-Bench task by leveraging `Mini-SWE-Agent <https://github.com/SWE-agent/mini-swe-agent>`_
+
+
+How does it work?
+------------------
+
+The Mini-SWE-Agent integration with SkyRL can be found in :code_link:`examples/mini_swe_agent/`. We implement a custom generator ``MiniSweAgentGenerator`` to use Mini-SWE-Agent to generate trajectories for the SWE-Bench task. 
+
+
+.. code-block:: python
+
+    class MiniSweAgentGenerator(SkyRLGymGenerator):
+        
+        async def generate_trajectory(self, prompt, ...): 
+            ...
+
+        async def generate(self, generator_input: GeneratorInput) -> GeneratorOutput:
+            ...
+            prompts = generator_input["prompts"]
+            env_extras = generator_input["env_extras"]
+            tasks = []
+            for i in range(len(prompts)):
+                tasks.append(
+                    self.generate_trajectory(
+                        prompts[i],
+                        env_extras[i],
+                    )
+                )
+
+            all_outputs = await asyncio.gather(*tasks)
+            ...
+
+In ``generate_trajectory`` we start a Ray task to generate a trajectory and evaluate it for the given instance. More concretely, this consists of the following:
+
+1. Generation:
+    - Initialize a sandbox / environment for the instance
+    - Generate a trajectory in this environment with Mini-SWE-Agent. For inference, we configure Mini-SWE-Agent to use the HTTP endpoint provided by SkyRL.
+    - Store the generated git patch after generation completes.
+2. Evaluation: 
+    - Initialize a fresh environment for the given instance using the given backend.
+    - Apply the model's git patch to the working directory in the environment.
+    - Run the evaluation script for the instance. If the script runs successfully, the instance is considered to be resolved, and unresolved otherwise.
+
+By running this workflow as a Ray task, we are also able to scale up generation across all the nodes in the Ray cluster. 
+
+
+ At a high level, the code looks as follows:
+
+.. code-block:: python
+
+    @ray.remote(num_cpus=0.01)
+    def init_and_run(instance: dict, litellm_model_name: str, sweagent_config: dict, data_source: str, ...):
+        model = get_model(litellm_model_name, sweagent_config.get("model", {}))
+        error = None
+        try:
+        env = get_sb_environment(sweagent_config, instance, data_source)
+        agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+        exit_status, model_patch = agent.run(instance["problem_statement"])
+        eval_result = evaluate_trajectory(instance, model_patch, sweagent_config, data_source)
+        except Exception as e:
+            error = str(e)
+        return agent.messages, eval_result, error
+
+    class MiniSweAgentGenerator(SkyRLGymGenerator):
+        async def generate_trajectory(self, prompt, env_extras, ...): 
+            messages, eval_result, error = init_and_run.remote(env_extras["instance"], ...)
+            ...
+
+Note that the full implementation has some additional logic for configuration and error handling, and can be found in :code_link:`examples/mini_swe_agent/mini_swe_generator.py`.
+
 
 Dataset preparation
 -------------------
@@ -12,8 +80,8 @@ For training, we use `SWE-Gym <https://huggingface.co/SWE-Gym>`_, and more speci
 Execute the following command: 
 
 .. code-block:: bash
-    # execute from skyrl-train directory
 
+    # execute from skyrl-train directory
     uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
 
 
@@ -23,9 +91,6 @@ Training
 Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use `apptainer <https://apptainer.org/docs/admin/main/index.html#>`_. This can be modified in :code_link:`examples/mini_swe_agent/swebench.yaml` 
 
 .. code-block:: bash
+
     # execute from skyrl-train directory
-
     bash examples/mini_swe_agent/run_mini_swe.sh
-
-
-TODO (sumanthrh, pcmorritz): Fill this in
