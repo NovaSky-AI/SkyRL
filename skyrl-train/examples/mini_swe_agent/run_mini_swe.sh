@@ -1,0 +1,69 @@
+set -x
+
+# Colocated GRPO training+generation for Qwen3-8B on the SWE-Bench task.
+# Uses 1 node with 4 GPUs.
+# uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
+# bash examples/mini_swe_agent/run_mini_swe.sh
+
+DATA_DIR="$HOME/data/swe_gym"
+CKPT_PATH="$HOME/ckpts/llm_mini_swe"
+# save trajectories here
+MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
+
+NUM_GPUS=4
+NUM_INFERENCE_ENGINES=1
+TP_SIZE=1
+LOGGER=wandb
+
+# apply dynamic sampling
+DYNAMIC_SAMPLING_TYPE=filter
+DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=10
+
+# We use a smaller batch size here for demonstration
+uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
+  data.train_data="['$DATA_DIR/train.parquet']" \
+  data.val_data="['$DATA_DIR/validation.parquet']" \
+  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.policy.model.path="Qwen/Qwen3-4B" \
+  trainer.placement.colocate_all=false \
+  trainer.strategy=fsdp2 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine_tensor_parallel_size=$TP_SIZE \
+  trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
+  trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
+  trainer.epochs=20 \
+  trainer.eval_batch_size=8 \
+  trainer.eval_before_train=false \
+  trainer.eval_interval=5 \
+  trainer.update_epochs_per_batch=1 \
+  trainer.train_batch_size=8 \
+  trainer.policy_mini_batch_size=8 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.ckpt_interval=10 \
+  trainer.max_prompt_length=4096 \
+  generator.sampling_params.max_generate_length=2048 \
+  generator.max_input_length=30720 \
+  generator.max_turns=50 \
+  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.algorithm.use_kl_loss=true \
+  generator.backend=vllm \
+  generator.run_engines_locally=True \
+  generator.enable_http_endpoint=True \
+  generator.http_endpoint_host='127.0.0.1' \
+  generator.http_endpoint_port=8001 \
+  generator.weight_sync_backend=nccl \
+  generator.async_engine=true \
+  generator.batched=true \
+  generator.n_samples_per_prompt=4 \
+  generator.gpu_memory_utilization=0.8 \
+  trainer.logger="$LOGGER" \
+  trainer.project_name="mini_swe" \
+  trainer.run_name="gsm8k_mini_swe_4B_http" \
+  trainer.resume_mode=null \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_mini_swe_4B_ckpt" \
+  +generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \
+  +generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR
+  $@

@@ -39,6 +39,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    examples/multi_turn_text2sql
    examples/search
    examples/flash_rl
+   examples/mini_swe_agent
 
 .. toctree::
    :maxdepth: 2

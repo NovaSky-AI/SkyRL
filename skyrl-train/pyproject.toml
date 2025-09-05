@@ -51,6 +51,10 @@ conflicts = [
         { extra = "vllm" },
         { extra = "flashrl" },
         { extra = "sglang" },
+    ],
+    [
+        { extra = "flashrl" },
+        { extra = "miniswe" },
     ]
 ]
 
@@ -109,6 +113,11 @@ flashrl = [
     "torch==2.7.0",
     "flashinfer-python",
     "torchvision",
+]
+miniswe = [
+    # TODO (sumanthrh): Shift to mini-swe-agent installed from upstream after merging changes
+    "mini-swe-agent @ git+https://github.com/SumanthRH/mini-swe-agent@minimal-eval-support",
+    "litellm",
 ]
 
 [[tool.uv.index]]
