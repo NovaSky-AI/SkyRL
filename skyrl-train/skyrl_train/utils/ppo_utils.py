@@ -505,6 +505,14 @@ def sync_registries():
     logger.info("Synced registries to ray actor")
 
 
+def _safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> torch.Tensor:
+    """
+    Clamp the delta before exponentiating to avoid potential overflow.
+    """
+    y = torch.clamp(delta.to(torch.float32), -clip, clip).exp()
+    return y.to(out_dtype or delta.dtype)
+
+
 @register_policy_loss(PolicyLossType.REGULAR)
 @register_policy_loss(PolicyLossType.DUAL_CLIP)
 def ppo_policy_loss(
@@ -523,7 +531,7 @@ def ppo_policy_loss(
         "seq_mean_token_sum_norm",
     ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
 
-    ratio = (log_probs - old_log_probs).exp()
+    ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
     surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
     loss = -torch.min(surr1, surr2)
@@ -539,7 +547,7 @@ def ppo_policy_loss(
 
         logger_.debug(f"Using TIS with dtype: {rollout_logprobs.dtype}")
         # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
-        tis_imp_ratio = torch.exp(old_log_probs - rollout_logprobs)
+        tis_imp_ratio = _safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
         tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
         loss = loss * tis_imp_ratio
 

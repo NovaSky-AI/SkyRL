@@ -234,6 +234,8 @@ class BasePPOExp:
             )
         elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
             from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker, RewardWorker
+        elif self.cfg.trainer.strategy == "megatron":
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RewardWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 

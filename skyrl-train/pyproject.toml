@@ -33,7 +33,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets",
+    "datasets>=3.6.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
@@ -51,6 +51,11 @@ conflicts = [
         { extra = "vllm" },
         { extra = "flashrl" },
         { extra = "sglang" },
+    ],
+    [
+        { extra = "mcore" },
+        { extra = "sglang" },
+        { extra = "flashrl" },
     ]
 ]
 
@@ -101,6 +106,18 @@ sglang = [
     "torch==2.7.1",
     "torchvision",
 ]
+mcore = [
+  # Build transformer-engine separately first!
+  # uv pip install "torch==2.7.1"
+  # uv pip install "nvidia-cudnn-cu12>=9.3"
+  # export CUDNN_PATH="$(python -c 'import inspect, nvidia.cudnn as c, os; print(os.path.dirname(inspect.getfile(c)))')"
+  # export CPATH="$CUDNN_PATH/include:${CPATH:-}"
+  # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
+  # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
+  "mbridge==0.13.0",
+  "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
+  "transformer-engine[pytorch]==2.5.0",
+]
 flashrl = [
     # TODO (sumanthrh): Shift to install from git source
     # Currently, this is the wheel built for commit 4b04dfc at: https://github.com/SumanthRH/vllm/tree/flashrl
@@ -110,6 +127,7 @@ flashrl = [
     "flashinfer-python",
     "torchvision",
 ]
+
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

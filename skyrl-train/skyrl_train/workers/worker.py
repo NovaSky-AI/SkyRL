@@ -88,6 +88,7 @@ class DistributedTorchRayActor:
             pp=0,
             world_size=self._world_size,
             dp_size=self.device_mesh.size(0),
+            pp_size=1,
         )
 
     def _seq_parallel_monkey_patch(self, model: PreTrainedModel, use_parent_class: bool = False):
@@ -641,6 +642,8 @@ class PolicyWorkerBase(Worker):
                         "policy_lr": status["policy_lr"],
                         "ent": status["policy_entropy"],
                     }
+                    if "raw_grad_norm" in status:
+                        short_status["grad_norm"] = status["raw_grad_norm"]
                     if "reward" in status:
                         short_status["rm"] = status["reward"]
 
@@ -805,6 +808,7 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
                 sequences,

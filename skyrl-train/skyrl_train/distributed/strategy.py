@@ -21,16 +21,6 @@ class DistributedStrategy(ABC):
         pass
 
     @abstractmethod
-    def all_reduce(self, data: DataT, op="mean") -> DataT:
-        """Perform all_reduce across all processes"""
-        pass
-
-    @abstractmethod
-    def all_gather(self, data: DataT) -> DataT:
-        """Perform all_gather across all processes"""
-        pass
-
-    @abstractmethod
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs):
         """Perform backward pass"""
         pass
@@ -74,6 +64,46 @@ class DistributedStrategy(ABC):
     def get_rank(self) -> int:
         """Get current process rank"""
         return dist.get_rank()
+
+    def all_reduce(self, data: DataT, op="mean") -> DataT:
+        """Perform all_reduce across all processes"""
+        assert op in ("mean", "max", "sum")
+        if isinstance(data, dict):
+            ret = {}
+            for k, v in data.items():
+                ret[k] = self.all_reduce(v, op)
+            return ret
+        else:
+            is_tensor = True
+            if not isinstance(data, torch.Tensor):
+                data = torch.Tensor([data])
+                is_tensor = False
+            is_cpu_tensor = data.device.type == "cpu"
+
+            if is_cpu_tensor:
+                data = data.to(torch.cuda.current_device())
+            if op == "mean":
+                data /= self.world_size
+            dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
+            if is_cpu_tensor:
+                data = data.cpu()
+            return data.item() if not is_tensor else data
+
+    def all_gather(self, data: DataT) -> DataT:
+        """Perform all_gather across all processes"""
+        if isinstance(data, dict):
+            ret = {}
+            for k, v in data.items():
+                ret[k] = self.all_gather(v)
+            return ret
+        else:
+            if not isinstance(data, torch.Tensor):
+                data = torch.Tensor([data])
+            is_cpu_tensor = data.device.type == "cpu"
+
+            ret = [torch.zeros_like(data).to(torch.cuda.current_device()) for _ in range(self.world_size)]
+            dist.all_gather(ret, data.to(torch.cuda.current_device()))
+            return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
 
     def save_hf_configs(self, model, ckpt_dir: str, tokenizer=None):
         """

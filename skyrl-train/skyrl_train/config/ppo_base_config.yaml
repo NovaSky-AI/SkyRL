@@ -2,6 +2,8 @@ defaults:
   - _self_
   - deepspeed_config@deepspeed_config.train: train
   - deepspeed_config@deepspeed_config.eval: eval
+  - megatron_config@megatron_config.policy: policy
+  - megatron_config@megatron_config.ref: ref
   - skyrl_gym_config: default
 
 data:
@@ -34,11 +36,12 @@ trainer:
       max_grad_norm: 1.0 # gradient clipping
       offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
       num_warmup_steps: 0
-      scheduler: "constant_with_warmup"
+      scheduler: "constant_with_warmup"   
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
       reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
+    megatron_config: ${megatron_config.policy}
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
     use_torch_compile: false
@@ -47,6 +50,7 @@ trainer:
   ref:
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
+    megatron_config: ${megatron_config.ref}
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
