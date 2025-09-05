@@ -101,27 +101,7 @@ async def run_generator_end_to_end(
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         tokenizer=tokenizer,
-        sampling_params=get_sampling_params_for_backend(
-            "vllm",
-            DictConfig(
-                {
-                    "temperature": 1.0,
-                    "top_p": 1.0,
-                    "top_k": -1,
-                    "max_generate_length": max_generate_length,
-                    "min_p": 0.0,
-                    "logprobs": None,
-                }
-            ),
-        ),
     )
-
-    inference_engine_client = InferenceEngineClient(
-        inference_engines,
-        tokenizer,
-    )
-
-    await inference_engine_client.wake_up()
 
     # Create a mock generator config
     generator_cfg = DictConfig(
@@ -130,12 +110,17 @@ async def run_generator_end_to_end(
                 "max_generate_length": max_generate_length,
                 "logprobs": None,
             },
+            "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
             "max_input_length": max_input_length,
             "batched": batched,
             "max_turns": max_turns,
             "zero_reward_on_non_stop": False,
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
+            "backend": "vllm",
+            "enable_http_endpoint": False,
+            "http_endpoint_host": "127.0.0.1",
+            "http_endpoint_port": 8000,
         }
     )
 
@@ -150,6 +135,17 @@ async def run_generator_end_to_end(
             "max_env_workers": max_env_workers,
         }
     )
+
+    cfg = get_test_actor_config()
+    cfg.trainer.policy.model.path = model
+    cfg.generator = generator_cfg
+    inference_engine_client = InferenceEngineClient(
+        inference_engines,
+        tokenizer,
+        cfg,
+    )
+
+    await inference_engine_client.wake_up()
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,
@@ -166,6 +162,21 @@ async def run_generator_end_to_end(
         max_prompt_length=max_prompt_length,
         data_path=data_path,
         env_class=env_class,
+    )
+    # Attach request-time sampling params into the generator input
+    input_batch["sampling_params"] = get_sampling_params_for_backend(
+        "vllm",
+        DictConfig(
+            {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "max_generate_length": max_generate_length,
+                "min_p": 0.0,
+                "logprobs": None,
+                "stop": ["</search>", "</answer>"] if env_class == "search" else None,
+            }
+        ),
     )
 
     with Timer(f"generate_responses_async_engine_{use_async_engine}"):

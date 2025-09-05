@@ -1,3 +1,4 @@
+import asyncio
 import os
 import ray
 import torch
@@ -20,8 +21,10 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
-from skyrl_train.utils.utils import peer_access_supported
-
+from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.base import InferenceEngineInput
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -32,8 +35,16 @@ def get_test_actor_config() -> DictConfig:
         cfg = hydra.compose(config_name="ppo_base_config")
 
         cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
+        cfg.trainer.logger = "console"
+        validate_cfg(cfg)
 
         return cfg
+
+
+def get_rank_0_memory(actor_group, message: str):
+    mem = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
+    print_mem(message, mem)
+    return mem["allocated"]
 
 
 def make_dummy_tensorbatch(seq_len=10, num_actions=4) -> TensorBatch:
@@ -78,6 +89,7 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
         sequences=torch.randint(0, 100, (B, T), device="cpu"),
         action_log_probs=0.4 * torch.ones((B, num_actions), device="cpu"),
         base_action_log_probs=0.3 * torch.ones((B, num_actions), device="cpu"),
+        rollout_logprobs=0.2 * torch.ones((B, num_actions), device="cpu"),
         values=0.5 * torch.ones((B, num_actions), device="cpu"),
         returns=0.5 * torch.ones((B, num_actions), device="cpu"),
         advantages=0.6 * torch.ones((B, num_actions), device="cpu"),
@@ -85,7 +97,6 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
         loss_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         action_mask=torch.ones((B, num_actions), dtype=int, device="cpu"),
         num_actions=num_actions,
-        rollout_logprobs=0.4 * torch.ones((B, num_actions), device="cpu"),
         info={},
     )
 
@@ -120,6 +131,8 @@ def import_worker(strategy: str, worker_type: str):
         module_path = "skyrl_train.workers.deepspeed.deepspeed_worker"
     elif strategy in ("fsdp", "fsdp2"):
         module_path = "skyrl_train.workers.fsdp.fsdp_worker"
+    elif strategy == "megatron":
+        module_path = "skyrl_train.workers.megatron.megatron_worker"
     else:
         raise ValueError(f"Unknown strategy type for {worker_type}: {strategy}")
 
@@ -254,8 +267,8 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = PromptDataset(
-        [TEST_DATA_PATH],
-        tokenizer,
+        datasets=[TEST_DATA_PATH],
+        tokenizer=tokenizer,
         max_prompt_length=512,
     )
 
@@ -282,8 +295,8 @@ def get_test_generator_input(
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = PromptDataset(
-        [data_path],
-        tokenizer,
+        datasets=[data_path],
+        tokenizer=tokenizer,
         max_prompt_length=max_prompt_length,
     )
 
@@ -339,3 +352,45 @@ def ray_init_for_tests():
         log_once("Disabling NCCL P2P for test environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
     ray.init(runtime_env={"env_vars": env_vars})
+
+
+async def run_inference(client, prompts, sampling_params):
+    engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
+    return await client.generate(engine_input)
+
+
+def init_inference_engines(cfg, model, use_local, async_engine, tp_size, colocate_all, backend):
+    assert use_local, "This test does not yet support remote engines."
+    assert backend in ["vllm", "sglang"]
+    initialize_ray(cfg)
+    if colocate_all:
+        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
+        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        sleep = True
+    else:
+        pg, sleep = None, False
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eps = create_ray_wrapped_inference_engines(
+        num_inference_engines=1,
+        tensor_parallel_size=tp_size,
+        model_dtype="bfloat16",
+        pretrain=model,
+        seed=42,
+        vllm_v1_disable_multiproc=True,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+        max_model_len=1536,
+        shared_pg=pg,
+        gpu_memory_utilization=0.6,
+        inference_engine_enable_sleep=sleep,
+        async_engine=async_engine,
+        max_num_batched_tokens=8192,
+        max_num_seqs=1024,
+        tokenizer=tokenizer,
+        backend=backend,
+    )
+    client = InferenceEngineClient(eps, tokenizer, cfg)
+    if sleep:
+        asyncio.run(client.wake_up())
+    return client, pg

@@ -179,10 +179,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             )
         self.tokenizer = kwargs.pop("tokenizer", None)
 
-        # Extract sampling params
-        sampling_params_dict = kwargs.pop("sampling_params", None)
-        self.sampling_params = sampling_params_dict or {}
-
         # Unused kwargs
         _ = kwargs.pop("num_gpus", 1)
 
@@ -212,8 +208,8 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             prompts is None and prompt_token_ids is not None
         ), "SGLangInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
 
-        # Use request sampling params if provided, otherwise use defaults
-        sampling_params = request_sampling_params if request_sampling_params is not None else self.sampling_params
+        # Use request sampling params if provided.
+        sampling_params = request_sampling_params if request_sampling_params is not None else {}
 
         return prompt_token_ids, sampling_params
 

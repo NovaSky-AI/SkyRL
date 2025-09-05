@@ -33,7 +33,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets",
+    "datasets>=3.6.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
@@ -51,6 +51,11 @@ conflicts = [
         { extra = "vllm" },
         { extra = "flashrl" },
         { extra = "sglang" },
+    ],
+    [
+        { extra = "mcore" },
+        { extra = "sglang" },
+        { extra = "flashrl" },
     ]
 ]
 
@@ -77,6 +82,9 @@ dev = [
     "pytest>=6.2.5",
     "pytest-asyncio",
     "pre-commit",
+    "fastapi",
+    "uvicorn",
+    "litellm",
 ]
 docs = [
     "sphinx>=7.0.0",
@@ -87,8 +95,8 @@ docs = [
     "sphinx-autobuild>=2021.3.14"
 ]
 vllm = [
-    "vllm==0.9.2",
-    "torch==2.7.0",
+    "vllm==0.10.1.1",
+    "torch==2.7.1",
     "flashinfer-python",
     "torchvision"
 ]
@@ -97,6 +105,18 @@ sglang = [
     "flashinfer-python",
     "torch==2.7.1",
     "torchvision",
+]
+mcore = [
+  # Build transformer-engine separately first!
+  # uv pip install "torch==2.7.1"
+  # uv pip install "nvidia-cudnn-cu12>=9.3"
+  # export CUDNN_PATH="$(python -c 'import inspect, nvidia.cudnn as c, os; print(os.path.dirname(inspect.getfile(c)))')"
+  # export CPATH="$CUDNN_PATH/include:${CPATH:-}"
+  # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
+  # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
+  "mbridge==0.13.0",
+  "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
+  "transformer-engine[pytorch]==2.5.0",
 ]
 flashrl = [
     # TODO (sumanthrh): Shift to install from git source
@@ -107,6 +127,7 @@ flashrl = [
     "flashinfer-python",
     "torchvision",
 ]
+
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

@@ -125,8 +125,10 @@ class Tracking:
                 self.logger["vemlp_wandb"].finish(exit_code=0)
             if "tensorboard" in self.logger:
                 self.logger["tensorboard"].finish()
+            if "mlflow" in self.logger:
+                self.logger["mlflow"].finish()
         except Exception as e:
-            print(f"WARNING: Attempted to finish tracking but got error {e}")
+            logger.warning(f"Attempted to finish tracking but got error {e}")
 
 
 class ConsoleLogger:
@@ -179,6 +181,11 @@ class _MlflowLoggingAdapter:
 
         results = {k.replace("@", "_at_"): v for k, v in data.items()}
         mlflow.log_metrics(metrics=results, step=step)
+
+    def finish(self):
+        import mlflow
+
+        mlflow.end_run()
 
 
 def _compute_mlflow_params_from_objects(params) -> Dict[str, Any]:
@@ -300,4 +307,4 @@ class ValidationGenerationsLogger:
                     json.dump(row_data, file)
                 mlflow.log_artifact(validation_gen_step_file)
         except Exception as e:
-            print(f"WARNING: save validation generation file to mlflow failed with error {e}")
+            logger.warning(f"save validation generation file to mlflow failed with error {e}")
