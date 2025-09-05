@@ -255,6 +255,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         return self._postprocess_outputs(outputs)
 
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Only supported in AsyncVLLMInferenceEngine."""
+        raise NotImplementedError()
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
@@ -429,7 +433,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("destroy_weights_update_group")
 
-    async def chat_completion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint.
 
         Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
@@ -437,8 +441,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         Returns a plain dict that is JSON-serializable, either a ChatCompletionResponse or
         an ErrorResponse, both defined in vllm.entrypoints.openai.protocol.
         """
-        body = payload.get("json", {})
-        headers = payload.get("headers", {})
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
 
         # 1. Build request
         try:

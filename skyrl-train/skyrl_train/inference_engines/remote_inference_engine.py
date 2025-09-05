@@ -104,8 +104,8 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=None
         )
 
-    async def chat_completion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        body = payload.get("json", {})
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = request_payload.get("json", {})
         # NOTE(Charlie): cannot reuse payload["headers"] since we are posting a new request.
         # Otherwise will lead to json decode error.
         headers = {"Content-Type": "application/json"}
