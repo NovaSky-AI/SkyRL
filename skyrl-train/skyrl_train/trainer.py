@@ -131,12 +131,15 @@ class RayPPOTrainer:
         return dataloader
 
     @torch.no_grad()
-    async def eval(self) -> Dict[str, float]:
+    async def eval(self, eval_only: bool = False) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
         The eval metrics are recorded after having finished training `self.global_step` steps.
         Metrics recorded in global_step 0 corresponds to evaluations before training.
+
+        Args:
+            eval_only: should be set to True for eval only runs.
 
         Returns:
             A dictionary of evaluation metrics.
@@ -188,7 +191,9 @@ class RayPPOTrainer:
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
-                    Path(self.cfg.trainer.export_path) / "dumped_evals" / f"global_step_{self.global_step}_evals"
+                    Path(self.cfg.trainer.export_path)
+                    / "dumped_evals"
+                    / ("eval_only" if eval_only else f"global_step_{self.global_step}_evals")
                 )
                 data_save_dir.mkdir(parents=True, exist_ok=True)
                 dump_per_dataset_eval_results(
