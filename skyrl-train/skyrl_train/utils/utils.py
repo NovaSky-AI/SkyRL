@@ -139,13 +139,6 @@ def validate_megatron_cfg(cfg: DictConfig):
             config.sequence_parallel_size == 1
         ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
 
-        # check that DP size is 1 - there are some convergence/grad norm issues that need to be resolved for DP > 1
-        num_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-        assert (
-            config.megatron_config.tensor_model_parallel_size * config.megatron_config.pipeline_model_parallel_size
-            == num_gpus
-        ), f"DP size should be 1, but found {worker_type}.megatron_config.tensor_model_parallel_size={config.megatron_config.tensor_model_parallel_size} * {config.megatron_config.pipeline_model_parallel_size}={config.megatron_config.tensor_model_parallel_size * config.megatron_config.pipeline_model_parallel_size} != num_gpus={num_gpus}"
-
 
 def validate_cfg(cfg: DictConfig):
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
