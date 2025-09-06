@@ -78,6 +78,133 @@ class InferenceEngineClient(InferenceEngineInterface):
         engine_idx = abs(hash(str(trajectory_id))) % len(self.engines)
         return await self.engines[engine_idx].chat_completion(request_payload)
 
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO(Charlie): completion might be batched. Need different trajectory id
+        # routing logic.
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+        prompt = body.get("prompt")
+
+        def is_list_of_ints(x):
+            return isinstance(x, list) and (len(x) == 0 or all(isinstance(y, int) for y in x))
+
+        def is_list_of_list_of_ints(x):
+            return (
+                isinstance(x, list)
+                and len(x) > 0
+                and all(isinstance(y, list) and all(isinstance(z, int) for z in y) for y in x)
+            )
+
+        def is_list_of_str(x):
+            return isinstance(x, list) and (len(x) == 0 or all(isinstance(y, str) for y in x))
+
+        # Determine if this is a single or batched request
+        is_single = isinstance(prompt, str) or is_list_of_ints(prompt)
+        is_batched = is_list_of_str(prompt) or is_list_of_list_of_ints(prompt)
+
+        trajectory_id_value = body.pop("trajectory_id", None)
+
+        if is_single:
+            # Single completion request, route by a single trajectory_id (if provided)
+            if isinstance(trajectory_id_value, list) and len(trajectory_id_value) != 1:
+                raise ValueError(
+                    "For single /completions request, trajectory_id must be a single integer or a singleton list."
+                )
+            trajectory_id = (
+                trajectory_id_value[0] if isinstance(trajectory_id_value, list) else (trajectory_id_value or 0)
+            )
+            engine_idx = abs(hash(str(trajectory_id))) % len(self.engines)
+            # Forward as-is (body already has trajectory_id removed)
+            return await self.engines[engine_idx].completion({"json": body, "headers": headers})
+
+        if not is_batched:
+            raise ValueError(
+                "Invalid prompt type for /completions. Expected str, list[int], list[str] or list[list[int]]."
+            )
+
+        # Batched request
+        num_items = len(prompt)
+
+        if trajectory_id_value is not None:
+            # If trajectory ids are specified, they must be provided for each prompt
+            if not isinstance(trajectory_id_value, list) or len(trajectory_id_value) != num_items:
+                raise ValueError(
+                    "For batched /completions, trajectory_id must be a list with the same length as prompt."
+                )
+
+            # Group prompts by engine index
+            engine_groups: dict[int, dict[str, list]] = {}
+            for i, (cur_prompt, cur_tid) in enumerate(zip(prompt, trajectory_id_value)):
+                engine_idx = abs(hash(str(cur_tid))) % len(self.engines)
+                group = engine_groups.setdefault(engine_idx, {"prompts": [], "indices": []})
+                group["prompts"].append(cur_prompt)
+                group["indices"].append(i)
+
+            # Dispatch batched requests per engine
+            tasks: list[asyncio.Task] = []
+            indices_list: list[list[int]] = []
+            for engine_idx, group in engine_groups.items():
+                sub_json = dict(body)
+                sub_json["prompt"] = group["prompts"]
+                coro = self.engines[engine_idx].completion({"json": sub_json, "headers": headers})
+                tasks.append(asyncio.create_task(coro))
+                indices_list.append(group["indices"])
+
+            results = await asyncio.gather(*tasks)
+
+        else:
+            # No trajectory ids: split evenly across engines
+            num_inference_engines = len(self.engines)
+            dp_item_size = (num_items + num_inference_engines - 1) // num_inference_engines
+
+            tasks = []
+            indices_list: list[list[int]] = []
+            for dp_rank in range(num_inference_engines):
+                start_idx = dp_rank * dp_item_size
+                end_idx = min((dp_rank + 1) * dp_item_size, num_items)
+                sub_prompts = prompt[start_idx:end_idx]
+                if not sub_prompts:
+                    continue
+                sub_json = dict(body)
+                sub_json["prompt"] = sub_prompts
+                coro = self.engines[dp_rank].completion({"json": sub_json, "headers": headers})
+                tasks.append(asyncio.create_task(coro))
+                indices_list.append(list(range(start_idx, end_idx)))
+
+            results = await asyncio.gather(*tasks)
+
+        # Combine choices preserving original order. vLLM sets index positions per sub-batch;
+        # we will reset indices to be 0..n-1 for the combined response.
+        combined_choices: list[Dict[str, Any]] = [None] * num_items  # type: ignore
+        base_response = None
+        for group_indices, result in zip(indices_list, results):
+            if base_response is None:
+                base_response = result
+            for local_idx, original_idx in enumerate(group_indices):
+                choice = dict(result["choices"][local_idx])
+                # overwrite index with the global position
+                choice["index"] = original_idx
+                combined_choices[original_idx] = choice
+
+        # Reindex sequentially 0..n-1 to comply with OpenAI-style responses
+        # while preserving order of prompts
+        for new_idx in range(len(combined_choices)):
+            combined_choices[new_idx]["index"] = new_idx
+
+        # Build final response using the first result as base
+        if base_response is None:
+            base_response = {
+                "id": "",
+                "object": "text_completion",
+                "created": 0,
+                "model": self.model_name,
+                "choices": [],
+            }
+        final_response = dict(base_response)
+        final_response["model"] = self.model_name
+        final_response["choices"] = combined_choices
+        return final_response
+
     async def _generate_with_trajectory_routing(
         self, prompt_token_ids, trajectory_ids, sampling_params
     ) -> InferenceEngineOutput:

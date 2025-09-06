@@ -58,11 +58,8 @@ def set_global_state(inference_engine_client: "InferenceEngineClient", uvicorn_s
     _global_uvicorn_server = uvicorn_server
 
 
-def _validate_chat_completion(request_json: Dict[str, Any]) -> Optional[ErrorResponse]:
-    """
-    The only validation that SkyRL does to the request. Rest of the validations are done
-    by the underlying inference engines (vLLM / SGLang).
-    """
+def _validate_common(request_json: Dict[str, Any], *, endpoint: str) -> Optional[ErrorResponse]:
+    """Common validation for chat/completions endpoints."""
     if _global_inference_engine_client is None:
         return ErrorResponse(
             error=ErrorInfo(
@@ -74,7 +71,7 @@ def _validate_chat_completion(request_json: Dict[str, Any]) -> Optional[ErrorRes
     if "model" not in request_json:
         return ErrorResponse(
             error=ErrorInfo(
-                message="The field `model` is required in your `/chat/completion` request.",
+                message=f"The field `model` is required in your `{endpoint}` request.",
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
@@ -97,9 +94,14 @@ def _validate_chat_completion(request_json: Dict[str, Any]) -> Optional[ErrorRes
         )
     if request_json.get("trajectory_id", None) is None:
         logger.warning(
-            "Trajectory ID is not provided in your `/chat/completion` request. Please add it to your request to ensure load balancing and sticky routing."
+            f"Trajectory ID is not provided in your `{endpoint}` request. Please add it to your request to ensure load balancing and sticky routing."
         )
     return None
+
+
+def _validate_chat_completion(request_json: Dict[str, Any]) -> Optional[ErrorResponse]:
+    """Thin wrapper using common validation."""
+    return _validate_common(request_json, endpoint="/chat/completions")
 
 
 async def handle_chat_completion(raw_request: Request) -> JSONResponse:
@@ -134,10 +136,71 @@ async def handle_chat_completion(raw_request: Request) -> JSONResponse:
             ),
         )
         return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
+    except ValueError as e:
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=str(e),
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
     except Exception as e:
         error_response = ErrorResponse(
             error=ErrorInfo(
                 message=f"Error in chat completion: {str(e)}",
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
+
+    # removed: replaced by _validate_common
+
+
+async def handle_completion(raw_request: Request) -> JSONResponse:
+    """Handle text completion request."""
+    try:
+        request_json = await raw_request.json()
+
+        # SkyRL-side validation
+        error_response = _validate_common(request_json, endpoint="/completions")
+        if error_response is not None:
+            return JSONResponse(content=error_response.model_dump(), status_code=error_response.error.code)
+
+        payload = {
+            "json": request_json,
+            "headers": dict(raw_request.headers) if hasattr(raw_request, "headers") else {},
+        }
+        response = await _global_inference_engine_client.completion(payload)
+
+        if "error" in response and "message" in response["error"]:
+            return JSONResponse(content=response, status_code=response["error"]["code"])
+        else:
+            return JSONResponse(content=response)
+
+    except json.JSONDecodeError as e:
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Invalid JSON error: {str(e)}",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
+    except ValueError as e:
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=str(e),
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
+    except Exception as e:
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Error in completion: {str(e)}",
                 type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                 code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             ),
@@ -245,6 +308,23 @@ def create_app() -> fastapi.FastAPI:
         - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
         return await handle_chat_completion(raw_request)
+
+    # Text completion endpoint
+    @app.post("/v1/completions")
+    async def completions(raw_request: Request):
+        """
+        Takes in OpenAI's `CompletionRequest` and returns OpenAI's `CompletionResponse`.
+
+        Note that the specific fields inside the request and response depend on the backend you use.
+        If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
+        SkyRL does not do any field checkings besides `model` and `trajectory_id` but instead offload
+        everything to the underlying engines.
+
+        API reference:
+        - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+        - https://docs.sglang.ai/basic_usage/openai_api_completions.html
+        """
+        return await handle_completion(raw_request)
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus

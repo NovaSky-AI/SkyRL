@@ -112,6 +112,128 @@ def _check_outputs(outputs, test_type, num_samples, backend):
         assert choice["logprobs"]["content"][0]["token"].split(":")[1].isdigit()
 
 
+def _check_completion_outputs(outputs, test_type, num_samples, backend):
+    print_n = 5
+    assert len(outputs) == num_samples
+    print(f"First {print_n} generated responses out of {num_samples} using completions:")
+    print(f"outputs[0]: {outputs[0]}")
+    for i, output in enumerate(outputs[:print_n]):
+        data = output.model_dump() if test_type == "litellm" else output
+        # CompletionResponse uses 'text' field
+        preview = data["choices"][0].get("text") or str(data)[0:100]
+        print(f"{i}: {preview[:100]}...")
+
+    for response_data in outputs:
+        if test_type == "litellm":
+            response_data = response_data.model_dump()
+
+        if test_type != "litellm":
+            if backend == "vllm":
+                from vllm.entrypoints.openai.protocol import CompletionResponse
+
+                CompletionResponse.model_validate(response_data)
+            else:
+                raise ValueError(f"Unsupported backend: {backend}")
+
+        for key in ["id", "object", "created", "model", "choices"]:
+            assert key in response_data
+            assert response_data[key] is not None
+
+        for choice in response_data["choices"]:
+            assert "index" in choice and "text" in choice and "finish_reason" in choice
+            assert choice["index"] == 0 and choice["finish_reason"] in ["stop", "length"]
+
+        choice = response_data["choices"][0]
+        if "logprobs" in choice and choice["logprobs"] is not None:
+            assert "tokens" in choice["logprobs"]
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "batched,with_traj",
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_http_endpoint_completions_routing_and_batching(batched, with_traj):
+    try:
+        cfg = get_test_actor_config()
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        sampling_params = _get_test_sampling_params("vllm", cfg)
+        client, pg = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL,
+        )
+
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            cfg=cfg,
+        )
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        asyncio.run(client.reset_prefix_cache())
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        # Build prompts
+        test_prompts = get_test_prompts(MODEL, num_samples=4)  # smaller for routing test
+        text_prompts = ["\n".join([m["content"] for m in conv if m["role"] == "user"]) for conv in test_prompts]
+
+        if not batched:
+            outputs = []
+            for i, p in enumerate(text_prompts):
+                payload = {"model": MODEL, "prompt": p, **sampling_params}
+                if with_traj:
+                    payload["trajectory_id"] = i
+                outputs.append(requests.post(f"{base_url}/completions", json=payload).json())
+        else:
+            payload = {"model": MODEL, "prompt": text_prompts, **sampling_params}
+            if with_traj:
+                payload["trajectory_id"] = list(range(len(text_prompts)))
+            outputs = [requests.post(f"{base_url}/completions", json=payload).json()]
+            # Expand choices into list to reuse checker; normalize index to 0 for each single-choice view
+            expanded = []
+            for choice in outputs[0]["choices"]:
+                normalized_choice = dict(choice)
+                normalized_choice["index"] = 0
+                expanded.append({**outputs[0], "choices": [normalized_choice]})
+            outputs = expanded
+
+        _check_completion_outputs(outputs, "request_posting", len(outputs), "vllm")
+
+        # Negative: when batched and trajectory_id wrong length -> 400 from server or client-side error
+        if batched and with_traj:
+            bad_payload = {"model": MODEL, "prompt": text_prompts, "trajectory_id": [0, 1], **sampling_params}
+            r = requests.post(f"{base_url}/completions", json=bad_payload)
+            assert r.status_code in (HTTPStatus.BAD_REQUEST, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)
+    finally:
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        ray.shutdown()
+
+
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
@@ -237,6 +359,119 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type):
         if server_thread.is_alive():
             server_thread.join(timeout=5)
 
+    finally:
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        ray.shutdown()
+
+
+# TODO(Charlie): parametrize in order to deduplicate with test_http_endpoint_openai_api_with_weight_sync?
+@pytest.mark.vllm
+@pytest.mark.parametrize("test_type", ["request_posting", "aiohttp_client_session"])
+def test_http_endpoint_completions_with_weight_sync(test_type):
+    try:
+        cfg = get_test_actor_config()
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        sampling_params = _get_test_sampling_params("vllm", cfg)
+        client, pg = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL,
+        )
+
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            cfg=cfg,
+        )
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        asyncio.run(client.reset_prefix_cache())
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        num_samples = 20
+        test_prompts = [p for p in get_test_prompts(MODEL, num_samples=num_samples)]
+        # Convert chat prompts -> plain prompts using the user's content concatenation
+        # For vLLM /completions, we can pass a list of input ids or prompts; here we pass text prompts
+        text_prompts = ["\n".join([m["content"] for m in conv if m["role"] == "user"]) for conv in test_prompts]
+
+        if test_type == "request_posting":
+
+            def generate_output(traj_id, prompt):
+                return requests.post(
+                    f"{base_url}/completions",
+                    json={
+                        "model": MODEL,
+                        "prompt": prompt,
+                        "trajectory_id": traj_id,
+                        **sampling_params,
+                    },
+                ).json()
+
+            with ThreadPoolExecutor() as executor:
+                output_tasks = [executor.submit(generate_output, i, p) for i, p in enumerate(text_prompts)]
+                outputs = [task.result() for task in output_tasks]
+
+        elif test_type == "aiohttp_client_session":
+
+            async def generate_outputs_async():
+                conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)
+                async with aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=None)) as session:
+                    headers = {"Content-Type": "application/json"}
+                    output_tasks = []
+                    for traj_id, prompt in enumerate(text_prompts):
+                        payload = {
+                            "model": MODEL,
+                            "prompt": prompt,
+                            "trajectory_id": traj_id,
+                            **sampling_params,
+                        }
+                        output_tasks.append(session.post(f"{base_url}/completions", json=payload, headers=headers))
+                    responses = await asyncio.gather(*output_tasks)
+                    return [await response.json() for response in responses]
+
+            outputs = asyncio.run(generate_outputs_async())
+
+        elif test_type == "litellm":
+
+            async def generate_outputs_async():
+                async def generate_output(traj_id, prompt):
+                    return await litellm_async_completion(
+                        model=f"openai/{MODEL}",
+                        api_base=base_url,
+                        api_key="DUMMY_KEY",
+                        prompt=prompt,
+                        trajectory_id=traj_id,
+                        **sampling_params,
+                    )
+
+                tasks = [generate_output(i, p) for i, p in enumerate(text_prompts)]
+                return await asyncio.gather(*tasks)
+
+            outputs = asyncio.run(generate_outputs_async())
+
+        else:
+            raise ValueError(f"Invalid test type: {test_type}")
+
+        _check_completion_outputs(outputs, test_type, num_samples, "vllm")
+
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
@@ -490,6 +725,28 @@ def test_http_endpoint_error_handling():
         assert response.status_code == HTTPStatus.OK  # 200
         health_data = response.json()
         assert health_data["status"] == "healthy"
+
+        # TODO(Charlie): add more tests or be more rigorous on the coverage representation.
+        # Additional tests for /v1/completions
+        # C1: streaming not supported
+        response = requests.post(
+            f"{base_url}/v1/completions",
+            json={"model": MODEL, "prompt": "Hello", "stream": True},
+        )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        # C2: wrong model
+        response = requests.post(
+            f"{base_url}/v1/completions",
+            json={"model": "wrong_model", "prompt": "Hello"},
+        )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        # C3: malformed json
+        response = requests.post(
+            f"{base_url}/v1/completions",
+            data="some invalid json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
 
     finally:
         ray.shutdown()
