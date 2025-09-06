@@ -1,7 +1,7 @@
 import ray
 from packaging import version
 from ray.actor import ActorHandle
-from typing import Any, List
+from typing import Any, List, Dict
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.inference_engines.base import (
@@ -49,6 +49,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
 
     async def reset_prefix_cache(self):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.inference_engine_actor.chat_completion.remote(request_payload)
 
 
 def create_ray_wrapped_inference_engines(

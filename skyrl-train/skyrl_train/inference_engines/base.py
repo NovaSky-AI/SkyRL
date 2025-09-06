@@ -41,6 +41,17 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handles OpenAI-compatible HTTP endpoint.
+
+        Accepts a JSON payload: {"json": <request-body>, "headers": <headers-dict>}.
+        Returns a plain dict, either a ChatCompletionResponse or an ErrorResponse.
+        The specific fields depend on the engine's backend (e.g. for vllm these are defined
+        in vllm.entrypoints.openai.protocol).
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
     async def wake_up(self, *args: Any, **kwargs: Any):
         raise NotImplementedError()
 

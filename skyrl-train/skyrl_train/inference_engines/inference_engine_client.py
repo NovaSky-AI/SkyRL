@@ -6,9 +6,10 @@ from skyrl_train.inference_engines.base import (
 )
 from transformers import PreTrainedTokenizerBase
 import asyncio
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 from omegaconf import DictConfig
 import threading
+import random
 
 
 class InferenceEngineClient(InferenceEngineInterface):
@@ -72,6 +73,15 @@ class InferenceEngineClient(InferenceEngineInterface):
         else:
             # Split evenly across engines
             return await self._generate_batched(prompt_token_ids, sampling_params)
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        trajectory_id = request_payload["json"].pop("trajectory_id", None)
+        if trajectory_id is None:
+            # if trajectory_id is not provided, we'll use a random engine
+            engine_idx = random.randint(0, len(self.engines) - 1)
+        else:
+            engine_idx = abs(hash(str(trajectory_id))) % len(self.engines)
+        return await self.engines[engine_idx].chat_completion(request_payload)
 
     async def _generate_with_trajectory_routing(
         self, prompt_token_ids, trajectory_ids, sampling_params
