@@ -33,6 +33,7 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
 )
 from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
+from skyrl_train.utils.profiler import Profiler
 
 
 class MegatronWorker:
@@ -126,6 +127,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
+        self.profiler: Profiler = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
@@ -191,6 +193,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
+        # create profiler
+        if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
+            self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
+
         # create optimizer
         optim_config = init_megatron_optim_config(self.cfg.trainer.policy.optimizer_config)
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
@@ -233,7 +239,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
 
+        if self.profiler is not None:
+            self.profiler.start()
+
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
+            self.optimizer.zero_grad()
             pbar = tqdm(
                 dataloader,
                 desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
@@ -265,6 +275,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 if len(micro_buffer) == micro_batches_per_mini_batch:
                     # run mini-batch forward-backward and then one optimizer step
                     self.model.train()
+                    for chunk in self.actor_module:
+                        # if use distributed optimizer, zero grad buffer will be handled by optimizer
+                        chunk.zero_grad_buffer()
                     seq_len = micro_buffer[0]["sequences"].shape[1]
                     micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
@@ -318,6 +331,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             micro_buffer = []
 
         torch.distributed.barrier()
+        if self.profiler is not None:
+            self.profiler.stop_and_save()
+            self.profiler.stop_trace()
+
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
 

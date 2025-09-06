@@ -26,6 +26,7 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.transformer.module import Float16Module
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
+from megatron.core.utils import get_attr_wrapped_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -351,3 +352,7 @@ def recover_left_padding(
     for i in range(batch_size):
         new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
     return new_result
+
+
+def get_model_config(model):
+    return get_attr_wrapped_model(model, "config", allow_none=False)

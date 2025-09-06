@@ -15,6 +15,11 @@ ddp_config:
 # kwargs to override the HF model config
 model_config_kwargs: {}
 
+torch_profiler_config:
+  enable: false
+  ranks: []
+  save_path: null
+
 # kwargs to override the Megatron TransformerConfig object
 transformer_config_kwargs:
   # Recompute config - used for gradient/activation checkpointing
