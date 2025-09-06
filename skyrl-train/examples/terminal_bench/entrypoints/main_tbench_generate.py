@@ -50,10 +50,20 @@ class TerminalBenchGenerateExp(BasePPOExp):
     def run(self):
         generator = self._setup_generator()
 
-        # TODO(tgriggs): Plumb the sandboxes task list here instead of an empty prompt
-        num_prompts = 16
+        # Build input from the training dataset
+        num_prompts = len(self.train_dataset)
+        prompts = []
+        env_extras = []
+        for i in range(num_prompts):
+            prompt, _, extra = self.train_dataset[i]
+            prompts.append(prompt)
+            env_extras.append(extra)
+
         input_batch = GeneratorInput(
-            prompts=["" for _ in range(num_prompts)],
+            prompts=prompts,
+            env_classes=None,
+            env_extras=env_extras,
+            sampling_params=None,
         )
 
         # Start generation
