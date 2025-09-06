@@ -72,6 +72,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
+
+    chat_template_config = None
+    if "Qwen3" in model_name:
+        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+
     generator_cfg = DictConfig(
         {
             "sampling_params": {"max_generate_length": 200, "logprobs": None},
@@ -81,6 +86,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "zero_reward_on_non_stop": False,
             "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
+            "chat_template": chat_template_config,
             "append_eos_token_after_stop_str_in_multi_turn": True,
         }
     )
@@ -127,7 +133,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # check that the full response is exactly string matching with applying the chat template on history
     prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
     resp_str = tokenizer.decode(generator_output["response_ids"][0])
-    custom_chat_template = get_custom_chat_template(model_name)
+    
+    custom_chat_template = generator.custom_chat_template
     if custom_chat_template is not None:
         assert prompt_str + resp_str == tokenizer.apply_chat_template(
             expected_chat_history, chat_template=custom_chat_template, tokenize=False
