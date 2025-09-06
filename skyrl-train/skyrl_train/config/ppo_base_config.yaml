@@ -158,6 +158,7 @@ trainer:
 
 
 generator:
+  model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16" # should match dtype for inference engine
   run_engines_locally: true
   num_inference_engines: 1

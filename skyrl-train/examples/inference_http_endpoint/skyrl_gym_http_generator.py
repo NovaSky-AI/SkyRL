@@ -6,7 +6,7 @@ from omegaconf import DictConfig
 from typing import List, Dict, Any, Optional
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType, InferenceEngineOutput
-from skyrl_train.generators.utils import apply_overlong_filtering
+from skyrl_train.generators.utils import apply_overlong_filtering, get_rollout_metrics
 from skyrl_train.generators.base import GeneratorOutput
 import skyrl_gym
 
@@ -102,7 +102,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
 
         prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
         responses = truncated_responses
-        rollout_metrics = self._rollout_metrics(responses, rewards)
+        rollout_metrics = get_rollout_metrics(responses, rewards)
 
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)

@@ -94,6 +94,10 @@ docs = [
     "sphinx-copybutton>=0.5.0",
     "sphinx-autobuild>=2021.3.14"
 ]
+# TODO(tgriggs): Add `sandboxes` here once available as a package.
+sandboxes = [
+    "litellm[proxy]>=1.67.5",
+]
 vllm = [
     "vllm==0.10.1.1",
     "torch==2.7.1",
