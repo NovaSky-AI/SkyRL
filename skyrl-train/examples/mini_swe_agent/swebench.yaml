@@ -209,22 +209,23 @@ agent:
 
     If you have completed your assignment, please consult the first message about how to
     submit your solution (you will not be able to continue working on this task after that).
-  step_limit: 50
+  step_limit: 25
   cost_limit: 3.
 
 environment:
   cwd: "/testbed"
   timeout: 3600
+  pull_timeout: 1200
   env:
     PAGER: cat
     MANPAGER: cat
     LESS: -R
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
-  environment_class: singularity
-  executable: apptainer
+  environment_class: docker
+  executable: podman
 
 model:
-  model_name: "Qwen/Qwen3-4B"
+  model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
   model_kwargs:
     drop_params: true

@@ -15,20 +15,11 @@ if __name__ == "__main__":
 
     args.output_dir = os.path.expanduser(args.output_dir)
 
-    data_source = "SumanthRH/SWE-Gym"
+    data_source = "SumanthRH/SWE-Gym-Subset"
     eval_data_source = "SumanthRH/SWE-bench_Verified"
 
     dataset = datasets.load_dataset(data_source, "default")
     train_dataset = dataset["train"]
-    # Use only the instance ids in SkyRL-v0-293-data
-    from huggingface_hub import snapshot_download
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        snapshot_download("NovaSky-AI/SkyRL-v0-293-data", local_dir=tmpdir, repo_type="dataset")
-        skyrl_v0_dataset = datasets.load_dataset("parquet", data_files=[os.path.join(tmpdir, "train.parquet")])["train"]
-        valid_instance_ids = set([skyrl_v0_dataset["instance"][i]["instance_id"] for i in range(len(skyrl_v0_dataset))])
-    train_dataset = train_dataset.filter(lambda x: x["instance_id"] in valid_instance_ids)
 
     val_dataset = datasets.load_dataset(eval_data_source, "default")["test"]
 

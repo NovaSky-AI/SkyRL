@@ -4,8 +4,6 @@ from omegaconf import DictConfig
 import yaml
 import traceback
 import ray
-import json
-import threading
 from pathlib import Path
 
 from minisweagent.models import get_model
@@ -18,22 +16,6 @@ from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, Genera
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-
-_OUTPUT_FILE_LOCK = threading.Lock()
-
-
-def update_preds_file(output_path: Path, instance_id: str, model_name: str, result: str):
-    """Update the output JSON file with results from a single instance."""
-    with _OUTPUT_FILE_LOCK:
-        output_data = {}
-        if output_path.exists():
-            output_data = json.loads(output_path.read_text())
-        output_data[instance_id] = {
-            "model_name_or_path": model_name,
-            "instance_id": instance_id,
-            "model_patch": result,
-        }
-        output_path.write_text(json.dumps(output_data, indent=2))
 
 
 @ray.remote(num_cpus=0.01)
@@ -53,6 +35,9 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
     try:
         env = get_sb_environment(sweagent_config, instance, data_source)
         agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+        # NOTE (sumanthrh): The existing error handling doesn't handle context window exceeded errors correctly.
+        # Ideally, we stream response and append the partially complete response from the model and use it during training, but a simple exception
+        # is raised at the moment
         exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
@@ -64,7 +49,6 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
         path.mkdir(parents=True, exist_ok=True)
         path = path / (str(instance["instance_id"]) + ".json")
         if agent is not None:
-            reward = None
             eval_error = None
             try:
                 result = evaluate_trajectory(instance, result, sweagent_config, data_source)

@@ -21,9 +21,12 @@ def get_sb_environment(config: dict, instance: dict, data_source: str) -> Enviro
     env_config["environment_class"] = env_config.get("environment_class", "docker")
     image_name = get_docker_image_name(instance, data_source)
     if env_config["environment_class"] == "docker":
-        env_config["image"] = image_name
+        if env_config.get("executable", "docker") == "podman":
+            env_config["image"] = f"docker://{image_name}"
+        else:
+            env_config["image"] = image_name
     elif env_config["environment_class"] == "singularity":
-        env_config["image"] = "docker://" + image_name
+        env_config["image"] = f"docker://{image_name}"
     env = get_environment(env_config)
     if startup_command := config.get("run", {}).get("env_startup_command"):
         startup_command = Template(startup_command).render(**instance)

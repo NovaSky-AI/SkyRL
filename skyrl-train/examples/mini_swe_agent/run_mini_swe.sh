@@ -10,33 +10,28 @@ CKPT_PATH="$HOME/ckpts/llm_mini_swe"
 # save trajectories here
 MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
 
-NUM_GPUS=4
-NUM_INFERENCE_ENGINES=1
-TP_SIZE=1
+NUM_GPUS=8
+NUM_INFERENCE_ENGINES=4
+TP_SIZE=2
 LOGGER=wandb
-
-# apply dynamic sampling
-DYNAMIC_SAMPLING_TYPE=filter
-DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=10
 
 # We use a smaller batch size here for demonstration
 uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="Qwen/Qwen3-4B" \
-  trainer.placement.colocate_all=false \
+  trainer.policy.model.path="Qwen/Qwen3-Coder-30B-A3B-Instruct" \
+  trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  trainer.policy.sequence_parallel_size=4 \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
-  trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
-  trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
   trainer.epochs=20 \
   trainer.eval_batch_size=8 \
   trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=8 \
   trainer.policy_mini_batch_size=8 \
@@ -61,9 +56,9 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="mini_swe" \
-  trainer.run_name="gsm8k_mini_swe_4B_http" \
+  trainer.run_name="mini_swe_30B_swe_gym" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_mini_swe_4B_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/mini_swe_30B_swe_ckpt" \
   +generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \
   +generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR
   $@
