@@ -336,6 +336,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             model_config=model_config,
             models=models,
             response_role="assistant",
+            request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
         )
