@@ -9,9 +9,10 @@ from loguru import logger
 from ray.util.placement_group import placement_group
 from omegaconf import DictConfig
 import hydra
-from typing import List
-from transformers import AutoTokenizer
+from typing import List, Tuple
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
+import subprocess
 
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -25,6 +26,7 @@ from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -394,3 +396,109 @@ def init_inference_engines(cfg, model, use_local, async_engine, tp_size, colocat
     if sleep:
         asyncio.run(client.wake_up())
     return client, pg
+
+
+def init_remote_inference_servers(
+    tp_size: int,
+    backend: str,
+    tokenizer: PreTrainedTokenizerBase,
+    config: DictConfig,
+    model: str,
+) -> Tuple[InferenceEngineClient, subprocess.Popen]:
+    available_gpus = get_available_gpus()
+    assert (
+        len(available_gpus) >= tp_size
+    ), f"Not enough GPUs available. Need {tp_size}, but only {len(available_gpus)} available: {available_gpus}"
+
+    selected_gpus = available_gpus[:tp_size]
+    gpu_ids_str = ",".join(map(str, selected_gpus))
+    print(f"Using GPUs {gpu_ids_str} for vLLM server (tensor_parallel_size={tp_size})")
+
+    def get_free_port():
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    engine_port = get_free_port()
+
+    # Launch vLLM server using subprocess
+    if backend == "vllm":
+        remote_server_command = [
+            "uv",
+            "run",
+            "--isolated",
+            "--extra",
+            "vllm",
+            "-m",
+            "skyrl_train.inference_engines.vllm.vllm_server",
+            "--model",
+            model,
+            "--enforce-eager",
+            "--gpu-memory-utilization",
+            "0.8",
+            "--tensor-parallel-size",
+            str(tp_size),
+            # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
+            # For standalone server, we use mp for now.
+            "--distributed-executor-backend",
+            "mp",
+            "--dtype",
+            "bfloat16",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(engine_port),
+            "--worker-extension-cls",
+            "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+        ]
+    elif backend == "sglang":
+        remote_server_command = [
+            "uv",
+            "run",
+            "--isolated",
+            "--extra",
+            "sglang",
+            "-m",
+            "skyrl_train.inference_engines.sglang.sglang_server",
+            "--model-path",
+            model,
+            "--tp-size",
+            str(tp_size),
+            "--dtype",
+            "bfloat16",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(engine_port),
+            "--mm-attention-backend",
+            "fa3",
+            "--attention-backend",
+            "fa3",
+        ]
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    # Set CUDA_VISIBLE_DEVICES environment variable for the subprocess
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = gpu_ids_str
+
+    # Start the vLLM server process
+    server_process = subprocess.Popen(remote_server_command, env=env)
+
+    wait_for_server(url=f"localhost:{engine_port}", health_path="health")
+    print(f"Server at localhost:{engine_port} is online")
+
+    engines = create_remote_inference_engines(
+        urls=[f"localhost:{engine_port}"],
+        model_name=model,
+        tokenizer=tokenizer,
+        engine_backend=backend,
+        tensor_parallel_size=tp_size,
+    )
+
+    client = InferenceEngineClient(engines, tokenizer, config)
+    return client, server_process
