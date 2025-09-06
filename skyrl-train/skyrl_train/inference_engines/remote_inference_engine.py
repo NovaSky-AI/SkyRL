@@ -5,7 +5,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 import json
 from transformers import PreTrainedTokenizerBase
 
@@ -103,6 +103,19 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         return InferenceEngineOutput(
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=None
         )
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = request_payload.get("json", {})
+        # NOTE(Charlie): cannot reuse payload["headers"] since we are posting a new request.
+        # Otherwise will lead to json decode error.
+        headers = {"Content-Type": "application/json"}
+        response = None
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            request_url = f"{self.url}/v1/chat/completions"
+            async with session.post(request_url, json=body, headers=headers) as resp:
+                response = await resp.json()
+
+        return response
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:

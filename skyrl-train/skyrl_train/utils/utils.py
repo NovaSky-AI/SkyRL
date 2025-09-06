@@ -329,8 +329,17 @@ def validate_cfg(cfg: DictConfig):
                 "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
             )
 
-    if cfg.generator.enable_http_endpoint and not cfg.generator.async_engine:
-        raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
+    if cfg.generator.enable_http_endpoint:
+        if cfg.generator.backend == "sglang":
+            # TODO(Charlie): sglang_server.py not supported for /chat/completion yet because we have
+            # skip_tokenizer_init=True in engine creation. Fix by getting tokens via return logprobs
+            # instead. sglang_engine.py not supported yet because we still need to figure out how
+            # to make SGLang Python engine take OAI request.
+            raise ValueError(
+                'generator.enable_http_endpoint is not supported for SGLang backend yet. Please set generator.backend="vllm".'
+            )
+        if not cfg.generator.async_engine:
+            raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
 
 @ray.remote
