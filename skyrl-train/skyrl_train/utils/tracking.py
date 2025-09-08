@@ -45,20 +45,7 @@ class Tracking:
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:
-            import os
-
-            import mlflow
-
-            MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", None)
-            if MLFLOW_TRACKING_URI:
-                mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
-            # Project_name is actually experiment_name in MLFlow
-            # If experiment does not exist, will create a new experiment
-            experiment = mlflow.set_experiment(project_name)
-            mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
-            mlflow.log_params(_compute_mlflow_params_from_objects(config))
-            self.logger["mlflow"] = _MlflowLoggingAdapter()
+            self.logger["mlflow"] = _MlflowLoggingAdapter(project_name, experiment_name, config)
 
         if "swanlab" in default_backend:
             import os
@@ -176,16 +163,34 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def log(self, data, step):
+    def __init__(self, project_name, experiment_name, config):
+        import os
+
         import mlflow
 
+        if mlflow.active_run() is None:
+            self.we_created_mlflow = True
+            if mlflow_tracking_uri := os.environ.get("MLFLOW_TRACKING_URI", None):
+                mlflow.set_tracking_uri(mlflow_tracking_uri)
+
+            # Project_name is actually experiment_name in MLFlow
+            # If experiment does not exist, will create a new experiment
+            experiment = mlflow.set_experiment(project_name)
+            mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
+
+        else:
+            self.we_created_mlflow = False
+
+        mlflow.log_params(_compute_mlflow_params_from_objects(config))
+        self.mlflow = mlflow
+
+    def log(self, data, step):
         results = {k.replace("@", "_at_"): v for k, v in data.items()}
-        mlflow.log_metrics(metrics=results, step=step)
+        self.mlflow.log_metrics(metrics=results, step=step)
 
     def finish(self):
-        import mlflow
-
-        mlflow.end_run()
+        if self.we_created_mlflow:
+            self.mlflow.end_run()
 
 
 def _compute_mlflow_params_from_objects(params) -> Dict[str, Any]:
