@@ -361,7 +361,9 @@ async def run_inference(client, prompts, sampling_params):
     return await client.generate(engine_input)
 
 
-def init_inference_engines(cfg, model, use_local, async_engine, tp_size, colocate_all, backend):
+def init_inference_engines(
+    cfg, model, use_local, async_engine, tp_size, colocate_all, backend, max_model_len=1536, gpu_memory_utilization=0.6
+):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
     initialize_ray(cfg)
@@ -382,9 +384,9 @@ def init_inference_engines(cfg, model, use_local, async_engine, tp_size, colocat
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        max_model_len=1536,
+        max_model_len=max_model_len,
         shared_pg=pg,
-        gpu_memory_utilization=0.6,
+        gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,
         async_engine=async_engine,
         max_num_batched_tokens=8192,

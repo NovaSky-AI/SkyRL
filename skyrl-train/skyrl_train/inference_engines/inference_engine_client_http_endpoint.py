@@ -97,10 +97,6 @@ def _validate_chat_completion(request_json: Dict[str, Any]) -> Optional[ErrorRes
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
         )
-    if request_json.get("trajectory_id", None) is None:
-        logger.warning(
-            "Trajectory ID is not provided in your `/chat/completion` request. Please add it to your request to ensure load balancing and sticky routing."
-        )
     return None
 
 
