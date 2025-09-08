@@ -38,4 +38,4 @@ docs/_spelling/
 /skyrl-gym/build
 /skyrl-gym/dist
 
-*.log
+# *.log

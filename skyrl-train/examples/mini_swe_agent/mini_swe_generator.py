@@ -18,6 +18,20 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
+class DefaultAgentWithReminder(DefaultAgent):
+    def get_observation(self, response: dict) -> dict:
+        """Execute the action and return the observation."""
+        output = self.execute_action(self.parse_action(response))
+        observation = self.render_template(self.config.action_observation_template, output=output)
+        if 0 < self.config.step_limit < self.model.n_calls:
+            if self.config.step_limit == self.model.n_calls - 1:
+                observation = f"{observation}\nREMINDER:You only have 1 turn left. Please provide the final answer"
+            else:
+                observation = f"{observation}\nREMINDER: You have {self.config.step_limit - self.model.n_calls} turns left to arrive at the solution."
+        self.add_message("user", observation)
+        return output
+
+
 @ray.remote(num_cpus=0.01)
 def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, data_source, sampling_params):
     from loguru import logger
@@ -34,7 +48,7 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
     error = None
     try:
         env = get_sb_environment(sweagent_config, instance, data_source)
-        agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+        agent = DefaultAgentWithReminder(model, env, **sweagent_config.get("agent", {}))
         # NOTE (sumanthrh): The existing error handling doesn't handle context window exceeded errors correctly.
         # Ideally, we stream response and append the partially complete response from the model and use it during training, but a simple exception
         # is raised at the moment

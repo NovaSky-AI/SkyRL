@@ -209,7 +209,7 @@ agent:
 
     If you have completed your assignment, please consult the first message about how to
     submit your solution (you will not be able to continue working on this task after that).
-  step_limit: 25
+  step_limit: 5
   cost_limit: 3.
 
 environment:
@@ -227,5 +227,8 @@ environment:
 
 model:
   model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+  # model_name: "Qwen/Qwen3-8B"
   model_kwargs:
     drop_params: true
+    # temperature: 0.0
+    # top_p: 1.0

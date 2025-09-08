@@ -1449,7 +1449,7 @@ wheels = [
 [[package]]
 name = "mini-swe-agent"
 version = "1.10.0"
-source = { git = "https://github.com/SumanthRH/mini-swe-agent?rev=minimal-eval-support#773053214bf9676f402f92673be176b429a185cd" }
+source = { git = "https://github.com/SumanthRH/mini-swe-agent?rev=sumanthrh%2Fr2e#30604976c483837e39333328abb3860f7bc6abdd" }
 dependencies = [
     { name = "jinja2" },
     { name = "litellm", version = "1.76.1", source = { registry = "https://pypi.org/simple" } },
@@ -3187,7 +3187,7 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'dev'" },
     { name = "litellm", marker = "extra == 'miniswe'" },
     { name = "loguru" },
-    { name = "mini-swe-agent", marker = "extra == 'miniswe'", git = "https://github.com/SumanthRH/mini-swe-agent?rev=minimal-eval-support" },
+    { name = "mini-swe-agent", marker = "extra == 'miniswe'", git = "https://github.com/SumanthRH/mini-swe-agent?rev=sumanthrh%2Fr2e" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
     { name = "omegaconf" },
     { name = "peft" },

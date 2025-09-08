@@ -5,14 +5,14 @@ set -x
 # uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
 # bash examples/mini_swe_agent/run_mini_swe.sh
 
-DATA_DIR="$HOME/data/swe_gym"
-CKPT_PATH="$HOME/ckpts/llm_mini_swe"
+DATA_DIR="/mnt/user_storage/data/swe_gym_subset"
+CKPT_PATH="/mnt/local_storage/ckpts/llm_mini_swe"
 # save trajectories here
-MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
+MINISWE_TRAJ_DIR="/mnt/user_storage/mini_swe_agent_trajs"
 
-NUM_GPUS=8
+NUM_GPUS=16
 NUM_INFERENCE_ENGINES=4
-TP_SIZE=2
+TP_SIZE=4
 LOGGER=wandb
 
 # We use a smaller batch size here for demonstration
@@ -29,12 +29,12 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=8 \
+  trainer.eval_batch_size=16 \
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=8 \
-  trainer.policy_mini_batch_size=8 \
+  trainer.train_batch_size=16 \
+  trainer.policy_mini_batch_size=16 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
@@ -58,7 +58,7 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   trainer.project_name="mini_swe" \
   trainer.run_name="mini_swe_30B_swe_gym" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/mini_swe_30B_swe_ckpt" \
+  trainer.ckpt_path="$CKPT_PATH" \
   +generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \
   +generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR
   $@

@@ -32,6 +32,8 @@ class MiniSWEPPOTrainer(RayPPOTrainer):
         # we simply ignore validation for now
         # validate_generator_output(input_batch, generator_output)
 
+        print("Rewards: ", generator_output["rewards"])
+
         # ensure that the number of trajectories meets the minimum required
         num_trajectories = len(generator_output["response_ids"])
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
