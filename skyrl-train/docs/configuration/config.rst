@@ -100,7 +100,7 @@ Checkpoint Configuration
 
     resume_mode: latest # null/"none", "latest", "from_path"
     resume_path: null
-    ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
+    ckpt_path: "${oc.env:HOME}/ckpts/" # Local directory path or cloud storage path (S3, GCP) for resumable training checkpoints (model state, optimizer state, etc.)
     max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
     ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
     hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.

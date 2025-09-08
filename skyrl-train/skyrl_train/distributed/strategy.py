@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
 from transformers import GenerationConfig
+from skyrl_train.utils import io
 
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
@@ -115,23 +116,25 @@ class DistributedStrategy(ABC):
             tokenizer: AutoTokenizer - tokenizer to save
         """
         hf_config_tokenizer_path = os.path.join(ckpt_dir, "huggingface")
-        os.makedirs(hf_config_tokenizer_path, exist_ok=True)
+        io.makedirs(hf_config_tokenizer_path, exist_ok=True)
         model_config = model.config
-        generation_config = None
-        if model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
-            try:
-                # Some model's name_or_path is empty if not initialized from pretrained,
-                # in this cases, we don't save generation config.
-                generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
-                generation_config.save_pretrained(hf_config_tokenizer_path)
-            except Exception as e:
-                # if the generation config isn't available, we don't save it
-                logger.warning(f"Could not save generation config for '{model_config.name_or_path}'. Error: {e}")
-                pass
 
-        model_config.save_pretrained(hf_config_tokenizer_path)
-        if tokenizer is not None:
-            tokenizer.save_pretrained(hf_config_tokenizer_path)
+        with io.local_work_dir(hf_config_tokenizer_path) as work_dir:
+            model_config.save_pretrained(work_dir)
+            if tokenizer is not None:
+                tokenizer.save_pretrained(work_dir)
+
+            if model.can_generate() and hasattr(model_config, "name_or_path") and model_config.name_or_path:
+                try:
+                    # Some model's name_or_path is empty if not initialized from pretrained,
+                    # in this cases, we don't save generation config.
+                    generation_config = GenerationConfig.from_pretrained(model_config.name_or_path)
+                    # with io.local_work_dir(hf_config_tokenizer_path) as work_dir:
+                    generation_config.save_pretrained(work_dir)
+                except Exception as e:
+                    # if the generation config isn't available, we don't save it
+                    logger.warning(f"Could not save generation config for '{model_config.name_or_path}'. Error: {e}")
+                    pass
 
     @staticmethod
     def get_rng_state():

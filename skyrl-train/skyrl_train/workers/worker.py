@@ -17,6 +17,7 @@ from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy
@@ -216,17 +217,17 @@ class Worker(DistributedTorchRayActor):
         """
         rank = torch.distributed.get_rank()
         save_path = os.path.join(self.cfg.trainer.ckpt_path, "memory_snapshots")
-        if self._local_rank == 0 and not os.path.exists(save_path):
-            os.makedirs(save_path, exist_ok=True)
+        if self._local_rank == 0 and not io.exists(save_path):
+            io.makedirs(save_path, exist_ok=True)
         torch.distributed.barrier()
         if global_step is None or local_step is None:
             file_name = f"policy_rank_{rank}.pickle"
         else:
             file_name = f"policy_rank_{rank}_training_step_{global_step}_{local_step}.pickle"
         record_memory_path = os.path.join(save_path, file_name)
-        if os.path.exists(record_memory_path):
+        if io.exists(record_memory_path):
             # seeing issues if we don't remove the file first
-            os.remove(record_memory_path)
+            io.remove(record_memory_path)
         torch.cuda.memory._dump_snapshot(record_memory_path)
 
     async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):

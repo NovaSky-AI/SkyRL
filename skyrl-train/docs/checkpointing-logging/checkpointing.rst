@@ -3,6 +3,8 @@ Checkpointing
 
 SkyRL provides checkpointing features to resume training from a previous state. Training state is saved at regular intervals and provides flexible configuration options for checkpoint management.
 
+Checkpointed state can be stored in the local file system or uploaded to cloud storage (S3, GCP).
+
 What State is Saved
 -------------------
 
@@ -88,6 +90,9 @@ Checkpointing behavior is controlled by several parameters in the YAML configura
 ``ckpt_path``
   - **Default**: ``"${oc.env:HOME}/ckpts/"``
   - **Purpose**: Base directory where all checkpoints are stored
+  - **Options**:
+    - Local file system path (e.g., ``/path/to/ckpts/``)
+    - Cloud storage path (S3, GCP) (e.g., ``s3://path/to/ckpts/``)
 
 **Checkpoint Cleanup**
 
