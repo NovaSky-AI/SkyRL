@@ -1,6 +1,6 @@
-## Verifiers + SkyRL Guide
+## Guide: Verifiers (Environments Hub) + SkyRL
 
-This directory holds the workflow to train on Verifiers environments with SkyRL.
+This directory holds the workflow to train on Environments Hub environments with SkyRL.
 
 To start training, follow three simple steps:
 1) Install the environment from Environments Hub.
