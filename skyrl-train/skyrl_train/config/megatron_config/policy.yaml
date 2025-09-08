@@ -7,7 +7,7 @@ expert_tensor_parallel_size: 1
 
 # Settings for the Distributed Data Parallel (DDP) config
 ddp_config:
-  grad_reduce_in_fp32: true
+  grad_reduce_in_fp32: false
   overlap_grad_reduce: false
   overlap_param_gather: false
   average_in_collective: true

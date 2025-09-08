@@ -37,7 +37,7 @@ class MegatronPPOPolicy:
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
-        # use the build in finalize_model_grads function to all reduce gradients across parallism dimensions
+        # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
         config.finalize_model_grads_func = finalize_model_grads
 
     def train(self):
