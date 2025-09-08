@@ -11,7 +11,6 @@ import socket
 from tests.gpu.utils import get_test_actor_config, init_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from integrations.verifiers.verifiers_generator import VerifiersGenerator
 
 # Mark all tests in this file as "integrations"
 pytestmark = pytest.mark.integrations
@@ -87,6 +86,8 @@ async def _run_verifiers_end_to_end(
             "http_endpoint_port": http_port,
         }
     )
+
+    from integrations.verifiers.verifiers_generator import VerifiersGenerator
 
     generator = VerifiersGenerator(
         generator_cfg=generator_cfg,
