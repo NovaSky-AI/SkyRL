@@ -1292,7 +1292,7 @@ class RayPPOTrainer:
                 )
 
         # Validate that the path exists
-        if not io.exists(checkpoint_path):
+        if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
