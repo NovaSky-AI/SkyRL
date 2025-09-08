@@ -350,6 +350,11 @@ async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 4
 
+    # set torch profiler config
+    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = True
+    cfg.trainer.policy.megatron_config.torch_profiler_config.ranks = [0]
+    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = "/home/ray/megatron_prof/tp2_pp2/"
+
     actor_group = init_worker_with_type(
         "policy",
         shared_pg=None,
@@ -382,6 +387,9 @@ async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_
     # check the grad norm for the same thing but with pp=1, tp=1, dp=4
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+
+    # set torch profiler config
+    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = "/home/ray/megatron_prof/dp4/"
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = 64
