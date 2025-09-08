@@ -7,7 +7,7 @@ To start training, follow three simple steps:
 2) Prepare the environment's training and validation datasets.
 3) Launch training!
 
-Start by entering the `skyrl-train` directory:
+Start by following the SkyRL [installation instructions](https://skyrl.readthedocs.io/en/latest/getting-started/installation.html), then enter the `skyrl-train` directory:
 ```bash
 cd SkyRL/skyrl-train
 ```
