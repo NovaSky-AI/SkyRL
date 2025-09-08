@@ -2,6 +2,8 @@ import os
 import time
 
 import ray
+import sys
+import logging
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -465,6 +467,43 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     return env_vars
 
 
+def configure_worker_logging() -> None:
+    """
+    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
+    `configure_worker_logging` is used within each Ray worker to
+    force color and formatting (e.g., bold) and route stdlib `logging`
+    through Loguru so third‑party logs match formatting
+    """
+    # 1) Loguru formatting (force colors)
+    logger.remove()
+    logger.level("INFO", color="<bold><green>")
+    logger.add(
+        sys.stderr,
+        colorize=True,  # keep ANSI even without a TTY
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>",
+    )
+
+    # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
+    class _InterceptHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+    logging.root.handlers = [_InterceptHandler()]
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.root.setLevel(level)
+
+
 def initialize_ray(cfg: DictConfig):
     """
     Initialize Ray cluster with prepared runtime environment.
@@ -477,7 +516,12 @@ def initialize_ray(cfg: DictConfig):
     )
 
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+    ray.init(
+        runtime_env={
+            "env_vars": env_vars,
+            "worker_process_setup_hook": configure_worker_logging,
+        },
+    )
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()
