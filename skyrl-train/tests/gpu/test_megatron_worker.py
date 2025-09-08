@@ -9,7 +9,7 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import asyncio
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tests.gpu.utils import (
     init_worker_with_type,
@@ -54,50 +54,46 @@ def get_test_training_batch() -> TrainingInputBatch:
     Attention masks are 1 for non-padding tokens, 0 for padding tokens
     The rest of the fields are filled with dummy data
     """
-    import pickle
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    with open("/mnt/cluster_storage/gsm8k_batch.pkl", "rb") as f:
-        data = pickle.load(f)[10:74]
-    # tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    sentences = [
+        "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+        "<|im_start|>user\nThe selling price of a bicycle that had sold $220 last year was increased by 15",
+        "What is the new price? Let's think step by step and output the final answer after `####`.<|im_end|>\n",
+        "<|im_start|>assistant\nTo find the new price of the bicycle after the increase,",
+    ]
 
-    # sentences = [
-    #     "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-    #     "<|im_start|>user\nThe selling price of a bicycle that had sold $220 last year was increased by 15",
-    #     "What is the new price? Let's think step by step and output the final answer after `####`.<|im_end|>\n",
-    #     "<|im_start|>assistant\nTo find the new price of the bicycle after the increase,",
-    # ]
+    sequences = [tokenizer.encode(sentence) for sentence in sentences]
+    attention_masks = [[1] * len(seq) for seq in sequences]
+    batch_size = len(sequences)
+    num_actions = 10
 
-    # sequences = [tokenizer.encode(sentence) for sentence in sentences]
-    # attention_masks = [[1] * len(seq) for seq in sequences]
-    # batch_size = len(sequences)
-    # num_actions = 10
+    pad_token_id = tokenizer.pad_token_id
 
-    # pad_token_id = tokenizer.pad_token_id
+    # pad to length of longest sequence (25)
+    pad_before_after = [(4, 2), (0, 1), (1, 1), (6, 4)]
+    for i, (pad_before, pad_after) in enumerate(pad_before_after):
+        sequences[i] = [pad_token_id] * pad_before + sequences[i] + [pad_token_id] * pad_after
+        attention_masks[i] = [0] * pad_before + attention_masks[i] + [0] * pad_after
 
-    # # pad to length of longest sequence (25)
-    # pad_before_after = [(4, 2), (0, 1), (1, 1), (6, 4)]
-    # for i, (pad_before, pad_after) in enumerate(pad_before_after):
-    #     sequences[i] = [pad_token_id] * pad_before + sequences[i] + [pad_token_id] * pad_after
-    #     attention_masks[i] = [0] * pad_before + attention_masks[i] + [0] * pad_after
+    attention_masks = torch.tensor(attention_masks)
+    sequences = torch.tensor(sequences)
 
-    # attention_masks = torch.tensor(attention_masks)
-    # sequences = torch.tensor(sequences)
-
-    # data = TrainingInputBatch(
-    #     {
-    #         "sequences": sequences,
-    #         "attention_mask": attention_masks,
-    #         "action_log_probs": torch.tensor([[0.1] * num_actions] * batch_size),
-    #         "base_action_log_probs": torch.tensor([[0.2] * num_actions] * batch_size),
-    #         "rollout_logprobs": torch.tensor([[0.11] * num_actions] * batch_size),
-    #         "values": torch.tensor([[0.1] * num_actions] * batch_size),
-    #         "returns": torch.tensor([[0.1] * num_actions] * batch_size),
-    #         "advantages": torch.tensor([[0.5] * num_actions] * batch_size),
-    #         "loss_mask": torch.tensor([[1] * num_actions] * batch_size),
-    #         "response_mask": torch.tensor([[1] * num_actions] * batch_size),
-    #     }
-    # )
-    # data.metadata = {"response_length": num_actions}
+    data = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_masks,
+            "action_log_probs": torch.tensor([[0.1] * num_actions] * batch_size),
+            "base_action_log_probs": torch.tensor([[0.2] * num_actions] * batch_size),
+            "rollout_logprobs": torch.tensor([[0.11] * num_actions] * batch_size),
+            "values": torch.tensor([[0.1] * num_actions] * batch_size),
+            "returns": torch.tensor([[0.1] * num_actions] * batch_size),
+            "advantages": torch.tensor([[0.5] * num_actions] * batch_size),
+            "loss_mask": torch.tensor([[1] * num_actions] * batch_size),
+            "response_mask": torch.tensor([[1] * num_actions] * batch_size),
+        }
+    )
+    data.metadata = {"response_length": num_actions}
     return data
 
 
