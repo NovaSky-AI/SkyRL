@@ -308,6 +308,11 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
             masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
             masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
+            assert (
+                MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
+                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+            ), "generation prompts should be loss masked out"
+
             # Observations and EOS expectations only strictly apply when the model finished turns
             if stop_reason == "stop":
                 assert (
@@ -316,11 +321,6 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
                 assert (
                     "give me another solution 2" in masked_out_resp_str
                 ), '"give me another solution 2" observation should be loss masked out'
-                assert (
-                    MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
-                    and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-                ), "generation prompts should be loss masked out"
-
                 # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
                 assert sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 3
                 # total eos in full response: 2 user eos + 3 assistant eos
@@ -328,10 +328,6 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
             else:
                 # On length stops, the model may not produce EOS at the end of each assistant turn.
                 # Only check that generation prompts are masked out.
-                assert (
-                    MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
-                    and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-                ), "generation prompts should be loss masked out"
                 logger.warning(f"Got stop reason {stop_reason}, so we did not fully checked the response")
             if model_name == "Qwen/Qwen3-1.7B":
                 assert (
