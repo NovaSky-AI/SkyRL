@@ -289,15 +289,26 @@ class SkyRLGymGenerator(GeneratorInterface):
         if retokenize_chat_history:
             reward_out = per_step_rewards[-1][0]
         else:
-            # Build token-level rewards placed at assistant turn boundaries
-            token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for step_reward, idx in per_step_rewards:
-                if step_reward is None:
-                    continue
-                if idx >= len(response_ids):
+            # Check if all rewards besides the last one are None
+            is_per_trajectory_reward = True
+            for reward, _ in per_step_rewards[:-1]:
+                if reward is not None:
+                    is_per_trajectory_reward = False
                     break
-                token_level_rewards[idx] += step_reward
-            reward_out = token_level_rewards
+
+            if is_per_trajectory_reward:
+                # If there is only a single reward, we still keep it as a float
+                reward_out = per_step_rewards[-1][0]
+            else:
+                # Otherwise build token-level rewards placed at assistant turn boundaries
+                token_level_rewards: List[float] = [0.0] * len(response_ids)
+                for step_reward, idx in per_step_rewards:
+                    if step_reward is None:
+                        continue
+                    if idx >= len(response_ids):
+                        break
+                    token_level_rewards[idx] += step_reward
+                reward_out = token_level_rewards
 
         return AgentLoopOutput(
             response_ids=response_ids,
