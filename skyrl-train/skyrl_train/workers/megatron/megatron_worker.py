@@ -51,7 +51,7 @@ class MegatronWorker:
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
-        transformer_config_kwargs = OmegaConf.create(transformer_config_kwargs)
+        transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         bridge = AutoBridge.from_config(hf_config)
