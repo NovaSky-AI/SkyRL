@@ -9,7 +9,7 @@ import datasets
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="~/data/swe_gym")
+    parser.add_argument("--output_dir", default="~/data/swe_gym_subset")
 
     args = parser.parse_args()
 

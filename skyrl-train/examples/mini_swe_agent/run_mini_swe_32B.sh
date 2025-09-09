@@ -1,23 +1,24 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen3-8B on the SWE-Bench task.
-# Uses 1 node with 4 GPUs.
-# uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
-# bash examples/mini_swe_agent/run_mini_swe.sh
+# Colocated GRPO training+generation for Qwen/Qwen3-Coder-30B-A3B-Instruct on the SWE-Bench task.
+# Uses 2 node with 8 GPUs each.
+# uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
+# bash examples/mini_swe_agent/run_mini_swe_32B.sh
 
 # ensure that all worker nodes can access this data directory
-DATA_DIR="$HOME/data/swe_gym_subset"
+DATA_DIR="$DATA/data/swe_gym_subset"
 
-CKPT_PATH="$HOME/ckpts/llm_mini_swe"
+CKPT_PATH="$DATA/ckpts/llm_mini_swe"
 # save trajectories here for debugging.
 MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs_32B"
 
-NUM_GPUS=16
+NUM_GPUS=8
+NNODES=2
 NUM_INFERENCE_ENGINES=4
 TP_SIZE=4
 LOGGER=wandb
 
-# We use a smaller batch size here for demonstration
+# We use a small batch size here for demonstration
 uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -27,6 +28,8 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.policy_num_nodes=$NNODES \
+  trainer.placement.ref_num_nodes=$NNODES \
   trainer.policy.sequence_parallel_size=4 \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \

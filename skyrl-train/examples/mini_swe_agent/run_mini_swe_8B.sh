@@ -1,21 +1,22 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen3-8B on the SWE-Bench task.
-# Uses 1 node with 4 GPUs.
-# uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
+# Uses 1 node with 8 GPUs.
+# uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
 # bash examples/mini_swe_agent/run_mini_swe.sh
 
 DATA_DIR="/mnt/user_storage/data/swe_gym_subset"
 CKPT_PATH="/mnt/local_storage/ckpts/llm_mini_swe"
 # save trajectories here
-MINISWE_TRAJ_DIR="/mnt/user_storage/mini_swe_agent_trajs"
+MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
 
-NUM_GPUS=16
+NUM_GPUS=8
+NNODES=1
 NUM_INFERENCE_ENGINES=4
-TP_SIZE=4
+TP_SIZE=2
 LOGGER=wandb
 
-# We use a smaller batch size here for demonstration
+# We use a small batch size here for demonstration
 uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -25,15 +26,17 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  trainer.policy.sequence_parallel_size=4 \
+  trainer.placement.policy_num_nodes=$NNODES \
+  trainer.placement.ref_num_nodes=$NNODES \
+  trainer.policy.sequence_parallel_size=2 \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.epochs=20 \
   trainer.eval_batch_size=16 \
-  trainer.eval_before_train=false \
+  trainer.eval_before_train=true \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=32 \
+  trainer.train_batch_size=16 \
   trainer.policy_mini_batch_size=16 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
