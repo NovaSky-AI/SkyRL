@@ -19,6 +19,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
 import hydra
 from skyrl_train.entrypoints.main_base import config_dir
+from loguru import logger
 
 
 def get_test_actor_config() -> DictConfig:
@@ -43,7 +44,7 @@ class TestEnv(BaseTextEnv):
         self.turns += 1
         done = self.turns >= self.max_turns
         return BaseTextEnvStepOutput(
-            observations=[{"role": "user", "content": f"turn {self.turns}"}] if not done else [],
+            observations=[{"role": "user", "content": f"give me another solution {self.turns}"}] if not done else [],
             reward=0,
             done=done,
             metadata={},
@@ -56,9 +57,9 @@ register(
 )
 
 MODEL_TO_GENERATION_PROMPT = {
-    "Qwen/Qwen2.5-1.5B-Instruct": "<|im_start|>assistant\n",
-    "unsloth/Llama-3.2-1B-Instruct": "<|start_header_id|>assistant<|end_header_id|>\n\n",
-    "Qwen/Qwen3-0.6B": "<|im_start|>assistant\n",
+    "Qwen/Qwen2.5-3B-Instruct": "<|im_start|>assistant\n",
+    "unsloth/Llama-3.2-3B-Instruct": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    "Qwen/Qwen3-1.7B": "<|im_start|>assistant\n",
 }
 
 
@@ -68,7 +69,7 @@ async def run_generator_end_to_end(
     n_samples_per_prompt,
     num_inference_engines,
     tensor_parallel_size,
-    model="Qwen/Qwen2.5-1.5B-Instruct",
+    model="Qwen/Qwen2.5-3B-Instruct",
     max_prompt_length=512,
     max_input_length=2048,
     max_generate_length=1024,
@@ -257,7 +258,7 @@ async def test_generator_multi_turn_search():
             n_samples_per_prompt=5,
             num_inference_engines=2,
             tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-1.5B-Instruct",
+            model="Qwen/Qwen2.5-3B-Instruct",
             max_prompt_length=2048,
             max_input_length=4096,
             max_generate_length=1000,
@@ -274,7 +275,7 @@ async def test_generator_multi_turn_search():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name", ["unsloth/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen3-1.7B"]
 )
 async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
@@ -290,9 +291,9 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
             num_inference_engines=1,
             tensor_parallel_size=1,
             model=model_name,
-            max_prompt_length=1000,
-            max_input_length=3000,
-            max_generate_length=1000,
+            max_prompt_length=3000,
+            max_input_length=10000,
+            max_generate_length=3000,
             env_class="test_env",
             num_prompts=2,
             max_turns=3,
@@ -302,26 +303,37 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
         for i, resp_ids in enumerate(generator_output["response_ids"]):
             loss_mask = generator_output["loss_masks"][i]
             prompt_token_ids = generator_output["prompt_token_ids"][i]
+            stop_reason = generator_output["stop_reasons"][i]
             masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
             masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
 
             masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
             masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert "turn 1" in masked_out_resp_str, "turn 1 observation should be loss masked out"
-            assert "turn 2" in masked_out_resp_str, "turn 2 observation should be loss masked out"
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "generation prompts should be loss masked out"
+            # Observations and EOS expectations only strictly apply when the model finished turns
+            if stop_reason == "stop":
+                assert "give me another solution 1" in masked_out_resp_str, '"give me another solution 1" observation should be loss masked out'
+                assert "give me another solution 2" in masked_out_resp_str, '"give me another solution 2" observation should be loss masked out'
+                assert (
+                    MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
+                    and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+                ), "generation prompts should be loss masked out"
 
-            # count number of eos tokens in masked_in_resp_ids
-            # NOTE: this could fail if the stop reason is "length" where model fails to generate eos
-            assert (
-                sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 3
-            )  # 1 eos for each assistant response
-            assert sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id) == 5  # 2 user eos, 3 assistant eos
-            if model_name == "Qwen/Qwen3-0.6B":
+                # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
+                assert (
+                    sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 3
+                )
+                # total eos in full response: 2 user eos + 3 assistant eos
+                assert sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id) == 5
+            else:
+                # On length stops, the model may not produce EOS at the end of each assistant turn.
+                # Only check that generation prompts are masked out.
+                assert (
+                    MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
+                    and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+                ), "generation prompts should be loss masked out"
+                logger.warning(f"Got stop reason {stop_reason}, so we did not fully checked the response")
+            if model_name == "Qwen/Qwen3-1.7B":
                 assert (
                     sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
                 )  # 1 user eos (no system for Qwen3)
@@ -333,7 +345,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name", ["unsloth/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen3-1.7B"]
 )
 async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
@@ -349,7 +361,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
             num_inference_engines=1,
             tensor_parallel_size=1,
             model=model_name,
-            max_prompt_length=1000,
+            max_prompt_length=3000,
             max_input_length=10000,
             max_generate_length=3000,
             env_class="test_env",
@@ -369,8 +381,8 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
             masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
             masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert "turn 1" in masked_out_resp_str, "turn 1 observation should be loss masked out"
-            assert "turn 2" in masked_out_resp_str, "turn 2 observation should be loss masked out"
+            assert "give me another solution 1" in masked_out_resp_str, '"give me another solution 1" observation should be loss masked out'
+            assert "give me another solution 2" in masked_out_resp_str, '"give me another solution 2" observation should be loss masked out'
             assert (
                 prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
                 + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
@@ -385,7 +397,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
             assert (
                 sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
             )  # 1 eos for each assistant response
-            if model_name == "Qwen/Qwen3-0.6B":
+            if model_name == "Qwen/Qwen3-1.7B":
                 assert (
                     sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
                 )  # 1 user eos (no system for Qwen3)
