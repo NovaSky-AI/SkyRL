@@ -9,6 +9,7 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
+from omegaconf import OmegaConf
 
 from mbridge import AutoBridge
 import megatron.core.parallel_state as mpu
@@ -37,7 +38,7 @@ from skyrl_train.utils.profiler import Profiler
 
 
 class MegatronWorker:
-    def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs):
+    def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs, flash_attn=False):
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         hf_config = AutoConfig.from_pretrained(model_path)
 
@@ -48,6 +49,10 @@ class MegatronWorker:
         }
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
+
+        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
+        transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         bridge = AutoBridge.from_config(hf_config)
         bridge.set_extra_args(**transformer_config_kwargs)
@@ -169,6 +174,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             model_path,
             self.cfg.trainer.policy.megatron_config.model_config_kwargs,
             self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+            flash_attn=self.cfg.trainer.flash_attn,
         )
 
         # wrap with DDP for training
@@ -457,6 +463,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             model_path,
             self.cfg.trainer.ref.megatron_config.model_config_kwargs,
             self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
+            flash_attn=self.cfg.trainer.flash_attn,
         )
 
         self.actor_module = self.make_megatron_module(

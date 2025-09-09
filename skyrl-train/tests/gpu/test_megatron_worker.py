@@ -327,7 +327,7 @@ async def test_megatron_training_step(cfg, ray_init_fixture, worker_type, tp, pp
 @pytest.mark.parametrize(
     ("worker_type", "tp", "pp", "gpus_per_node"),
     [
-        ("policy", 2, 2, 4),
+        ("policy", 1, 4, 4),
     ],
 )
 async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_node):
@@ -339,6 +339,7 @@ async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_
 
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
+    cfg.trainer.flash_attn = False
 
     # try tp=2, pp=2 first
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -353,7 +354,7 @@ async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_
     # set torch profiler config
     cfg.trainer.policy.megatron_config.torch_profiler_config.enable = True
     cfg.trainer.policy.megatron_config.torch_profiler_config.ranks = [0]
-    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = "/home/ray/megatron_prof/tp2_pp2/"
+    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
 
     actor_group = init_worker_with_type(
         "policy",
