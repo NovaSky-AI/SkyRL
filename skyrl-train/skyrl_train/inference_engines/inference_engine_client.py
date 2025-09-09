@@ -7,6 +7,7 @@ from skyrl_train.inference_engines.base import (
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional, Dict
+from skyrl_train.inference_engines.utils import route_prompts_to_engines, hash_with_sha256
 from omegaconf import DictConfig
 import threading
 import random
@@ -50,6 +51,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+        # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         trajectory_ids = input_batch.get("trajectory_ids")
@@ -66,55 +68,32 @@ class InferenceEngineClient(InferenceEngineInterface):
                 tokenize=True,
             )["input_ids"]
 
-        # TODO(tgriggs): If there are no traj ids, we'd still like to load balance instead of landing on a single engine.
-        if trajectory_ids is not None:
-            # Route based on trajectory_ids
-            return await self._generate_with_trajectory_routing(prompt_token_ids, trajectory_ids, sampling_params)
-        else:
-            # Split evenly across engines
-            return await self._generate_batched(prompt_token_ids, sampling_params)
+        num_prompts = len(prompt_token_ids)
+        num_inference_engines = len(self.engines)
 
-    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        trajectory_id = request_payload["json"].pop("trajectory_id", None)
-        if trajectory_id is None:
-            # if trajectory_id is not provided, we'll use a random engine
-            engine_idx = random.randint(0, len(self.engines) - 1)
-        else:
-            engine_idx = abs(hash(str(trajectory_id))) % len(self.engines)
-        return await self.engines[engine_idx].chat_completion(request_payload)
+        # 1. Route prompts to engines
+        engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
+            num_prompts=num_prompts,
+            num_inference_engines=num_inference_engines,
+            trajectory_ids=trajectory_ids,
+        )
 
-    async def _generate_with_trajectory_routing(
-        self, prompt_token_ids, trajectory_ids, sampling_params
-    ) -> InferenceEngineOutput:
-        """
-        Route prompts to engines based on trajectory_ids and return results in the original order of the prompts.
-        """
-        # Group prompts by engine
-        engine_groups: dict[int, dict[str, list]] = {}
-        assert len(prompt_token_ids) == len(
-            trajectory_ids
-        ), f"Mismatch between number of prompts ({len(prompt_token_ids)}) and trajectory_ids ({len(trajectory_ids)})"
-        for i, (token_ids, traj_id) in enumerate(zip(prompt_token_ids, trajectory_ids)):
-            engine_idx = abs(hash(str(traj_id))) % len(self.engines)
-            group = engine_groups.setdefault(engine_idx, {"token_ids": [], "indices": []})
-            group["token_ids"].append(token_ids)
-            group["indices"].append(i)
-
-        # Build two parallel lists: one of tasks, one of the index‐lists
+        # 2. Generate responses concurrently
         tasks: list[asyncio.Task] = []
         indices_list: list[list[int]] = []
-        for engine_idx, group in engine_groups.items():
-            inp = InferenceEngineInput(
-                prompt_token_ids=group["token_ids"],
+        for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
+            # index prompt_token_ids with prompt_ids
+            cur_prompt_token_ids = [prompt_token_ids[i] for i in prompt_ids]
+            engine_input = InferenceEngineInput(
+                prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
             )
-            coro = self.engines[engine_idx].generate(inp)
-            tasks.append(asyncio.create_task(coro))
-            indices_list.append(group["indices"])
+            tasks.append(self.engines[engine_idx].generate(engine_input))
+            indices_list.append(prompt_ids)
 
         results = await asyncio.gather(*tasks)
 
-        # Reconstruct output in original order
+        # 3. Reconstruct output in original order
         n = len(prompt_token_ids)
         responses: list[str] = [""] * n
         stop_reasons: list[str] = [""] * n
@@ -139,48 +118,14 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
         )
 
-    async def _generate_batched(self, prompt_token_ids, sampling_params) -> InferenceEngineOutput:
-        """
-        Split prompts evenly across engines and return results in the original order of the prompts.
-        """
-        num_inference_engines = len(self.engines)
-        dp_item_size = (len(prompt_token_ids) + num_inference_engines - 1) // num_inference_engines
-
-        tasks = []
-        for dp_rank in range(num_inference_engines):
-            start_idx = dp_rank * dp_item_size
-            end_idx = (dp_rank + 1) * dp_item_size
-            dp_items = prompt_token_ids[start_idx:end_idx]
-
-            if len(dp_items) <= 0:
-                continue
-
-            engine_input = InferenceEngineInput(
-                prompt_token_ids=dp_items,
-                sampling_params=sampling_params,
-            )
-            tasks.append(self.engines[dp_rank].generate(engine_input))
-
-        all_outputs = await asyncio.gather(*tasks)
-
-        # Flatten results
-        responses = []
-        stop_reasons = []
-        response_ids = []
-        response_logprobs = []
-        for output in all_outputs:
-            responses.extend(output["responses"])
-            stop_reasons.extend(output["stop_reasons"])
-            response_ids.extend(output["response_ids"])
-            if output.get("response_logprobs", None):
-                response_logprobs.extend(output["response_logprobs"])
-
-        return InferenceEngineOutput(
-            responses=responses,
-            stop_reasons=stop_reasons,
-            response_ids=response_ids,
-            response_logprobs=response_logprobs if len(response_logprobs) else None,
-        )
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        trajectory_id = request_payload["json"].pop("trajectory_id", None)
+        if trajectory_id is None:
+            # if trajectory_id is not provided, we'll use a random engine
+            engine_idx = random.randint(0, len(self.engines) - 1)
+        else:
+            engine_idx = hash_with_sha256(str(trajectory_id)) % len(self.engines)
+        return await self.engines[engine_idx].chat_completion(request_payload)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("wake_up", *args, **kwargs)
