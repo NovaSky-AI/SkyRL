@@ -1,6 +1,6 @@
 """
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base
+uv run --isolated --extra vllm -- python -m skyrl_train.entrypoints.main_base
 
 """
 
