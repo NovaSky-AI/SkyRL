@@ -75,7 +75,7 @@ Note that the full implementation has some additional logic for configuration an
 Dataset preparation
 -------------------
 
-For training, we use `SWE-Gym <https://huggingface.co/SWE-Gym>`_, and more specifically the subset of SWE-Gym in https://huggingface.co/datasets/NovaSky-AI/SkyRL-v0-293-data
+For training, we use `SWE-Gym <https://huggingface.co/SWE-Gym>`_, and more specifically the subset of SWE-Gym in `SumanthRH/SWE-Gym-Subset <https://huggingface.co/datasets/SumanthRH/SWE-Gym-Subset>`_.
 
 Execute the following command: 
 
@@ -88,9 +88,26 @@ Execute the following command:
 Training
 ---------
 
-Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use `apptainer <https://apptainer.org/docs/admin/main/index.html#>`_. This can be modified in :code_link:`examples/mini_swe_agent/swebench.yaml` 
+Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use `Podman <https://podman.io/docs>`_. This can be modified in :code_link:`examples/mini_swe_agent/swebench.yaml` 
+
+We provide two example scripts: One for Qwen3-8B model and another for the `Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>` model. Both currently require 2 nodes for training.
 
 .. code-block:: bash
 
     # execute from skyrl-train directory
-    bash examples/mini_swe_agent/run_mini_swe.sh
+    bash examples/mini_swe_agent/run_mini_swe_8B.sh
+
+
+.. code-block:: bash
+
+    # execute from skyrl-train directory
+    bash examples/mini_swe_agent/run_mini_swe_32B.sh
+
+
+Tips
+~~~~~
+
+- If you notice too many errors such as ``ValueError: The decoder prompt (length xxxx) is longer than the maximum model length`` in the logs, this means that the LLM is hitting context length limits. Training can still proceed as usual, but if there are too many such errors per batch, then you should either increase the sequence length (increase ``max_input_length`` and ``max_generate_length``) or reduce the number of steps in the ``swebench.yaml`` file.
+- The task can sometimes be too difficult for the base model. For convenience, we log the list of rewards in a batch. If the rewards are all zeros, then the batch is too hard. If you notice too many such batches in your dataset, you should either (1) filter your data to have a better mix of easy and hard samples to promote learning (2) choose a stronger base model or (3) increase ``step_limit`` in ``swebench.yaml``. We've noticed that SWE-Gym can be hard (i.e most 0 rewards) for the Qwen3-8B with the given settings.
+- If you notice errors like "Error during evaluation [Errno 7] Argument list too long: 'podman'" , this is because the evaluation logic currently applies the model's git patch in-line, and for very large git patches, you will hit system ``ARG_MAX`` limits. 
+On modern systems, this maximum is ~ 1 MB, which is very generous. We thus make a simple assumption that large patches that exceed this limit are meant to be incorrect.

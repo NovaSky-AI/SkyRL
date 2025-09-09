@@ -5,10 +5,12 @@ set -x
 # uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
 # bash examples/mini_swe_agent/run_mini_swe.sh
 
-DATA_DIR="/mnt/user_storage/data/swe_gym_subset"
-CKPT_PATH="/mnt/local_storage/ckpts/llm_mini_swe"
-# save trajectories here
-MINISWE_TRAJ_DIR="/mnt/user_storage/mini_swe_agent_trajs"
+# ensure that all worker nodes can access this data directory
+DATA_DIR="$HOME/data/swe_gym_subset"
+
+CKPT_PATH="$HOME/ckpts/llm_mini_swe"
+# save trajectories here for debugging.
+MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs_32B"
 
 NUM_GPUS=16
 NUM_INFERENCE_ENGINES=4
@@ -39,7 +41,7 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=4096 \
-  generator.sampling_params.max_generate_length=2048 \
+  generator.sampling_params.max_generate_length=4096 \
   generator.max_input_length=30720 \
   generator.max_turns=50 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
@@ -56,7 +58,7 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="mini_swe" \
-  trainer.run_name="mini_swe_30B_swe_gym" \
+  trainer.run_name="mini_swe_32B_swe_gym" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_PATH" \
   +generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \

@@ -209,12 +209,12 @@ agent:
 
     If you have completed your assignment, please consult the first message about how to
     submit your solution (you will not be able to continue working on this task after that).
-  step_limit: 25
+  step_limit: 20
   cost_limit: 3.
 
 environment:
   cwd: "/testbed"
-  timeout: 3600
+  timeout: 180
   pull_timeout: 1200
   env:
     PAGER: cat
@@ -226,8 +226,7 @@ environment:
   executable: podman
 
 model:
-  model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
-  # model_name: "Qwen/Qwen3-8B"
+  model_name: ""
   model_kwargs:
     drop_params: true
     # temperature: 0.0

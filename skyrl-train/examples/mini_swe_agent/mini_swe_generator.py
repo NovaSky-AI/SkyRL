@@ -37,6 +37,8 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
     from loguru import logger
 
     model_config = sweagent_config.get("model", {})
+    # Use new sampling parameters
+    # Can also have custom sampling parameters per trajectory (ex: custom max tokens)
     model_config.setdefault("model_kwargs", {}).update(sampling_params)
     model = get_model(litellm_model_name, model_config)
 
@@ -49,9 +51,6 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
     try:
         env = get_sb_environment(sweagent_config, instance, data_source)
         agent = DefaultAgentWithReminder(model, env, **sweagent_config.get("agent", {}))
-        # NOTE (sumanthrh): The existing error handling doesn't handle context window exceeded errors correctly.
-        # Ideally, we stream response and append the partially complete response from the model and use it during training, but a simple exception
-        # is raised at the moment
         exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error processing instance {instance['instance_id']}: {e}", exc_info=True)
@@ -61,7 +60,7 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
     finally:
         path = Path(generator_cfg.miniswe_traj_dir)
         path.mkdir(parents=True, exist_ok=True)
-        path = path / (str(instance["instance_id"]) + ".json")
+        path = path / f"{instance['instance_id']}.json"
         if agent is not None:
             eval_error = None
             try:
@@ -131,7 +130,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         if not len(messages):
             return None, None, None, None, None, None
 
-        # TODO (sumanthrh):This is currently hardcoded for SWEBench with 2 initial messages.
+        # TODO (sumanthrh):This is currently hardcoded for SWEBench with 2 initial messages (system and user).
         response_messages = messages[2:]
 
         for message in messages[:2]:

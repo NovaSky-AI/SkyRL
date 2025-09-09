@@ -83,7 +83,8 @@ def evaluate_trajectory(
         # run eval script in-line
         eval_script = instance["eval_script"]
         eval_cmd = f"bash <<'EOF'\n{eval_script}\nEOF"
-        obs = env.execute(eval_cmd)
+        # add longer timeout for evaluation
+        obs = env.execute(eval_cmd, timeout=3600)
         # use the return value
         ret["resolved"] = obs["returncode"] == 0
         # truncate to last 1000 characters for brevity
