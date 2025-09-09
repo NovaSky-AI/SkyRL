@@ -229,5 +229,3 @@ model:
   model_name: ""
   model_kwargs:
     drop_params: true
-    # temperature: 0.0
-    # top_p: 1.0
