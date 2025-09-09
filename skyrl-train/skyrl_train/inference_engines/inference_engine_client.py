@@ -88,7 +88,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
             )
-            tasks.append(self.engines[engine_idx].generate(engine_input))
+            tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
 
         results = await asyncio.gather(*tasks)
