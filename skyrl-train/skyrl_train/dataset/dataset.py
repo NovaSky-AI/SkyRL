@@ -1,42 +1,58 @@
 import datasets
 from loguru import logger
 import os
+from typing import List
+from transformers import PreTrainedTokenizerBase
 
 
 class PromptDataset:
     def __init__(
         self,
-        data_files,
-        tokenizer: callable,
+        datasets: str | List[str],
+        tokenizer: PreTrainedTokenizerBase,
         max_prompt_length: int,
         num_workers: int = 8,
         prompt_key: str = "prompt",
         env_class_key: str = "env_class",
-        **kwargs,
     ):
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
-        self.data_files = data_files
         self.prompt_key = prompt_key
         self.env_class_key = env_class_key
         self.num_workers = num_workers
+
+        self.datasets = datasets
+        if isinstance(self.datasets, str):
+            self.datasets = [self.datasets]
+
         self._read_files_and_tokenize()
 
     def _read_files_and_tokenize(self):
-        dataframes = []
-        for data_file in self.data_files:
-            ext = os.path.splitext(data_file)[-1].lower()
+        loaded_datasets = []
+        for source in self.datasets:
+            ext = os.path.splitext(source)[-1].lower()
             if ext == ".parquet":
-                dataset = datasets.load_dataset("parquet", data_files=data_file, keep_in_memory=True)["train"]
-            elif ext == ".json":
-                dataset = datasets.load_dataset("json", data_files=data_file, keep_in_memory=True)["train"]
+                ds = datasets.load_dataset("parquet", data_files=source, keep_in_memory=True)["train"]
+            elif ext in [".json", ".jsonl"]:
+                ds = datasets.load_dataset("json", data_files=source, keep_in_memory=True)["train"]
             else:
-                raise ValueError(f"Unsupported file extension: {ext}")
-            dataframes.append(dataset)
+                # Treat as HF dataset spec: "name" or "name:split"
+                dataset_name, has_split, split = source.partition(":")
+                try:
+                    ds_dict = datasets.load_dataset(path=dataset_name, keep_in_memory=True)
+                except ValueError:
+                    raise ValueError(f"Dataset `{dataset_name}` not found on Hugging Face.")
+                split = split if has_split else "train"
+                if split not in ds_dict:
+                    raise ValueError(
+                        f"Split `{split}` not found in dataset `{dataset_name}`. Configured split was `{split}` and default is `train`"
+                    )
+                ds = ds_dict[split]
+            loaded_datasets.append(ds)
 
-        self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
+        self.dataframe: datasets.Dataset = datasets.concatenate_datasets(loaded_datasets)
 
-        logger.info(f"dataset len: {len(self.dataframe)}")
+        logger.info(f"Total dataset size: {len(self.dataframe)}")
 
         # filter out too long prompts
         tokenizer = self.tokenizer
@@ -48,7 +64,7 @@ class PromptDataset:
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )
 
-        logger.info(f"filter dataset len: {len(self.dataframe)}")
+        logger.info(f"Filtered dataset size: {len(self.dataframe)}")
 
     def __getitem__(self, item):
         row_dict: dict = self.dataframe[item]

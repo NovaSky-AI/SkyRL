@@ -29,7 +29,7 @@ from skyrl_train.workers.worker import (
 
 class FSDPPolicyRayActorBase(PolicyWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-        # self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
+        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, self.optimizer, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True):
@@ -235,7 +235,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
 
 class FSDPCriticRayActorBase(CriticWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-        # self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
+        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, self.optimizer, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True):
@@ -310,7 +310,7 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
 
 class FSDPRewardRayActorBase(RewardWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-        # self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
+        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True):
@@ -363,7 +363,7 @@ class FSDPRewardRayActorBase(RewardWorkerBase):
 
 class FSDPRefRayActorBase(RefWorkerBase):
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-        # self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
+        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
 
     def backload_to_gpu(self, non_blocking=True):

@@ -12,8 +12,7 @@ import ray
 import hydra
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines
-from skyrl_train.inference_engines.base import InferenceEngineInput
+from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
@@ -35,11 +34,6 @@ def get_test_actor_config() -> DictConfig:
         cfg.generator.run_engines_locally = True
 
         return cfg
-
-
-async def run_inference(client, prompts, sampling_params):
-    engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
-    return await client.generate(engine_input)
 
 
 @pytest.mark.parametrize(
@@ -92,13 +86,13 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
+            model=MODEL,
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend=backend,
-            model=MODEL,
         )
 
         policy = init_worker_with_type(

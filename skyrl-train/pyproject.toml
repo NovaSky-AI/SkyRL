@@ -33,7 +33,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets",
+    "datasets>=3.6.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
@@ -55,6 +55,11 @@ conflicts = [
     [
         { extra = "flashrl" },
         { extra = "miniswe" },
+    ],
+    [
+        { extra = "mcore" },
+        { extra = "sglang" },
+        { extra = "flashrl" },
     ]
 ]
 
@@ -70,7 +75,6 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
-# mini-swe-agent = { path = "/home/ray/default/mini-swe-agent-fork", editable = true }
 
 
 [project.optional-dependencies]
@@ -95,6 +99,10 @@ docs = [
     "sphinx-copybutton>=0.5.0",
     "sphinx-autobuild>=2021.3.14"
 ]
+# TODO(tgriggs): Add `sandboxes` here once available as a package.
+sandboxes = [
+    "litellm[proxy]>=1.67.5",
+]
 vllm = [
     "vllm==0.10.1.1",
     "torch==2.7.1",
@@ -106,6 +114,20 @@ sglang = [
     "flashinfer-python",
     "torch==2.7.1",
     "torchvision",
+]
+mcore = [
+  # Make sure to change the flash attention source (under tool.uv.sources) above to a compatible version (<= 2.7.4.post1) for TransformerEngine==2.5.0
+  # https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+  # Build transformer-engine separately first!
+  # uv pip install "torch==2.7.1"
+  # uv pip install "nvidia-cudnn-cu12>=9.3"
+  # export CUDNN_PATH="$(python -c 'import inspect, nvidia.cudnn as c, os; print(os.path.dirname(inspect.getfile(c)))')"
+  # export CPATH="$CUDNN_PATH/include:${CPATH:-}"
+  # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
+  # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
+  "mbridge==0.13.0",
+  "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
+  "transformer-engine[pytorch]==2.5.0",
 ]
 flashrl = [
     # TODO (sumanthrh): Shift to install from git source
@@ -121,6 +143,7 @@ miniswe = [
     "mini-swe-agent @ git+https://github.com/SumanthRH/mini-swe-agent@sumanthrh/r2e",
     "litellm",
 ]
+
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

@@ -61,7 +61,7 @@ def test_cleanup_old_checkpoints():
         setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
 
         # 2. Execute
-        cleanup_old_checkpoints(tmpdir, max_ckpts_to_keep=2, current_global_step=11)
+        cleanup_old_checkpoints(tmpdir, max_checkpoints=2)
 
         # 3. Verify
         remaining_dirs = sorted(os.listdir(tmpdir))
@@ -75,14 +75,15 @@ def test_cleanup_old_checkpoints():
         checkpoint_steps = [1, 2, 10, 11]
         setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
 
-        # 2. Execute - remove all checkpoints
-        cleanup_old_checkpoints(tmpdir, max_ckpts_to_keep=0, current_global_step=11)
+        # 2. Execute
+        cleanup_old_checkpoints(tmpdir, max_checkpoints=0)
 
         # 3. Verify
         remaining_dirs = sorted(os.listdir(tmpdir))
+
         assert len(remaining_dirs) == 0, "Cleanup should have removed all checkpoints"
 
-    # 3. Test cleanup with `current_global_step` less than the highest global step in the folder
+    # Test cleanup with `current_global_step` less than the highest global step in the folder
     # This means that the folder contains checkpoints from a previous run.
     with tempfile.TemporaryDirectory() as tmpdir:
         # 1. Setup
@@ -90,7 +91,7 @@ def test_cleanup_old_checkpoints():
         setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
 
         # 2. Execute
-        cleanup_old_checkpoints(tmpdir, max_ckpts_to_keep=2, current_global_step=2)
+        cleanup_old_checkpoints(tmpdir, max_checkpoints=4)
 
         remaining_dirs = sorted(os.listdir(tmpdir))
         assert len(remaining_dirs) == 4, "Cleanup should not have removed any checkpoints"
@@ -99,7 +100,7 @@ def test_cleanup_old_checkpoints():
 def test_cleanup_does_not_run_when_not_needed():
     """
     Verify that cleanup does not remove any checkpoints if the total number
-    is less than or equal to max_ckpts_to_keep.
+    is less than or equal to max_checkpoints.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         # 1. Setup
@@ -107,7 +108,7 @@ def test_cleanup_does_not_run_when_not_needed():
         setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
 
         # 2. Execute
-        cleanup_old_checkpoints(tmpdir, max_ckpts_to_keep=5, current_global_step=4)
+        cleanup_old_checkpoints(tmpdir, max_checkpoints=5)
 
         # 3. Verify
         remaining_dirs = sorted(os.listdir(tmpdir))
@@ -116,7 +117,7 @@ def test_cleanup_does_not_run_when_not_needed():
 
 def test_cleanup_with_negative_max_checkpoints():
     """
-    Verify that cleanup is disabled when max_ckpts_to_keep is -1
+    Verify that cleanup is disabled when max_checkpoints is -1
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         # 1. Setup
@@ -124,11 +125,11 @@ def test_cleanup_with_negative_max_checkpoints():
         setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
 
         # 2. Execute
-        cleanup_old_checkpoints(tmpdir, max_ckpts_to_keep=-1, current_global_step=5)
+        cleanup_old_checkpoints(tmpdir, max_checkpoints=-1)
 
         # 3. Verify
         remaining_dirs = sorted(os.listdir(tmpdir))
-        assert len(remaining_dirs) == 5, "Cleanup should be disabled when max_ckpts_to_keep is -1"
+        assert len(remaining_dirs) == 5, "Cleanup should be disabled when max_checkpoints is -1"
 
 
 def test_validate_consistency_for_latest_checkpoint():
