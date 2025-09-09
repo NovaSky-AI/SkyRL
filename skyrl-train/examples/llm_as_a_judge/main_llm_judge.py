@@ -1,6 +1,7 @@
 """
 Main entrypoint for the LLM-as-a-judge example.
 """
+
 import ray
 import hydra
 from omegaconf import DictConfig
