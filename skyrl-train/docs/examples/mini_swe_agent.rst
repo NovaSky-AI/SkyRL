@@ -1,7 +1,7 @@
 SkyRL + Mini-SWE-Agent: Training a SWE-Agent for SWE-Bench
 ===========================================================
 
-In this example, we walk through how to train a SWE-Agent on the SWE-Bench task by leveraging `Mini-SWE-Agent <https://github.com/SWE-agent/mini-swe-agent>`_
+In this example, we walk through a simple example on how to train a SWE-Agent on the SWE-Bench task by leveraging `Mini-SWE-Agent <https://github.com/SWE-agent/mini-swe-agent>`_
 
 
 How does it work?
@@ -82,7 +82,7 @@ Execute the following command:
 .. code-block:: bash
 
     # execute from skyrl-train directory
-    uv run --isolated examples/mini_swe_agent/preprocess.py --output_dir ~/data/swe_gym
+    uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
 
 
 Training
@@ -90,24 +90,19 @@ Training
 
 Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use `Podman <https://podman.io/docs>`_. This can be modified in :code_link:`examples/mini_swe_agent/swebench.yaml` 
 
-We provide two example scripts: One for Qwen3-8B model and another for the `Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>` model. Both currently require 2 nodes for training.
+We provide two example scripts: One for Qwen3-8B model and another for the `Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>` model. While the first script for Qwen3-8B requires a single 8xH100 node, the script for the 30B model requires 2 8xH100 nodes for training.
 
 .. code-block:: bash
 
     # execute from skyrl-train directory
     bash examples/mini_swe_agent/run_mini_swe_8B.sh
-
-
-.. code-block:: bash
-
-    # execute from skyrl-train directory
-    bash examples/mini_swe_agent/run_mini_swe_32B.sh
+    # or for 32B:
+    # bash examples/mini_swe_agent/run_mini_swe_32B.sh
 
 
 Tips
 ~~~~~
 
 - If you notice too many errors such as ``ValueError: The decoder prompt (length xxxx) is longer than the maximum model length`` in the logs, this means that the LLM is hitting context length limits. Training can still proceed as usual, but if there are too many such errors per batch, then you should either increase the sequence length (increase ``max_input_length`` and ``max_generate_length``) or reduce the number of steps in the ``swebench.yaml`` file.
-- The task can sometimes be too difficult for the base model. For convenience, we log the list of rewards in a batch. If the rewards are all zeros, then the batch is too hard. If you notice too many such batches in your dataset, you should either (1) filter your data to have a better mix of easy and hard samples to promote learning (2) choose a stronger base model or (3) increase ``step_limit`` in ``swebench.yaml``. We've noticed that SWE-Gym can be hard (i.e most 0 rewards) for the Qwen3-8B with the given settings.
-- If you notice errors like "Error during evaluation [Errno 7] Argument list too long: 'podman'" , this is because the evaluation logic currently applies the model's git patch in-line, and for very large git patches, you will hit system ``ARG_MAX`` limits. 
-On modern systems, this maximum is ~ 1 MB, which is very generous. We thus make a simple assumption that large patches that exceed this limit are meant to be incorrect.
+- The task can sometimes be too difficult for the base model. For convenience, we log the list of rewards in a batch. If the rewards are all zeros, then the batch is too hard. If you notice too many such batches in your dataset, you should either (1) filter your data to have a better mix of easy and hard samples to promote learning (2) choose a stronger base model or (3) increase ``step_limit`` in ``swebench.yaml``. We've noticed that SWE-Gym can be hard (i.e most 0 rewards) for the Qwen3-8B with the given settings. The choice of the available tools can also affect performance (in Mini-SWE-Agent, agents have one tool - bash commands)
+- If you notice errors like "Error during evaluation [Errno 7] Argument list too long: 'podman'" , this is because the evaluation logic currently applies the model's git patch in-line, and for very large git patches, you will hit system ``ARG_MAX`` limits. On modern systems, this maximum is ~ 1 MB, which is very generous. We thus make a simple assumption that large patches that exceed this limit are meant to be incorrect.

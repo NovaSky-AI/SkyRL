@@ -16,6 +16,9 @@ from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, Genera
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.generators.utils import (
+    get_rollout_metrics,
+)
 
 
 class DefaultAgentWithReminder(DefaultAgent):
@@ -25,7 +28,7 @@ class DefaultAgentWithReminder(DefaultAgent):
         observation = self.render_template(self.config.action_observation_template, output=output)
         if 0 < self.config.step_limit < self.model.n_calls:
             if self.config.step_limit == self.model.n_calls - 1:
-                observation = f"{observation}\nREMINDER:You only have 1 turn left. Please provide the final answer"
+                observation = f"{observation}\nREMINDER: You only have 1 turn left. Please provide the final answer"
             else:
                 observation = f"{observation}\nREMINDER: You have {self.config.step_limit - self.model.n_calls} turns left to arrive at the solution."
         self.add_message("user", observation)
@@ -145,6 +148,16 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         response_ids: List[int] = []
         loss_mask: List[int] = []
 
+        # We remove trailing `user` messages - this is added by Mini-SWE-Agent to capture the final git diff for the trajectory
+        last_idx = len(response_messages) - 1
+        while response_messages[last_idx]["role"] == "user":
+            last_idx -= 1
+        if last_idx < 0:
+            raise ValueError(
+                "Found no assistant messages. Please ensure that your environment is configured correctly and the `OPENAI_BASE_URL` points to the HTTP server from the inference engine client"
+            )
+        response_messages = response_messages[: last_idx + 1]
+
         for message in response_messages:
             # Apply chat template and tokenize each message
             msg_encoding = self.tokenizer.apply_chat_template([message], add_generation_prompt=False, tokenize=True)
@@ -220,7 +233,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
             )
-        rollout_metrics = self._rollout_metrics(responses, rewards)
+        rollout_metrics = get_rollout_metrics(responses, rewards)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
