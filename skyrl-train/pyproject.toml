@@ -111,6 +111,8 @@ sglang = [
     "torchvision",
 ]
 mcore = [
+  # Make sure to change the flash attention source above to a compatible version 
+  # https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
   # Build transformer-engine separately first!
   # uv pip install "torch==2.7.1"
   # uv pip install "nvidia-cudnn-cu12>=9.3"
