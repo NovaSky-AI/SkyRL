@@ -1,4 +1,6 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Union
+import random
+import hashlib
 from omegaconf import DictConfig, ListConfig
 
 
@@ -57,3 +59,61 @@ def get_sampling_params_for_backend(backend: str, sampling_params: DictConfig) -
         return get_sglang_sampling_params(sampling_params)
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")
+
+
+def hash_with_sha256(x: Union[int, str]) -> int:
+    return int.from_bytes(hashlib.sha256(str(x).encode()).digest(), "big")
+
+
+def route_prompts_to_engines(
+    num_prompts: int, num_inference_engines: int, trajectory_ids: Optional[Union[list[int], list[str]]]
+) -> dict[int, list[int]]:
+    """
+    Given the number of prompts, number of inference engines, and the trajectory_id, return a mapping
+    from engine index to the list of prompt IDs the engine will process.
+
+    Args:
+    - num_prompts: int - The number of prompts.
+    - num_inference_engines: int - The number of inference engines.
+    - trajectory_ids: Optional[Union[list[int], list[str]]] - The trajectory IDs.
+
+    Required:
+    - num_prompts > 0
+    - num_inference_engines > 0
+    - trajectory_ids is a list of integers or strings if provided
+    - len(trajectory_ids) == num_prompts if provided
+
+    Returns:
+    - dict[int, list[int]] - A mapping from engine index to the list of prompt IDs the engine will process.
+    """
+    # 0. Validation
+    assert num_prompts > 0, "Number of prompts must be greater than 0"
+    assert num_inference_engines > 0, "Number of inference engines must be greater than 0"
+    if trajectory_ids is not None:
+        assert isinstance(trajectory_ids, list) and all(
+            isinstance(tid, (int, str)) for tid in trajectory_ids
+        ), "Trajectory ID must be a list of integers or strings"
+        assert len(trajectory_ids) == num_prompts, "Trajectory ID must have the same length as the number of prompts"
+
+    # 1. trajectory_id not provided, with a single prompt: route to a random engine for a naive load balancing.
+    if trajectory_ids is None and num_prompts == 1:
+        engine_idx = random.randint(0, num_inference_engines - 1)
+        return {engine_idx: [0]}
+
+    # 2. trajectory_id not provided, with a batched prompt: split evenly across engines.
+    engine_idx_to_prompt_ids: dict[int, list[int]] = {}
+    if trajectory_ids is None:
+        dp_item_size = (num_prompts + num_inference_engines - 1) // num_inference_engines
+        for dp_rank in range(num_inference_engines):
+            start_idx = dp_rank * dp_item_size
+            end_idx = min((dp_rank + 1) * dp_item_size, num_prompts)
+            prompt_ids = list(range(start_idx, end_idx))
+            if len(prompt_ids) > 0:
+                engine_idx_to_prompt_ids[dp_rank] = prompt_ids
+        return engine_idx_to_prompt_ids
+
+    # 3. trajectory_id provided, we route by trajectory_id
+    for i, cur_tid in enumerate(trajectory_ids):
+        engine_idx = hash_with_sha256(str(cur_tid)) % num_inference_engines
+        engine_idx_to_prompt_ids.setdefault(engine_idx, []).append(i)
+    return engine_idx_to_prompt_ids
