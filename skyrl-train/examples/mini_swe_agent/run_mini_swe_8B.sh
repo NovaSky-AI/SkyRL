@@ -5,8 +5,8 @@ set -x
 # uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
 # bash examples/mini_swe_agent/run_mini_swe.sh
 
-DATA_DIR="/mnt/user_storage/data/swe_gym_subset"
-CKPT_PATH="/mnt/local_storage/ckpts/llm_mini_swe"
+DATA_DIR="$HOME/data/swe_gym_subset"
+CKPT_PATH="$HOME/ckpts/llm_mini_swe"
 # save trajectories here
 MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
 
@@ -17,6 +17,8 @@ TP_SIZE=2
 LOGGER=wandb
 
 # We use a small batch size here for demonstration
+# NOTE (sumanthrh): The `generator.max_turns` here is actually unused, and we use the `step_limit` from the `swebench.yaml` file. 
+# This simply has to be a value > 1
 uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -32,19 +34,20 @@ uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agen
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=16 \
+  trainer.eval_batch_size=50 \
   trainer.eval_before_train=true \
-  trainer.eval_interval=-1 \
+  trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=16 \
   trainer.policy_mini_batch_size=16 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.dump_data_batch=true \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=4096 \
   generator.sampling_params.max_generate_length=4096 \
   generator.max_input_length=30720 \
-  generator.max_turns=50 \
+  generator.max_turns=20 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   generator.backend=vllm \

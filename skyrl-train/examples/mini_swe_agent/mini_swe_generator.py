@@ -80,6 +80,10 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
 
             save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info, reward=reward, eval_error=eval_error)  # type: ignore[arg-type]
 
+        if env is not None:
+            # trigger cleanup explicitly
+            env.cleanup()
+
     return (agent.messages if agent is not None else [], reward, error)
 
 
@@ -174,10 +178,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         prompt_ids = initial_input_ids
 
         # Calculate maximum response tokens allowed
-        if hasattr(self, "max_turns") and self.max_turns > 1:
-            max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-        else:
-            max_response_tokens = max_tokens
+        max_response_tokens = max_tokens + max_input_length - initial_prompt_length
 
         # Determine stop reason
         stop_reason = "complete"  # Default for trial completion

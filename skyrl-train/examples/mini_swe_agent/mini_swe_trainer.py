@@ -1,3 +1,4 @@
+from typing import List
 import torch
 import math
 from loguru import logger
@@ -35,31 +36,37 @@ class MiniSWEPPOTrainer(RayPPOTrainer):
 
         logger.info(f"Rewards: {generator_output["rewards"]}")
 
-        # ensure that the number of trajectories meets the minimum required
-        num_trajectories = len(generator_output["response_ids"])
-        dp_size = self.policy_model.actor_infos[0].rank.dp_size
-        assert (
-            num_trajectories >= self.policy_model.actor_infos[0].rank.dp_size
-        ), f"Expected atleast {dp_size} valid trajectories for num policy workers {dp_size}, but got {num_trajectories} trajectories"
-        if self.critic_model is not None:
-            dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
-            assert (
-                num_trajectories >= self.critic_model.actor_infos[0].rank.dp_size
-            ), f"Expected atleast {self.critic_model.actor_infos[0].rank.dp_size} valid trajectories for num critic workers {self.critic_model.actor_infos[0].rank.dp_size}, but got {num_trajectories} trajectories"
-        if self.ref_model is not None:
-            dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-            assert (
-                num_trajectories >= self.ref_model.actor_infos[0].rank.dp_size
-            ), f"Expected atleast {self.ref_model.actor_infos[0].rank.dp_size} valid trajectories for num ref workers {self.ref_model.actor_infos[0].rank.dp_size}, but got {num_trajectories} trajectories"
-
-        # removes tail data so that workers get even shards
-        for key in generator_output.keys():
-            if isinstance(generator_output[key], list):
-                generator_output[key] = generator_output[key][: (num_trajectories // dp_size) * dp_size]
-
-        if not len(generator_output["prompt_token_ids"]):
-            raise ValueError(
-                "Found no valid generation. This likely means that there is something wrong with your environment setup. Please ensure that you can successfully generate trajectories with `mini-swe-agent` in your Ray cluster"
-            )
-
         return generator_output
+
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+        # first: add custom validation
+        # We add this here instead of in `generate` becasue this is run only for training batches
+        if len(generator_output["response_ids"]) != len(generator_output["prompt_token_ids"]):
+            # this means that there were some failures, so we add checks to
+            # ensure that the number of trajectories meets the minimum required
+            num_trajectories = len(generator_output["response_ids"])
+            dp_size = self.policy_model.actor_infos[0].rank.dp_size
+            assert (
+                num_trajectories >= self.policy_model.actor_infos[0].rank.dp_size
+            ), f"Expected atleast {dp_size} valid trajectories for num policy workers {dp_size}, but got {num_trajectories} trajectories"
+            if self.critic_model is not None:
+                dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
+                assert (
+                    num_trajectories >= self.critic_model.actor_infos[0].rank.dp_size
+                ), f"Expected atleast {self.critic_model.actor_infos[0].rank.dp_size} valid trajectories for num critic workers {self.critic_model.actor_infos[0].rank.dp_size}, but got {num_trajectories} trajectories"
+            if self.ref_model is not None:
+                dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
+                assert (
+                    num_trajectories >= self.ref_model.actor_infos[0].rank.dp_size
+                ), f"Expected atleast {self.ref_model.actor_infos[0].rank.dp_size} valid trajectories for num ref workers {self.ref_model.actor_infos[0].rank.dp_size}, but got {num_trajectories} trajectories"
+
+            # removes tail data so that workers get even shards
+            for key in generator_output.keys():
+                if isinstance(generator_output[key], list):
+                    generator_output[key] = generator_output[key][: (num_trajectories // dp_size) * dp_size]
+
+            if not len(generator_output["prompt_token_ids"]):
+                raise ValueError(
+                    "Found no valid generation. This likely means that there is something wrong with your environment setup. Please ensure that you can successfully generate trajectories with `mini-swe-agent` in your Ray cluster"
+                )
+        return super().postprocess_generator_output(generator_output, uids)

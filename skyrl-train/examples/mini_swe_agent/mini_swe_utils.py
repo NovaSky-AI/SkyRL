@@ -68,27 +68,31 @@ def evaluate_trajectory(
         logger.info(f"Starting environment failed with exception: {e}\n, {traceback.format_exc()}")
         return ret
 
-    # apply git patch
-    # NOTE (sumanthrh): This applies patch in-line, and the maximum patch size is limited by the OS limits for `ARG_MAX`.
-    # In modern systems, this is typically ~ 1 MB, which is pretty generous.
-    # For simplicity, we assume that large patches greater than `ARG_MAX` are meant to fail
-    delimiter = f"PATCH_{uuid.uuid4().hex}"  # unlikely to collide with symbols in the patch
-    command = f"git apply <<'{delimiter}'\n{model_patch}\n{delimiter}"
+    try:
+        # apply git patch
+        # NOTE (sumanthrh): This applies patch in-line, and the maximum patch size is limited by the OS limits for `ARG_MAX`.
+        # In modern systems, this is typically ~ 1 MB, which is pretty generous.
+        # For simplicity, we assume that large patches greater than `ARG_MAX` are meant to fail
+        delimiter = f"PATCH_{uuid.uuid4().hex}"  # unlikely to collide with symbols in the patch
+        command = f"git apply <<'{delimiter}'\n{model_patch}\n{delimiter}"
 
-    obs = env.execute(command)
+        obs = env.execute(command)
 
-    if obs["returncode"] != 0:
-        ret["eval_error"] = obs["output"]
-    else:
-        # run eval script in-line
-        eval_script = instance["eval_script"]
-        eval_cmd = f"bash <<'EOF'\n{eval_script}\nEOF"
-        # add longer timeout for evaluation
-        obs = env.execute(eval_cmd, timeout=3600)
-        # use the return value
-        ret["resolved"] = obs["returncode"] == 0
-        # truncate to last 1000 characters for brevity
-        ret["eval_error"] = (
-            f"(truncated to last 1000 characters)\n{obs["output"][-1000:]}" if not ret["resolved"] else None
-        )
+        if obs["returncode"] != 0:
+            ret["eval_error"] = obs["output"]
+        else:
+            # run eval script in-line
+            eval_script = instance["eval_script"]
+            eval_cmd = f"bash <<'EOF'\n{eval_script}\nEOF"
+            # add longer timeout for evaluation
+            obs = env.execute(eval_cmd, timeout=3600)
+            # use the return value
+            ret["resolved"] = obs["returncode"] == 0
+            # truncate to last 1000 characters for brevity
+            ret["eval_error"] = (
+                f"(truncated to last 1000 characters)\n{obs["output"][-1000:]}" if not ret["resolved"] else None
+            )
+    finally:
+        if env is not None:
+            env.cleanup()
     return ret
