@@ -1,0 +1,3 @@
+vimgolf-gym==0.1.1
+datasets
+levenstein
