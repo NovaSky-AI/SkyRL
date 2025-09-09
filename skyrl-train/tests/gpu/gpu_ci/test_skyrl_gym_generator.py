@@ -46,7 +46,7 @@ class TestEnv(BaseTextEnv):
         self.turns += 1
         done = self.turns >= self.max_turns
         return BaseTextEnvStepOutput(
-            observations=[{"role": "user", "content": f" {self.turns}"}] if not done else [],
+            observations=[{"role": "user", "content": f"{OBSERVATION_PROMPT} {self.turns}"}] if not done else [],
             reward=0,
             done=done,
             metadata={},
