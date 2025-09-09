@@ -290,11 +290,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward_out = per_step_rewards[-1][0]
         else:
             # Check if all rewards besides the last one are None
-            is_per_trajectory_reward = True
-            for reward, _ in per_step_rewards[:-1]:
-                if reward is not None:
-                    is_per_trajectory_reward = False
-                    break
+            is_per_trajectory_reward = all(reward is None for reward, _ in per_step_rewards[:-1])
 
             if is_per_trajectory_reward:
                 # If there is only a single reward, we still keep it as a float
