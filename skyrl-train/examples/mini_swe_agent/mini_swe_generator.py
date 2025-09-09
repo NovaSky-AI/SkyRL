@@ -23,14 +23,16 @@ from skyrl_train.generators.utils import (
 
 class DefaultAgentWithReminder(DefaultAgent):
     def get_observation(self, response: dict) -> dict:
-        """Execute the action and return the observation."""
+        """Execute the action and return the output."""
         output = self.execute_action(self.parse_action(response))
         observation = self.render_template(self.config.action_observation_template, output=output)
-        if 0 < self.config.step_limit < self.model.n_calls:
-            if self.config.step_limit == self.model.n_calls - 1:
-                observation = f"{observation}\nREMINDER: You only have 1 turn left. Please provide the final answer"
-            else:
-                observation = f"{observation}\nREMINDER: You have {self.config.step_limit - self.model.n_calls} turns left to arrive at the solution."
+        remaining = self.config.step_limit - self.model.n_calls
+
+        if remaining == 1:
+            observation = f"{observation}\nREMINDER: You only have 1 turn left. Please provide the final answer"
+        elif remaining > 1:
+            observation = f"{observation}\nREMINDER: You have {remaining} turns left to arrive at the solution."
+
         self.add_message("user", observation)
         return output
 

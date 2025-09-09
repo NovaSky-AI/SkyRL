@@ -34,7 +34,7 @@ class MiniSWEPPOExp(BasePPOExp):
         """Initializes the trainer.
 
         Returns:
-            RayPPOTrainer: The trainer.
+            MiniSWEPPOTrainer: The trainer.
         """
         return MiniSWEPPOTrainer(
             cfg=cfg,
