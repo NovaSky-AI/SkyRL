@@ -115,7 +115,5 @@ def route_prompts_to_engines(
     # 3. trajectory_id provided, we route by trajectory_id
     for i, cur_tid in enumerate(trajectory_ids):
         engine_idx = hash_with_sha256(str(cur_tid)) % num_inference_engines
-        if engine_idx not in engine_idx_to_prompt_ids:
-            engine_idx_to_prompt_ids[engine_idx] = []
-        engine_idx_to_prompt_ids[engine_idx].append(i)
+        engine_idx_to_prompt_ids.setdefault(engine_idx, []).append(i)
     return engine_idx_to_prompt_ids
