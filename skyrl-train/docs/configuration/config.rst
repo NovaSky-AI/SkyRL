@@ -7,12 +7,13 @@ Data Configuration
 .. code-block:: yaml
 
     data:
-    train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
-    val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+      train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
+      val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
-- ``data.train_data``: A list of files for the training dataset in parquet format.
-- ``data.val_data``: A list of files for evaluation in parquet format.
+- ``data.train_data``: A list of files for the training dataset. 
+- ``data.val_data``: A list of files for the evaluation dataset.
 
+A dataset file can be a path to a parquet or json file, or the name of a Hugging Face dataset.
 
 .. note::
     Currently, all datasets are loaded into memory, so the dataset size is limited by available CPU memory on a worker node.
@@ -99,7 +100,7 @@ Checkpoint Configuration
 
     resume_mode: latest # null/"none", "latest", "from_path"
     resume_path: null
-    ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
+    ckpt_path: "${oc.env:HOME}/ckpts/" # Local directory path or cloud storage path (S3, GCP) for resumable training checkpoints (model state, optimizer state, etc.)
     max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
     ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
     hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.
@@ -301,7 +302,7 @@ Algorithm Configuration
       # this adds training batch level normalization to advantages
       advantage_batch_normalize: false
       value_head_prefix: "value_head"
-      policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
+      policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
       loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
       grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
 
@@ -314,6 +315,17 @@ Algorithm Configuration
       eps_clip_high: 0.2
       # dual clip parameters
       clip_ratio_c: 3.0
+
+      # clip-cov parameters (only used when policy_loss_type: "clip_cov")
+      clip_cov:
+        clip_ratio: 0.0002 # fraction of tokens to clip based on covariance
+        clip_cov_lb: 1.0 # lower bound for covariance clipping
+        clip_cov_ub: 5.0 # upper bound for covariance clipping
+      
+      # kl-cov parameters (only used when policy_loss_type: "kl_cov")
+      kl_cov:
+        kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
+        ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
       # value loss parameters
       value_clip: 0.2
@@ -328,7 +340,6 @@ Algorithm Configuration
       # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
       use_tis: false 
       tis_imp_ratio_cap: -1.0
-
 
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
@@ -350,6 +361,8 @@ Algorithm Configuration
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
   - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
+  - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
@@ -372,7 +385,16 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
 - ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
 - ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
+- ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
 
+  - ``clip_ratio``: Fraction of tokens to clip based on covariance values.
+  - ``clip_cov_lb``: Lower bound for covariance clipping.
+  - ``clip_cov_ub``: Upper bound for covariance clipping.
+
+- ``algorithm.kl_cov``: KL-Cov parameters (only used when ``policy_loss_type`` is ``kl_cov``):
+
+  - ``kl_cov_frac``: Percentage of tokens to apply KL regularization to.
+  - ``ppo_kl_coef``: Coefficient for KL regularization term.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -461,6 +483,9 @@ Inference Engine Placement Configuration
 - ``generator.run_engines_locally``: Whether to use local inference engines. If ``true``, the inference engine will be initialized during the training run in the current Ray cluster. We use one Ray actor per inference replica and communication will happen via Ray object store.  If set to ``false``, then the generator expects a list of remote urls and communication will happen over HTTP.
 - ``generator.num_inference_engines``: Number of inference engines to use. If ``run_engines_locally`` is ``false``, then this number should match the number of remote urls.
 - ``generator.remote_inference_engine_urls``: List of remote urls to use. Applicable only when ``run_engines_locally`` is ``false``.
+- ``generator.enable_http_endpoint``: When ``true``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.
+- ``generator.http_endpoint_host``: Host for the inference HTTP endpoint.
+- ``generator.http_endpoint_port``: Port for the inference HTTP endpoint.
 
 For more details on how different placement options work, please refer to the :doc:`placement guide <placement>`.
 

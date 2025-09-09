@@ -19,6 +19,7 @@ from torch.distributed.fsdp import CPUOffload, MixedPrecision
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl_train.utils import io
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -307,46 +308,6 @@ class FSDPStrategy(DistributedStrategy):
 
         return model
 
-    def all_reduce(self, data, op="mean"):
-        """Perform all_reduce across all processes"""
-        assert op in ("mean", "max", "sum")
-        if isinstance(data, dict):
-            ret = {}
-            for k, v in data.items():
-                ret[k] = self.all_reduce(v, op)
-            return ret
-        else:
-            is_tensor = True
-            if not isinstance(data, torch.Tensor):
-                data = torch.Tensor([data])
-                is_tensor = False
-            is_cpu_tensor = data.device.type == "cpu"
-
-            if is_cpu_tensor:
-                data = data.to(torch.cuda.current_device())
-            if op == "mean":
-                data /= self.world_size
-            dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
-            if is_cpu_tensor:
-                data = data.cpu()
-            return data.item() if not is_tensor else data
-
-    def all_gather(self, data):
-        """Perform all_gather across all processes"""
-        if isinstance(data, dict):
-            ret = {}
-            for k, v in data.items():
-                ret[k] = self.all_gather(v)
-            return ret
-        else:
-            if not isinstance(data, torch.Tensor):
-                data = torch.Tensor([data])
-            is_cpu_tensor = data.device.type == "cpu"
-
-            ret = [torch.zeros_like(data).to(torch.cuda.current_device()) for _ in range(self.world_size)]
-            dist.all_gather(ret, data.to(torch.cuda.current_device()))
-            return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
-
     def _unwrap_model(self, model) -> nn.Module:
         """Unwrap model from Actor or FSDP"""
         # Handle Actor wrapper
@@ -369,6 +330,30 @@ class FSDPStrategy(DistributedStrategy):
         # If no unwrapping needed, return the original model
         return model
 
+    def _fix_fsdp_config(self, config):
+        """Fix architecture names by removing FSDP prefix if present"""
+        # Determine which config to save
+        config_to_save = config
+
+        # Fix architecture name by removing FSDP prefix if present
+        if hasattr(config_to_save, "architectures") and config_to_save.architectures:
+            # Create a copy of the config to avoid modifying the original
+            config_to_save = copy.deepcopy(config_to_save)
+
+            # Fix architecture names to remove FSDP prefix
+            fixed_architectures = []
+            for arch in config_to_save.architectures:
+                fixed_arch = arch
+                if arch.startswith("FSDP"):
+                    # Remove "FSDP" prefix (for fsdp2)
+                    fixed_arch = arch[len("FSDP") :]
+                    self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                fixed_architectures.append(fixed_arch)
+
+            config_to_save.architectures = fixed_architectures
+
+        return config_to_save
+
     def save_ckpt(
         self,
         model,
@@ -386,7 +371,7 @@ class FSDPStrategy(DistributedStrategy):
         from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig, StateDictType
 
         if node_local_rank == 0:
-            os.makedirs(ckpt_dir, exist_ok=True)
+            io.makedirs(ckpt_dir, exist_ok=True)
 
         # Wait for checkpoint directory to be created.
         dist.barrier()
@@ -417,15 +402,17 @@ class FSDPStrategy(DistributedStrategy):
             with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 # Get and save model state dict
                 model_state_dict = save_model.state_dict()
-                self.print(f"[rank-{rank}]: Saving model to {os.path.abspath(model_path)}")
-                torch.save(model_state_dict, model_path)
+                self.print(f"[rank-{rank}]: Saving model to {model_path}")
+                with io.open_file(model_path, "wb") as f:
+                    torch.save(model_state_dict, f)
 
                 # Get and save optimizer state dict if optimizer is provided
                 optimizer_state_dict = {}
                 if optimizer is not None:
                     optimizer_state_dict = optimizer.state_dict()
-                self.print(f"[rank-{rank}]: Saving optim to {os.path.abspath(optim_path)}")
-                torch.save(optimizer_state_dict, optim_path)
+                self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
+                with io.open_file(optim_path, "wb") as f:
+                    torch.save(optimizer_state_dict, f)
 
                 # Get scheduler state dict if scheduler is provided
                 lr_scheduler_state_dict = {}
@@ -445,8 +432,9 @@ class FSDPStrategy(DistributedStrategy):
                 }
 
                 # Save extra state
-                self.print(f"[rank-{rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
-                torch.save(extra_state_dict, extra_path)
+                self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
+                with io.open_file(extra_path, "wb") as f:
+                    torch.save(extra_state_dict, f)
 
                 # Garbage collect temporary buffers from materializing the state dicts
                 gc.collect()
@@ -457,7 +445,7 @@ class FSDPStrategy(DistributedStrategy):
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
-            with open(fsdp_config_path, "w") as f:
+            with io.open_file(fsdp_config_path, "w") as f:
                 json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
@@ -483,7 +471,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if ckpt_dir is None:
             raise ValueError("ckpt_dir cannot be None")
-        elif not os.path.exists(ckpt_dir):
+        elif not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
 
         # Extract the actual model for loading
@@ -499,26 +487,29 @@ class FSDPStrategy(DistributedStrategy):
         extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
         # Check if checkpoint files exist
-        if not os.path.exists(model_path):
+        if not io.exists(model_path):
             raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-        if not os.path.exists(extra_path):
+        if not io.exists(extra_path):
             raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
 
         # Optimizer path is optional since we may not save optimizer states initially
-        optim_exists = os.path.exists(optim_path)
+        optim_exists = io.exists(optim_path)
 
-        self.print(f"[rank-{rank}]: Loading model from {os.path.abspath(model_path)}")
-        self.print(f"[rank-{rank}]: Loading extra_state from {os.path.abspath(extra_path)}")
+        self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
         if optim_exists:
-            self.print(f"[rank-{rank}]: Loading optim from {os.path.abspath(optim_path)}")
+            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
         # Load state dictionaries from disk
-        model_state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
-        extra_state_dict = torch.load(extra_path, map_location="cpu", weights_only=False)
+        with io.open_file(model_path, "rb") as f:
+            model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+        with io.open_file(extra_path, "rb") as f:
+            extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         optimizer_state_dict = {}
         if optim_exists and load_optimizer_states and not load_module_only:
-            optimizer_state_dict = torch.load(optim_path, map_location="cpu", weights_only=False)
+            with io.open_file(optim_path, "rb") as f:
+                optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
@@ -573,7 +564,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 1: Create output directory (rank 0 only)
         if self.is_rank_0():
-            os.makedirs(output_dir, exist_ok=True)
+            io.makedirs(output_dir, exist_ok=True)
             self.print(f"[rank-0]: Created output directory: {output_dir}")
 
         # Step 2: Extract models - get both the model for saving metadata and the FSDP model for state dict
@@ -603,37 +594,17 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
-            # Save the model in HuggingFace format using safetensors
-            model_to_save.save_pretrained(
-                output_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs  # Always use safetensors
-            )
+            with io.local_work_dir(output_dir) as work_dir:
+                # Save the model in HuggingFace format using safetensors
+                model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
 
-            # Determine which config to save
-            config_to_save = model_to_save.config
+                # Fix and save the config
+                config_to_save = self._fix_fsdp_config(model_to_save.config)
+                config_to_save.save_pretrained(work_dir)
 
-            # Fix architecture name by removing FSDP prefix if present
-            if hasattr(config_to_save, "architectures") and config_to_save.architectures:
-                # Create a copy of the config to avoid modifying the original
-                config_to_save = copy.deepcopy(config_to_save)
-
-                # Fix architecture names to remove FSDP prefix
-                fixed_architectures = []
-                for arch in config_to_save.architectures:
-                    fixed_arch = arch
-                    if arch.startswith("FSDP"):
-                        # Remove "FSDP" prefix (for fsdp2)
-                        fixed_arch = arch[len("FSDP") :]
-                        self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
-                    fixed_architectures.append(fixed_arch)
-
-                config_to_save.architectures = fixed_architectures
-
-            # Save the config
-            config_to_save.save_pretrained(output_dir)
-
-            # Save tokenizer if provided
-            if tokenizer is not None:
-                tokenizer.save_pretrained(output_dir)
+                # Save tokenizer if provided
+                if tokenizer is not None:
+                    tokenizer.save_pretrained(work_dir)
 
             self.print(f"[rank-0]: Successfully saved model to {output_dir}")
 

@@ -5,7 +5,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Any, Dict
 import json
 from transformers import PreTrainedTokenizerBase
 
@@ -22,14 +22,12 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         engine_backend: str,
         tokenizer: PreTrainedTokenizerBase,
         tp_size: Optional[int] = None,
-        sampling_params: Optional[Dict[str, Any]] = None,
     ):
         """Initialize the InferenceEngine."""
         self.url = f"http://{url}"
         self.model_name = model_name
         self.engine_backend = engine_backend
         self.tp_size = tp_size
-        self.sampling_params = sampling_params if sampling_params is not None else {}
         self.tokenizer = tokenizer
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -42,7 +40,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             prompts is None and prompt_token_ids is not None
         ), "RemoteInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
 
-        sampling_params = request_sampling_params if request_sampling_params is not None else self.sampling_params
+        sampling_params = request_sampling_params if request_sampling_params is not None else {}
         if "n" in sampling_params and sampling_params["n"] > 1:
             raise ValueError(
                 "n is not supported yet for remote inference engines. "
@@ -105,6 +103,19 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         return InferenceEngineOutput(
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=None
         )
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = request_payload.get("json", {})
+        # NOTE(Charlie): cannot reuse payload["headers"] since we are posting a new request.
+        # Otherwise will lead to json decode error.
+        headers = {"Content-Type": "application/json"}
+        response = None
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            request_url = f"{self.url}/v1/chat/completions"
+            async with session.post(request_url, json=body, headers=headers) as resp:
+                response = await resp.json()
+
+        return response
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
@@ -211,7 +222,6 @@ def create_remote_inference_engines(
     engine_backend: str,
     tokenizer: PreTrainedTokenizerBase,
     tensor_parallel_size: Optional[int] = None,
-    sampling_params: Optional[Dict[str, Any]] = None,
 ):
     return [
         RemoteInferenceEngine(
@@ -220,7 +230,6 @@ def create_remote_inference_engines(
             tokenizer=tokenizer,
             engine_backend=engine_backend,
             tp_size=tensor_parallel_size,
-            sampling_params=sampling_params,
         )
         for url in urls
     ]

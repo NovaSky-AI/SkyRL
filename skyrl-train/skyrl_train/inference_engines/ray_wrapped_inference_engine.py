@@ -1,7 +1,7 @@
 import ray
 from packaging import version
 from ray.actor import ActorHandle
-from typing import Dict, Any, Optional, List
+from typing import Any, List, Dict
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.inference_engines.base import (
@@ -50,6 +50,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def reset_prefix_cache(self):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
 
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.inference_engine_actor.chat_completion.remote(request_payload)
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
@@ -67,7 +70,6 @@ def create_ray_wrapped_inference_engines(
     async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
-    sampling_params: Optional[Dict[str, Any]] = None,
     tokenizer=None,
     backend="vllm",
 ) -> List[InferenceEngineInterface]:
@@ -145,7 +147,6 @@ def create_ray_wrapped_inference_engines(
                 noset_visible_devices=noset_visible_devices,
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_num_seqs=max_num_seqs,
-                sampling_params=sampling_params,
                 # only need the logprobs for the chosen token if any
                 max_logprobs=1,
             )
@@ -191,7 +192,6 @@ def create_ray_wrapped_inference_engines(
                     noset_visible_devices=noset_visible_devices,
                     bundle_indices=bundle_indices,
                     num_gpus=0.2 if use_hybrid_engine else 1,
-                    sampling_params=sampling_params,
                     tokenizer=tokenizer,
                 )
                 return engine

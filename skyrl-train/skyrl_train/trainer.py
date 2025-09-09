@@ -28,7 +28,7 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.utils import ppo_utils
-from skyrl_train.utils import trainer_utils
+from skyrl_train.utils import trainer_utils, io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
@@ -117,7 +117,8 @@ class RayPPOTrainer:
             batch_size=batch_size,
             shuffle=True if is_train else False,
             collate_fn=dataset.collate_fn,
-            num_workers=8,
+            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+            num_workers=0 if self.cfg.generator.enable_http_endpoint else 8,
             drop_last=True if is_train else False,
             generator=seeded_generator,
         )
@@ -184,6 +185,7 @@ class RayPPOTrainer:
         )
 
         # 4. Prepare dumping data
+        # TODO[Ben] update this to be cloud-compatible
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
@@ -263,7 +265,7 @@ class RayPPOTrainer:
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
                     generator_input, uids = self._prepare_generator_input(
-                        self.cfg.generator.n_samples_per_prompt, rand_prompts
+                        self.cfg.generator.n_samples_per_prompt, rand_prompts, self.cfg.generator.sampling_params
                     )
 
                     # if we are continuing sampling, we don't want to trigger weight management
@@ -392,7 +394,7 @@ class RayPPOTrainer:
         return entries[: (len(entries) // dp_size) * dp_size]
 
     def _prepare_generator_input(
-        self, n_samples_per_prompt: int, rand_prompts: List[Any], sampling_params: Optional[Dict[str, Any]] = None
+        self, n_samples_per_prompt: int, rand_prompts: List[Any], sampling_params: Dict[str, Any]
     ) -> Tuple[GeneratorInput, List[str]]:
         """
         Replicate prompts if needed and generate uids.
@@ -413,11 +415,7 @@ class RayPPOTrainer:
             [[prompt["env_extras"]] * n_samples_per_prompt for prompt in rand_prompts],
             [],
         )
-        request_sampling_params = (
-            get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
-            if sampling_params is not None
-            else None
-        )
+        request_sampling_params = get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
         generator_input: GeneratorInput = {
             "prompts": all_prompts,
             "env_classes": all_envs,
@@ -1177,7 +1175,7 @@ class RayPPOTrainer:
         critic_save_dir = os.path.join(global_step_folder, "critic")
         # TODO(tgriggs): Add reward model checkpointing.
 
-        os.makedirs(global_step_folder, exist_ok=True)
+        io.makedirs(global_step_folder, exist_ok=True)
 
         # Save policy checkpoint
         ray.get(
@@ -1214,7 +1212,8 @@ class RayPPOTrainer:
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
         try:
             dataloader_state_dict = self.train_dataloader.state_dict()
-            torch.save(dataloader_state_dict, dataloader_save_path)
+            with io.open_file(dataloader_save_path, "wb") as f:
+                torch.save(dataloader_state_dict, f)
             logger.info(f"Saved dataloader state to {dataloader_save_path}")
         except Exception as e:
             logger.warning(f"Failed to save dataloader state: {e}")
@@ -1225,12 +1224,13 @@ class RayPPOTrainer:
             "config": self.cfg,
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
-        torch.save(trainer_state, trainer_state_path)
+        with io.open_file(trainer_state_path, "wb") as f:
+            torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
         # Atomic tracking - write this last after all saves succeed
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
-        with open(latest_checkpoint_file, "w") as f:
+        with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
@@ -1247,11 +1247,10 @@ class RayPPOTrainer:
             cleanup_old_checkpoints,
             self.cfg.trainer.ckpt_path,
             self.cfg.trainer.max_ckpts_to_keep,
-            self.global_step,
         )
         # run on driver as well
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
-        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep, self.global_step)
+        cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
 
     def load_checkpoints(self) -> int:
         """
@@ -1265,13 +1264,13 @@ class RayPPOTrainer:
             return 0
         # first, let's get resume_path
         elif self.resume_mode == ResumeMode.LATEST:
-            latest_checkpoint_file = Path(self.cfg.trainer.ckpt_path) / "latest_ckpt_global_step.txt"
-            if not latest_checkpoint_file.exists():
+            latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+            if not io.exists(latest_checkpoint_file):
                 logger.info("No checkpoint found, starting training from scratch")
                 return 0
-            with open(latest_checkpoint_file, "r") as f:
-                ckpt_iteration = int(f.read())
-            checkpoint_path = Path(self.cfg.trainer.ckpt_path) / f"{GLOBAL_STEP_PREFIX}{ckpt_iteration}"
+            with io.open_file(latest_checkpoint_file, "r") as f:
+                ckpt_iteration = int(f.read().strip())
+            checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_iteration}")
             # Run validation: Make sure ckpt folder is consistent with latest_ckpt_global_step.txt
             validate_consistency_for_latest_checkpoint(
                 self.cfg.trainer.ckpt_path,
@@ -1293,42 +1292,41 @@ class RayPPOTrainer:
                 )
 
         # Validate that the path exists
-        if not checkpoint_path.exists():
+        if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
-        # Make path absolute if it's relative
-        checkpoint_path = checkpoint_path.resolve()
-
         # Extract global step from checkpoint path
-        global_step = extract_step_from_path(checkpoint_path)
+        global_step = extract_step_from_path(Path(checkpoint_path))
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
         self.global_step = global_step
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
-        policy_ckpt_dir = checkpoint_path / "policy"
-        critic_ckpt_dir = checkpoint_path / "critic"
-        trainer_state_path = checkpoint_path / "trainer_state.pt"
-        dataloader_state_path = checkpoint_path / "data.pt"
+        policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
+        critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
+        trainer_state_path = os.path.join(checkpoint_path, "trainer_state.pt")
+        dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
 
         # Validate that required checkpoint files exist
-        if not trainer_state_path.exists():
+        if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"Trainer state file not found: {trainer_state_path}")
 
         # 1. Load and validate trainer state
-        trainer_state = torch.load(trainer_state_path, map_location="cpu", weights_only=False)
+        with io.open_file(trainer_state_path, "rb") as f:
+            trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
         # 2. Load dataloader state if available
-        if dataloader_state_path.exists():
+        if io.exists(dataloader_state_path):
             try:
-                dataloader_state = torch.load(dataloader_state_path, map_location="cpu", weights_only=False)
+                with io.open_file(dataloader_state_path, "rb") as f:
+                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
                 self.train_dataloader.load_state_dict(dataloader_state)
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:

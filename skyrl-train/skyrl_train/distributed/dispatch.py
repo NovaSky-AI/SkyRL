@@ -25,18 +25,19 @@ class MeshRank:
 
     world_size: int
     dp_size: int
+    pp_size: int
 
-    def is_primary_dp_rank(self) -> bool:
-        """Check if this rank is the primary DP rank.
+    def is_collection_dp_rank(self) -> bool:
+        """Check if this rank is a DP rank to collect from
 
-        This is the rank with (SP=0, TP=0, PP=0)
+        This is the rank with (SP=0, TP=0, PP=pp_size-1)
+
+        Note: double check this for ETP > 1 (but this is not a typically used case)
         """
-        return self.tp == 0 and self.pp == 0 and self.sp == 0
+        return self.tp == 0 and self.pp == self.pp_size - 1 and self.sp == 0
 
     def __str__(self) -> str:
-        return (
-            f"MeshRank(dp={self.dp}, sp={self.sp}, tp={self.tp}, world_size={self.world_size}, dp_size={self.dp_size})"
-        )
+        return f"MeshRank(dp={self.dp}, sp={self.sp}, tp={self.tp}, pp={self.pp}, world_size={self.world_size}, dp_size={self.dp_size}, pp_size={self.pp_size})"
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -256,7 +257,7 @@ def concatenate_outputs_after_mesh_dispatch(
     # collect in-order
     dp_rank_to_shard = {}
     for actor_info, data_batch in zip(actor_infos, data_batches):
-        if actor_info.rank.is_primary_dp_rank():
+        if actor_info.rank.is_collection_dp_rank():
             dp_rank = actor_info.rank.dp
             dp_rank_to_shard[dp_rank] = data_batch
     for i in range(actor_infos[0].rank.dp_size):

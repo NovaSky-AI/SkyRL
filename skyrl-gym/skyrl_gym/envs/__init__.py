@@ -13,6 +13,11 @@ register(
 )
 
 register(
+    id="gsm8k_multi_turn",
+    entry_point="skyrl_gym.envs.gsm8k.multi_turn_env:GSM8kMultiTurnEnv",
+)
+
+register(
     id="text2sql",
     entry_point="skyrl_gym.envs.sql.env:SQLEnv",
 )

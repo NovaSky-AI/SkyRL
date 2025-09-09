@@ -9,20 +9,16 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_engine
 import pytest
 import ray
 import hydra
-from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import asyncio
-import subprocess
-import os
-from tests.gpu.utils import get_available_gpus, wait_for_server, are_responses_similar, get_test_prompts
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from tests.gpu.utils import are_responses_similar, get_test_prompts, init_remote_inference_servers
+from transformers import AutoTokenizer
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import config_dir
-from typing import Tuple
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
@@ -34,124 +30,17 @@ def get_test_actor_config() -> DictConfig:
 
         cfg.trainer.policy.model.path = MODEL
 
+        cfg.generator.sampling_params.temperature = 0.0
+        cfg.generator.sampling_params.top_p = 1
+        cfg.generator.sampling_params.top_k = -1
+        cfg.generator.sampling_params.max_generate_length = 1024
+        cfg.generator.sampling_params.min_p = 0.0
+        cfg.generator.sampling_params.logprobs = None
+
         return cfg
 
 
-def init_remote_inference_servers(
-    tp_size: int, backend: str, tokenizer: PreTrainedTokenizerBase
-) -> Tuple[InferenceEngineClient, subprocess.Popen]:
-    available_gpus = get_available_gpus()
-    assert (
-        len(available_gpus) >= tp_size
-    ), f"Not enough GPUs available. Need {tp_size}, but only {len(available_gpus)} available: {available_gpus}"
-
-    selected_gpus = available_gpus[:tp_size]
-    gpu_ids_str = ",".join(map(str, selected_gpus))
-    print(f"Using GPUs {gpu_ids_str} for vLLM server (tensor_parallel_size={tp_size})")
-
-    def get_free_port():
-        import socket
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("", 0))
-        port = s.getsockname()[1]
-        s.close()
-        return port
-
-    engine_port = get_free_port()
-
-    # Launch vLLM server using subprocess
-    if backend == "vllm":
-        remote_server_command = [
-            "uv",
-            "run",
-            "--isolated",
-            "--extra",
-            "vllm",
-            "-m",
-            "skyrl_train.inference_engines.vllm.vllm_server",
-            "--model",
-            MODEL,
-            "--enforce-eager",
-            "--gpu-memory-utilization",
-            "0.8",
-            "--tensor-parallel-size",
-            str(tp_size),
-            # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
-            # For standalone server, we use mp for now.
-            "--distributed-executor-backend",
-            "mp",
-            "--dtype",
-            "bfloat16",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(engine_port),
-            "--worker-extension-cls",
-            "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
-        ]
-    elif backend == "sglang":
-        remote_server_command = [
-            "uv",
-            "run",
-            "--isolated",
-            "--extra",
-            "sglang",
-            "-m",
-            "skyrl_train.inference_engines.sglang.sglang_server",
-            "--model-path",
-            MODEL,
-            "--tp-size",
-            str(tp_size),
-            "--dtype",
-            "bfloat16",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(engine_port),
-            "--mm-attention-backend",
-            "fa3",
-            "--attention-backend",
-            "fa3",
-        ]
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")
-
-    # Set CUDA_VISIBLE_DEVICES environment variable for the subprocess
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = gpu_ids_str
-
-    # Start the vLLM server process
-    server_process = subprocess.Popen(remote_server_command, env=env)
-
-    wait_for_server(url=f"localhost:{engine_port}", health_path="health")
-    print(f"Server at localhost:{engine_port} is online")
-
-    engines = create_remote_inference_engines(
-        urls=[f"localhost:{engine_port}"],
-        model_name=MODEL,
-        tokenizer=tokenizer,
-        engine_backend=backend,
-        tensor_parallel_size=tp_size,
-        sampling_params=get_sampling_params_for_backend(
-            backend,
-            DictConfig(
-                {
-                    "temperature": 0.0,
-                    "top_p": 1,
-                    "top_k": -1,
-                    "max_generate_length": 1024,
-                    "min_p": 0.0,
-                    "logprobs": None,
-                }
-            ),
-        ),
-    )
-
-    return InferenceEngineClient(engines, tokenizer), server_process
-
-
-def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineClient:
+def init_ray_inference_engines(backend: str, tp_size: int, config: DictConfig) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engine = create_ray_wrapped_inference_engines(
@@ -170,36 +59,23 @@ def init_ray_inference_engines(backend: str, tp_size: int) -> InferenceEngineCli
         async_engine=True,
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
-        sampling_params=get_sampling_params_for_backend(
-            backend,
-            DictConfig(
-                {
-                    "temperature": 0.0,
-                    "top_p": 1,
-                    "top_k": -1,
-                    "max_generate_length": 1024,
-                    "min_p": 0.0,
-                    "logprobs": None,
-                }
-            ),
-        ),
         tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(engine, tokenizer)
+    client = InferenceEngineClient(engine, tokenizer, config)
     return client
 
 
-async def run_batch_generation(client, prompts):
-    engine_input = InferenceEngineInput(prompts=prompts)
+async def run_batch_generation(client, prompts, sampling_params):
+    engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     engine_output = await client.generate(engine_input)
     return engine_output["responses"], engine_output["stop_reasons"]
 
 
-async def run_single_generation(client, prompts):
+async def run_single_generation(client, prompts, sampling_params):
     tasks = []
     for prompt in prompts:
-        engine_input = InferenceEngineInput(prompts=[prompt])
+        engine_input = InferenceEngineInput(prompts=[prompt], sampling_params=sampling_params)
         task = client.generate(engine_input)
         tasks.append(task)
 
@@ -214,16 +90,16 @@ async def run_single_generation(client, prompts):
     return responses, finish_reasons
 
 
-async def run_batch_generation_with_tokens(client, prompt_token_ids):
-    engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids)
+async def run_batch_generation_with_tokens(client, prompt_token_ids, sampling_params):
+    engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     engine_output = await client.generate(engine_input)
     return engine_output["responses"], engine_output["stop_reasons"]
 
 
-async def run_single_generation_with_tokens(client, prompt_token_ids):
+async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_params):
     tasks = []
     for tokens in prompt_token_ids:
-        engine_input = InferenceEngineInput(prompt_token_ids=[tokens])
+        engine_input = InferenceEngineInput(prompt_token_ids=[tokens], sampling_params=sampling_params)
         task = client.generate(engine_input)
         tasks.append(task)
 
@@ -260,10 +136,13 @@ def test_inference_engines_generation(backend: str, tp_size: int):
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         try:
-            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer)
+            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
+            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
             # Batched generation
-            remote_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
+            remote_batch_responses, batch_finish_reasons = asyncio.run(
+                run_batch_generation(llm_client, prompts, sampling_params)
+            )
             assert len(remote_batch_responses) == len(
                 prompts
             ), f"Number of responses should match number of prompts, got {len(remote_batch_responses)} responses but {len(prompts)} prompts"
@@ -272,7 +151,9 @@ def test_inference_engines_generation(backend: str, tp_size: int):
             ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
 
             # Single generation (ie, submit individual requests)
-            remote_single_responses, single_finish_reasons = asyncio.run(run_single_generation(llm_client, prompts))
+            remote_single_responses, single_finish_reasons = asyncio.run(
+                run_single_generation(llm_client, prompts, sampling_params)
+            )
             assert len(remote_single_responses) == len(
                 prompts
             ), f"Number of responses should match number of prompts, got {len(remote_single_responses)} responses but {len(prompts)} prompts"
@@ -288,14 +169,18 @@ def test_inference_engines_generation(backend: str, tp_size: int):
                     )
 
         finally:
-            remote_server_process.terminate()
-            remote_server_process.wait()
+            if "remote_server_process" in locals():
+                remote_server_process.terminate()
+                remote_server_process.wait()
 
         # Get responses from Ray engine
-        llm_client = init_ray_inference_engines(backend, tp_size)
+        llm_client = init_ray_inference_engines(backend, tp_size, cfg)
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Batched generation
-        local_batch_responses, batch_finish_reasons = asyncio.run(run_batch_generation(llm_client, prompts))
+        local_batch_responses, batch_finish_reasons = asyncio.run(
+            run_batch_generation(llm_client, prompts, sampling_params)
+        )
         assert len(local_batch_responses) == len(
             prompts
         ), f"Number of responses should match number of prompts, got {len(local_batch_responses)} responses but {len(prompts)} prompts"
@@ -304,7 +189,9 @@ def test_inference_engines_generation(backend: str, tp_size: int):
         ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
 
         # Single generation (ie, submit individual requests)
-        local_single_responses, single_finish_reasons = asyncio.run(run_single_generation(llm_client, prompts))
+        local_single_responses, single_finish_reasons = asyncio.run(
+            run_single_generation(llm_client, prompts, sampling_params)
+        )
         assert len(local_single_responses) == len(
             prompts
         ), f"Number of responses should match number of prompts, got {len(local_single_responses)} responses but {len(prompts)} prompts"
@@ -353,18 +240,23 @@ def test_token_based_generation(backend: str, tp_size: int):
             prompts, add_generation_prompt=True, tokenize=True, return_dict=True
         )["input_ids"]
 
-        llm_client = init_ray_inference_engines(backend, tp_size)
+        llm_client = init_ray_inference_engines(backend, tp_size, cfg)
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Test batch generation with tokens
-        token_batch_responses, _ = asyncio.run(run_batch_generation_with_tokens(llm_client, prompt_token_ids))
+        token_batch_responses, _ = asyncio.run(
+            run_batch_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
         assert len(token_batch_responses) == len(prompts)
 
         # Test single generation with tokens
-        token_single_responses, _ = asyncio.run(run_single_generation_with_tokens(llm_client, prompt_token_ids))
+        token_single_responses, _ = asyncio.run(
+            run_single_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+        )
         assert len(token_single_responses) == len(prompts)
 
         # Compare with prompt-based generation
-        prompt_responses, _ = asyncio.run(run_batch_generation(llm_client, prompts))
+        prompt_responses, _ = asyncio.run(run_batch_generation(llm_client, prompts, sampling_params))
 
         # Outputs should be similar since we're using the same inputs
         for i in range(len(prompts)):

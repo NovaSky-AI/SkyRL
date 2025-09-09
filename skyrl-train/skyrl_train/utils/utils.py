@@ -114,6 +114,32 @@ def validate_batch_sizes(cfg: DictConfig):
         ), f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
 
 
+def validate_megatron_cfg(cfg: DictConfig):
+    # not yet supported + tested features
+    assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
+    assert cfg.trainer.placement.colocate_all, "only colocate_all=True is supported for megatron training"
+    assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+    assert not cfg.trainer.use_sample_packing, "sample packing is not yet supported for megatron"
+
+    worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
+    for config, worker_type in worker_configs:
+        # context, expert, and export tensor parallel are not yet supported for megatron
+        assert (
+            config.megatron_config.context_parallel_size == 1
+        ), f"found {worker_type}.context_parallel_size > 1, context parallel is not yet supported for megatron"
+        assert (
+            config.megatron_config.expert_model_parallel_size == 1
+        ), f"found {worker_type}.expert_model_parallel_size > 1, expert model parallel is not yet supported for megatron"
+        assert (
+            config.megatron_config.expert_tensor_parallel_size == 1
+        ), f"found {worker_type}.expert_tensor_parallel_size > 1, expert tensor parallel is not yet supported for megatron"
+        # check that sequence parallel is not configured outside of megatron
+        assert (
+            config.sequence_parallel_size == 1
+        ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
+
+
 def validate_cfg(cfg: DictConfig):
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
 
@@ -268,6 +294,8 @@ def validate_cfg(cfg: DictConfig):
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
+    if cfg.trainer.strategy == "megatron":
+        validate_megatron_cfg(cfg)
     if cfg.generator.backend == "sglang":
         # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
         if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
@@ -293,6 +321,18 @@ def validate_cfg(cfg: DictConfig):
                 "are using multi-turn generation. You might want to set `append_eos_token_after_stop_str_in_multi_turn` "
                 "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
             )
+
+    if cfg.generator.enable_http_endpoint:
+        if cfg.generator.backend == "sglang":
+            # TODO(Charlie): sglang_server.py not supported for /chat/completion yet because we have
+            # skip_tokenizer_init=True in engine creation. Fix by getting tokens via return logprobs
+            # instead. sglang_engine.py not supported yet because we still need to figure out how
+            # to make SGLang Python engine take OAI request.
+            raise ValueError(
+                'generator.enable_http_endpoint is not supported for SGLang backend yet. Please set generator.backend="vllm".'
+            )
+        if not cfg.generator.async_engine:
+            raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
 
 @ray.remote
@@ -352,6 +392,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if cfg.generator.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
+    if cfg.trainer.strategy == "megatron" and cfg.trainer.flash_attn:
+        # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
+        # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
+        env_vars["NVTE_FUSED_ATTN"] = "0"
+
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
@@ -389,6 +434,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
+
+    if cfg.trainer.strategy == "megatron":
+        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
+        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
+        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
@@ -522,3 +572,16 @@ def peer_access_supported(max_num_gpus_per_node: int):
         return result
     else:
         return run_p2p_access_check()
+
+
+def update_model_config(module_config, override_config_kwargs):
+    """Update the module config with the override_config_kwargs.
+    Args:
+        module_config: The module config from Huggingface Transformers.
+        override_config_kwargs: The kwargs to override the module config.
+    """
+    for key, val in override_config_kwargs.items():
+        if isinstance(val, dict):
+            update_model_config(getattr(module_config, key), val)
+        else:
+            setattr(module_config, key, val)

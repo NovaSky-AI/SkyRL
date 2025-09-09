@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/test_save_load_ckpt.py
+uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_load_ckpt.py
 """
 
 import ray
@@ -18,6 +18,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 CKPT_PATH = "$HOME/ckpts/test/"
+NUM_GPUS = 1
 
 
 def get_test_actor_config(strategy: str) -> DictConfig:
@@ -25,7 +26,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
         cfg = hydra.compose(config_name="ppo_base_config")
 
     cfg.trainer.policy.model.path = MODEL_NAME
-    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy
 
     cfg.trainer.ckpt_path = CKPT_PATH
@@ -105,7 +106,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             with open(fsdp_config_path, "r") as f:
                 fsdp_config = json.load(f)
             assert fsdp_config["fsdp_strategy"] == strategy
-            assert fsdp_config["world_size"] == 2
+            assert fsdp_config["world_size"] == NUM_GPUS
 
         # Step 3: Do second training step and record results
         ray.get(
