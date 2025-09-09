@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm --extra sandboxes -m examples.terminal_bench.main_tbench_generate
+Main entrypoint for generating rollouts on terminal bench tasks.
 """
 
 import ray

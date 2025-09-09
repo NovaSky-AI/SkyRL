@@ -1,7 +1,5 @@
 """
-
-uv run --isolated --extra vllm -- python -m skyrl_train.entrypoints.main_base
-
+Main entrypoint for training.
 """
 
 from ray.util.placement_group import placement_group, PlacementGroup

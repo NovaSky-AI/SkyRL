@@ -1,7 +1,3 @@
-"""
-uv run --isolated --extra vllm -m examples.llm_as_a_judge.main_llm_judge
-"""
-
 import ray
 import hydra
 from omegaconf import DictConfig
