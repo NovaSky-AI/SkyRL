@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm -m examples.async.main_async
+Main entrypoint for async training.
 """
 
 import hydra

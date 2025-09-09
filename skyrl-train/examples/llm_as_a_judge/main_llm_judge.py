@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm -m examples.llm_as_a_judge.main_llm_judge
+Main entrypoint for the LLM-as-a-judge example.
 """
 
 import ray

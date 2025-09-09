@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm --extra sandboxes -m examples.terminal_bench.main_tbench
+Main entrypoint for training on terminal bench tasks.
 """
 
 import ray
