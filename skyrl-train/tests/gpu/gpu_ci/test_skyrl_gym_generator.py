@@ -274,9 +274,7 @@ async def test_generator_multi_turn_search():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen3-1.7B"]
-)
+@pytest.mark.parametrize("model_name", ["unsloth/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen3-1.7B"])
 async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when using conversation formatting for multi-turn
@@ -312,17 +310,19 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 
             # Observations and EOS expectations only strictly apply when the model finished turns
             if stop_reason == "stop":
-                assert "give me another solution 1" in masked_out_resp_str, '"give me another solution 1" observation should be loss masked out'
-                assert "give me another solution 2" in masked_out_resp_str, '"give me another solution 2" observation should be loss masked out'
+                assert (
+                    "give me another solution 1" in masked_out_resp_str
+                ), '"give me another solution 1" observation should be loss masked out'
+                assert (
+                    "give me another solution 2" in masked_out_resp_str
+                ), '"give me another solution 2" observation should be loss masked out'
                 assert (
                     MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
                     and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
                 ), "generation prompts should be loss masked out"
 
                 # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
-                assert (
-                    sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 3
-                )
+                assert sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 3
                 # total eos in full response: 2 user eos + 3 assistant eos
                 assert sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id) == 5
             else:
@@ -344,9 +344,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen3-1.7B"]
-)
+@pytest.mark.parametrize("model_name", ["unsloth/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen3-1.7B"])
 async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when not using conversation formatting for multi-turn
@@ -381,8 +379,12 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
             masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
             masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert "give me another solution 1" in masked_out_resp_str, '"give me another solution 1" observation should be loss masked out'
-            assert "give me another solution 2" in masked_out_resp_str, '"give me another solution 2" observation should be loss masked out'
+            assert (
+                "give me another solution 1" in masked_out_resp_str
+            ), '"give me another solution 1" observation should be loss masked out'
+            assert (
+                "give me another solution 2" in masked_out_resp_str
+            ), '"give me another solution 2" observation should be loss masked out'
             assert (
                 prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
                 + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
