@@ -3,7 +3,7 @@ set -x
 # Colocated GRPO training+generation for Qwen/Qwen3-Coder-30B-A3B-Instruct on the SWE-Bench task.
 # Uses 2 node with 8 GPUs each.
 # uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
-# bash examples/mini_swe_agent/run_mini_swe_32B.sh
+# bash examples/mini_swe_agent/run_mini_swe_30B.sh
 
 # ensure that all worker nodes can access this data directory
 DATA_DIR="$DATA/data/swe_gym_subset"

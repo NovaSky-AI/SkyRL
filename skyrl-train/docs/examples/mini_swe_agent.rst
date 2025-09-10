@@ -96,8 +96,8 @@ We provide two example scripts: One for Qwen3-8B model and another for the `Qwen
 
     # execute from skyrl-train directory
     bash examples/mini_swe_agent/run_mini_swe_8B.sh
-    # or for 32B:
-    # bash examples/mini_swe_agent/run_mini_swe_32B.sh
+    # or for 30B:
+    # bash examples/mini_swe_agent/run_mini_swe_30B.sh
 
 
 Tips
