@@ -10,7 +10,7 @@ from omegaconf import DictConfig
 import torch
 import asyncio
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
+from omegaconf import OmegaConf
 from tests.gpu.utils import (
     init_worker_with_type,
     ray_init_for_tests,
@@ -29,7 +29,11 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+# running moonlight16b
+# huggingface-cli download moonshotai/Moonlight-16B-A3B-Instruct --local-dir ~/moonlight16b
+# add "blobfile", to pyproject.toml
+MODEL_NAME = "/home/ray/moonlight16b"
+# MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def get_test_actor_config() -> DictConfig:
@@ -40,6 +44,7 @@ def get_test_actor_config() -> DictConfig:
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.use_sample_packing = False
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create({"num_layers_in_last_pipeline_stage": 13})
 
     validate_cfg(cfg)
 
@@ -56,7 +61,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     """
     assert batch_size % 4 == 0, "batch size must be divisible by 4"
     num_repeats = batch_size // 4
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
     sentences = [
         "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
@@ -68,12 +73,14 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     sequences = [tokenizer.encode(sentence) for sentence in sentences]
     attention_masks = [[1] * len(seq) for seq in sequences]
     num_actions = 10
+    # max seq len 1 longer than the longest sequence so we always have some padding
+    max_seq_length = max([len(seq) for seq in sequences]) + 7
 
     pad_token_id = tokenizer.pad_token_id
+    pad_before = [4, 0, 1, 6] * num_repeats
+    pad_after = [max_seq_length - len(seq) - pad_before[i] for i, seq in enumerate(sequences)]
 
-    # pad to length of longest sequence (25)
-    pad_before_after = [(4, 2), (0, 1), (1, 1), (6, 4)] * num_repeats
-    for i, (pad_before, pad_after) in enumerate(pad_before_after):
+    for i, (pad_before, pad_after) in enumerate(zip(pad_before, pad_after)):
         sequences[i] = [pad_token_id] * pad_before + sequences[i] + [pad_token_id] * pad_after
         attention_masks[i] = [0] * pad_before + attention_masks[i] + [0] * pad_after
 
@@ -257,8 +264,14 @@ async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, cp, 
         ("policy", 2, 2, 1, 4, True),
         ("policy", 2, 2, 1, 4, False),
         ("policy", 2, 2, 2, 8, True),
+        ("policy", 4, 2, 1, 8, True),
     ],
-    ids=["tp2_pp2_policy_seq_packing", "tp2_pp2_policy_unpacked", "tp2_pp2_cp2_policy_seq_packing"],
+    ids=[
+        "tp2_pp2_policy_seq_packing",
+        "tp2_pp2_policy_unpacked",
+        "tp2_pp2_cp2_policy_seq_packing",
+        "tp4_pp2_cp1_policy_seq_packing",
+    ],
 )
 async def test_megatron_train(cfg, ray_init_fixture, worker_type, tp, pp, cp, gpus_per_node, use_sample_packing):
     """
