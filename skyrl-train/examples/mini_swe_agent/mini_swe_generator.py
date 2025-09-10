@@ -71,9 +71,10 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
             try:
                 result = evaluate_trajectory(instance, result, sweagent_config, data_source)
                 reward = int(result["resolved"])
-                error = result["eval_error"]
-                if error:
-                    logger.debug(f"Error during evaluation {error}")
+                eval_error = result["eval_error"]
+                if eval_error:
+                    error = eval_error
+                    logger.debug(f"Error during evaluation {eval_error}")
             except Exception as e:
                 logger.debug(f"Error during evaluation {e}")
                 logger.debug(f"traceback: {traceback.format_exc()}")
