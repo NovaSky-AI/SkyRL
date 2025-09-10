@@ -18,9 +18,7 @@ if __name__ == "__main__":
     data_source = "SumanthRH/SWE-Gym-Subset"
     eval_data_source = "SumanthRH/SWE-bench_Verified"
 
-    dataset = datasets.load_dataset(data_source, "default")
-    train_dataset = dataset["train"]
-
+    train_dataset = datasets.load_dataset(data_source, "default")["train"]
     val_dataset = datasets.load_dataset(eval_data_source, "default")["test"]
 
     # add a row to each data item that represents a unique id
