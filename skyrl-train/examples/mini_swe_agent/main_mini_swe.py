@@ -1,12 +1,10 @@
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.generators.base import GeneratorInterface
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
 import ray
 
 from .mini_swe_generator import MiniSweAgentGenerator
-from .mini_swe_trainer import MiniSWEPPOTrainer
 
 
 class MiniSWEPPOExp(BasePPOExp):
@@ -19,33 +17,6 @@ class MiniSWEPPOExp(BasePPOExp):
             model_name=self.cfg.trainer.policy.model.path,
         )
         return generator
-
-    def get_trainer(
-        self,
-        cfg,
-        tracker,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        inference_engine_client,
-        generator: GeneratorInterface,
-        colocate_pg,
-    ):
-        """Initializes the trainer.
-
-        Returns:
-            MiniSWEPPOTrainer: The trainer.
-        """
-        return MiniSWEPPOTrainer(
-            cfg=cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            generator=generator,
-            colocate_pg=colocate_pg,
-        )
 
 
 @ray.remote(num_cpus=1)

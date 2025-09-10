@@ -1930,8 +1930,8 @@ dependencies = [
 
 [[package]]
 name = "mini-swe-agent"
-version = "1.11.0"
-source = { git = "https://github.com/SumanthRH/mini-swe-agent?rev=timeout#415df134137649d9e424a0a4dc866d3df3553963" }
+version = "1.11.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
     { name = "litellm", version = "1.76.3", source = { registry = "https://pypi.org/simple" } },
@@ -1945,6 +1945,10 @@ dependencies = [
     { name = "tenacity" },
     { name = "textual" },
     { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/02/45a9743c5f1276effc1ab90ac773375b8bb64f61ba6c2d1610cf4c920986/mini_swe_agent-1.11.1.tar.gz", hash = "sha256:2eb99cce5e66813b2997d748a60012fdecd341f8b42b7b63508e9f1768a65468", size = 46171, upload-time = "2025-09-10T16:40:46.925Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/de/91/30c5a2da924a16aeab12714221d3cf9e3cf2bec1c832a71d92ea895929d1/mini_swe_agent-1.11.1-py3-none-any.whl", hash = "sha256:1e4b20f81317954545a6f893bbcc16d170f0fc2cb4731f4b01690a85a54e99f9", size = 70437, upload-time = "2025-09-10T16:40:45.529Z" },
 ]
 
 [[package]]
@@ -3871,7 +3875,7 @@ requires-dist = [
     { name = "loguru" },
     { name = "mbridge", marker = "extra == 'mcore'", specifier = "==0.13.0" },
     { name = "megatron-core", marker = "extra == 'mcore'", git = "https://github.com/NVIDIA/Megatron-LM.git?rev=core_r0.13.0" },
-    { name = "mini-swe-agent", marker = "extra == 'miniswe'", git = "https://github.com/SumanthRH/mini-swe-agent?rev=timeout" },
+    { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.11.1" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
     { name = "omegaconf" },
     { name = "peft" },

@@ -139,8 +139,9 @@ flashrl = [
     "torchvision",
 ]
 miniswe = [
-    # TODO (sumanthrh): Shift to mini-swe-agent installed from upstream after merging changes
-    "mini-swe-agent @ git+https://github.com/SumanthRH/mini-swe-agent@timeout",
+    # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
+    # TODO (sumanthrh): Use a release version
+    "mini-swe-agent @ git+https://github.com/SWE-agent/mini-swe-agent",
     "litellm",
 ]
 

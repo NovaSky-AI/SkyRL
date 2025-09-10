@@ -82,10 +82,6 @@ def init_and_run(instance, litellm_model_name, sweagent_config, generator_cfg, d
 
             save_traj(agent, path, exit_status=exit_status, result=result, extra_info=extra_info, reward=reward, eval_error=eval_error)  # type: ignore[arg-type]
 
-        if env is not None:
-            # trigger cleanup explicitly
-            env.cleanup()
-
     return (agent.messages if agent is not None else [], reward, error)
 
 
