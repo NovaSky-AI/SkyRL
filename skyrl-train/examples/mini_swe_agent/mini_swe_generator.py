@@ -123,10 +123,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
     ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
 
         sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
-        instance: Dict[str, Dict[str, Any]] = env_extras["instance"]
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         messages, reward, error = await init_and_run.remote(
-            instance,
+            env_extras["instance"],
             self.litellm_model_name,
             sweagent_config,
             self.generator_cfg,
@@ -136,7 +135,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         if not len(messages):
             return None, None, None, None, None, None
 
-        # TODO (sumanthrh):This is currently hardcoded for SWEBench with 2 initial messages (system and user).
+        # TODO (sumanthrh): This is currently hardcoded for SWEBench with 2 initial messages (system and user).
         response_messages = messages[2:]
 
         for message in messages[:2]:
