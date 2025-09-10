@@ -56,10 +56,10 @@ By running this workflow as a Ray task, we are also able to scale up generation 
         model = get_model(litellm_model_name, sweagent_config.get("model", {}))
         error = None
         try:
-        env = get_sb_environment(sweagent_config, instance, data_source)
-        agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
-        exit_status, model_patch = agent.run(instance["problem_statement"])
-        eval_result = evaluate_trajectory(instance, model_patch, sweagent_config, data_source)
+            env = get_sb_environment(sweagent_config, instance, data_source)
+            agent = DefaultAgent(model, env, **sweagent_config.get("agent", {}))
+            exit_status, model_patch = agent.run(instance["problem_statement"])
+            eval_result = evaluate_trajectory(instance, model_patch, sweagent_config, data_source)
         except Exception as e:
             error = str(e)
         return agent.messages, eval_result, error
@@ -90,7 +90,7 @@ Training
 
 Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use `Podman <https://podman.io/docs>`_. This can be modified in :code_link:`examples/mini_swe_agent/swebench.yaml` 
 
-We provide two example scripts: One for Qwen3-8B model and another for the `Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>` model. While the first script for Qwen3-8B requires a single 8xH100 node, the script for the 30B model requires 2 8xH100 nodes for training.
+We provide two example scripts: One for Qwen3-8B model and another for the `Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>`_ model. While the first script for Qwen3-8B requires a single 8xH100 node, the script for the 30B model requires 2 8xH100 nodes for training.
 
 .. code-block:: bash
 

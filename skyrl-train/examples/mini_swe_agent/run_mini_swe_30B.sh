@@ -9,7 +9,9 @@ set -x
 DATA_DIR="$DATA/data/swe_gym_subset"
 
 CKPT_PATH="$DATA/ckpts/llm_mini_swe"
-# save trajectories here for debugging.
+
+# Save trajectories here for debugging.
+# NOTE: For a multi-node cluster, ensure that this is on NFS so that you can save all trajectories in the same path
 MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs_32B"
 
 NUM_GPUS=8

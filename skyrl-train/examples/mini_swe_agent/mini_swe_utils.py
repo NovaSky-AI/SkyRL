@@ -53,9 +53,8 @@ def get_docker_image_name(instance: dict, data_source: str) -> str:
 def evaluate_trajectory(
     instance: Dict[str, Any], model_patch: str, sweagent_config: dict, data_source: str
 ) -> MiniSWEEvaluationResult:
-    instance_id = instance["instance_id"]
 
-    ret = MiniSWEEvaluationResult(instance_id=instance_id, resolved=False, eval_error=None)
+    ret = MiniSWEEvaluationResult(instance_id=instance["instance_id"], resolved=False, eval_error=None)
 
     env = None
     try:
