@@ -15,6 +15,7 @@ INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
 MEGATRON_TP=2
 MEGATRON_PP=2
+MEGATRON_CP=1
 
 # torch profiler config
 ENABLE_TORCH_PROFILER=false
@@ -66,7 +67,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   generator.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_${MODEL_NAME}" \
+  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@

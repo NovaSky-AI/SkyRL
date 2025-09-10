@@ -120,14 +120,19 @@ def validate_megatron_cfg(cfg: DictConfig):
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.placement.colocate_all, "only colocate_all=True is supported for megatron training"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
-    assert not cfg.trainer.use_sample_packing, "sample packing is not yet supported for megatron"
+
+    if cfg.trainer.flash_attn:
+        import flash_attn
+
+        version = flash_attn.__version__
+        if version > "2.7.4.post1":
+            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
-        # context, expert, and export tensor parallel are not yet supported for megatron
-        assert (
-            config.megatron_config.context_parallel_size == 1
-        ), f"found {worker_type}.context_parallel_size > 1, context parallel is not yet supported for megatron"
+        # context, expert, and expert tensor parallel are not yet supported for megatron
+        if config.megatron_config.context_parallel_size > 1:
+            assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         assert (
             config.megatron_config.expert_model_parallel_size == 1
         ), f"found {worker_type}.expert_model_parallel_size > 1, expert model parallel is not yet supported for megatron"
