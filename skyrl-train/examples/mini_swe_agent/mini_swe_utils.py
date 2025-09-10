@@ -21,10 +21,7 @@ def get_sb_environment(config: dict, instance: dict, data_source: str) -> Enviro
     env_config["environment_class"] = env_config.get("environment_class", "docker")
     image_name = get_docker_image_name(instance, data_source)
     if env_config["environment_class"] == "docker":
-        if env_config.get("executable", "docker") == "podman":
-            env_config["image"] = f"docker://{image_name}"
-        else:
-            env_config["image"] = image_name
+        env_config["image"] = image_name
     elif env_config["environment_class"] == "singularity":
         env_config["image"] = f"docker://{image_name}"
     env = get_environment(env_config)
@@ -43,11 +40,11 @@ def get_docker_image_name(instance: dict, data_source: str) -> str:
         iid = instance["instance_id"]
         if "swe-gym" in data_source.lower():
             id_docker_compatible = iid.replace("__", "_s_")  # to comply with docker image naming convention
-            image_name = f"xingyaoww/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
+            image_name = f"docker.io/xingyaoww/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
         elif "swe-bench" in data_source.lower():
             # Docker doesn't allow double underscore, so we replace them with a magic token
             id_docker_compatible = iid.replace("__", "_1776_")
-            image_name = f"swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
+            image_name = f"docker.io/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
         else:
             raise NotImplementedError(f"Data source: {data_source} is not supported")
     return image_name

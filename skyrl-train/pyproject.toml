@@ -140,7 +140,7 @@ flashrl = [
 ]
 miniswe = [
     # TODO (sumanthrh): Shift to mini-swe-agent installed from upstream after merging changes
-    "mini-swe-agent @ git+https://github.com/SumanthRH/mini-swe-agent@sumanthrh/r2e",
+    "mini-swe-agent @ git+https://github.com/SumanthRH/mini-swe-agent@timeout",
     "litellm",
 ]
 
