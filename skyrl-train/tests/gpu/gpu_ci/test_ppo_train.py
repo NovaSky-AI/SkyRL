@@ -2,7 +2,7 @@
 Tests for ppo_train method in worker classes.
 
 Run with:
-uv run --isolated --extra dev --extra deepspeed pytest tests/gpu/test_ppo_train.py
+uv run --isolated --extra dev --extra deepspeed pytest tests/gpu/gpu_ci/test_ppo_train.py
 """
 
 import pytest
