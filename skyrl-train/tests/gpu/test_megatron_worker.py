@@ -181,7 +181,7 @@ async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, cp, 
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.use_sample_packing = use_sample_packing
-    batch = get_test_training_batch(gpus_per_node)
+    batch = get_test_training_batch(gpus_per_node if gpus_per_node > 4 else 4)
 
     actor_group = init_worker_with_type(
         worker_type,
