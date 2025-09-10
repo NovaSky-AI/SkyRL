@@ -33,13 +33,7 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
 
     initialize_ray(cfg)
-    task = skyrl_entrypoint.remote(cfg)
-    try:
-        ray.get(task)
-    except KeyboardInterrupt:
-        print("KeyboardInterrupt received, shutting down...")
-        ray.cancel(task)
-        raise
+    ray.get(skyrl_entrypoint.remote(cfg))
 
 
 if __name__ == "__main__":
