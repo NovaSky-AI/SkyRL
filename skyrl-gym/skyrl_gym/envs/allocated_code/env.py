@@ -5,6 +5,9 @@ import re
 from typing import Dict, Optional, List
 from omegaconf import DictConfig
 import httpx
+import atexit
+import signal
+import weakref
 
 
 class AllocatedCodeToolGroup:
@@ -17,10 +20,26 @@ class AllocatedCodeToolGroup:
         if self.allocated_container is not None:
             return
         
-        response = self.client.post(f"{self.manager_url}/allocate")
-        response.raise_for_status()
-        result = response.json()
-        self.allocated_container = result["container_id"]
+        # Retry container allocation up to 3 times
+        for attempt in range(3):
+            try:
+                response = self.client.post(f"{self.manager_url}/allocate")
+                response.raise_for_status()
+                result = response.json()
+                self.allocated_container = result["container_id"]
+                return
+            except Exception as e:
+                # Convert HTTPStatusError to a more Ray-friendly exception
+                error_msg = f"Failed to allocate container (attempt {attempt + 1}/3): {str(e)}"
+                if hasattr(e, 'response') and e.response is not None:
+                    error_msg += f" (Status: {e.response.status_code})"
+                
+                if attempt == 2:  # Last attempt
+                    raise RuntimeError(error_msg)
+                else:
+                    print(f"WARNING: {error_msg}, retrying...")
+                    import time
+                    time.sleep(1)  # Wait 1 second before retry
     
     def deallocate_container(self):
         if self.allocated_container is None:
@@ -33,14 +52,23 @@ class AllocatedCodeToolGroup:
         if self.allocated_container is None:
             raise RuntimeError("No container allocated")
         
-        response = self.client.post(
-            f"{self.manager_url}/session/{self.allocated_container}/execute",
-            json={"code": code}
-        )
-        response.raise_for_status()
-        result = response.json()
-        output = str(result.get("outputs", []))
-        return output
+        try:
+            response = self.client.post(
+                f"{self.manager_url}/session/{self.allocated_container}/execute",
+                json={"code": code}
+            )
+            response.raise_for_status()
+            result = response.json()
+            raw_output = result.get("outputs", [])
+            # Clean and format the Jupyter output
+            output = utils.clean_jupyter_output(raw_output)
+            return output
+        except Exception as e:
+            # Convert HTTPStatusError to a more Ray-friendly exception
+            error_msg = f"Failed to execute code: {str(e)}"
+            if hasattr(e, 'response') and e.response is not None:
+                error_msg += f" (Status: {e.response.status_code})"
+            raise RuntimeError(error_msg)
     
     def get_tool_names(self):
         return ["python"]
@@ -55,6 +83,7 @@ class AllocatedCodeEnv(BaseTextEnv):
         self.ground_truth = extras["reward_spec"]["ground_truth"]
         self.max_turns = extras["max_turns"] if "max_turns" in extras else 2
         self.query = extras["extra_info"]["question"]
+        self.data_source = extras["data_source"]
         
         # Configure whether to enable code execution reward, default False (keep original behavior)
         self.use_code_execution_reward = env_config.get("use_code_execution_reward", False)
@@ -110,6 +139,8 @@ class AllocatedCodeEnv(BaseTextEnv):
         if done:
             # Final reward: LLM-based scoring of hypothesis quality
             chat_history_str = "".join([item["content"] for item in self.chat_history])
+            if self.data_source == "qrdata":
+                return utils.compute_score(action, self.ground_truth)
             hypothesis = self._extract_hypothesis(chat_history_str)
             if self.use_discrete_reward:
                 return utils.compute_llm_score_discrete(hypothesis, chat_history_str, self.ground_truth, self.query)
@@ -124,9 +155,12 @@ class AllocatedCodeEnv(BaseTextEnv):
             return 0
 
     def _is_done(self, action: str) -> bool:
-        if self.turns >= self.max_turns:
-            return True
-        return "<answer>" in action and "</answer>" in action
+        max_turns_reached = self.turns >= self.max_turns
+        has_answer_tags = "<answer>" in action and "</answer>" in action
+        
+        result = max_turns_reached or has_answer_tags
+        
+        return result
 
     def _postprocess_action(self, action: str) -> str:
         if "</python>" in action:
@@ -183,6 +217,7 @@ class AllocatedCodeEnv(BaseTextEnv):
         if new_obs:
             self.chat_history.append(new_obs)
 
+        # print(f"DEBUG: Step output - done: {done}, reward: {reward}, new_obs: {new_obs['content'][:20] if new_obs else 'None'}")
         return BaseTextEnvStepOutput(
             observations=[new_obs] if new_obs else [],
             reward=reward,

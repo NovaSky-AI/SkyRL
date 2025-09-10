@@ -8,6 +8,14 @@ def load_json_data(file_path: str) -> List[Dict[str, Any]]:
     with open(file_path, 'r') as f:
         return json.load(f)
 
+discovery_instructions = """
+
+"""
+
+qr_instructions = """
+
+"""
+
 def create_base_prompt(context: str, question: str, dataset_locations: str, metadata_section: str, answer_format: str) -> str:
     prompt = f"""
 You are an expert data scientist and data analyst who tackles analytical challenges through systematic thinking and thorough investigation. 
@@ -35,6 +43,7 @@ INSTRUCTIONS:
 7. Do not use plotting libraries. You cannot see the plots.
 8. When workflow tags are provided, you should use them to guide your analysis.
 9. Only form your final answer when you have enough evidence.
+10. Code execution is continuous - variables and data loaded in previous steps remain available for subsequent analysis. Do not need to reload the same dataset or variables.
 
 
 You MUST use the following format for your response. Each step must follow this exact structure:
@@ -51,8 +60,11 @@ The output/results from your Python code will appear here.
 This section is read-only - you cannot write here.
 </information>
 
-Repeat these blocks for each analysis step. When you reach your conclusion:
+Repeat these blocks for each analysis step. When you reach your conclusion, you should follow this structure:
 
+<reasoning>
+Write clear reasoning about how you came up with your final answer.
+</reasoning>
 {answer_format}
 """
     return prompt
@@ -145,7 +157,7 @@ def process_dataset(items: List[Dict[str, Any]], dataset_name: str) -> List[Dict
         
         system_prompt = {
             "role": "system",
-            "content": "You are a discovery agent who can analyze datasets and generate scientific hypotheses."
+            "content": "You are a data scientist who is expert in data analysis and data modeling. You can analyze datasets and generate scientific hypotheses."
         }
         
         data = {
@@ -187,11 +199,11 @@ def main():
     random.seed(41)
     
     print("Loading QR data...")
-    qr_data = load_json_data('/data/fede/SkyRL/datasets/qrdata.json')
+    qr_data = load_json_data('/data/fan/clone/SkyRL/datasets/qrdata.json')
     print(f"Loaded {len(qr_data)} QR examples")
     
     print("Loading DiscoveryBench data...")
-    discovery_data = load_json_data('/data/fede/SkyRL/datasets/discoverybench.json')
+    discovery_data = load_json_data('/data/fan/clone/SkyRL/datasets/discoverybench.json')
     print(f"Loaded {len(discovery_data)} DiscoveryBench examples")
     
     print("Processing QR data...")
@@ -214,7 +226,7 @@ def main():
     random.shuffle(all_val)
     
     print("Creating output directory...")
-    output_dir = '/data/fede/SkyRL/datasets/data_parquet'
+    output_dir = '/data/fan/clone/SkyRL/datasets/data_parquet'
     os.makedirs(output_dir, exist_ok=True)
     
     print("Saving datasets...")
