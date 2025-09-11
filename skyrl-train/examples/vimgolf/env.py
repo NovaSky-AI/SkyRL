@@ -63,6 +63,11 @@ def _calculate_edit_distance_score(input_text: str, output_text: str, buffer_str
     buffer_str = vimgolf.vimgolf.format_(buffer_str)
 
     d_io = levenshtein.distance(input_text, output_text)
+
+    if d_io == 0:
+        # If input and output are the same, score is 1 if buffer matches, 0 otherwise.
+        return 1.0 if buffer_str == output_text else 0.0
+
     d_ib = levenshtein.distance(input_text, buffer_str)
     d_bo = levenshtein.distance(buffer_str, output_text)
     input_score = 1 - (d_io - d_ib) / d_io
@@ -149,6 +154,9 @@ class _VimGolfBaseEnv(BaseTextEnv):
         assert "input_text" in extras["reward_spec"], "input_text is required in reward_spec field"
         assert "output_text" in extras["reward_spec"], "output_text is required in reward_spec field"
         assert "detail" in extras["reward_spec"], "detail is required in reward_spec field"
+
+        assert_docker_privilege()
+
         self.input_text = extras["reward_spec"]["input_text"]
         self.output_text = extras["reward_spec"]["output_text"]
         self.detail = extras["reward_spec"]["detail"]
@@ -385,6 +393,3 @@ Estimated edit distance score (1 for perfect match, 0 for worst match): {edit_di
     def close(self):
         """close the environment"""
         self.vimgolf_gym_env.close()
-
-
-assert_docker_privilege()
