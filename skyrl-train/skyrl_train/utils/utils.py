@@ -6,6 +6,7 @@ import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
+from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
 
 
 class Timer:
@@ -146,8 +147,6 @@ def validate_megatron_cfg(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
-    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
-
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length

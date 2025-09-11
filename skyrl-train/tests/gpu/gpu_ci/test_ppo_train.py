@@ -10,7 +10,7 @@ import ray
 from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_test_actor_config, validate_cfg
-
+from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
 
 @pytest.fixture
 def cfg() -> DictConfig:
