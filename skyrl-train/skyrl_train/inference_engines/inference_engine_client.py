@@ -195,7 +195,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 error_type = result["error"]["type"] if "error" in result else result["type"]
                 return ErrorResponse(
                     error=ErrorInfo(
-                        message=f"In one of the engines that SkyRL manages, an error occurred: {result.error.message}",
+                        message=f"In one of the engines that SkyRL manages, an error occurred: {result['error']['message']}",
                         type=error_code,
                         code=error_type,
                     ),

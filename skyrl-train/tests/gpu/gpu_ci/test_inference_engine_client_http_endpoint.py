@@ -752,7 +752,7 @@ def test_http_endpoint_error_handling():
         # When batched and trajectory_id wrong length -> 400 from server or client-side error
         bad_payload = {"model": MODEL, "prompt": ["hi", "hello", "ok"], "trajectory_id": [0, 1]}
         r = requests.post(f"{base_url}/v1/completions", json=bad_payload)
-        assert r.status_code in (HTTPStatus.BAD_REQUEST, HTTPStatus.INTERNAL_SERVER_ERROR)
+        assert r.status_code == HTTPStatus.BAD_REQUEST
 
     finally:
         ray.shutdown()
