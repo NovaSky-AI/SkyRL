@@ -1,5 +1,7 @@
 import os
 import time
+import sys
+import logging
 import math
 
 import ray
@@ -498,6 +500,42 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
 
     return env_vars
+
+
+def configure_ray_worker_logging() -> None:
+    """
+    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
+    This method forces color and formatting (e.g., bold) and routes stdlib `logging`
+    through Loguru so third‑party logs match formatting
+    """
+    # 1) Loguru formatting (force colors)
+    logger.remove()
+    logger.level("INFO", color="<bold><green>")
+    logger.add(
+        sys.stderr,
+        colorize=True,  # keep ANSI even without a TTY
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>",
+    )
+
+    # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
+    class _InterceptHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+    logging.root.handlers = [_InterceptHandler()]
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.root.setLevel(level)
 
 
 def initialize_ray(cfg: DictConfig):

@@ -57,6 +57,7 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
     DynamicSamplingState,
 )
+from skyrl_train.utils.utils import configure_ray_worker_logging
 
 
 class RayPPOTrainer:
@@ -103,6 +104,7 @@ class RayPPOTrainer:
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
+        configure_ray_worker_logging()
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
