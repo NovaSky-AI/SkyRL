@@ -1,7 +1,8 @@
 import os
 import time
 import sys
-import loggingimport math
+import logging
+import math
 
 import ray
 import torch
@@ -486,9 +487,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     return env_vars
 
 
-def configure_ray_driver_logging() -> None:
+def configure_ray_worker_logging() -> None:
     """
-    In the Ray driver, stderr/stdout are not TTYs, so Loguru disables color.
+    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
     through Loguru so third‑party logs match formatting
     """

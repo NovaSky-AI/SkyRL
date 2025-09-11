@@ -31,6 +31,7 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.utils.utils import configure_ray_worker_logging
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -65,6 +66,7 @@ class DistributedTorchRayActor:
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
+        configure_ray_worker_logging()
 
     def get_node_local_rank(self):
         return self._local_rank
