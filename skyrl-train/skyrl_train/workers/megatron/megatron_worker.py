@@ -9,6 +9,7 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
+from omegaconf import OmegaConf
 
 from mbridge import AutoBridge
 import megatron.core.parallel_state as mpu
@@ -33,10 +34,11 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
 )
 from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
+from skyrl_train.utils.profiler import Profiler
 
 
 class MegatronWorker:
-    def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs):
+    def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs, flash_attn=False):
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         hf_config = AutoConfig.from_pretrained(model_path)
 
@@ -47,6 +49,10 @@ class MegatronWorker:
         }
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
+
+        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
+        transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         bridge = AutoBridge.from_config(hf_config)
         bridge.set_extra_args(**transformer_config_kwargs)
@@ -126,6 +132,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
+        self.profiler: Profiler = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
@@ -167,6 +174,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             model_path,
             self.cfg.trainer.policy.megatron_config.model_config_kwargs,
             self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+            flash_attn=self.cfg.trainer.flash_attn,
         )
 
         # wrap with DDP for training
@@ -190,6 +198,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
+
+        # create profiler
+        if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
+            self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
         optim_config = init_megatron_optim_config(self.cfg.trainer.policy.optimizer_config)
@@ -233,7 +245,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
 
+        if self.profiler is not None:
+            self.profiler.start()
+
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
+            self.optimizer.zero_grad()
             pbar = tqdm(
                 dataloader,
                 desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
@@ -265,6 +281,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 if len(micro_buffer) == micro_batches_per_mini_batch:
                     # run mini-batch forward-backward and then one optimizer step
                     self.model.train()
+                    for chunk in self.actor_module:
+                        # if use distributed optimizer, zero grad buffer will be handled by optimizer
+                        chunk.zero_grad_buffer()
                     seq_len = micro_buffer[0]["sequences"].shape[1]
                     micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
@@ -318,6 +337,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             micro_buffer = []
 
         torch.distributed.barrier()
+        if self.profiler is not None:
+            self.profiler.stop_and_save()
+            self.profiler.stop_trace()
+
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
 
@@ -440,6 +463,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             model_path,
             self.cfg.trainer.ref.megatron_config.model_config_kwargs,
             self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
+            flash_attn=self.cfg.trainer.flash_attn,
         )
 
         self.actor_module = self.make_megatron_module(

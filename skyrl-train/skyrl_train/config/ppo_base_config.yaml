@@ -2,8 +2,9 @@ defaults:
   - _self_
   - deepspeed_config@deepspeed_config.train: train
   - deepspeed_config@deepspeed_config.eval: eval
-  - megatron_config@megatron_config.policy: policy
-  - megatron_config@megatron_config.ref: ref
+  # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
+  - megatron_config@trainer.policy.megatron_config: policy
+  - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
 
 data:
@@ -41,7 +42,6 @@ trainer:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
       reshard_after_forward: true # fsdp2 only, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
-    megatron_config: ${megatron_config.policy}
     sequence_parallel_size: 1
     # uses torch compile with logits calculation
     use_torch_compile: false
@@ -50,7 +50,6 @@ trainer:
   ref:
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
-    megatron_config: ${megatron_config.ref}
     fsdp_config:
       cpu_offload: true
       reshard_after_forward: true
@@ -97,7 +96,7 @@ trainer:
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
-    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", or customizable with PolicyLossRegistry
+    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov", or customizable with PolicyLossRegistry
     loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
     grpo_norm_by_std: true # set to false to disable normalization by std in GRPO
     # GAE parameters
@@ -111,7 +110,7 @@ trainer:
     # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
     tis_imp_ratio_cap: -1.0
     use_tis: false
-
+    
     # value loss parameters
     value_clip: 0.2
     normalize_reward: true
@@ -120,6 +119,15 @@ trainer:
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
       min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
     
+    # clip-cov parameters (only used when policy_loss_type: "clip_cov"
+    clip_cov:
+      clip_ratio: 0.0002 # fraction of tokens to clip based on covariance
+      clip_cov_lb: 1.0 # lower bound for covariance clipping
+      clip_cov_ub: 5.0 # upper bound for covariance clipping
+    
+    kl_cov:
+      kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
+      ppo_kl_coef: 1.0
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

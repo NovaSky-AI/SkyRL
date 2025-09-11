@@ -1,0 +1,10 @@
+# NOTE (sumanthrh): We add .venv/ to gitignore here so that ray doesn't export .venv folder in the working directory
+.venv/
+
+# Exclude common Python artifacts from the Ray working directory
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/

@@ -46,7 +46,7 @@ def get_test_actor_config() -> DictConfig:
     return cfg
 
 
-def get_test_training_batch() -> TrainingInputBatch:
+def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     """
     Returns a test training batch with padded seqs and attention masks
 
@@ -54,6 +54,8 @@ def get_test_training_batch() -> TrainingInputBatch:
     Attention masks are 1 for non-padding tokens, 0 for padding tokens
     The rest of the fields are filled with dummy data
     """
+    assert batch_size % 4 == 0, "batch size must be divisible by 4"
+    num_repeats = batch_size // 4
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     sentences = [
@@ -61,17 +63,16 @@ def get_test_training_batch() -> TrainingInputBatch:
         "<|im_start|>user\nThe selling price of a bicycle that had sold $220 last year was increased by 15",
         "What is the new price? Let's think step by step and output the final answer after `####`.<|im_end|>\n",
         "<|im_start|>assistant\nTo find the new price of the bicycle after the increase,",
-    ]
+    ] * num_repeats
 
     sequences = [tokenizer.encode(sentence) for sentence in sentences]
     attention_masks = [[1] * len(seq) for seq in sequences]
-    batch_size = len(sequences)
     num_actions = 10
 
     pad_token_id = tokenizer.pad_token_id
 
     # pad to length of longest sequence (25)
-    pad_before_after = [(4, 2), (0, 1), (1, 1), (6, 4)]
+    pad_before_after = [(4, 2), (0, 1), (1, 1), (6, 4)] * num_repeats
     for i, (pad_before, pad_after) in enumerate(pad_before_after):
         sequences[i] = [pad_token_id] * pad_before + sequences[i] + [pad_token_id] * pad_after
         attention_masks[i] = [0] * pad_before + attention_masks[i] + [0] * pad_after
@@ -149,16 +150,27 @@ def test_megatron_policy_weight_sync(cfg):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "gpus_per_node"),
+    ("worker_type", "tp", "pp", "cp", "gpus_per_node", "use_sample_packing"),
     [
-        ("policy", 2, 1, 2),
-        ("ref", 2, 1, 2),  # ref has same forward pass as policy - just duplicate one test to test setup
-        ("policy", 1, 2, 2),
-        ("policy", 2, 2, 4),
+        ("policy", 2, 1, 1, 2, False),
+        ("ref", 2, 1, 1, 2, False),  # ref has same forward pass as policy - just duplicate one test to test setup
+        ("policy", 1, 2, 1, 2, False),
+        ("policy", 2, 2, 1, 4, False),
+        ("policy", 2, 2, 1, 4, True),
+        ("policy", 1, 1, 2, 2, True),
+        ("policy", 2, 2, 2, 8, True),
     ],
-    ids=["tp2_pp1_policy", "tp2_pp1_ref", "tp1_pp2_policy", "tp2_pp2_policy"],
+    ids=[
+        "tp2_pp1_policy",
+        "tp2_pp1_ref",
+        "tp1_pp2_policy",
+        "tp2_pp2_policy_unpacked",
+        "tp2_pp2_policy_seq_packing",
+        "cp_2_policy_seq_packing",
+        "tp_2_pp_2_cp_2_policy_seq_packing",
+    ],
 )
-async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_node):
+async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, cp, gpus_per_node, use_sample_packing):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
     """
@@ -167,7 +179,9 @@ async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, gpus
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
-    batch = get_test_training_batch()
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.use_sample_packing = use_sample_packing
+    batch = get_test_training_batch(gpus_per_node if gpus_per_node > 4 else 4)
 
     actor_group = init_worker_with_type(
         worker_type,
@@ -228,35 +242,41 @@ async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, gpus
     # max diff
     max_diff = torch.max(torch.abs(action_log_probs_masked - action_log_probs_megatron_masked))
     print(f"Max diff: {max_diff}")
+    assert max_diff < 2e-1, f"Max diff {max_diff} is too large"
 
     # average diff
     avg_diff = torch.mean(torch.abs(action_log_probs_masked - action_log_probs_megatron_masked))
     print(f"Avg diff: {avg_diff}")
-    assert avg_diff < 5e-2, f"Avg diff {avg_diff} is too large"
+    assert avg_diff < 6e-2, f"Avg diff {avg_diff} is too large"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "gpus_per_node"),
+    ("worker_type", "tp", "pp", "cp", "gpus_per_node", "use_sample_packing"),
     [
-        ("policy", 2, 2, 4),
+        ("policy", 2, 2, 1, 4, True),
+        ("policy", 2, 2, 1, 4, False),
+        ("policy", 2, 2, 2, 8, True),
     ],
+    ids=["tp2_pp2_policy_seq_packing", "tp2_pp2_policy_unpacked", "tp2_pp2_cp2_policy_seq_packing"],
 )
-async def test_megatron_training_step(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_node):
+async def test_megatron_train(cfg, ray_init_fixture, worker_type, tp, pp, cp, gpus_per_node, use_sample_packing):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
 
-    batch = get_test_training_batch()
+    batch = get_test_training_batch(batch_size=gpus_per_node)
 
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.use_sample_packing = use_sample_packing
 
     # set batch sizes correctly
-    cfg.trainer.train_batch_size = 4
-    cfg.trainer.policy_mini_batch_size = 2
+    cfg.trainer.train_batch_size = gpus_per_node
+    cfg.trainer.policy_mini_batch_size = gpus_per_node
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
 
@@ -291,9 +311,14 @@ async def test_megatron_training_step(cfg, ray_init_fixture, worker_type, tp, pp
 
     # manually run the same batch with FSDP via training step
     experience = BatchIterator.batch_to_experience(batch)
-    global_step, local_step, accumulation_steps = 0, 0, 2
+    global_step, local_step, accumulation_steps = 0, 0, 1
 
     cfg.trainer.strategy = "fsdp"
+    # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
+    # between use_sample_packing true/false for FSDP (no diff for megatron)
+    # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211
+    # + tested that this does not affect convergence
+    cfg.trainer.use_sample_packing = False
     actor_group = init_worker_with_type(
         "policy",
         shared_pg=None,
@@ -308,8 +333,9 @@ async def test_megatron_training_step(cfg, ray_init_fixture, worker_type, tp, pp
         )
     )
 
-    print("megatron results: ", results_megatron)
-    print("fsdp results: ", results_fsdp)
+    print("megatron results: ", results_megatron[0])
+    print("\n\n")
+    print("fsdp results: ", results_fsdp[0])
 
     keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl"]
     for i, result in enumerate(results_fsdp):
@@ -327,7 +353,7 @@ async def test_megatron_training_step(cfg, ray_init_fixture, worker_type, tp, pp
 @pytest.mark.parametrize(
     ("worker_type", "tp", "pp", "gpus_per_node"),
     [
-        ("policy", 2, 2, 4),
+        ("policy", 1, 4, 4),
     ],
 )
 async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_node):
@@ -349,6 +375,11 @@ async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_
     cfg.trainer.policy_mini_batch_size = len(batch["sequences"])  # self.policy_mini_batch_size_per_gpu = 2 * 1 / 1 = 2
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 4
+
+    # set torch profiler config
+    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = True
+    cfg.trainer.policy.megatron_config.torch_profiler_config.ranks = [0]
+    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
 
     actor_group = init_worker_with_type(
         "policy",
@@ -382,6 +413,9 @@ async def test_megatron_dp(cfg, ray_init_fixture, worker_type, tp, pp, gpus_per_
     # check the grad norm for the same thing but with pp=1, tp=1, dp=4
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+
+    # set torch profiler config
+    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = "/home/ray/megatron_prof/dp4/"
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = 64

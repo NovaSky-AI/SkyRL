@@ -1,7 +1,8 @@
 import os
 import time
 import sys
-import logging
+import loggingimport math
+
 import ray
 import torch
 from loguru import logger
@@ -114,6 +115,22 @@ def validate_batch_sizes(cfg: DictConfig):
             critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0
         ), f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
 
+    # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
+    lcm_dp_size = policy_dp_size
+
+    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    if use_ref_model:
+        ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
+        ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
+        lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
+
+    assert cfg.trainer.train_batch_size >= lcm_dp_size, (
+        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
+        f"policy_dp_size={policy_dp_size}, "
+        f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
+        f"lcm_dp_size={lcm_dp_size}"
+    )
+
 
 def validate_megatron_cfg(cfg: DictConfig):
     # not yet supported + tested features
@@ -121,14 +138,19 @@ def validate_megatron_cfg(cfg: DictConfig):
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.placement.colocate_all, "only colocate_all=True is supported for megatron training"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
-    assert not cfg.trainer.use_sample_packing, "sample packing is not yet supported for megatron"
+
+    if cfg.trainer.flash_attn:
+        import flash_attn
+
+        version = flash_attn.__version__
+        if version > "2.7.4.post1":
+            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
-        # context, expert, and export tensor parallel are not yet supported for megatron
-        assert (
-            config.megatron_config.context_parallel_size == 1
-        ), f"found {worker_type}.context_parallel_size > 1, context parallel is not yet supported for megatron"
+        # context, expert, and expert tensor parallel are not yet supported for megatron
+        if config.megatron_config.context_parallel_size > 1:
+            assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         assert (
             config.megatron_config.expert_model_parallel_size == 1
         ), f"found {worker_type}.expert_model_parallel_size > 1, expert model parallel is not yet supported for megatron"
@@ -139,13 +161,6 @@ def validate_megatron_cfg(cfg: DictConfig):
         assert (
             config.sequence_parallel_size == 1
         ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
-
-        # check that DP size is 1 - there are some convergence/grad norm issues that need to be resolved for DP > 1
-        num_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-        assert (
-            config.megatron_config.tensor_model_parallel_size * config.megatron_config.pipeline_model_parallel_size
-            == num_gpus
-        ), f"DP size should be 1, but found {worker_type}.megatron_config.tensor_model_parallel_size={config.megatron_config.tensor_model_parallel_size} * {config.megatron_config.pipeline_model_parallel_size}={config.megatron_config.tensor_model_parallel_size * config.megatron_config.pipeline_model_parallel_size} != num_gpus={num_gpus}"
 
 
 def validate_cfg(cfg: DictConfig):
@@ -399,6 +414,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
     if cfg.generator.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
+
+    if cfg.trainer.strategy == "megatron" and cfg.trainer.flash_attn:
+        # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
+        # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
+        env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.

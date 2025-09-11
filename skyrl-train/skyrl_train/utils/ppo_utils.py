@@ -449,6 +449,8 @@ class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
     GSPO = "gspo"
+    CLIP_COV = "clip_cov"
+    KL_COV = "kl_cov"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -613,6 +615,123 @@ def gspo_policy_loss(
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
     return loss, clip_ratio
+
+
+@register_policy_loss(PolicyLossType.CLIP_COV)
+def compute_policy_loss_clip_cov(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """Clip-Cov policy loss function implementation.
+
+    Adapted from https://github.com/PRIME-RL/Entropy-Mechanism-of-RL/blob/main/verl/trainer/ppo/core_algos.py
+
+    This method combines standard PPO clipping with covariance-based clipping
+    to provide more stable training dynamics.
+    """
+    # Extract config parameters with defaults
+    clip_cov_ratio = config.clip_cov.clip_ratio
+    clip_cov_lb = config.clip_cov.clip_cov_lb
+    clip_cov_ub = config.clip_cov.clip_cov_ub
+
+    negative_approx_kl = log_probs - old_log_probs
+    ratio = torch.exp(negative_approx_kl)
+
+    pg_losses1 = -advantages * ratio
+
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - config.eps_clip_low, 1 + config.eps_clip_high)
+    clip_by_origin = (pg_losses2 > pg_losses1) & (loss_mask > 0)
+
+    # Compute covariance for clipping decision
+    cov_all = (advantages - masked_mean(advantages, loss_mask)) * (
+        log_probs - masked_mean(log_probs.detach(), loss_mask)
+    )
+    cov_all[loss_mask == 0] = -torch.inf
+    cov_all[clip_by_origin] = -torch.inf
+
+    # Determine number of tokens to clip based on clip_ratio
+    clip_num = max(int(clip_cov_ratio * loss_mask.sum().item()), 1)
+    top_k_idx = (cov_all < clip_cov_ub) & (cov_all > clip_cov_lb) & (loss_mask > 0)
+    top_k_idx = torch.nonzero(top_k_idx)
+
+    if len(top_k_idx) > 0:
+        perm = torch.randperm(len(top_k_idx))
+        top_k_idx = top_k_idx[perm[: min(clip_num, len(top_k_idx))]]
+    else:
+        top_k_idx = torch.empty((0, 2), device=cov_all.device, dtype=torch.long)
+
+    # Create correction mask
+    corr = torch.ones_like(advantages)
+    if len(top_k_idx) > 0:
+        corr[top_k_idx[:, 0], top_k_idx[:, 1]] = 0
+
+    # Compute clip fraction for monitoring
+    clip_frac = masked_mean((corr == 0).float(), loss_mask)
+
+    # Apply correction mask to losses
+    pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
+    pg_loss = reduce_loss(
+        loss=pg_losses, loss_mask=loss_mask, loss_reduction=config.loss_reduction, max_seq_len=config.max_seq_len
+    )
+
+    return pg_loss, clip_frac.item()
+
+
+@register_policy_loss(PolicyLossType.KL_COV)
+def compute_policy_loss_kl_cov(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """KL-Cov policy loss function implementation.
+
+    Adapted from https://github.com/PRIME-RL/Entropy-Mechanism-of-RL/blob/main/verl/trainer/ppo/core_algos.py
+
+    Uses covariance-based selection to apply KL regularization to a subset of tokens.
+    """
+    kl_cov_frac = config.kl_cov.kl_cov_frac  # This should be a percentage (e.g., 0.2 for 20%)
+    ppo_kl_coef = config.kl_cov.ppo_kl_coef
+
+    negative_approx_kl = log_probs - old_log_probs
+    abs_kl = negative_approx_kl.abs()
+    ratio = torch.exp(negative_approx_kl)
+
+    pg_losses1 = -advantages * ratio
+    pg_losses_kl = -advantages * ratio + ppo_kl_coef * abs_kl
+    pg_losses = pg_losses1.clone()
+
+    all_valid = loss_mask > 0
+    all_valid_idx = torch.nonzero(all_valid.reshape(-1), as_tuple=True)[0]
+    all_valid_adv = advantages[all_valid].detach().reshape(-1).cpu()
+    all_valid_logp = log_probs[all_valid].detach().reshape(-1).cpu()
+
+    if len(all_valid_adv) > 0:
+        cov_lst_all = (all_valid_adv - all_valid_adv.mean()) * (all_valid_logp - all_valid_logp.mean())
+        # Use percentage-based selection like the reference implementation
+        k_percent_nums = max(1, int(len(cov_lst_all) * kl_cov_frac))
+
+        if k_percent_nums > 0:
+            large_cov_idxs = torch.topk(cov_lst_all, min(k_percent_nums, len(cov_lst_all)), largest=True).indices
+
+            if len(large_cov_idxs) > 0:
+                large_cov_idxs = all_valid_idx[large_cov_idxs]
+                pg_losses[large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]] = pg_losses_kl[
+                    large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]
+                ]
+
+    pg_loss = reduce_loss(
+        loss=pg_losses, loss_mask=loss_mask, loss_reduction=config.loss_reduction, max_seq_len=config.max_seq_len
+    )
+
+    # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0
+    return pg_loss, 0.0
 
 
 def reduce_loss(
