@@ -12,6 +12,7 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_infere
 
 import json
 import pytest
+import time
 import asyncio
 from http import HTTPStatus
 from typing import Any, Dict, List, Union
@@ -72,113 +73,6 @@ def get_test_actor_config(num_inference_engines: int) -> DictConfig:
         cfg.generator.run_engines_locally = True
 
         return cfg
-
-
-# ------------------------------------
-# Fixtures for launching engines
-# ------------------------------------
-@pytest.fixture(scope="module")
-def completions_test_env():
-    """
-    Start a local vLLM-backed HTTP server with 2 engines for /completions routing tests.
-    Reused across parametrized cases to save time.
-    """
-    cfg = get_test_actor_config(num_inference_engines=2)
-    cfg.trainer.placement.colocate_all = True
-    cfg.generator.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
-    sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
-    client, _ = init_inference_engines(
-        cfg=cfg,
-        use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-        colocate_all=cfg.trainer.placement.colocate_all,
-        backend="vllm",
-        model=MODEL,
-        num_inference_engines=cfg.generator.num_inference_engines,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
-
-    def run_server():
-        serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
-
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-    base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
-
-    try:
-        yield {
-            "cfg": cfg,
-            "sampling_params": sampling_params,
-            "client": client,
-            "tokenizer": tokenizer,
-            "base_url": base_url,
-        }
-    finally:
-        with contextlib.suppress(Exception):
-            shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
-        if server_thread.is_alive():
-            server_thread.join(timeout=5)
-        ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def openai_test_env():
-    """
-    Start a local vLLM-backed HTTP server with 1 engine for openai api tests.
-    Reused across parametrized cases to save time.
-    """
-    cfg = get_test_actor_config(num_inference_engines=1)
-    cfg.trainer.placement.colocate_all = True
-    cfg.generator.weight_sync_backend = "nccl"
-    cfg.trainer.strategy = "fsdp2"
-    client, pg = init_inference_engines(
-        cfg=cfg,
-        use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-        colocate_all=cfg.trainer.placement.colocate_all,
-        backend="vllm",
-        model=MODEL,
-        num_inference_engines=cfg.generator.num_inference_engines,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
-
-    def run_server():
-        serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
-
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-    base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
-
-    # Weight sync once for the module
-    policy = init_worker_with_type(
-        "policy",
-        shared_pg=pg,
-        colocate_all=cfg.trainer.placement.colocate_all,
-        num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
-        cfg=cfg,
-    )
-    ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-    asyncio.run(client.reset_prefix_cache())
-    ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-
-    try:
-        yield {
-            "cfg": cfg,
-            "client": client,
-            "tokenizer": tokenizer,
-            "base_url": base_url,
-        }
-    finally:
-        with contextlib.suppress(Exception):
-            shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
-        if server_thread.is_alive():
-            server_thread.join(timeout=5)
-        ray.shutdown()
 
 
 # --------------------------------------
@@ -250,7 +144,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
         data = output.model_dump() if test_type == "litellm" else output
         # CompletionResponse uses 'text' field
         preview = data.get("text") or str(data)[0:100]
-        print(f"Prompt {i}: {prompts[i][:100]}...")
+        print(f"Prompt {i}: {prompts[i][:300]}...")
         print(f"Output {i}: {preview[:100]}...")
 
     # Formatting checks
@@ -285,16 +179,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 
 
 @pytest.mark.vllm
-@pytest.mark.parametrize(
-    "batched,with_traj",
-    [
-        (False, False),
-        (False, True),
-        (True, False),
-        (True, True),
-    ],
-)
-def test_http_endpoint_completions_routing_and_batching(batched, with_traj, completions_test_env):
+def test_http_endpoint_completions_routing_and_batching():
     """
     Since /completions endpoint supports both single and batched requests, and we support
     either using trajectory_id or not, we test all combinations.
@@ -305,11 +190,39 @@ def test_http_endpoint_completions_routing_and_batching(batched, with_traj, comp
     the same order as the input prompt (i.e. order presreved), but not sure how to test this. We
     verified gsm8k curve with both batched and unbatched, which should be enough.
     """
+    batched_list = [False, True]
+    with_traj_list = [False, True]
+
     try:
-        _ = completions_test_env["cfg"]
-        sampling_params = completions_test_env["sampling_params"]
-        tokenizer = completions_test_env["tokenizer"]
-        base_url = completions_test_env["base_url"]
+        # 1. Build engine
+        cfg = get_test_actor_config(num_inference_engines=2)
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        # Ensure a clean Ray state before initializing engines in this fixture.
+        if ray.is_initialized():
+            ray.shutdown()
+            time.sleep(5)
+        sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
+        client, _ = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL,
+            num_inference_engines=cfg.generator.num_inference_engines,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
 
         # 2. Build prompts
         num_samples = 20
@@ -319,33 +232,34 @@ def test_http_endpoint_completions_routing_and_batching(batched, with_traj, comp
             for conv in test_prompts_conv_list
         ]
 
-        if not batched:
-            outputs = []
-            for i, p in enumerate(text_prompts):
-                payload = {"model": MODEL, "prompt": p, **sampling_params}
-                if with_traj:
-                    payload["trajectory_id"] = i
-                outputs.append(requests.post(f"{base_url}/completions", json=payload).json())
-        else:
-            payload = {"model": MODEL, "prompt": text_prompts, **sampling_params}
-            if with_traj:
-                payload["trajectory_id"] = list(range(len(text_prompts)))
-            outputs = [requests.post(f"{base_url}/completions", json=payload).json()]
+        for batched in batched_list:
+            for with_traj in with_traj_list:
+                if not batched:
+                    outputs = []
+                    for i, p in enumerate(text_prompts):
+                        payload = {"model": MODEL, "prompt": p, **sampling_params}
+                        if with_traj:
+                            payload["trajectory_id"] = i
+                        outputs.append(requests.post(f"{base_url}/completions", json=payload).json())
+                else:
+                    payload = {"model": MODEL, "prompt": text_prompts, **sampling_params}
+                    if with_traj:
+                        payload["trajectory_id"] = list(range(len(text_prompts)))
+                    outputs = [requests.post(f"{base_url}/completions", json=payload).json()]
 
-        _check_completions_outputs(text_prompts, outputs, "request_posting", "vllm")
-
-        # cleanup handled by fixture
+                _check_completions_outputs(text_prompts, outputs, "request_posting", "vllm")
     finally:
-        pass
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)
+        ray.shutdown()
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
 @pytest.mark.vllm
-@pytest.mark.parametrize("test_type", ["request_posting", "aiohttp_client_session", "litellm"])
-@pytest.mark.parametrize("endpoint", ["chat_completions", "completions"])
-def test_http_endpoint_openai_api_with_weight_sync(test_type, endpoint, openai_test_env):
+def test_http_endpoint_openai_api_with_weight_sync():
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
 
@@ -354,13 +268,51 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type, endpoint, openai_t
 
     Besides we only tests single engine case.
     """
+    test_types = ["request_posting", "aiohttp_client_session", "litellm"]
+    endpoints = ["chat_completions", "completions"]
     try:
-        cfg = openai_test_env["cfg"]
-        tokenizer = openai_test_env["tokenizer"]
-        base_url = openai_test_env["base_url"]
+        # 1. Set up engine
+        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        # Ensure a clean Ray state before initializing engines in this fixture.
+        if ray.is_initialized():
+            ray.shutdown()
+            time.sleep(5)
+        client, pg = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL,
+            num_inference_engines=cfg.generator.num_inference_engines,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
-        # Weight sync handled in fixture setup
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
 
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+
+        # Weight sync
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            cfg=cfg,
+        )
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        asyncio.run(client.reset_prefix_cache())
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        # 2. Do tests
         num_samples = 20
         test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL, num_samples=num_samples)
         # For /completions, we test both string and token IDs input
@@ -464,15 +416,20 @@ def test_http_endpoint_openai_api_with_weight_sync(test_type, endpoint, openai_t
 
             return outputs
 
-        print(f"Testing {test_type} with {endpoint}")
-        outputs = _generate_outputs(test_type, endpoint)
-        if endpoint == "chat_completions":
-            _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
-        else:
-            _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
+        for test_type in test_types:
+            for endpoint in endpoints:
+                print(f"Testing {test_type} with {endpoint}")
+                outputs = _generate_outputs(test_type, endpoint)
+                if endpoint == "chat_completions":
+                    _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
+                else:
+                    _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
 
     finally:
-        pass
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)
+        ray.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -507,6 +464,9 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1)
         cfg.generator.backend = backend
+        if ray.is_initialized():
+            ray.shutdown()
+            time.sleep(5)
         initialize_ray(cfg)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -594,6 +554,10 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
 @pytest.mark.vllm
 def test_structured_generation():
     try:
+        # Ensure no leftover Ray context from earlier fixtures or tests.
+        if ray.is_initialized():
+            ray.shutdown()
+            time.sleep(5)
         cfg = get_test_actor_config(num_inference_engines=1)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
@@ -664,6 +628,10 @@ def test_http_endpoint_error_handling():
     Test error handling for various invalid requests.
     """
     try:
+        # Ensure no leftover Ray context from earlier fixtures or tests.
+        if ray.is_initialized():
+            ray.shutdown()
+            time.sleep(5)
         cfg = get_test_actor_config(num_inference_engines=2)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
