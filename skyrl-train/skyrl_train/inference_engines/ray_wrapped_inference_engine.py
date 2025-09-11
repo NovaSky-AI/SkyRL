@@ -44,6 +44,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
+    async def update_named_weights_gpu(self, names: list[str], dtypes: list[str], tensors: list[Any]):
+        return await self.inference_engine_actor.update_named_weights_gpu.remote(names, dtypes, tensors)
+
     async def teardown(self):
         return await self.inference_engine_actor.teardown.remote()
 
@@ -127,6 +130,7 @@ def create_ray_wrapped_inference_engines(
             engine = actor_class.options(
                 num_cpus=num_gpus,
                 num_gpus=num_gpus,
+                enable_tensor_transport=True,
                 scheduling_strategy=scheduling_strategy,
             ).remote(
                 model=pretrain,
@@ -171,6 +175,7 @@ def create_ray_wrapped_inference_engines(
                 engine = actor_class.options(
                     num_cpus=num_gpus,
                     num_gpus=num_gpus,
+                    enable_tensor_transport=True,
                     scheduling_strategy=scheduling_strategy,
                 ).remote(
                     model_path=pretrain,

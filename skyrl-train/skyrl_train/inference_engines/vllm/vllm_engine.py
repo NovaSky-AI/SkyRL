@@ -365,6 +365,18 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
 
+    async def update_named_weights_gpu(self, names: List[str], dtypes: List[str], tensors: List[torch.Tensor]):
+        """Update named weights using GPU tensors sent via Ray tensor transport."""
+        engine = self._get_engine()
+        def _load():
+            weight_list = []
+            for name, dtype_str, tensor in zip(names, dtypes, tensors):
+                dtype = str_to_torch_dtype(dtype_str)
+                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                weight_list.append((name, tensor))
+            engine.model_runner.model.load_weights(weights=weight_list)
+        return await asyncio.to_thread(_load)
+
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
@@ -505,6 +517,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             return await result
         return result
 
+    async def update_named_weights_gpu(self, names: List[str], dtypes: List[str], tensors: List[torch.Tensor]):
+        engine = self._get_engine()
+        def _load():
+            weight_list = []
+            for name, dtype_str, tensor in zip(names, dtypes, tensors):
+                dtype = str_to_torch_dtype(dtype_str)
+                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                weight_list.append((name, tensor))
+            engine.model_runner.model.load_weights(weights=weight_list)
+        result = _load()
+        return result
+
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint.
 
@@ -564,5 +588,5 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             ).model_dump()
 
 
-VLLMRayActor = ray.remote(VLLMInferenceEngine)
-AsyncVLLMRayActor = ray.remote(AsyncVLLMInferenceEngine)
+VLLMRayActor = ray.remote(enable_tensor_transport=True)(VLLMInferenceEngine)
+AsyncVLLMRayActor = ray.remote(enable_tensor_transport=True)(AsyncVLLMInferenceEngine)

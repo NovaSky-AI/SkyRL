@@ -107,7 +107,10 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             )
         params = self.model.model.state_dict()
 
-        if not self.use_cuda_ipc:
+        weight_transport_backend = getattr(self.cfg.generator, "weight_transport", None)
+        use_ray_gpu_objects = weight_transport_backend == "gpu_object_store"
+
+        if not self.use_cuda_ipc and not use_ray_gpu_objects:
             for name, param in params.items():
                 if torch.distributed.get_rank() == 0:
                     shape = param.shape
@@ -137,7 +140,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                     await update_weight_task
                 torch.distributed.barrier()
         # CUDA IPC
-        else:
+        elif self.use_cuda_ipc:
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
             current_size = 0
 
@@ -204,6 +207,46 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                 weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
             torch.distributed.barrier()
             torch.cuda.synchronize()
+
+        # Ray GPU object store backend
+        else:
+            # Send weights in module-sized batches similar to IPC branch
+            names_batch: List[str] = []
+            dtypes_batch: List[str] = []
+            tensors_batch: List[torch.Tensor] = []
+
+            module_to_params: Dict[str, List[str]] = {}
+            for param_name, param in params.items():
+                module_name = ".".join(param_name.split(".")[:-2])
+                if module_name not in module_to_params:
+                    module_to_params[module_name] = [param_name]
+                else:
+                    module_to_params[module_name].append(param_name)
+
+            for module_name, param_names in module_to_params.items():
+                for i, name in enumerate(param_names):
+                    param = params[name]
+                    module_done = i == len(param_names) - 1
+
+                    device = torch.cuda.current_device()
+                    param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                    weight_tensor = param.detach().contiguous().to(device, non_blocking=True)
+
+                    if torch.distributed.get_rank() == 0:
+                        names_batch.append(name)
+                        dtypes_batch.append(self.cfg.generator.model_dtype)
+                        tensors_batch.append(weight_tensor)
+
+                    if module_done:
+                        if torch.distributed.get_rank() == 0:
+                            await inference_engine_client.update_named_weights_gpu(
+                                names_batch, dtypes_batch, tensors_batch
+                            )
+                            names_batch.clear()
+                            dtypes_batch.clear()
+                            tensors_batch.clear()
+                    torch.distributed.barrier()
+                    torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -414,8 +457,8 @@ class FSDPRefRayActorBase(RefWorkerBase):
         return output
 
 
-# Ray remote actors
-PolicyWorker = ray.remote(num_gpus=1)(FSDPPolicyRayActorBase)
-CriticWorker = ray.remote(num_gpus=1)(FSDPCriticRayActorBase)
-RewardWorker = ray.remote(num_gpus=1)(FSDPRewardRayActorBase)
-RefWorker = ray.remote(num_gpus=1)(FSDPRefRayActorBase)
+# Ray remote actors (enable tensor transport for GPU object store backend)
+PolicyWorker = ray.remote(num_gpus=1, enable_tensor_transport=True)(FSDPPolicyRayActorBase)
+CriticWorker = ray.remote(num_gpus=1, enable_tensor_transport=True)(FSDPCriticRayActorBase)
+RewardWorker = ray.remote(num_gpus=1, enable_tensor_transport=True)(FSDPRewardRayActorBase)
+RefWorker = ray.remote(num_gpus=1, enable_tensor_transport=True)(FSDPRefRayActorBase)

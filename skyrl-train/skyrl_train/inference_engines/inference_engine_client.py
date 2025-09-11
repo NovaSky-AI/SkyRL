@@ -165,6 +165,9 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
+    async def update_named_weights_gpu(self, names: list[str], dtypes: list[str], tensors: list[Any]):
+        return await self._run_on_all_engines("update_named_weights_gpu", names, dtypes, tensors)
+
     async def reset_prefix_cache(self):
         return await self._run_on_all_engines("reset_prefix_cache")
 

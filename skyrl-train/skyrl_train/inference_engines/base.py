@@ -70,6 +70,17 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    async def update_named_weights_gpu(self, names: List[str], dtypes: List[str], tensors: List[Any]):
+        """Update named weights by receiving live GPU tensors via Ray tensor transport.
+
+        Args:
+            names: Parameter names
+            dtypes: Torch dtype strings corresponding to the tensors
+            tensors: CUDA tensors transferred via Ray GPU object store
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
     async def teardown(self):
         raise NotImplementedError()
 
