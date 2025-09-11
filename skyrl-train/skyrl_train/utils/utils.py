@@ -165,26 +165,11 @@ def validate_megatron_cfg(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
+
+    # Validate generation config separately
+    validate_generator_cfg(cfg)
+
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
-
-    if cfg.generator.max_turns == 1:
-        assert (
-            cfg.generator.max_input_length == cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
-    else:
-        assert (
-            cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
-
-    if not cfg.generator.run_engines_locally:
-        assert cfg.generator.num_inference_engines == len(
-            cfg.generator.remote_inference_engine_urls
-        ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
-
-    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
-        assert (
-            cfg.generator.batched
-        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -215,23 +200,10 @@ def validate_cfg(cfg: DictConfig):
 
     validate_batch_sizes(cfg)
 
-    # tracker
-    if cfg.trainer.logger == "wandb":
-        assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
-
     if cfg.trainer.max_ckpts_to_keep == 0:
         raise ValueError(
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
-
-    # resolve override_existing_update_group
-    if cfg.generator.override_existing_update_group == "auto":
-        if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
-            # remote engines can be launched separately so we `enable` by default
-            cfg.generator.override_existing_update_group = "enable"
-        else:
-            # for local engines or sglang, we disable
-            cfg.generator.override_existing_update_group = "disable"
 
     assert (
         cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
@@ -265,13 +237,6 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    # TODO: fix once we support these features with SGLang
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
-            "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
-            "Please set `inference_engine_tensor_parallel_size` to 1."
-        )
-
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
         and cfg.trainer.critic.optimizer_config.offload_after_step
@@ -279,9 +244,6 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
         )
-
-    if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
-        raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
@@ -303,9 +265,61 @@ def validate_cfg(cfg: DictConfig):
                 "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
             )
 
+
+def validate_generator_cfg(cfg: DictConfig):
+    """Validates the correctness of generator-related config.
+
+    Args:
+        cfg (DictConfig): config to validate
+
+    Raises:
+        NotImplementedError: if feature is not supported, such as sglang for multiturn generation
+        ValueError: when cfg.generator.sampling_params.logprobs > 0
+    """
+
+    if cfg.generator.max_turns == 1:
+        assert (
+            cfg.generator.max_input_length == cfg.trainer.max_prompt_length
+        ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
+    else:
+        assert (
+            cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
+        ), "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
+
+    if not cfg.generator.run_engines_locally:
+        assert cfg.generator.num_inference_engines == len(
+            cfg.generator.remote_inference_engine_urls
+        ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
+
+    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
+        assert (
+            cfg.generator.batched
+        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
+
+    # TODO(tgriggs): use a more modular config validation
+    if cfg.trainer.logger == "wandb":
+        assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
+
+    if cfg.generator.override_existing_update_group == "auto":
+        if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
+            # remote engines can be launched separately so we `enable` by default
+            cfg.generator.override_existing_update_group = "enable"
+        else:
+            # for local engines or sglang, we disable
+            cfg.generator.override_existing_update_group = "disable"
+
+    # TODO: fix once we support these features with SGLang
+    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
+        assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
+            "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
+            "Please set `inference_engine_tensor_parallel_size` to 1."
+        )
+
+    if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
+        raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
+
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
-
         if cfg.generator.sampling_params.logprobs > 0:
             raise ValueError(
                 f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
@@ -314,7 +328,6 @@ def validate_cfg(cfg: DictConfig):
             raise NotImplementedError(
                 "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
             )
-
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
