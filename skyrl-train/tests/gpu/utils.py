@@ -375,10 +375,25 @@ def init_inference_engines(
         pg, sleep = None, False
 
     tokenizer = AutoTokenizer.from_pretrained(model)
+    # Choose dtype based on GPU compute capability: bfloat16 requires CC >= 8.0
+    def _select_model_dtype():
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available() and _torch.cuda.device_count() > 0:
+                min_major = min(_torch.cuda.get_device_properties(i).major for i in range(_torch.cuda.device_count()))
+                return "bfloat16" if min_major >= 8 else "float16"
+        except Exception:
+            pass
+        return "float16"
+
+    selected_dtype = _select_model_dtype()
+    # Ensure generator config matches engine dtype to avoid weight-cast mismatches
+    cfg.generator.model_dtype = selected_dtype
+
     eps = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
-        model_dtype="bfloat16",
+        model_dtype=selected_dtype,
         pretrain=model,
         seed=42,
         vllm_v1_disable_multiproc=True,

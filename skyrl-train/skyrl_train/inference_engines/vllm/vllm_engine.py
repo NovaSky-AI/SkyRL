@@ -6,6 +6,7 @@ import ray
 import torch
 import asyncio
 import vllm
+import inspect
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -22,6 +23,31 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.utils import str_to_torch_dtype
+
+
+def _extract_vllm_model_config(engine):
+    """Compatibility helper to fetch model_config across vLLM versions.
+
+    vLLM < 0.9 typically exposes `model_config` directly on async engines.
+    Newer versions expose `get_model_config()` or nest it under `llm_engine`.
+    """
+    # Prefer direct attribute if available (older API)
+    if hasattr(engine, "model_config"):
+        return engine.model_config
+
+    # Some variants: nested under underlying engine
+    if hasattr(engine, "llm_engine") and hasattr(engine.llm_engine, "model_config"):
+        return engine.llm_engine.model_config
+
+    # Newer API: method accessor (may be async). If it's async, do NOT await here,
+    # since we may be inside a running event loop (Ray worker). Let caller handle None.
+    if hasattr(engine, "get_model_config") and callable(getattr(engine, "get_model_config")):
+        result = engine.get_model_config()
+        if inspect.iscoroutine(result):
+            return None
+        return result
+
+    raise AttributeError("Unable to locate vLLM model_config on engine")
 
 
 @dataclass
@@ -51,6 +77,33 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         print(f"creating LLM with bundle_indices={bundle_indices}")
+
+    # Detect the minimum compute capability across visible GPUs.
+    min_major = None
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        min_major = min(torch.cuda.get_device_properties(i).major for i in range(torch.cuda.device_count()))
+
+    # Disable vLLM v1 path on GPUs with compute capability < 8.0 to avoid
+    # NotImplementedError raised by vLLM when VLLM_USE_V1=1 on older GPUs.
+    # This must be set before engine creation.
+    if os.environ.get("VLLM_USE_V1", "1") == "1" and min_major is not None and min_major < 8:
+        os.environ["VLLM_USE_V1"] = "0"
+        print("Detected compute capability < 8.0; forcing VLLM_USE_V1=0")
+
+    # Force a supported dtype on pre-Ampere GPUs. bfloat16 requires CC >= 8.0.
+    # If user explicitly set a supported dtype, respect it; otherwise coerce to float16.
+    if min_major is not None and min_major < 8:
+        current_dtype = kwargs.get("dtype")
+
+        def _is_bfloat16(value):
+            try:
+                return value in ("bfloat16", "bf16") or value == torch.bfloat16
+            except Exception:
+                return value in ("bfloat16", "bf16")
+
+        if current_dtype is None or current_dtype == "auto" or _is_bfloat16(current_dtype):
+            kwargs["dtype"] = "float16"
+            print("Detected compute capability < 8.0; forcing dtype=float16")
 
 
 class WorkerWrap:
@@ -322,7 +375,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
-        model_config = engine.model_config
+        model_config = _extract_vllm_model_config(engine)
+        if model_config is None:
+            # Defer OpenAI serving setup if model_config requires awaiting in this vLLM version
+            # (we cannot await inside Ray's running event loop here). Chat endpoint will be disabled.
+            return engine
         model_path = kwargs.get("model")
         # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
         model_name = model_path
@@ -382,10 +439,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
     ):
         engine = self._get_engine()
-        return await engine.collective_rpc(
+        result = engine.collective_rpc(
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:
@@ -400,7 +460,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         is_ipc = request.get("extras") and "ipc_handles" in request["extras"][0]
 
         if is_ipc:
-            return await engine.collective_rpc(
+            result = engine.collective_rpc(
                 "update_weights_cuda_ipc",
                 args=(
                     request["names"],
@@ -409,11 +469,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     [extra["ipc_handles"] for extra in request["extras"]],
                 ),
             )
+            if inspect.isawaitable(result):
+                return await result
+            return result
         else:
             assert (
                 len(request["names"]) == 1
             ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await engine.collective_rpc(
+            result = engine.collective_rpc(
                 "update_weights",
                 args=(
                     request["names"],
@@ -421,17 +484,26 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request["shapes"],
                 ),
             )
+            if inspect.isawaitable(result):
+                return await result
+            return result
 
     async def teardown(self):
         await self._destroy_weights_update_group()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()
-        await engine.reset_prefix_cache()
+        result = engine.reset_prefix_cache()
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     async def _destroy_weights_update_group(self):
         engine = self._get_engine()
-        return await engine.collective_rpc("destroy_weights_update_group")
+        result = engine.collective_rpc("destroy_weights_update_group")
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint.
@@ -441,6 +513,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         Returns a plain dict that is JSON-serializable, either a ChatCompletionResponse or
         an ErrorResponse, both defined in vllm.entrypoints.openai.protocol.
         """
+        if not hasattr(self, "openai_serving_chat"):
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message="chat_completion unavailable: model_config requires async resolution in this vLLM version",
+                    type=HTTPStatus.SERVICE_UNAVAILABLE.phrase,
+                    code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                ),
+            ).model_dump()
+
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 

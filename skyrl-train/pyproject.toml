@@ -28,7 +28,7 @@ dependencies = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.48.0",
+    "ray @ file:///workspace/ray/python",
     "peft",
     "debugpy==1.8.0",
     "hf_transfer",

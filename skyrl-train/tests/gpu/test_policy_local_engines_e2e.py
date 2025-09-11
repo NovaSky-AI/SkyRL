@@ -76,6 +76,7 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
+    print(f"Ray version: {ray.__version__}, path: {ray.__file__}")
     try:
         cfg = get_test_actor_config()
         cfg.trainer.placement.colocate_all = colocate_all
