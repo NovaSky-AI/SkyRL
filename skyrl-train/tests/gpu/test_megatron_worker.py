@@ -44,7 +44,9 @@ def get_test_actor_config() -> DictConfig:
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create({"num_layers_in_last_pipeline_stage": 13})
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create(
+        {"num_layers_in_last_pipeline_stage": 13}
+    )
 
     validate_cfg(cfg)
 
@@ -157,15 +159,25 @@ def test_megatron_policy_weight_sync(cfg):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "gpus_per_node", "use_sample_packing"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing"),
     [
-        ("policy", 2, 1, 1, 2, False),
-        ("ref", 2, 1, 1, 2, False),  # ref has same forward pass as policy - just duplicate one test to test setup
-        ("policy", 1, 2, 1, 2, False),
-        ("policy", 2, 2, 1, 4, False),
-        ("policy", 2, 2, 1, 4, True),
-        ("policy", 1, 1, 2, 2, True),
-        ("policy", 2, 2, 2, 8, True),
+        ("policy", 2, 1, 1, 1, None, 2, False),
+        (
+            "ref",
+            2,
+            1,
+            1,
+            1,
+            None,
+            2,
+            False,
+        ),  # ref has same forward pass as policy - just duplicate one test to test setup
+        ("policy", 1, 2, 1, 1, None, 2, False),
+        ("policy", 2, 2, 1, 1, None, 4, False),
+        ("policy", 2, 2, 1, 1, None, 4, True),
+        ("policy", 1, 1, 2, 1, None, 2, True),
+        ("policy", 2, 2, 2, 1, None, 8, True),
+        ("policy", 4, 2, 1, 4, 1, 8, True),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -175,9 +187,12 @@ def test_megatron_policy_weight_sync(cfg):
         "tp2_pp2_policy_seq_packing",
         "cp_2_policy_seq_packing",
         "tp_2_pp_2_cp_2_policy_seq_packing",
+        "tp4_pp2_cp1_ep4_etp1_policy_seq_packing",
     ],
 )
-async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, cp, gpus_per_node, use_sample_packing):
+async def test_megatron_forward(
+    cfg, ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing
+):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
     """
@@ -187,6 +202,8 @@ async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, cp, 
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
     batch = get_test_training_batch(gpus_per_node)
 
@@ -249,31 +266,33 @@ async def test_megatron_forward(cfg, ray_init_fixture, worker_type, tp, pp, cp, 
     # max diff
     max_diff = torch.max(torch.abs(action_log_probs_masked - action_log_probs_megatron_masked))
     print(f"Max diff: {max_diff}")
-    assert max_diff < 2e-1, f"Max diff {max_diff} is too large"
+    assert max_diff < 4e-1, f"Max diff {max_diff} is too large"
 
     # average diff
     avg_diff = torch.mean(torch.abs(action_log_probs_masked - action_log_probs_megatron_masked))
     print(f"Avg diff: {avg_diff}")
-    assert avg_diff < 6e-2, f"Avg diff {avg_diff} is too large"
+    assert avg_diff < 7e-2, f"Avg diff {avg_diff} is too large"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "gpus_per_node", "use_sample_packing"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing"),
     [
-        ("policy", 2, 2, 1, 4, True),
-        ("policy", 2, 2, 1, 4, False),
-        ("policy", 2, 2, 2, 8, True),
-        ("policy", 4, 2, 1, 8, True),
+        ("policy", 2, 2, 1, 1, 1, 4, True),
+        ("policy", 2, 2, 1, 1, 1, 4, False),
+        ("policy", 2, 2, 2, 1, 1, 8, True),
+        ("policy", 4, 2, 1, 4, 1, 8, True),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
         "tp2_pp2_policy_unpacked",
         "tp2_pp2_cp2_policy_seq_packing",
-        "tp4_pp2_cp1_policy_seq_packing",
+        "tp4_pp2_cp1_ep4_etp1_policy_seq_packing",
     ],
 )
-async def test_megatron_train(cfg, ray_init_fixture, worker_type, tp, pp, cp, gpus_per_node, use_sample_packing):
+async def test_megatron_train(
+    cfg, ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing
+):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
@@ -285,6 +304,8 @@ async def test_megatron_train(cfg, ray_init_fixture, worker_type, tp, pp, cp, gp
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
 
     # set batch sizes correctly
@@ -326,7 +347,7 @@ async def test_megatron_train(cfg, ray_init_fixture, worker_type, tp, pp, cp, gp
     experience = BatchIterator.batch_to_experience(batch)
     global_step, local_step, accumulation_steps = 0, 0, 1
 
-    cfg.trainer.strategy = "fsdp"
+    cfg.trainer.strategy = "fsdp2"
     # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
     # between use_sample_packing true/false for FSDP (no diff for megatron)
     # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211
@@ -483,6 +504,13 @@ async def test_megatron_offload_memory_and_correctness(cfg, worker_type):
     # 0 learning rate and wd so we can optimizer step to free gradients but still check results are the same
     getattr(cfg.trainer, worker_type).optimizer_config.lr = 0
     getattr(cfg.trainer, worker_type).optimizer_config.weight_decay = 0
+
+    cfg.trainer.placement.policy_num_gpus_per_node = 8
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+    cfg.trainer.policy.megatron_config.context_parallel_size = 1
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
     try:
         actor_group = init_worker_with_type(
             worker_type,

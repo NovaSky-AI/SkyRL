@@ -133,12 +133,6 @@ def validate_megatron_cfg(cfg: DictConfig):
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
-        assert (
-            config.megatron_config.expert_model_parallel_size == 1
-        ), f"found {worker_type}.expert_model_parallel_size > 1, expert model parallel is not yet supported for megatron"
-        assert (
-            config.megatron_config.expert_tensor_parallel_size == 1
-        ), f"found {worker_type}.expert_tensor_parallel_size > 1, expert tensor parallel is not yet supported for megatron"
         # check that sequence parallel is not configured outside of megatron
         assert (
             config.sequence_parallel_size == 1
@@ -401,6 +395,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
         # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
         env_vars["NVTE_FUSED_ATTN"] = "0"
+        env_vars["NVTE_DEBUG"] = "1"
+        env_vars["NVTE_DEBUG_LEVEL"] = "2"
 
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.

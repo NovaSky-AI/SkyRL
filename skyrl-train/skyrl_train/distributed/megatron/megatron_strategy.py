@@ -58,6 +58,8 @@ class MegatronStrategy(DistributedStrategy):
             tensor_model_parallel_size=self.megatron_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.megatron_config.pipeline_model_parallel_size,
             pipeline_model_parallel_split_rank=None,
+            expert_model_parallel_size=self.megatron_config.expert_model_parallel_size,
+            expert_tensor_parallel_size=self.megatron_config.expert_tensor_parallel_size,
             use_sharp=False,
             context_parallel_size=self.megatron_config.context_parallel_size,
             nccl_communicator_config_path=None,
