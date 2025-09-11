@@ -20,7 +20,7 @@ INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 MEGATRON_TP=4
 MEGATRON_PP=2
 MEGATRON_CP=1
-MEGATRON_EP=4
+MEGATRON_EP=2
 MEGATRON_ETP=1
 
 NUM_INFERENCE_ENGINES=1
@@ -79,7 +79,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   generator.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_${MODEL_NAME}" \
+  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_moonlight16b-a3b" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@
