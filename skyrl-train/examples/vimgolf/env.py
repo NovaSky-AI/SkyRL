@@ -92,8 +92,8 @@ def _verify_solution_and_get_feedback(solution: str, input_text: str, output_tex
     score = 0.0
 
     with tempfile.TemporaryDirectory() as tempdir:
-        input_file = tempdir + "/input.txt"
-        output_file = tempdir + "/output.txt"
+        input_file = os.path.join(tempdir, "input.txt")
+        output_file = os.path.join(tempdir, "output.txt")
         with open(input_file, "w") as f:
             f.write(input_text)
         with open(output_file, "w") as f:
