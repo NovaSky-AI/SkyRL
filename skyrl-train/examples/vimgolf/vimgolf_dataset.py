@@ -38,7 +38,7 @@ def create_dataset(data: list[dict], split_name: str):
         output_text = it["output"]
         challenge_id = it["id"]
         detail = it["metadata"]["detail"]
-        data = {
+        example_data = {
             "data_source": "vimgolf_public_challenges",
             "prompt": [],
             "env_class": "vimgolf-single-turn",
@@ -53,7 +53,7 @@ def create_dataset(data: list[dict], split_name: str):
                 "split": split_name,
             },
         }
-        examples.append(data)
+        examples.append(example_data)
 
     return Dataset.from_list(examples)
 
