@@ -239,6 +239,19 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
+    # Validate inference engine parallelism.
+    ep_size = cfg.generator.inference_engine_expert_parallel_size
+    dp_size = cfg.generator.inference_engine_data_parallel_size
+    tp_size = cfg.generator.inference_engine_tensor_parallel_size
+    assert (
+        dp_size == 1
+    ), "Inference data parallelism is not yet supported, but is in active development and testing: https://github.com/NovaSky-AI/SkyRL/issues/202"
+    if ep_size > 1:
+        assert dp_size * tp_size == ep_size, (
+            f"If expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
+            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
+        )
+
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
         and cfg.trainer.critic.optimizer_config.offload_after_step

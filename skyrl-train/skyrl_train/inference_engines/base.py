@@ -76,3 +76,13 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def reset_prefix_cache(self):
         raise NotImplementedError()
+
+    @abstractmethod
+    def tp_size(self) -> int:
+        """Return the tensor parallel size of this inference engine."""
+        raise NotImplementedError()
+
+    @abstractmethod
+    def dp_size(self) -> int:
+        """Return the data parallel size of this inference engine."""
+        raise NotImplementedError()

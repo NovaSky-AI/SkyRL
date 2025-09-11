@@ -195,8 +195,11 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         print(f"Created SGLang engine with kwargs: {kwargs}")
 
     def tp_size(self):
-        """Return the tensor parallel size."""
         return self._tp_size
+
+    def dp_size(self):
+        # TODO(tgriggs): EP/DP not yet supported for SGLang
+        return 1
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
         """Preprocess prompts for SGLang generation."""

@@ -163,13 +163,16 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._dp_size = kwargs.get("data_parallel_size", 1)
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
 
     def tp_size(self):
-        """Return the tensor parallel size."""
         return self._tp_size
+
+    def dp_size(self):
+        return self._dp_size
 
     def _create_engine(self, *args, **kwargs):
         """Abstract method for subclasses to implement engine creation."""
