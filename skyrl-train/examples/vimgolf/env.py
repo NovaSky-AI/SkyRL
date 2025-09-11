@@ -204,9 +204,9 @@ The output file wrapped in triple backticks:
 {self.output_text}
 ```
 
-Your keystokes must be less than the length of output file. Do not naively copy and paste the output file. You must use Vim commands to transform the input file into the output file.
+Your keystrokes must be less than the length of output file. Do not naively copy and paste the output file. You must use Vim commands to transform the input file into the output file.
 
-Here are some example solutions, for format demostration (all solutions shall be in one line):
+Here are some example solutions, for format demonstration (all solutions shall be in one line):
 
 iHello World<Esc>:wq<NL>
 
