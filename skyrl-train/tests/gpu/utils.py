@@ -361,14 +361,25 @@ async def run_inference(client, prompts, sampling_params):
     return await client.generate(engine_input)
 
 
+# TODO: this is kind of messy. All these information are inside cfg but we are passing them in
+# again. Make a global get_test_config function that is parametrized.
 def init_inference_engines(
-    cfg, model, use_local, async_engine, tp_size, colocate_all, backend, max_model_len=1536, gpu_memory_utilization=0.6
+    cfg,
+    model,
+    use_local,
+    async_engine,
+    tp_size,
+    colocate_all,
+    backend,
+    max_model_len=1536,
+    gpu_memory_utilization=0.6,
+    num_inference_engines=1,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
     initialize_ray(cfg)
     if colocate_all:
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
+        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         sleep = True
     else:
@@ -376,7 +387,7 @@ def init_inference_engines(
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eps = create_ray_wrapped_inference_engines(
-        num_inference_engines=1,
+        num_inference_engines=num_inference_engines,
         tensor_parallel_size=tp_size,
         model_dtype="bfloat16",
         pretrain=model,

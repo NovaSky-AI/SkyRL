@@ -2,6 +2,9 @@ from typing import Dict, Any, Optional, Union
 import random
 import hashlib
 from omegaconf import DictConfig, ListConfig
+from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
+from typing import List
+from http import HTTPStatus
 
 
 def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
@@ -117,3 +120,56 @@ def route_prompts_to_engines(
         engine_idx = hash_with_sha256(str(cur_tid)) % num_inference_engines
         engine_idx_to_prompt_ids.setdefault(engine_idx, []).append(i)
     return engine_idx_to_prompt_ids
+
+
+def postprocess_completion_request(
+    prompt: Union[List[int], List[List[int]], List[str], str],
+    trajectory_id_value: Optional[Union[List[int], List[str], int, str]],
+) -> tuple[Optional[Union[List[int], List[str], ErrorResponse]], Union[List[List[int]], List[str]]]:
+    """
+    Postprocess the trajectory_id value and raise error if invalid.
+
+    Returns a list of trajectory_ids, or None if trajectory_id_value is None, or ErrorResponse if invalid.
+    Also returns the processed prompt, where if the prompt is a single request, we make it
+    a singleton list of a single request. That is, List[int] becomes List[List[int]] of length 1,
+    and str becomes List[str] of length 1.
+
+    Postconditions:
+    - If trajectory_id_value is None, we return None.
+    - If trajectory_id_value and prompt do not match, we return ErrorResponse.
+    - The returned trajectory_id_list has the same length as the prompt.
+    - The returned prompt is either List[List[int]], or List[str], whether batched or not.
+    """
+
+    def _is_list_of_ints(x):
+        return isinstance(x, list) and all(isinstance(y, int) for y in x)
+
+    # Determine if this is a single or batched request (a List[str] of length 1 is considered batched)
+    is_single = isinstance(prompt, str) or _is_list_of_ints(prompt)
+    if is_single:
+        prompt = [prompt]
+
+    if trajectory_id_value is None:
+        return None, prompt
+
+    if isinstance(trajectory_id_value, (int, str)):
+        trajectory_id_value = [trajectory_id_value]
+
+    if len(trajectory_id_value) != len(prompt):
+        return (
+            ErrorResponse(
+                error=ErrorInfo(
+                    message=(
+                        "For /completions request with a single prompt, request.trajectory_id must "
+                        f"be a single integer/string or a singleton list.\nFor batched requests, "
+                        f"request.trajectory_id must have the same length as request.prompt."
+                        f"However, received (len(trajectory_id_value): {len(trajectory_id_value)}, len(prompt): {len(prompt)})."
+                    ),
+                    type=HTTPStatus.BAD_REQUEST.phrase,
+                    code=HTTPStatus.BAD_REQUEST.value,
+                ),
+            ),
+            prompt,
+        )
+
+    return trajectory_id_value, prompt
