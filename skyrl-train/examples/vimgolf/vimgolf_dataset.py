@@ -75,7 +75,7 @@ if __name__ == "__main__":
     val_dataset = create_dataset(data=datasets["test"], split_name="val")
 
     # Save datasets
-    output_dir = args.output_dir
+    output_dir = os.path.expanduser(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     train_dataset.to_parquet(os.path.join(output_dir, "train.parquet"))
     val_dataset.to_parquet(os.path.join(output_dir, "validation.parquet"))
