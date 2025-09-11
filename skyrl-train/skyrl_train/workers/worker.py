@@ -17,6 +17,7 @@ from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
@@ -381,7 +382,7 @@ class PPORayActorGroup:
                     bundles[i][resources_name] = self._num_resources_per_node
 
             pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(pg, timeout=30)
+            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         if pg:
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,

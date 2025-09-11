@@ -12,6 +12,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
@@ -132,7 +133,7 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = 180) -> PlacementGroup:
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
         """Initializes a placement group for colocated training.
 
         A single placement group that packs all the inference engines together is created.

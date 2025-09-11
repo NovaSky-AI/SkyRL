@@ -30,6 +30,7 @@ from skyrl_train.dataset.preprocess import (
 from skyrl_train.utils import ppo_utils
 from skyrl_train.utils import trainer_utils, io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     masked_mean,
@@ -524,7 +525,7 @@ class RayPPOTrainer:
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
                 pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=30)
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             policy_model = PPORayActorGroup(
                 cfg,
@@ -566,7 +567,7 @@ class RayPPOTrainer:
                     for _ in range(cfg.trainer.placement.critic_num_nodes)
                 ]
                 pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=30)
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(

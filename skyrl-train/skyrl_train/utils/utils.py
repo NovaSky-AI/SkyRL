@@ -8,6 +8,8 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
 
+from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S
+
 
 class Timer:
     def __init__(self, message, update_dict=None):
@@ -476,7 +478,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
-    if os.environ.get("SKYRL_LD_LIBRARY_PATH_EXPORT"):
+    if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
@@ -584,7 +586,8 @@ def peer_access_supported(max_num_gpus_per_node: int):
     if not torch.cuda.is_available():
         # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
         ray.init()
-        pg = ray.get(placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK").ready(), timeout=120)
+        pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         result = ray.get(
             ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
                 run_p2p_access_check

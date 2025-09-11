@@ -8,7 +8,8 @@ import sys
 import ray
 import torch
 import torch.distributed as dist
-from skyrl_train.utils.utils import initialize_ray
+from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from ray.util.placement_group import placement_group
 from omegaconf import OmegaConf
 from loguru import logger
@@ -89,7 +90,7 @@ if __name__ == "__main__":
 
     # Create placement group for distributed training
     pg = placement_group(bundles=[{"GPU": 1, "CPU": 1}] * total_ranks, strategy="STRICT_SPREAD")
-    ray.get(pg.ready())
+    get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
     # Create actors
     for rank in range(total_ranks):
