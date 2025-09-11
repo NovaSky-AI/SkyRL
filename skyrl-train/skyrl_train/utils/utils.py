@@ -466,11 +466,10 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     return env_vars
 
 
-def configure_ray_worker_logging() -> None:
+def configure_ray_driver_logging() -> None:
     """
-    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
-    `configure_worker_logging` is used within each Ray worker to
-    force color and formatting (e.g., bold) and route stdlib `logging`
+    In the Ray driver, stderr/stdout are not TTYs, so Loguru disables color.
+    This method forces color and formatting (e.g., bold) and routes stdlib `logging`
     through Loguru so third‑party logs match formatting
     """
     # 1) Loguru formatting (force colors)
