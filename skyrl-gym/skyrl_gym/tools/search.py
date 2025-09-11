@@ -1,5 +1,4 @@
 import json
-import logging
 import requests
 import uuid
 import time
@@ -8,9 +7,6 @@ from typing import Tuple, Optional, Any, Dict
 from urllib.parse import urlparse
 
 from skyrl_gym.tools.core import tool, ToolGroup
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 10
@@ -58,10 +54,6 @@ def call_search_api(
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            if log_requests:
-                logger.info(
-                    f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling search API at {retrieval_service_url}"
-                )
             response = session.post(
                 retrieval_service_url,
                 headers=headers,
@@ -72,19 +64,13 @@ def call_search_api(
             # Check for Gateway Timeout (504) and other server errors for retrying
             if response.status_code in [500, 502, 503, 504]:
                 last_error = f"{log_prefix}API Request Error: Server Error ({response.status_code}) on attempt {attempt + 1}/{MAX_RETRIES}"
-                logger.warning(last_error)
                 if attempt < MAX_RETRIES - 1:
                     delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                    logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                     time.sleep(delay)
                 continue
 
             # Check for other HTTP errors (e.g., 4xx)
             response.raise_for_status()
-
-            # If successful (status code 2xx)
-            if log_requests:
-                logger.info(f"{log_prefix}Search API call successful on attempt {attempt + 1}")
 
             # Close session if we created it
             if should_close_session:
@@ -94,18 +80,14 @@ def call_search_api(
 
         except requests.exceptions.ConnectionError as e:
             last_error = f"{log_prefix}Connection Error: {e}"
-            logger.warning(last_error)
             if attempt < MAX_RETRIES - 1:
                 delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                 time.sleep(delay)
             continue
         except requests.exceptions.Timeout as e:
             last_error = f"{log_prefix}Timeout Error: {e}"
-            logger.warning(last_error)
             if attempt < MAX_RETRIES - 1:
                 delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                logger.info(f"{log_prefix}Retrying after {delay} seconds...")
                 time.sleep(delay)
             continue
         except requests.exceptions.RequestException as e:
@@ -118,9 +100,6 @@ def call_search_api(
         except Exception as e:
             last_error = f"{log_prefix}Unexpected Error: {e}"
             break  # Exit retry loop on other unexpected errors
-
-    # If we reach here, all attempts failed
-    logger.error(f"{log_prefix}API Request Failed after {MAX_RETRIES} attempts: {last_error}")
 
     # Close session if we created it
     if should_close_session:
@@ -158,7 +137,6 @@ class SearchToolGroup(ToolGroup):
                 session.mount("http://", adapter)
                 session.mount("https://", adapter)
                 cls._session_pool[base_url] = session
-                logger.info(f"Created shared session pool for {base_url}")
             return cls._session_pool[base_url]
 
     def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_requests=True):
@@ -173,8 +151,6 @@ class SearchToolGroup(ToolGroup):
 
         # Get shared session for this base URL
         self.session = self._get_shared_session(self.base_url)
-        if self.log_requests:
-            logger.info(f"SearchToolGroup initialized using shared session pool for {self.base_url}")
 
         super().__init__(name="SearchToolGroup")
 
@@ -197,7 +173,6 @@ class SearchToolGroup(ToolGroup):
             )
         except Exception as e:
             error_msg = f"API Request Exception during batch search: {e}"
-            logger.error(f"Batch search: {error_msg}")
 
         metadata = {
             "query": query,
@@ -213,9 +188,7 @@ class SearchToolGroup(ToolGroup):
         if error_msg:
             metadata["status"] = "api_error"
             result_text = json.dumps({"result": f"Search error: {error_msg}"})
-            logger.error(f"Batch search: API error occurred: {error_msg}")
         elif api_response:
-            logger.debug(f"Batch search: API Response: {api_response}")
             metadata["api_response"] = api_response
 
             try:
@@ -233,22 +206,16 @@ class SearchToolGroup(ToolGroup):
                     metadata["status"] = "success"
                     metadata["total_results"] = total_results
                     metadata["formatted_result"] = final_result
-                    if self.log_requests:
-                        logger.info(f"Batch search: Successful, got {total_results} total results")
                 else:
                     result_text = json.dumps({"result": "No search results found."})
                     metadata["status"] = "no_results"
                     metadata["total_results"] = 0
-                    if self.log_requests:
-                        logger.info("Batch search: No results found")
             except Exception as e:
                 error_msg = f"Error processing search results: {e}"
                 result_text = json.dumps({"result": error_msg})
                 metadata["status"] = "processing_error"
-                logger.error(f"Batch search: {error_msg}")
         else:
             metadata["status"] = "unknown_api_state"
             result_text = json.dumps({"result": "Unknown API state (no response and no error message)."})
-            logger.error("Batch search: Unknown API state.")
 
         return result_text
