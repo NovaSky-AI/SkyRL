@@ -4,7 +4,6 @@ from typing import List
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.generators.utils import get_rollout_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
 from sandbox.models.trial.config import TrialConfig, AgentConfig, LocalTaskConfig
@@ -49,13 +48,13 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.max_episodes = terminal_bench_cfg.max_episodes
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        # TODO(tgriggs): Plumb the sandboxes task list here instead of using (and ignoring) empty prompts
-        prompts = input_batch["prompts"]
+        task_paths = [extra["terminal_bench"]["task_path"] for extra in input_batch["env_extras"]]
+
         tasks = []
-        for _ in range(len(prompts)):
+        for task_path in task_paths:
             tasks.append(
                 self.terminal_bench_agent_loop(
-                    prompt="",
+                    task_path=task_path,
                 )
             )
 
@@ -79,14 +78,14 @@ class TerminalBenchGenerator(GeneratorInterface):
 
     async def terminal_bench_agent_loop(
         self,
-        prompt: ConversationType,
+        task_path: str,
     ) -> TerminalBenchAgentOutput:
         """
         Run a single terminal_bench agent.
         """
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=LocalTaskConfig(id=LocalTaskId(path=task_path)),
                 trials_dir=Path(self.trials_dir),
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
@@ -96,7 +95,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
         elif self.agent_name == "oracle":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=LocalTaskConfig(id=LocalTaskId(path=task_path)),
                 trials_dir=Path(self.trials_dir),
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
