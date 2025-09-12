@@ -97,7 +97,7 @@ def create_minimal_trainer(cfg: DictConfig):
     tracker = Tracking(
         project_name=cfg.trainer.project_name,
         experiment_name=cfg.trainer.run_name,
-        default_backend=cfg.trainer.logger,
+        backends=cfg.trainer.logger,
         config=cfg,
     )
 

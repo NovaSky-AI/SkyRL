@@ -253,7 +253,7 @@ class RayPPOTrainer:
             with self.eval_weights_manager:
                 with Timer("eval", self.all_timings):
                     eval_metrics = asyncio.run(self.eval())
-                    self.tracker.log(eval_metrics, step=self.global_step)
+                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
             # Policy model is backloaded to GPU after eval
             if self.cfg.trainer.placement.colocate_all:
                 self.policy_model.backload_to_gpu()
@@ -357,9 +357,6 @@ class RayPPOTrainer:
                     if self.cfg.trainer.placement.colocate_all:
                         self.policy_model.backload_to_gpu()
 
-                self.tracker.log(self.all_metrics, step=self.global_step)
-                self.all_metrics = {}
-
                 if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                     with Timer("save_checkpoints", self.all_timings):
                         self.save_checkpoints()
@@ -367,7 +364,12 @@ class RayPPOTrainer:
                     with Timer("save_hf_model", self.all_timings):
                         self.save_models()
 
-                self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
+                log_payload = {
+                    **self.all_metrics,
+                    **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                }
+                self.tracker.log(log_payload, step=self.global_step, commit=True)
+                self.all_metrics = {}
                 self.all_timings = {}
 
                 # update progress bar after logging

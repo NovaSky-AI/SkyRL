@@ -27,27 +27,27 @@ import pprint
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
-    supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
+    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = "console", config=None):
-        if isinstance(default_backend, str):
-            default_backend = [default_backend]
-        for backend in default_backend:
-            assert backend in self.supported_backend, f"{backend} is not supported"
+    def __init__(self, project_name, experiment_name, backends: Union[str, List[str]] = "console", config=None):
+        if isinstance(backends, str):
+            backends = [backends]
+        for backend in backends:
+            assert backend in self.supported_backends, f"{backend} is not supported"
 
         self.logger = {}
 
-        if "wandb" in default_backend:
+        if "wandb" in backends:
             import wandb
             from omegaconf import OmegaConf
 
             wandb.init(project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True))
             self.logger["wandb"] = wandb
 
-        if "mlflow" in default_backend:
+        if "mlflow" in backends:
             self.logger["mlflow"] = _MlflowLoggingAdapter(project_name, experiment_name, config)
 
-        if "swanlab" in default_backend:
+        if "swanlab" in backends:
             import os
 
             import swanlab
@@ -66,36 +66,18 @@ class Tracking:
             )
             self.logger["swanlab"] = swanlab
 
-        if "vemlp_wandb" in default_backend:
-            import os
-
-            import volcengine_ml_platform
-            from volcengine_ml_platform import wandb as vemlp_wandb
-
-            volcengine_ml_platform.init(
-                ak=os.environ["VOLC_ACCESS_KEY_ID"],
-                sk=os.environ["VOLC_SECRET_ACCESS_KEY"],
-                region=os.environ["MLP_TRACKING_REGION"],
-            )
-
-            vemlp_wandb.init(
-                project=project_name,
-                name=experiment_name,
-                config=config,
-                sync_tensorboard=True,
-            )
-            self.logger["vemlp_wandb"] = vemlp_wandb
-
-        if "tensorboard" in default_backend:
+        if "tensorboard" in backends:
             self.logger["tensorboard"] = _TensorboardAdapter()
 
-        if "console" in default_backend:
+        if "console" in backends:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
 
-    def log(self, data, step, backend=None):
-        for default_backend, logger_instance in self.logger.items():
-            if backend is None or default_backend in backend:
+    def log(self, data, step, commit=False):
+        for logger_name, logger_instance in self.logger.items():
+            if logger_name == "wandb":
+                logger_instance.log(data=data, step=step, commit=commit)
+            else:
                 logger_instance.log(data=data, step=step)
 
     def __del__(self):
@@ -108,8 +90,6 @@ class Tracking:
                 self.logger["wandb"].finish(exit_code=0)
             if "swanlab" in self.logger:
                 self.logger["swanlab"].finish()
-            if "vemlp_wandb" in self.logger:
-                self.logger["vemlp_wandb"].finish(exit_code=0)
             if "tensorboard" in self.logger:
                 self.logger["tensorboard"].finish()
             if "mlflow" in self.logger:
