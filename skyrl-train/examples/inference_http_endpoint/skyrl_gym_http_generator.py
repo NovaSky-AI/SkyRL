@@ -1,3 +1,7 @@
+"""
+TODO(Charlie): This file will be removed soon since this is only for demonstration purposes.
+"""
+
 import asyncio
 import aiohttp
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
@@ -9,6 +13,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, Conversatio
 from skyrl_train.generators.utils import apply_overlong_filtering, get_rollout_metrics
 from skyrl_train.generators.base import GeneratorOutput
 import skyrl_gym
+from transformers import PreTrainedTokenizer
 
 
 class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
@@ -68,8 +73,13 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             prompts=init_prompts, trajectory_ids=trajectory_ids, sampling_params=sampling_params
         )
 
-        # The only line different from SkyRLGymGenerator.generate_batched
-        engine_output = await _generate_with_http_endpoint(self.base_url, self.model_name, engine_input)
+        # The only line different from SkyRLGymGenerator.generate_batched.
+        # Either use `/chat/completions` or `/completions`.
+
+        # engine_output = await _generate_with_chat_completions_http_endpoint(self.base_url, self.model_name, engine_input)
+        engine_output = await _generate_with_completions_http_endpoint(
+            self.base_url, self.model_name, engine_input, self.tokenizer
+        )
 
         responses = engine_output["responses"]
         stop_reasons = engine_output["stop_reasons"]
@@ -120,7 +130,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         return generator_output
 
 
-async def _generate_with_http_endpoint(
+async def _generate_with_chat_completions_http_endpoint(
     base_url: str,
     model_name: str,
     input_batch: InferenceEngineInput,
@@ -163,6 +173,55 @@ async def _generate_with_http_endpoint(
             response_json = await response.json()
             choice = response_json["choices"][0]
             results.append(choice["message"]["content"])
+            finish_reasons.append(choice["finish_reason"])
+
+    inference_engine_output: InferenceEngineOutput = {
+        "responses": results,
+        "stop_reasons": finish_reasons,
+        "response_ids": None,
+    }
+
+    return inference_engine_output
+
+
+async def _generate_with_completions_http_endpoint(
+    base_url: str,
+    model_name: str,
+    input_batch: InferenceEngineInput,
+    tokenizer: PreTrainedTokenizer,
+) -> InferenceEngineOutput:
+    """
+    Generate responses using direct ClientSession.post calls with the InferenceEngineClient HTTP endpoint.
+
+    Equivalent to running `self.inference_engine_client.generate()`, but with the HTTP endpoint.
+    """
+    prompts = input_batch.get("prompts")
+    # Since we are using /completions, we need to template the prompts ourselves
+    prompts = [tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=False) for prompt in prompts]
+    trajectory_ids = input_batch.get("trajectory_ids")
+    sampling_params = input_batch.get("sampling_params")
+    if trajectory_ids is not None:
+        assert len(prompts) == len(trajectory_ids), "prompts and trajectory_ids must have the same length"
+
+    # Use aiohttp session for direct HTTP requests
+    conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)  # 0 = no limit; without conn, has 100
+    async with aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=None)) as session:
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": model_name,
+            "prompt": prompts,
+            **(sampling_params or {}),
+        }
+        response = await session.post(f"{base_url}/v1/completions", json=payload, headers=headers)
+
+        # Parse responses
+        results = []
+        finish_reasons = []
+        response_json = await response.json()
+        if "error" in response_json:
+            raise ValueError(f"Error in response: {response_json}")
+        for choice in response_json["choices"]:
+            results.append(choice["text"])
             finish_reasons.append(choice["finish_reason"])
 
     inference_engine_output: InferenceEngineOutput = {

@@ -125,6 +125,17 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
         return response
 
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = request_payload.get("json", {})
+        headers = {"Content-Type": "application/json"}
+        response = None
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            request_url = f"{self.url}/v1/completions"
+            async with session.post(request_url, json=body, headers=headers) as resp:
+                response = await resp.json()
+
+        return response
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
             resp = await session.post(f"{self.url}/wake_up", json={"tags": kwargs.get("tags", 1)})

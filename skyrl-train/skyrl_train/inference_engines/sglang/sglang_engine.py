@@ -244,6 +244,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # TODO(charlie): implement this in the future
         raise NotImplementedError()
 
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO(charlie): implement this in the future
+        raise NotImplementedError()
+
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
     ):
