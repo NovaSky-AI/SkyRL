@@ -182,10 +182,6 @@ def test_http_endpoint_completions_routing_and_batching():
     either using trajectory_id or not, we test all combinations.
 
     We test with 2 engines of TP=1 to check if routing works.
-
-    Ideally we want to test that for the batched case, despite routing, the choices should have
-    the same order as the input prompt (i.e. order presreved), but not sure how to test this. We
-    verified gsm8k curve with both batched and unbatched, which should be enough.
     """
     batched_list = [False, True]
     with_traj_list = [False, True]
