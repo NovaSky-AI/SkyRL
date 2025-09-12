@@ -173,3 +173,40 @@ def postprocess_completion_request(
         )
 
     return trajectory_id_value, prompt
+
+
+def aggregate_completion_usage_info(
+    results: List[Dict[str, Any]],
+    backend: str,
+) -> Dict[str, Any]:
+    """
+    Aggregate the completion usage info and return the final usage info, since our
+    inference engine client breaks down a batched request into sub-requests and routes to engines,
+    where each engine only returns its sub-request's usage info. When we return the final response,
+    we need to aggregate the usage info.
+
+    NOTE(Charlie): we don't explicitly import vllm here for ease of CPU test. Whether these fields
+    are still compatible with newer vllm versions can be checked in our GPU tests, where we explicitly
+    check the dictionary with `CompletionResponse.model_validate()`.
+    """
+    if backend == "vllm":
+        # required fields
+        usage_info = {
+            "prompt_tokens": sum(result["usage"]["prompt_tokens"] for result in results),
+            "total_tokens": sum(result["usage"]["total_tokens"] for result in results),
+        }
+        # optional fields
+        if results[0]["usage"].get("completion_tokens") is not None:
+            usage_info["completion_tokens"] = sum(result["usage"]["completion_tokens"] for result in results)
+        if results[0]["usage"].get("prompt_tokens_details") is not None:
+            if results[0]["usage"]["prompt_tokens_details"].get("cached_tokens") is not None:
+                usage_info["prompt_tokens_details"] = {
+                    "cached_tokens": sum(
+                        result["usage"]["prompt_tokens_details"]["cached_tokens"] for result in results
+                    )
+                }
+        return usage_info
+    elif backend == "sglang":
+        raise NotImplementedError("SGLang is not supported yet")
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")

@@ -12,6 +12,7 @@ from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
     hash_with_sha256,
     postprocess_completion_request,
+    aggregate_completion_usage_info,
 )
 from omegaconf import DictConfig
 import threading
@@ -206,9 +207,18 @@ class InferenceEngineClient(InferenceEngineInterface):
                 ).model_dump()
 
         # 4. Combine choices and preserve original order.
+        # If there is only one result, we return it directly.
+        if len(results) == 1:
+            return results[0]
+
+        # Use the first result as base response. There are some fields that cannot be shared
+        # across sub-requests. For now it is just the usage field.
+        final_response = dict(results[0])
+        final_response["usage"] = aggregate_completion_usage_info(results, self.backend)
+
+        # Aggregate choices. TODO(Charlie): improve logic when we need to support n > 1
         # vLLM sets index positions per sub-batch, so we reset indices to be 0..n-1 for the combined response.
         combined_choices: list[Dict[str, Any]] = [None] * num_prompts
-        base_response = results[0]  # Use the first result as base response.
         for indices, result in zip(indices_list, results):
             # indices are the original prompt indices that the task's response corresponds to
             for local_idx, original_idx in enumerate(indices):
@@ -220,7 +230,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         for new_idx in range(len(combined_choices)):
             assert combined_choices[new_idx]["index"] == new_idx
 
-        final_response = dict(base_response)
         final_response["choices"] = combined_choices
         return final_response
 

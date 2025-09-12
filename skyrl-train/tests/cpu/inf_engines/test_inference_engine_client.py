@@ -166,10 +166,10 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_tra
             indices 0, 1, 2, 3, ...
             """
             body = request_payload["json"]
-            prompts = body["prompt"]
+            my_prompts = body["prompt"]
             # Return per-sub-batch indices 0..len-1; client is expected to remap to global order
             choices = []
-            for i, p in enumerate(prompts):
+            for i, p in enumerate(my_prompts):
                 choices.append(
                     {
                         "index": i,
@@ -177,11 +177,21 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_tra
                         "finish_reason": "stop",
                     }
                 )
+            num_prompt_tokens = sum(len(p) for p in my_prompts)
+            num_completion_tokens = num_prompt_tokens * 2  # since we doubled the prompts
             return {
                 "id": "cmpl-mock",
                 "object": "text_completion",
                 "model": body.get("model", "dummy-model"),
                 "choices": choices,
+                "usage": {
+                    "prompt_tokens": num_prompt_tokens,
+                    "total_tokens": num_prompt_tokens + num_completion_tokens,
+                    "completion_tokens": num_completion_tokens,
+                    "prompt_tokens_details": {
+                        "cached_tokens": num_prompt_tokens,
+                    },
+                },
             }
 
     # Create a minimal config to avoid spinning up HTTP endpoint
@@ -227,6 +237,18 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_tra
     for i, choice in enumerate(resp["choices"]):
         assert choice["index"] == i
         assert choice["text"] == expected_texts[i]
+
+    # also check usage aggregation here
+    global_num_prompt_tokens = sum(len(p) for p in prompts)
+    global_num_completion_tokens = global_num_prompt_tokens * 2  # since we doubled the prompts
+    assert resp["usage"] == {
+        "prompt_tokens": global_num_prompt_tokens,
+        "total_tokens": global_num_prompt_tokens + global_num_completion_tokens,
+        "completion_tokens": global_num_completion_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": global_num_prompt_tokens,
+        },
+    }
 
 
 # -------------------------------------------
