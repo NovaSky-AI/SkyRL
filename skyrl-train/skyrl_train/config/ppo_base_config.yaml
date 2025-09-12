@@ -195,6 +195,11 @@ generator:
   http_endpoint_port: 8000
   max_turns: 1
 
+  # chat template configuration
+  chat_template:
+    source: "name"  # "name" or "file"
+    name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
+
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:

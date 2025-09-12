@@ -5,8 +5,21 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
 
 CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
-    "qwen3_thinking": (
+    # chat template for qwen3 that preserves thinking tokens (trains on all tokens)
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # chat template for qwen3 that removes thinking tokens (masks them during training)
+    "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
@@ -15,24 +28,54 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% generation %}"
         "{% set full_content = message['content'] %}"
         "{% set mycontent = message['content'] %}"
-        "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
-        "{% if '</think>' in full_content and not is_last_message %}"
+        "{% if '</think>' in full_content %}"
         "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
         "{% endif %}"
         "{{mycontent + '<|im_end|>'}}"
         "{% endgeneration %}"
-        "{{'\n'}}"
         "{% endif %}"
         "{% endfor %}"
-    ),
+    )
 }
 
 
-def get_custom_chat_template(model_name: str) -> str:
-    if "Qwen3" in model_name:
-        return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
-    else:
+def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Optional[str]:
+    """
+    Get custom chat template based on the new config structure.
+    
+    Args:
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
+        
+    Returns:
+        Chat template string or None
+    """
+    if chat_template_config is None: 
         return None
+    
+    source = chat_template_config.get("source")
+    if not source:
+        raise ValueError("'source' is required in chat_template_config")
+
+    name_or_path = chat_template_config.get("name_or_path")
+    if not name_or_path:
+        raise ValueError("'name_or_path' is required in chat_template_config")
+
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
+        else:
+            raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
+    
+    if source == "file":
+        try:
+            with open(name_or_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            raise ValueError(f"Template file '{name_or_path}' not found")
+        except Exception as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}")
+    
+    raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
