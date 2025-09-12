@@ -724,7 +724,7 @@ def test_http_endpoint_error_handling():
         health_data = response.json()
         assert health_data["status"] == "healthy"
 
-        # TODO(Charlie): add more tests or be more rigorous on the coverage representation.
+        # Tests below are for `/completions` endpoint.
         # e.g. trajectory id wrong length, etc.
         # Additional tests for /v1/completions
         # C1: streaming not supported
