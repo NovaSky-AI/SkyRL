@@ -194,11 +194,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         for result in results:
             if "error" in result or result.get("object", "") == "error":
                 # former is vllm format, latter is sglang format
-                error_code = result["error"]["code"] if "error" in result else result["code"]
-                error_type = result["error"]["type"] if "error" in result else result["type"]
+                error_details = result.get("error", result)  # resolves vllm/sglang format difference
+                error_code = error_details["code"]
+                error_type = error_details["type"]
                 return ErrorResponse(
                     error=ErrorInfo(
-                        message=f"In one of the engines that SkyRL manages, an error occurred: {result['error']['message']}",
+                        message=f"In one of the engines that SkyRL manages, an error occurred: {error_details['message']}",
                         type=error_type,
                         code=error_code,
                     ),

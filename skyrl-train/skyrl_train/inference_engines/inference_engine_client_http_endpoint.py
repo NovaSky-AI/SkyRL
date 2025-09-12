@@ -96,6 +96,16 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
         )
+    if endpoint == "/completions" and "n" in request_json and request_json["n"] > 1:
+        # TODO(Charlie): this constraint can be removed when we leave DP routing to
+        # inference frameworks. Or we could try to resolve it when needed.
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="n is not supported in SkyRL for /completions request yet, please set n to 1.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
     return None
 
 

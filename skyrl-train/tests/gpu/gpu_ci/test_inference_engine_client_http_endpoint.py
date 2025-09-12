@@ -746,6 +746,14 @@ def test_http_endpoint_error_handling():
             headers={"Content-Type": "application/json"},
         )
         assert response.status_code == HTTPStatus.BAD_REQUEST
+        # C4: n > 1
+        response = requests.post(
+            f"{base_url}/v1/completions",
+            json={"model": MODEL, "prompt": "Hello", "n": 2},
+        )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        error_data = response.json()
+        assert "n is not supported in SkyRL for /completions " in error_data["error"]["message"]
 
         # When batched and trajectory_id wrong length -> 400 from server or client-side error
         bad_payload = {"model": MODEL, "prompt": ["hi", "hello", "ok"], "trajectory_id": [0, 1]}
