@@ -48,6 +48,7 @@ def create_ray_wrapped_inference_engines_flashrl(
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
+    from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 
     assert not async_engine, "`async_engine` is not supported for FlashRL"
 
@@ -70,7 +71,7 @@ def create_ray_wrapped_inference_engines_flashrl(
         # Create a big placement group to ensure that all inference engines are packed
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * tensor_parallel_size)]
         shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=30)
+        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
     for i in range(num_inference_engines):
         bundle_indices = None

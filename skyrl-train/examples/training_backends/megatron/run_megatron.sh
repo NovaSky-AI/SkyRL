@@ -17,6 +17,11 @@ MEGATRON_TP=2
 MEGATRON_PP=2
 MEGATRON_CP=1
 
+# torch profiler config
+ENABLE_TORCH_PROFILER=false
+RANKS_TO_PROFILE="[0]"
+SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
+
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -28,12 +33,15 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
-  megatron_config.policy.tensor_model_parallel_size=$MEGATRON_TP \
-  megatron_config.policy.pipeline_model_parallel_size=$MEGATRON_PP \
-  megatron_config.policy.context_parallel_size=$MEGATRON_CP \
-  megatron_config.ref.tensor_model_parallel_size=$MEGATRON_TP \
-  megatron_config.ref.context_parallel_size=$MEGATRON_CP \
-  megatron_config.ref.pipeline_model_parallel_size=$MEGATRON_PP \
+  trainer.policy.megatron_config.torch_profiler_config.enable=$ENABLE_TORCH_PROFILER \
+  trainer.policy.megatron_config.torch_profiler_config.ranks=$RANKS_TO_PROFILE \
+  trainer.policy.megatron_config.torch_profiler_config.save_path=$SAVE_PATH \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
+  trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
+  trainer.ref.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.ref.megatron_config.context_parallel_size=$MEGATRON_CP \
+  trainer.ref.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.use_sample_packing=true \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \

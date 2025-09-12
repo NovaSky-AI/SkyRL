@@ -45,9 +45,22 @@ class InferenceEngineInterface(ABC):
         """Handles OpenAI-compatible HTTP endpoint.
 
         Accepts a JSON payload: {"json": <request-body>, "headers": <headers-dict>}.
+        The request body will be used to construct a ChatCompletionRequest.
         Returns a plain dict, either a ChatCompletionResponse or an ErrorResponse.
-        The specific fields depend on the engine's backend (e.g. for vllm these are defined
-        in vllm.entrypoints.openai.protocol).
+        The specific fields of the response/request depend on the engine's backend (e.g. for vllm
+        these are defined in vllm.entrypoints.openai.protocol).
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handles OpenAI-compatible HTTP endpoint.
+
+        Accepts a JSON payload: {"json": <request-body>, "headers": <headers-dict>}.
+        The request body will be used to construct a CompletionRequest.
+        Returns a plain dict, either a CompletionResponse or an ErrorResponse.
+        The specific fields of the response/request depend on the engine's backend (e.g. for vllm
+        these are defined in vllm.entrypoints.openai.protocol).
         """
         raise NotImplementedError()
 
@@ -75,4 +88,14 @@ class InferenceEngineInterface(ABC):
 
     @abstractmethod
     async def reset_prefix_cache(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def tp_size(self) -> int:
+        """Return the tensor parallel size of this inference engine."""
+        raise NotImplementedError()
+
+    @abstractmethod
+    def dp_size(self) -> int:
+        """Return the data parallel size of this inference engine."""
         raise NotImplementedError()

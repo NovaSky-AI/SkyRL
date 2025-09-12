@@ -6,11 +6,20 @@ import ray
 import torch
 import asyncio
 import vllm
+from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ChatCompletionResponse, ErrorResponse, ErrorInfo
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ErrorResponse,
+    ErrorInfo,
+    CompletionRequest,
+    CompletionResponse,
+)
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
@@ -163,13 +172,16 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._dp_size = kwargs.get("data_parallel_size", 1)
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
 
     def tp_size(self):
-        """Return the tensor parallel size."""
         return self._tp_size
+
+    def dp_size(self):
+        return self._dp_size
 
     def _create_engine(self, *args, **kwargs):
         """Abstract method for subclasses to implement engine creation."""
@@ -258,6 +270,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Only supported in AsyncVLLMInferenceEngine."""
         raise NotImplementedError()
 
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Only supported in AsyncVLLMInferenceEngine."""
+        raise NotImplementedError()
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
@@ -339,6 +355,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
+        )
+
+        # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
+        # `enable_prompt_tokens_details`, `enable_force_include_usage`.
+        self.openai_serving_completion = OpenAIServingCompletion(
+            engine_client=engine,
+            model_config=model_config,
+            models=models,
+            request_logger=None,
         )
         return engine
 
@@ -433,20 +458,23 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("destroy_weights_update_group")
 
-    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """OpenAI-compatible HTTP endpoint.
+    # ----------------------------------------
+    # Methods for handling OpenAI API requests
+    # ----------------------------------------
 
-        Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
-        Constructs a minimal request-like object for vLLM's openai_serving_chat.
-        Returns a plain dict that is JSON-serializable, either a ChatCompletionResponse or
-        an ErrorResponse, both defined in vllm.entrypoints.openai.protocol.
-        """
+    async def _handle_openai_request(self, request_payload: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+        """Handle OpenAI API request."""
+        assert endpoint in ["/chat/completions", "/completions"]
+
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 
         # 1. Build request
         try:
-            request = ChatCompletionRequest(**body)
+            if endpoint == "/chat/completions":
+                request = ChatCompletionRequest(**body)
+            else:
+                request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             return ErrorResponse(
@@ -460,16 +488,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # 2. Call vllm engine
         try:
             # Create a minimal request-like object with attributes used by vLLM
-            from types import SimpleNamespace
-
-            class _MinimalRequest:
-                def __init__(self, headers):
-                    self.headers = headers  # Expect a mapping with .get support
-                    self.state = SimpleNamespace()  # vLLM sets raw_request.state.request_metadata
-
             minimal_request = _MinimalRequest(headers)
-            generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
-            assert isinstance(generator, (ChatCompletionResponse, ErrorResponse))
+            if endpoint == "/chat/completions":
+                generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+                assert isinstance(generator, (ChatCompletionResponse, ErrorResponse))
+            else:
+                generator = await self.openai_serving_completion.create_completion(request, minimal_request)
+                assert isinstance(generator, (CompletionResponse, ErrorResponse))
             return generator.model_dump()
 
         except Exception as e:
@@ -481,6 +506,42 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 ),
             ).model_dump()
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.
+
+        Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
+        Constructs a minimal request-like object for vLLM's openai_serving_chat.
+        Returns a plain dict, either a ChatCompletionResponse or an ErrorResponse, both defined
+        in vllm.entrypoints.openai.protocol.
+        """
+        return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
+
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """OpenAI-compatible HTTP endpoint for handling `/completions` in Python vLLM engine.
+
+        Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
+        Constructs a minimal request-like object for vLLM's openai_serving_completion.
+        Returns a plain dict, either a CompletionResponse or an ErrorResponse, both defined
+        in vllm.entrypoints.openai.protocol.
+        """
+        return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+
+class _MinimalRequest:
+    """
+    Minimal request-like object for vLLM's openai_serving_chat and openai_serving_completion.
+
+    We cannot use the original user Request object because it cannot be serialized and hence
+    cannot be a ray method argument. Instead we take the original request's headers and
+    reconstruct an instance of _MinimalRequest to mimic the FastAPI Request object.
+
+    The fields depend on what vLLM accesses internally.
+    """
+
+    def __init__(self, headers):
+        self.headers = headers  # Expect a mapping with .get support
+        self.state = SimpleNamespace()  # vLLM sets raw_request.state.request_metadata
 
 
 VLLMRayActor = ray.remote(VLLMInferenceEngine)

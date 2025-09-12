@@ -30,6 +30,7 @@ from skyrl_train.dataset.preprocess import (
 from skyrl_train.utils import ppo_utils
 from skyrl_train.utils import trainer_utils, io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     masked_mean,
@@ -56,6 +57,7 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
     DynamicSamplingState,
 )
+from skyrl_train.utils.utils import configure_ray_worker_logging
 
 
 class RayPPOTrainer:
@@ -64,7 +66,7 @@ class RayPPOTrainer:
         cfg: DictConfig,
         tracker: Tracking,
         tokenizer: AutoTokenizer,
-        train_dataset: PromptDataset,
+        train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
         colocate_pg: Optional[PlacementGroup] = None,
@@ -77,7 +79,9 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
-        self.train_dataloader = self.build_dataloader(train_dataset, is_train=True)
+        self.train_dataloader = (
+            self.build_dataloader(train_dataset, is_train=True) if train_dataset is not None else None
+        )
         self.eval_dataloader = self.build_dataloader(eval_dataset, is_train=False) if eval_dataset is not None else None
         self.colocate_pg = colocate_pg
 
@@ -100,6 +104,7 @@ class RayPPOTrainer:
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
+        configure_ray_worker_logging()
 
     def build_dataloader(self, dataset: PromptDataset, is_train=True):
         """
@@ -131,12 +136,15 @@ class RayPPOTrainer:
         return dataloader
 
     @torch.no_grad()
-    async def eval(self) -> Dict[str, float]:
+    async def eval(self, eval_only: bool = False) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
         The eval metrics are recorded after having finished training `self.global_step` steps.
         Metrics recorded in global_step 0 corresponds to evaluations before training.
+
+        Args:
+            eval_only: True for eval-only (ie, non-training) runs
 
         Returns:
             A dictionary of evaluation metrics.
@@ -189,7 +197,9 @@ class RayPPOTrainer:
         if self.cfg.trainer.dump_eval_results:
             with Timer("dump_eval_results"):
                 data_save_dir = (
-                    Path(self.cfg.trainer.export_path) / "dumped_evals" / f"global_step_{self.global_step}_evals"
+                    Path(self.cfg.trainer.export_path)
+                    / "dumped_evals"
+                    / ("eval_only" if eval_only else f"global_step_{self.global_step}_evals")
                 )
                 data_save_dir.mkdir(parents=True, exist_ok=True)
                 dump_per_dataset_eval_results(
@@ -295,7 +305,7 @@ class RayPPOTrainer:
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                    print("example: ", vis)
+                    logger.info(f"Example:\n" f"  Input: {generator_input['prompts'][0]}\n" f"  Output:\n{vis}")
 
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
@@ -443,7 +453,11 @@ class RayPPOTrainer:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
             num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
-            num_rollout_gpus = cfg.generator.num_inference_engines * cfg.generator.inference_engine_tensor_parallel_size
+            num_rollout_gpus = (
+                cfg.generator.num_inference_engines
+                * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_data_parallel_size
+            )
             assert (
                 num_policy_gpus == num_rollout_gpus
             ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
@@ -524,7 +538,7 @@ class RayPPOTrainer:
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
                 pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=30)
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             policy_model = PPORayActorGroup(
                 cfg,
@@ -566,7 +580,7 @@ class RayPPOTrainer:
                     for _ in range(cfg.trainer.placement.critic_num_nodes)
                 ]
                 pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=30)
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(

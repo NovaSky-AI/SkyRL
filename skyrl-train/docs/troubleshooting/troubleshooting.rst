@@ -2,6 +2,12 @@ Troubleshooting
 ===============
 
 
+Placement Group Timeouts
+-------------------------
+
+In SkyRL, we use Ray placement groups to request resources for different actors. In Ray clusters that autoscale with KubeRay, placement group creation can take a long time since the cluster might have to add a new node, pull the relevant image and start the container, etc. 
+You can use the ``SKYRL_RAY_PG_TIMEOUT_IN_S`` environment variable (Used in the ``.env`` file passed to the ``uv run`` command with ``--env-file``) to increase the timeout for placement group creation (By default, this is 60 seconds)
+
 Multi-node Training
 -------------------
 

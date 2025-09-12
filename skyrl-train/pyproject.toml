@@ -53,6 +53,10 @@ conflicts = [
         { extra = "sglang" },
     ],
     [
+        { extra = "flashrl" },
+        { extra = "miniswe" },
+    ],
+    [
         { extra = "mcore" },
         { extra = "sglang" },
         { extra = "flashrl" },
@@ -71,6 +75,7 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
+
 
 [project.optional-dependencies]
 deepspeed = [
@@ -135,6 +140,12 @@ flashrl = [
     "torch==2.7.0",
     "flashinfer-python",
     "torchvision",
+]
+miniswe = [
+    # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
+    # TODO (sumanthrh): Use a release version
+    "mini-swe-agent @ git+https://github.com/SWE-agent/mini-swe-agent",
+    "litellm",
 ]
 
 

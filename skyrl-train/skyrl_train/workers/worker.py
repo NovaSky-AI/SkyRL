@@ -17,6 +17,7 @@ from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
@@ -31,6 +32,7 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.utils.utils import configure_ray_worker_logging
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -65,6 +67,7 @@ class DistributedTorchRayActor:
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
+        configure_ray_worker_logging()
 
     def get_node_local_rank(self):
         return self._local_rank
@@ -381,7 +384,7 @@ class PPORayActorGroup:
                     bundles[i][resources_name] = self._num_resources_per_node
 
             pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(pg, timeout=30)
+            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         if pg:
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,

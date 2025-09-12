@@ -12,6 +12,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
@@ -46,6 +47,8 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         enable_prefix_caching=cfg.generator.enable_prefix_caching,
         enforce_eager=cfg.generator.enforce_eager,
         max_model_len=cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length,
+        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
+        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         shared_pg=colocate_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
@@ -65,6 +68,8 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         engine_backend=cfg.generator.backend,
         tokenizer=tokenizer,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
     )
 
 
@@ -132,7 +137,7 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = 180) -> PlacementGroup:
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
         """Initializes a placement group for colocated training.
 
         A single placement group that packs all the inference engines together is created.
@@ -147,7 +152,8 @@ class BasePPOExp:
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
                 * self.cfg.generator.num_inference_engines
-                * self.cfg.generator.inference_engine_tensor_parallel_size,
+                * self.cfg.generator.inference_engine_tensor_parallel_size
+                * self.cfg.generator.inference_engine_data_parallel_size,
                 strategy="PACK",
             )
             get_ray_pg_ready_with_timeout(pg, timeout=timeout)
