@@ -1,18 +1,14 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen3-0.6B on GSM8K with Megatron.
+# Colocated GRPO training+generation for Qwen3-30B-A3B on GSM8K with Megatron.
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/training_backends/megatron/run_megatron_moonlight.sh
-
-# running moonlight16b
-# huggingface-cli download moonshotai/Moonlight-16B-A3B-Instruct --local-dir ~/moonlight16b
-# add "blobfile", to pyproject.toml
+# bash examples/training_backends/megatron/run_megatron_qwen3-30b-a3b.sh
 
 DATA_DIR="/mnt/cluster_storage/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
-MODEL_NAME="/home/ray/moonlight16b"
+MODEL_NAME="Qwen/Qwen3-30B-A3B"
 
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
@@ -30,7 +26,7 @@ INFERENCE_ENGINE_TP=8
 
 # flash attn is not supported for moonlight16b since it is a DeepSeekV3 like model, and uses Multi-Head Latent Attention (MLA)
 # https://github.com/NVIDIA/TransformerEngine/blob/483d9594fb070f62966f6a12ed6c90942310b48e/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L483
-FLASH_ATTN=false
+FLASH_ATTN=true
 
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -55,8 +51,6 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   megatron_config.policy.expert_tensor_parallel_size=$MEGATRON_ETP \
   megatron_config.ref.expert_model_parallel_size=$MEGATRON_EP \
   megatron_config.ref.expert_tensor_parallel_size=$MEGATRON_ETP \
-  +megatron_config.policy.transformer_config_kwargs.num_layers_in_last_pipeline_stage=13 \
-  +megatron_config.ref.transformer_config_kwargs.num_layers_in_last_pipeline_stage=13 \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
@@ -80,10 +74,10 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.6 \
+  generator.gpu_memory_utilization=0.85 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_moonlight16b-a3b" \
+  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_qwen3_30b_a3b" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@

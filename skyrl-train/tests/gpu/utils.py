@@ -353,6 +353,7 @@ def ray_init_for_tests():
     if not peer_access_supported(max_num_gpus_per_node=4):
         log_once("Disabling NCCL P2P for test environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
+    env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
     ray.init(runtime_env={"env_vars": env_vars})
 
 
