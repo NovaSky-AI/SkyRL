@@ -21,6 +21,3 @@ class Mnist(nnx.Module):
         x = nnx.relu(self.dropout2(self.linear1(x)))
         x = self.linear2(x)
         return x
-
-model = Mnist(rngs=nnx.Rngs(0))
-nnx.display(model)

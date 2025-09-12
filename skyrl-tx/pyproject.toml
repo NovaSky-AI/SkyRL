@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "xtrain"
 version = "0.0.1"
@@ -5,5 +9,16 @@ description = "Cross-platform neural network training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "datasets>=4.0.0",
     "flax>=0.11.2",
+    "optax>=0.2.5",
+    "pillow>=11.3.0",
+    "safetensors>=0.6.2",
+    "typer>=0.17.4",
 ]
+
+[tool.setuptools]
+include-package-data = true
+
+[project.scripts]
+xtrain = "xtrain.run.sft:app"
