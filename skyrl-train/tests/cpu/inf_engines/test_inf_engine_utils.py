@@ -1,5 +1,5 @@
 """
-Test for postprocess_completion_request function that postprocesses completion requests in inference engine client.
+Test for helper methods in `skyrl-train/skyrl_train/inference_engines/utils.py`.
 
 Run with:
 uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_utils.py

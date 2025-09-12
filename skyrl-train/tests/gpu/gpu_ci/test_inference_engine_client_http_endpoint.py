@@ -86,7 +86,6 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
     print_n = 5
     assert len(outputs) == num_samples
     print(f"First {print_n} generated responses out of {num_samples} using {test_type}:")
-    # print(f"outputs[0]: {outputs[0]}")
     for i, output in enumerate(outputs[:print_n]):
         print(f"{i}: {output['choices'][0]['message']['content'][:100]}...")
 
@@ -135,7 +134,6 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
     print_n = 5
     # Content checks
     print(f"First {print_n} generated responses out of {num_outputs} using completions:")
-    # print(f"outputs[0]: {outputs[0]}")
     # First flatten it output[i][choices] into a single list
     choice_list = [output["choices"] for output in outputs]
     choice_list = [item for sublist in choice_list for item in sublist]

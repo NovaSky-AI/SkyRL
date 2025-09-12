@@ -139,12 +139,15 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Handles an OpenAI /completions request.
 
-        Since `request.prompt` can be `Union[list[int], list[list[int]], str, list[str]]`,
+        Since `request["prompt"]` can be `Union[list[int], list[list[int]], str, list[str]]`,
         (i.e. {batched, single} x {string, token IDs}), we need to route the request to engines
-        differently, based on whether it's a single or batched request, and whether trajectory_id
+        differently, based on whether it's a single or batched request, and whether `request["trajectory_id"]`
         is provided. This is similar to `generate()` method.
+
         For single, we do the same routing logic as `chat_completion()`. For batched, we route by
-        trajectory_id if present, and if not we split evenly across engines.
+        `request["trajectory_id"]` if present, and if not we split evenly across engines.
+
+        Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
         """
         body = request_payload.get("json", {})
 
@@ -196,8 +199,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=f"In one of the engines that SkyRL manages, an error occurred: {result['error']['message']}",
-                        type=error_code,
-                        code=error_type,
+                        type=error_type,
+                        code=error_code,
                     ),
                 ).model_dump()
 

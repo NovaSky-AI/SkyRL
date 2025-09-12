@@ -228,7 +228,6 @@ def create_app() -> fastapi.FastAPI:
         allow_headers=["*"],
     )
 
-    # Chat completion endpoint
     @app.post("/v1/chat/completions")
     async def chat_completion(raw_request: Request):
         """
@@ -250,7 +249,6 @@ def create_app() -> fastapi.FastAPI:
         """
         return await handle_openai_request(raw_request, endpoint="/chat/completions")
 
-    # Text completion endpoint
     @app.post("/v1/completions")
     async def completions(raw_request: Request):
         """
@@ -258,16 +256,16 @@ def create_app() -> fastapi.FastAPI:
 
         Note that the specific fields inside the request and response depend on the backend you use.
         If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
-        SkyRL does not do any field checkings besides `model` and `trajectory_id` but instead offload
-        everything to the underlying engines.
+        SkyRL only validates the fields `model` and `trajectory_id`, and otherwise offloads
+        field validation to the underlying engines.
 
         Make sure you add in `trajectory_id` to ensure load balancing and sticky routing. Since
-        `request.prompt` can be `Union[list[int], list[list[int]], str, list[str]]`, i.e.
+        `request["prompt"]` can be `Union[list[int], list[list[int]], str, list[str]]`, i.e.
         {batched, single} x {string, token IDs}, we follow the following logic for request routing:
-        - If batched request, `trajectory_id`, if provided, must have the same length as `request.prompt`
-          so that each request.prompt[i] will be routed based on `trajectory_id[i]`.
-        - If single request, `trajectory_id`, if provided, must be a single integer or a singleton list.
-        Where each trajectory_id is a string or an integer.
+        - For batched request: `trajectory_id`, if provided, must have the same length as `request["prompt"]`
+          so that each `request["prompt"][i]` is routed based on `trajectory_id[i]`.
+        - For single request: `trajectory_id`, if provided, must be a single integer or a singleton
+          list, where each `trajectory_id` is a string or an integer.
 
         API reference:
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html

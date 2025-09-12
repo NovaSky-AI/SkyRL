@@ -69,7 +69,9 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             prompts=init_prompts, trajectory_ids=trajectory_ids, sampling_params=sampling_params
         )
 
-        # The only line different from SkyRLGymGenerator.generate_batched
+        # The only line different from SkyRLGymGenerator.generate_batched.
+        # Either use `/chat/completions` or `/completions`.
+
         # engine_output = await _generate_with_chat_completions_http_endpoint(self.base_url, self.model_name, engine_input)
         engine_output = await _generate_with_completions_http_endpoint(
             self.base_url, self.model_name, engine_input, self.tokenizer
