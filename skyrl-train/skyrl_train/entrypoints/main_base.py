@@ -213,7 +213,7 @@ class BasePPOExp:
         return Tracking(
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
-            default_backend=self.cfg.trainer.logger,
+            backends=self.cfg.trainer.logger,
             config=self.cfg,
         )
 
