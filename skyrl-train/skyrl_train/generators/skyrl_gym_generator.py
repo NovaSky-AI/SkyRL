@@ -62,6 +62,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(model_name)
         # get generation prompt ids for the tokenizer if needed
@@ -174,23 +175,16 @@ class SkyRLGymGenerator(GeneratorInterface):
         per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
 
         while not done:
-            updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
-            updated_sampling_params["max_generate_length"] = min(
-                max_tokens, max_tokens + max_input_length - len(input_ids)
-            )
-            max_response_tokens = updated_sampling_params["max_generate_length"]
+            # 1. Generate output
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
+                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids],
-                    trajectory_ids=[trajectory_id],
-                    sampling_params=updated_sampling_params,
+                    prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
-
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
@@ -273,22 +267,23 @@ class SkyRLGymGenerator(GeneratorInterface):
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
-        if self.max_turns > 1:
-            max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-        else:
-            max_response_tokens = max_tokens
-
         if not self.use_conversation_multi_turn:
             # we might need to add the eos token to the response ids
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
 
-        # mask losses and response ids if they exceed max_response_tokens (final check for multiturn)
+        # need to truncate loss mask correctly for responses that go to max length
+        if self.max_turns > 1:
+            # max total resp length = max tokens (max length of final turn generation) + max_input_length (max input for any generation turn) - len(original prompt)
+            max_response_tokens = max_tokens + max_input_length - initial_prompt_length
+        else:
+            max_response_tokens = max_tokens
+
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
-            response_ids = response_ids[:max_response_tokens]
-            loss_mask = loss_mask[:max_response_tokens]
+        response_ids = response_ids[:max_response_tokens]
+        loss_mask = loss_mask[:max_response_tokens]
 
         # Build reward output
         if retokenize_chat_history:
