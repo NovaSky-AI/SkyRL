@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "mini-swe-agent"
-version = "1.11.1"
+version = "1.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -1946,9 +1946,9 @@ dependencies = [
     { name = "textual" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4e/02/45a9743c5f1276effc1ab90ac773375b8bb64f61ba6c2d1610cf4c920986/mini_swe_agent-1.11.1.tar.gz", hash = "sha256:2eb99cce5e66813b2997d748a60012fdecd341f8b42b7b63508e9f1768a65468", size = 46171, upload-time = "2025-09-10T16:40:46.925Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/6a/d73526992260dd9d1fc19981b8c3a01171a634dbbd3bf9a1fec21112d522/mini_swe_agent-1.12.0.tar.gz", hash = "sha256:703577a95f3ed78256bf30c93d431886e8a172cb363c9806bdae4785000acb2e", size = 46247, upload-time = "2025-09-16T14:21:33.056Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/de/91/30c5a2da924a16aeab12714221d3cf9e3cf2bec1c832a71d92ea895929d1/mini_swe_agent-1.11.1-py3-none-any.whl", hash = "sha256:1e4b20f81317954545a6f893bbcc16d170f0fc2cb4731f4b01690a85a54e99f9", size = 70437, upload-time = "2025-09-10T16:40:45.529Z" },
+    { url = "https://files.pythonhosted.org/packages/02/6d/f5e61f33b99f45ca9af9c15ebfa0b8d7ee243575125682240f1d0e6a3627/mini_swe_agent-1.12.0-py3-none-any.whl", hash = "sha256:b54aeec3b2e911114abbe7d2e2ae7d93ea23b5e181bd3991164abfb89c9829e8", size = 70530, upload-time = "2025-09-16T14:21:31.317Z" },
 ]
 
 [[package]]
@@ -3875,7 +3875,7 @@ requires-dist = [
     { name = "loguru" },
     { name = "mbridge", marker = "extra == 'mcore'", specifier = "==0.13.0" },
     { name = "megatron-core", marker = "extra == 'mcore'", git = "https://github.com/NVIDIA/Megatron-LM.git?rev=core_r0.13.0" },
-    { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.11.1" },
+    { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
     { name = "omegaconf" },
     { name = "peft" },
