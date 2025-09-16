@@ -95,6 +95,7 @@ def mock_generator_cfg():
     cfg.max_input_length = 512
     cfg.batched = True
     cfg.max_turns = 1
+    cfg.chat_template = {"source": "name", "name_or_path": "qwen3_without_thinking"}
     return cfg
 
 
