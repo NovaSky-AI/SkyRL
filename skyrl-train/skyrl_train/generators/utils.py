@@ -5,7 +5,7 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
 
 CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 that preserves thinking tokens (trains on all tokens)
+    # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
@@ -18,7 +18,7 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
-    # chat template for qwen3 that removes thinking tokens (masks them during training)
+    # chat template for qwen3 that removes all but last thinking tokens
     "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
