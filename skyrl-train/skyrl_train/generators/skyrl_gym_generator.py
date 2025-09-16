@@ -63,7 +63,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-        self.max_model_length = self._get_max_model_length()
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
@@ -185,12 +184,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
-            current_context_length = len(input_ids)
             updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
-            available_context = self.max_model_length - current_context_length
-            default_context = updated_sampling_params.get("max_generate_length", max_tokens)
-            updated_sampling_params["max_generate_length"] = min(available_context, default_context)
-            
+            updated_sampling_params["max_generate_length"] = min(max_tokens, max_tokens + max_input_length - len(input_ids))
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
@@ -526,19 +521,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 else:
                     rewards[i] = 0.0
         return rewards
-
-    # ----------------------------------------------------------------------------
-    # Helper methods
-    # ----------------------------------------------------------------------------
-    def _get_max_model_length(self) -> int:
-        if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length is not None:
-            return self.tokenizer.model_max_length
-        
-        if hasattr(self.tokenizer, 'init_kwargs') and 'model_max_length' in self.tokenizer.init_kwargs:
-            return self.tokenizer.init_kwargs['model_max_length']
-        
-        logger.warning("Could not determine model's maximum context length, using default of 2048")
-        return 2048
         
     # ----------------------------------------------------------------------------
     # Three methods of managing chat history and input ids in `agent_loop()`
