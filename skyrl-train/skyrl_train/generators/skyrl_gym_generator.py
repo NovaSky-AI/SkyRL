@@ -175,11 +175,13 @@ class SkyRLGymGenerator(GeneratorInterface):
         per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
 
         while not done:
-            # 1. Generate output
-            input_length = initial_prompt_length if not retokenize_chat_history else len(chat_history)
+            current_context_length = len(input_ids)
             updated_sampling_params = sampling_params.copy()
-            available_context, default_context = self.max_model_length - input_length, updated_sampling_params.get("max_generate_length", max_tokens)
-            updated_sampling_params["max_generate_length"] = min(available_context, default_context)
+            if updated_sampling_params is not None:
+                available_context, default_context = self.max_model_length - current_context_length, updated_sampling_params.get("max_generate_length", max_tokens)
+                updated_sampling_params["max_generate_length"] = min(available_context, default_context)
+            else:
+                updated_sampling_params["max_generate_length"] = max_tokens
 
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
