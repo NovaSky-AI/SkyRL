@@ -18,7 +18,6 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
-    # chat template for qwen3 that removes all but last thinking tokens
     "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
@@ -34,6 +33,7 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endif %}"
         "{{mycontent + '<|im_end|>'}}"
         "{% endgeneration %}"
+        "{{'\n'}}"
         "{% endif %}"
         "{% endfor %}"
     ),
@@ -59,7 +59,7 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
 
     name_or_path = chat_template_config.get("name_or_path")
     if not name_or_path:
-        raise ValueError("'name_or_path' is required in chat_template_config")
+        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
 
     if source == "name":
         if name_or_path in CUSTOM_CHAT_TEMPLATES:
