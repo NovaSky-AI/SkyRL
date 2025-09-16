@@ -12,7 +12,6 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.generators.utils import get_custom_chat_template
 
 
 # Setup for formatting tests
@@ -133,7 +132,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # check that the full response is exactly string matching with applying the chat template on history
     prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
     resp_str = tokenizer.decode(generator_output["response_ids"][0])
-    
+
     custom_chat_template = generator.custom_chat_template
     if custom_chat_template is not None:
         assert prompt_str + resp_str == tokenizer.apply_chat_template(

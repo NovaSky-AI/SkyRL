@@ -36,23 +36,23 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endgeneration %}"
         "{% endif %}"
         "{% endfor %}"
-    )
+    ),
 }
 
 
 def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Optional[str]:
     """
     Get custom chat template based on the new config structure.
-    
+
     Args:
         chat_template_config: Config dict with 'source' and 'name_or_path' fields.
-        
+
     Returns:
         Chat template string or None
     """
-    if chat_template_config is None: 
+    if chat_template_config is None:
         return None
-    
+
     source = chat_template_config.get("source")
     if not source:
         raise ValueError("'source' is required in chat_template_config")
@@ -65,17 +65,19 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
         if name_or_path in CUSTOM_CHAT_TEMPLATES:
             return CUSTOM_CHAT_TEMPLATES[name_or_path]
         else:
-            raise ValueError(f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}")
-    
+            raise ValueError(
+                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
+            )
+
     if source == "file":
         try:
-            with open(name_or_path, 'r', encoding='utf-8') as f:
+            with open(name_or_path, "r", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             raise ValueError(f"Template file '{name_or_path}' not found")
         except Exception as e:
             raise ValueError(f"Error reading template file '{name_or_path}': {e}")
-    
+
     raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
