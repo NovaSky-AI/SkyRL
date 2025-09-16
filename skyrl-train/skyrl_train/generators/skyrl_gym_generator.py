@@ -176,13 +176,11 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not done:
             current_context_length = len(input_ids)
-            updated_sampling_params = sampling_params.copy()
-            if updated_sampling_params is not None:
-                available_context, default_context = self.max_model_length - current_context_length, updated_sampling_params.get("max_generate_length", max_tokens)
-                updated_sampling_params["max_generate_length"] = min(available_context, default_context)
-            else:
-                updated_sampling_params["max_generate_length"] = max_tokens
-
+            updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
+            available_context = self.max_model_length - current_context_length
+            default_context = updated_sampling_params.get("max_generate_length", max_tokens)
+            updated_sampling_params["max_generate_length"] = min(available_context, default_context)
+            
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
@@ -497,7 +495,7 @@ class SkyRLGymGenerator(GeneratorInterface):
     # ----------------------------------------------------------------------------
     # Helper methods
     # ----------------------------------------------------------------------------
-    def _get_model_max_length(self) -> int:
+    def _get_max_model_length(self) -> int:
         if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length is not None:
             return self.tokenizer.model_max_length
         
