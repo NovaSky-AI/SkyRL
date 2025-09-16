@@ -175,9 +175,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not done:
             updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
-            updated_sampling_params["max_generate_length"] = min(
-                max_tokens, max_tokens + max_input_length - len(input_ids)
-            )
+            updated_sampling_params["max_generate_length"] = min(max_tokens, max_input_length - len(input_ids))
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
@@ -278,18 +276,18 @@ class SkyRLGymGenerator(GeneratorInterface):
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
 
-        # # need to truncate loss mask correctly for responses that go to max length
-        # if self.max_turns > 1:
-        #     # max total resp length = max tokens (max length of final turn generation) + max_input_length (max input for any generation turn) - len(original prompt)
-        #     max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-        # else:
-        #     max_response_tokens = max_tokens
+        if self.max_turns > 1:
+            max_response_tokens = max_tokens + max_input_length - initial_prompt_length
+        else:
+            max_response_tokens = max_tokens
 
-        # if len(response_ids) > max_response_tokens:
-        #     stop_reason = "length"
-        # max_response_tokens = min(max_response_tokens, self.max_model_length)
-        # response_ids = response_ids[:max_response_tokens]
-        # loss_mask = loss_mask[:max_response_tokens]
+        if len(response_ids) > max_response_tokens:
+            stop_reason = "length"
+
+        # mask losses and response_ids
+        max_response_tokens = min(max_response_tokens, max_tokens)
+        response_ids = response_ids[:max_response_tokens]
+        loss_mask = loss_mask[:max_response_tokens]
 
         # Build reward output
         if retokenize_chat_history:
