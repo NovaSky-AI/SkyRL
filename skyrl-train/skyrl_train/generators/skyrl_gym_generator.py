@@ -175,7 +175,9 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         while not done:
             updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
-            updated_sampling_params["max_generate_length"] = min(max_tokens, max_tokens + max_input_length - len(input_ids))
+            updated_sampling_params["max_generate_length"] = min(
+                max_tokens, max_tokens + max_input_length - len(input_ids)
+            )
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
@@ -183,7 +185,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
+                    prompt_token_ids=[input_ids],
+                    trajectory_ids=[trajectory_id],
+                    sampling_params=updated_sampling_params,
                 )
 
             engine_output = await self.inference_engine_client.generate(engine_input)
@@ -486,7 +490,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 else:
                     rewards[i] = 0.0
         return rewards
-        
+
     # ----------------------------------------------------------------------------
     # Three methods of managing chat history and input ids in `agent_loop()`
     # ----------------------------------------------------------------------------
