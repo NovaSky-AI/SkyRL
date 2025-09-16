@@ -143,7 +143,7 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, cfg=None
+    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
@@ -152,7 +152,7 @@ def init_worker_with_type(
         pg = shared_pg
         num_gpus_per_actor = 0.2
     else:
-        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}]
+        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
         pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         num_gpus_per_actor = 0.75
@@ -160,7 +160,7 @@ def init_worker_with_type(
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
         cfg,
-        num_nodes=1,  # single node for testing
+        num_nodes=num_nodes,
         num_gpus_per_node=num_gpus_per_node,
         ray_actor_type=worker_cls,
         pg=pg,

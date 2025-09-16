@@ -64,7 +64,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     """
     import pickle
     with open("/mnt/cluster_storage/qwen3-30b_gsm8k_batch.pkl", "rb") as f:
-        data = pickle.load(f)
+        data = pickle.load(f)[:128]
     # assert batch_size % 4 == 0, "batch size must be divisible by 4"
     # num_repeats = batch_size // 4
     # tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -278,12 +278,14 @@ async def test_megatron_forward(
         ("policy", 2, 2, 1, 1, 1, 4, False),
         ("policy", 2, 2, 2, 1, 1, 8, True),
         ("policy", 1, 1, 1, 8, 1, 8, True),
+        ("policy", 2, 1, 1, 1, 1, 8, True),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
         "tp2_pp2_policy_unpacked",
         "tp2_pp2_cp2_policy_seq_packing",
         "tp4_pp2_cp1_ep4_etp1_policy_seq_packing",
+        "x"
     ],
 )
 async def test_megatron_train(
@@ -296,6 +298,7 @@ async def test_megatron_train(
     batch = get_test_training_batch(batch_size=gpus_per_node)
 
     cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_nodes = 2 # temp for testing 2 node throughput
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
@@ -308,19 +311,24 @@ async def test_megatron_train(
     cfg.trainer.train_batch_size = 128
     cfg.trainer.policy_mini_batch_size = 64
     cfg.generator.n_samples_per_prompt = 1
-    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.micro_train_batch_size_per_gpu = 8
+    
 
     actor_group = init_worker_with_type(
         "policy",
         shared_pg=None,
         colocate_all=False,
+        num_nodes=cfg.trainer.placement.policy_num_nodes,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,
     )
 
     # call ppo_train with a batch of size 4 per gpu
-    batch.metadata["global_step"] = 0
-    results_megatron = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
+    from tests.gpu.utils import Timer
+
+    with Timer(f"megatron training step tp{tp} pp{pp} cp{cp} ep{ep} etp{etp}"):
+        batch.metadata["global_step"] = 0
+        results_megatron = ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", batch))
     results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
 
     memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
