@@ -172,6 +172,7 @@ class WorkerWrap:
 
         weight_list = []
         for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
+            print(shape)
 
             dtype = str_to_torch_dtype(dtype)
             device = torch.cuda.current_device()
@@ -195,6 +196,42 @@ class WorkerWrap:
 
         for weight in weight_list:
             del weight
+
+    def update_weights_from_gpu_tensors(
+        self, names: List[str], dtypes: List[str], tensors: List[torch.Tensor]
+    ):
+        print(f"loc16: update_weights_from_gpu_tensors in vllm_engine")
+        weight_list = []
+        for name, dtype, tensor in zip(names, dtypes, tensors):
+            print(tensor.shape)
+
+            dtype = str_to_torch_dtype(dtype)
+            device = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(device)
+            physical_gpu_id = str(props.uuid)
+
+            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+
+            weight = tensor.to("cuda")
+            weight_list.append((name, weight))
+
+        self.model_runner.model.load_weights(weights=weight_list)
+        print(f"loc17: finished loading weights")
+
+        for weight in weight_list:
+            del weight
+
+        # weight_list = []
+        # for name, dtype_str, incoming_tensor in zip(names, dtypes, tensors):
+        #     expected_dtype = str_to_torch_dtype(dtype_str)
+        #     assert expected_dtype == self.model_config.dtype, (
+        #         f"mismatch dtype: src {expected_dtype}, dst {self.model_config.dtype}"
+        #     )
+        #     weight_list.append((name, incoming_tensor))
+
+        # self.model_runner.model.load_weights(weights=weight_list)
+        # for weight in weight_list:
+        #     del weight
 
     # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
     def destroy_weights_update_group(self):
@@ -289,6 +326,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
+    def get_gpu_uuid(self) -> str:
+        device = torch.cuda.current_device()
+        return str(torch.cuda.get_device_properties(device).uuid)
+
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
@@ -354,6 +395,18 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             return await asyncio.to_thread(
                 engine.collective_rpc, "update_weights", args=(request["names"], request["dtypes"], request["shapes"])
             )
+
+    @ray.method(tensor_transport="nccl")
+    async def update_named_weights_gpu(self, export_ref):
+        print(f"loc17: update_named_weights_gpu in vllm_engine")
+        # export_ref arrives as the reconstructed dict; no awaiting needed
+        request = export_ref
+        engine = self._get_engine()
+        return await asyncio.to_thread(
+            engine.collective_rpc,
+            "update_weights_from_gpu_tensors",
+            args=(request["names"], request["dtypes"], request["tensors"]),
+        )
 
     async def teardown(self):
         await self._destroy_weights_update_group()
@@ -499,6 +552,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             if inspect.isawaitable(result):
                 return await result
             return result
+
+    @ray.method(tensor_transport="nccl")
+    async def update_named_weights_gpu(self, request):
+        engine = self._get_engine()
+        return await asyncio.to_thread(
+            engine.collective_rpc,
+            "update_weights_from_gpu_tensors",
+            args=(request["names"], request["dtypes"], request["tensors"]),
+        )
 
     async def teardown(self):
         await self._destroy_weights_update_group()

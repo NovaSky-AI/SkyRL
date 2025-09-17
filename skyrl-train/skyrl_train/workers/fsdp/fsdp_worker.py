@@ -28,6 +28,10 @@ from skyrl_train.workers.worker import (
 
 
 class FSDPPolicyRayActorBase(PolicyWorkerBase):
+    def get_gpu_uuid(self) -> str:
+        device = torch.cuda.current_device()
+        return str(torch.cuda.get_device_properties(device).uuid)
+        
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, self.optimizer, pin_memory, non_blocking)
@@ -253,6 +257,42 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         torch.cuda.empty_cache()
         torch.distributed.barrier()
 
+    @ray.method(tensor_transport="nccl")
+    def get_named_weights_gpu(self) -> Dict[str, List]:
+        print(f"loc14: get_named_weights_gpu in fsdp_worker")
+        generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
+        if fsdp_version(self.model.model) == 1:
+            FSDP.set_state_dict_type(
+                self.model.model,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
+        params = self.model.model.state_dict()
+
+        weights_update_request = {"names": [], "dtypes": [], "tensors": []}
+        module_to_params: Dict[str, List[str]] = {}
+        for param_name, param in params.items():
+            module_name = ".".join(param_name.split(".")[:-2])
+            if module_name not in module_to_params:
+                module_to_params[module_name] = [param_name]
+            else:
+                module_to_params[module_name].append(param_name)
+
+        for module_name, param_names in module_to_params.items():
+            for i, name in enumerate(param_names):
+                param = params[name]
+                module_done = i == len(param_names) - 1
+                
+                device = torch.cuda.current_device()
+                param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                param = param.to(generator_dtype)
+                weight = param.detach().contiguous()
+                weights_update_request["names"].append(name)
+                weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                weights_update_request["tensors"].append(weight)
+
+        return weights_update_request
+    
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
         raise NotImplementedError()

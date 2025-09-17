@@ -11,7 +11,7 @@ import asyncio
 import ray
 import hydra
 from omegaconf import DictConfig
-
+from collections import defaultdict
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
@@ -103,6 +103,43 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
             num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
             cfg=cfg,
         )
+
+        # gpu_to_actor = defaultdict(list)
+        # # Query GPU UUIDs via remote methods
+        # actor_gpu_uuids = ray.get([a.get_gpu_uuid.remote() for a in policy._actor_handlers])
+        # actor_list = []
+        # for a, uuid in zip(policy._actor_handlers, actor_gpu_uuids):
+        #     gpu_to_actor[uuid].append(a)
+        #     actor_list.append(a)
+        # engine_gpu_uuids = ray.get([e.inference_engine_actor.get_gpu_uuid.remote() for e in client.engines])
+        # inference_engine_actor_list = []
+        # for e, uuid in zip(client.engines, engine_gpu_uuids):
+        #     gpu_to_actor[uuid].append(e.inference_engine_actor)
+        #     actor_list.append(e.inference_engine_actor)
+        #     inference_engine_actor_list.append(e.inference_engine_actor)
+        # print(f"gpu_to_actor: {gpu_to_actor}")
+
+        # create_collective_group(actor_list, backend="nccl")
+
+        # weights_update_refs = []
+        # for policy_actor in policy._actor_handlers:
+        #     weights_req_ref = policy_actor.get_named_weights_gpu.remote()
+        #     # possible deadlock here if you ray.get(ref), all the actors need to get_named_weights_gpu so
+        #     # DTensor can be combined
+        #     weights_update_refs.append(weights_req_ref)
+
+        # output_refs = []
+        # for weights_req_ref in weights_update_refs:
+        #     print(f"in loop")
+        #     for inference_engine_actor in inference_engine_actor_list:
+        #         print(f"loc15: updating weights for inference engine actor {inference_engine_actor}")
+        #         ref = inference_engine_actor.update_named_weights_gpu.remote(weights_req_ref)
+        #         output_refs.append(ref)
+        #     break
+
+        # output = ray.get(output_refs)
+        # print(f"output: {output}")
+
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
