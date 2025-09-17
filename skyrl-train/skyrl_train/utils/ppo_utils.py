@@ -469,6 +469,28 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     _actor_name = "policy_loss_registry"
     _function_type = "policy loss"
 
+    @classmethod
+    def _ensure_builtin_functions(cls):
+        # TODO: this is a hack to ensure that the builtin functions are registered in the local registry, we should find a better way to do this
+        builtin_functions = ["regular", "dual_clip", "gspo", "clip_cov", "kl_cov"]
+        missing_functions = [name for name in builtin_functions if name not in cls._functions]
+        
+        if missing_functions:
+            import sys
+            current_module = sys.modules[__name__]
+            function_map = {
+                "regular": getattr(current_module, "ppo_policy_loss", None),
+                "dual_clip": getattr(current_module, "ppo_policy_loss", None),
+                "gspo": getattr(current_module, "gspo_policy_loss", None),
+                "clip_cov": getattr(current_module, "compute_policy_loss_clip_cov", None),
+                "kl_cov": getattr(current_module, "compute_policy_loss_kl_cov", None),
+            }
+            
+            for name in missing_functions:
+                func = function_map.get(name)
+                if func:
+                    cls._functions[name] = func
+
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
     """Decorator to register an advantage estimator function."""

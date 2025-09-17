@@ -148,7 +148,7 @@ def validate_megatron_cfg(cfg: DictConfig):
 
 def validate_cfg(cfg: DictConfig):
     from skyrl_train.utils import ppo_utils #TODO: explicit import to register all loss functions
-
+    PolicyLossRegistry._ensure_builtin_functions()
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
