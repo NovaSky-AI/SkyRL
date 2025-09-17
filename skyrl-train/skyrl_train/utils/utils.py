@@ -147,6 +147,8 @@ def validate_megatron_cfg(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
+    from skyrl_train.utils import ppo_utils #TODO: explicit import to register all loss functions
+
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -213,6 +215,7 @@ def validate_cfg(cfg: DictConfig):
             # for local engines or sglang, we disable
             cfg.generator.override_existing_update_group = "disable"
 
+    
     assert (
         cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
     ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
