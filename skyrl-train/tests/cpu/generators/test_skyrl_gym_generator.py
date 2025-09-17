@@ -102,7 +102,7 @@ def mock_generator_cfg():
     cfg.max_input_length = 512
     cfg.batched = True
     cfg.max_turns = 1
-    cfg.chat_template = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+    cfg.chat_template = {"source": "name", "name_or_path": None}
     return cfg
 
 
@@ -111,7 +111,7 @@ def mock_env_cfg():
     cfg = MagicMock()
     cfg.max_env_workers = 0
     cfg.env_class = "gsm8k"
-    cfg.get.return_value = MagicMock()
+    # cfg.get.return_value = MagicMock()
     return cfg
 
 
@@ -953,7 +953,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
-    cfg.chat_template = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+    cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -985,8 +985,11 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     """use_conversation_multi_turn=True; verify rewards placed at ends of assistant segments before observations."""
     mock_tokenizer.eos_token_id = 4
 
+    # Tokenizer: initial prompt -> 2 tokens; observation template -> 2 tokens each call
+
     def apply_chat_template_side_effect(messages, **kwargs):
         if kwargs.get("tokenize", True):
+            # For observations path, generator passes [*base_conversation, *new_obs] with add_generation_prompt=True
             return [201, 202]
         else:
             return "".join([m.get("content", "") for m in messages])
@@ -1132,7 +1135,10 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.chat_template = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+    cfg.chat_template = {
+        "source": "name",
+        "name_or_path": "qwen3_without_thinking",
+    }  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -1210,7 +1216,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     cfg.max_turns = 1
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
-    cfg.chat_template = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+    cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,

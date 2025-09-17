@@ -195,10 +195,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
 
 def test_qwen3_original_vs_without_thinking_chat_template():
-    """
-    Test comparing original Qwen3 chat template with qwen3_without_thinking.
-    Explains why we deleted the '\\n' - to match the tokenizer's actual behavior.
-    """
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
 
     messages = [

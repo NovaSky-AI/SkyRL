@@ -15,6 +15,7 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% generation %}"
         "{{message['content'] + '<|im_end|>'}}"
         "{% endgeneration %}"
+        "{{'\n'}}"
         "{% endif %}"
         "{% endfor %}"
     ),
