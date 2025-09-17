@@ -278,7 +278,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
-        await asyncio.to_thread(self.llm.sleep, level=kwargs.get("level", 1))
+        await asyncio.to_thread(self.llm.sleep, level=kwargs.get("level", 2))
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
@@ -401,7 +401,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
         await self.reset_prefix_cache()
-        await self.llm.sleep(level=kwargs.get("level", 1))
+        await self.llm.sleep(level=kwargs.get("level", 2))
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
