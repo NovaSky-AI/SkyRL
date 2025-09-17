@@ -34,8 +34,8 @@ def mock_tokenizer():
             if kwargs.get("return_dict", False):
                 # Return dictionary format for retokenization path
                 return {
-                    "input_ids": MOCK_TOKENIZER_ENCODED_IDS.copy(),
-                    "assistant_masks": [1] * len(MOCK_TOKENIZER_ENCODED_IDS),
+                    "input_ids": MOCK_LLM_OUTPUT_IDS.copy(),
+                    "assistant_masks": [1] * len(MOCK_LLM_OUTPUT_IDS),
                 }
             # Non-dict return
             if isinstance(x, list) and len(x) > 0 and isinstance(x[0], list):
@@ -111,6 +111,7 @@ def mock_env_cfg():
     cfg = MagicMock()
     cfg.max_env_workers = 0
     cfg.env_class = "gsm8k"
+    cfg.get.return_value = MagicMock()
     return cfg
 
 
