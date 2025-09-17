@@ -461,6 +461,7 @@ async def test_length_limit_exceeded_during_conversation(
     mock_generator_cfg.batched = False  # Use agent_loop mode
     mock_generator_cfg.max_turns = 5  # Allow multiple turns
     mock_generator_cfg.use_conversation_multi_turn = True
+    mock_generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to never set done=True naturally (we want to hit length limit)
@@ -545,6 +546,7 @@ async def test_multi_turn_response_truncation(
     mock_generator_cfg.max_turns = 3  # Ensure multi-turn logic is triggered
     mock_generator_cfg.batched = False  # Test is for agent_loop
     mock_generator_cfg.use_conversation_multi_turn = True
+    mock_generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to run for multiple turns to generate enough tokens for truncation
@@ -632,6 +634,8 @@ async def test_postprocessed_action_used(
     mock_make.return_value = mock_env
     mock_generator_cfg.max_turns = 1  # Single turn
     mock_generator_cfg.batched = False
+    # Override to avoid retokenization path for this test
+    mock_generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     postprocessed_response = "This is a clean response."
@@ -981,10 +985,8 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     """use_conversation_multi_turn=True; verify rewards placed at ends of assistant segments before observations."""
     mock_tokenizer.eos_token_id = 4
 
-    # Tokenizer: initial prompt -> 2 tokens; observation template -> 2 tokens each call
     def apply_chat_template_side_effect(messages, **kwargs):
         if kwargs.get("tokenize", True):
-            # For observations path, generator passes [*base_conversation, *new_obs] with add_generation_prompt=True
             return [201, 202]
         else:
             return "".join([m.get("content", "") for m in messages])
@@ -1037,7 +1039,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.chat_template = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+    cfg.chat_template = {"source": "name", "name_or_path": None}
 
     mock_env_cfg.env_class = "mt_env"
 
