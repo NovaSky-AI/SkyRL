@@ -68,17 +68,16 @@ def get_custom_chat_template(chat_template_config: Optional[dict] = None) -> Opt
             raise ValueError(
                 f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
             )
-
-    if source == "file":
+    elif source == "file":
         try:
             with open(name_or_path, "r", encoding="utf-8") as f:
                 return f.read()
-        except FileNotFoundError:
-            raise ValueError(f"Template file '{name_or_path}' not found")
-        except Exception as e:
-            raise ValueError(f"Error reading template file '{name_or_path}': {e}")
-
-    raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
+        except FileNotFoundError as e:
+            raise ValueError(f"Template file '{name_or_path}' not found") from e
+        except OSError as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
