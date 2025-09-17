@@ -147,8 +147,6 @@ def validate_megatron_cfg(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
-    from skyrl_train.utils import ppo_utils #TODO: explicit import to register all loss functions
-    PolicyLossRegistry._ensure_builtin_functions()
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
@@ -215,14 +213,20 @@ def validate_cfg(cfg: DictConfig):
             # for local engines or sglang, we disable
             cfg.generator.override_existing_update_group = "disable"
 
+    # Ensure the policy loss registry is populated by importing the module directly
+    from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
+    
+    available_policy_losses = PolicyLossRegistry.list_available()
+    assert available_policy_losses != [], "Policy loss registry is not populated."
     
     assert (
-        cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
-    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
+        cfg.trainer.algorithm.policy_loss_type in available_policy_losses
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
 
+    available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
     assert (
-        cfg.trainer.algorithm.advantage_estimator in AdvantageEstimatorRegistry.list_available()
-    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {AdvantageEstimatorRegistry.list_available()}"
+        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
+    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
