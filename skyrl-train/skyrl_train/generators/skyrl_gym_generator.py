@@ -292,8 +292,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
             for step_reward, idx in per_step_rewards:
-                if step_reward is None:
-                    continue
                 if idx >= len(response_ids):
                     break
                 token_level_rewards[idx] += step_reward
