@@ -263,7 +263,7 @@ Reference Model Configuration
     ref:
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
-        cpu_offload: true
+        cpu_offload: false
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
