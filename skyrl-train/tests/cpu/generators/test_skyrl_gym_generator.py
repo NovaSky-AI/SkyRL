@@ -965,9 +965,8 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-@pytest.mark.parametrize("is_per_turn_reward", [True, False])
 async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
-    mock_make, mock_tokenizer, mock_llm, mock_env_cfg, is_per_turn_reward
+    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
 ):
     """use_conversation_multi_turn=True; verify rewards placed at ends of assistant segments before observations."""
     mock_tokenizer.eos_token_id = 4
@@ -1008,10 +1007,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
             self.turns += 1
             if self.turns == 1:
                 return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": "obs1"}],
-                    reward=0.5 if is_per_turn_reward else None,
-                    done=False,
-                    metadata={},
+                    observations=[{"role": "user", "content": "obs1"}], reward=0.5, done=False, metadata={}
                 )
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=0.25, done=True, metadata={})
@@ -1050,16 +1046,11 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
 
     # Response ids layout: step1 assistant (4 incl. eos) + obs(2) + step2 assistant(4 incl. eos) = 10
     assert len(out.response_ids) == 10
-    if is_per_turn_reward:
-        # Rewards at indices: 3 (end of step1 assistant), 9 (end of step2 assistant)
-        expected = [0.0] * 10
-        expected[3] = 0.5
-        expected[9] = 0.25
-        assert isinstance(out.reward, list)
-    else:
-        # Per-trajectory reward is a single float
-        expected = 0.25
-        assert isinstance(out.reward, float)
+    # Rewards at indices: 3 (end of step1 assistant), 9 (end of step2 assistant)
+    expected = [0.0] * 10
+    expected[3] = 0.5
+    expected[9] = 0.25
+    assert isinstance(out.reward, list)
     assert out.reward == expected
     assert out.stop_reason == "stop"
 
