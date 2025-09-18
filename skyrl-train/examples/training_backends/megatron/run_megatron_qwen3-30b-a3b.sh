@@ -23,9 +23,6 @@ MEGATRON_ETP=1
 
 NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TP=8
-
-# flash attn is not supported for moonlight16b since it is a DeepSeekV3 like model, and uses Multi-Head Latent Attention (MLA)
-# https://github.com/NVIDIA/TransformerEngine/blob/483d9594fb070f62966f6a12ed6c90942310b48e/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L483
 FLASH_ATTN=true
 
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \

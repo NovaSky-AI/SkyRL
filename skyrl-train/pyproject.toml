@@ -128,7 +128,6 @@ mcore = [
   "mbridge==0.13.1",
   "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
   #"transformer-engine[pytorch]==2.5.0",
-  "blobfile",
 ]
 flashrl = [
     # TODO (sumanthrh): Shift to install from git source
