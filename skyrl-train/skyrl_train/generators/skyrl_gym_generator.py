@@ -172,7 +172,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
+        per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
             # 1. Generate output
@@ -207,7 +207,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
-            step_reward: Optional[float] = env_step_output["reward"]
+            step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
 
             if env_step_output.get("postprocessed_action", None) is not None:
