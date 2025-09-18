@@ -10,7 +10,7 @@ set -x
 MODEL_NAME="Qwen/Qwen3-30B-A3B"
 
 DATA_DIR="/mnt/cluster_storage/searchR1" # save to shared storage across nodes or use local storage on each node
-NUM_NODES=2
+NUM_NODES=4
 NUM_GPUS_PER_NODE=8
 
 MEGATRON_TP=2
@@ -19,8 +19,11 @@ MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
 
-NUM_INFERENCE_ENGINES=2
-INFERENCE_ENGINE_TP=8
+MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
+MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
+
+NUM_INFERENCE_ENGINES=8
+INFERENCE_ENGINE_TP=4
 
 
 uv run --isolated --frozen --extra mcore --extra vllm -m skyrl_train.entrypoints.main_base \
@@ -54,13 +57,13 @@ uv run --isolated --frozen --extra mcore --extra vllm -m skyrl_train.entrypoints
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.gpu_memory_utilization=0.5 \
+  generator.gpu_memory_utilization=0.7 \
   trainer.epochs=1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=512 \
   trainer.policy_mini_batch_size=256 \
-  trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.micro_forward_batch_size_per_gpu=$MICRO_FORWARD_BATCH_SIZE_PER_GPU \
+  trainer.micro_train_batch_size_per_gpu=$MICRO_TRAIN_BATCH_SIZE_PER_GPU \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
   generator.sampling_params.max_generate_length=500 \
@@ -75,7 +78,7 @@ uv run --isolated --frozen --extra mcore --extra vllm -m skyrl_train.entrypoints
   environment.env_class="search" \
   environment.skyrl_gym.max_env_workers=16 \
   environment.skyrl_gym.search.log_requests=false \
-  environment.skyrl_gym.search.search_url="http://127.0.0.1:8000/retrieve" \
+  environment.skyrl_gym.search.search_url="http://172.25.102.175:8000/retrieve" \
   environment.skyrl_gym.search.topk=3 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
