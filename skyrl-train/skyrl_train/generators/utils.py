@@ -69,7 +69,7 @@ def get_metrics_from_generator_output(
     # TODO: We should make metrics customizable by the environment
     # map from the example's uid to each trajectory's reward on that same example
     uid_to_trajectory_rewards = defaultdict(list)
-    if rewards and isinstance(rewards[0], list):
+    if isinstance(rewards[0], list):
         assert all(
             isinstance(reward, list) for reward in rewards
         ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"

@@ -146,7 +146,7 @@ The final implementation is available in `examples/multiply/env.py <https://gith
 (Turn-level) Rewards And Metrics
 --------------------------------
 
-In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single reward for the entire trajectory.
+In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single signal for the entire trajectory.
 You can experiment with turn-level rewards by returning a reward for each turn that is not necessarily ``0.0``.
 
 When computing metrics for logging purposes:
@@ -156,8 +156,8 @@ When computing metrics for logging purposes:
 
 If you do not want to provide turn-level rewards, you can simply return ``0.0`` for all intermediate turns.
 
-Whether you provide turn-level rewards or per-trajectory rewards, the final rewards we use to train will be translated to per-token rewards.
-Say we have 3 turns and each turn has 4 response tokens. If the turn-level rewards are ``[1.0, 2.0, 3.0]``. Then the per-token rewards will be
+Whether you provide turn-level rewards or per-trajectory rewards, the final rewards used to train the model will be translated to per-token rewards.
+Say we have 3 turns and each turn has 4 response tokens. If the turn-level rewards are ``[1.0, 2.0, 3.0]``, then the per-token rewards will be:
 
 .. code-block:: python
 
@@ -167,7 +167,7 @@ Say we have 3 turns and each turn has 4 response tokens. If the turn-level rewar
       0.0, 0.0, 0.0, 3.0,
    ]
 
-If we only have a per-trajectory reward of ``1.0`` (i.e. intermediate turns' rewards are all ``0.0``), the per-token rewards will be
+If we only have a per-trajectory reward of ``1.0`` (i.e. intermediate turns' rewards are all ``0.0``), the per-token rewards will be:
 
 .. code-block:: python
 
