@@ -443,8 +443,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
         # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
         env_vars["NVTE_FUSED_ATTN"] = "0"
-        env_vars["NVTE_DEBUG"] = "1"
-        env_vars["NVTE_DEBUG_LEVEL"] = "2"
 
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
