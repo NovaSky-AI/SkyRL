@@ -56,7 +56,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         """
         envs = []
         init_prompts = []
-        trajectory_ids = []  # for load balancing
+        session_ids = []  # for load balancing
         counter = 0
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
             env_extra["max_turns"] = self.max_turns
@@ -65,12 +65,12 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             init_prompt, _ = env.init(prompt)
             init_prompts.append(init_prompt)
             envs.append(env)
-            trajectory_ids.append(counter)
+            session_ids.append(counter)
             counter += 1
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(
-            prompts=init_prompts, trajectory_ids=trajectory_ids, sampling_params=sampling_params
+            prompts=init_prompts, session_ids=session_ids, sampling_params=sampling_params
         )
 
         # The only line different from SkyRLGymGenerator.generate_batched.
@@ -141,10 +141,10 @@ async def _generate_with_chat_completions_http_endpoint(
     Equivalent to running `self.inference_engine_client.generate()`, but with the HTTP endpoint.
     """
     prompts = input_batch.get("prompts")
-    trajectory_ids = input_batch.get("trajectory_ids")
+    session_ids = input_batch.get("session_ids")
     sampling_params = input_batch.get("sampling_params")
-    if trajectory_ids is not None:
-        assert len(prompts) == len(trajectory_ids), "prompts and trajectory_ids must have the same length"
+    if session_ids is not None:
+        assert len(prompts) == len(session_ids), "prompts and session_ids must have the same length"
 
     # Use aiohttp session for direct HTTP requests
     conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)  # 0 = no limit; without conn, has 100
@@ -153,11 +153,11 @@ async def _generate_with_chat_completions_http_endpoint(
         output_tasks = []
 
         for i, prompt in enumerate(prompts):
-            trajectory_id = trajectory_ids[i] if trajectory_ids is not None else None
+            session_id = session_ids[i] if session_ids is not None else None
             payload = {
                 "model": model_name,
                 "messages": [{"role": m["role"], "content": m["content"]} for m in prompt],
-                "trajectory_id": trajectory_id,
+                "session_id": session_id,
                 **(sampling_params or {}),
             }
             output_tasks.append(session.post(f"{base_url}/v1/chat/completions", json=payload, headers=headers))
@@ -198,10 +198,10 @@ async def _generate_with_completions_http_endpoint(
     prompts = input_batch.get("prompts")
     # Since we are using /completions, we need to template the prompts ourselves
     prompts = [tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=False) for prompt in prompts]
-    trajectory_ids = input_batch.get("trajectory_ids")
+    session_ids = input_batch.get("session_ids")
     sampling_params = input_batch.get("sampling_params")
-    if trajectory_ids is not None:
-        assert len(prompts) == len(trajectory_ids), "prompts and trajectory_ids must have the same length"
+    if session_ids is not None:
+        assert len(prompts) == len(session_ids), "prompts and session_ids must have the same length"
 
     # Use aiohttp session for direct HTTP requests
     conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)  # 0 = no limit; without conn, has 100

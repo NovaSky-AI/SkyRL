@@ -6,7 +6,6 @@ from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
-import uuid
 import torch
 from loguru import logger
 from omegaconf import DictConfig
@@ -22,6 +21,9 @@ from skyrl_train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     GeneratorInterface,
+    TrajectoryID,
+    BatchMetadata,
+    TrainingPhase,
 )
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_train.dataset.preprocess import (
@@ -89,6 +91,7 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
+        self.global_step = 0
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -149,6 +152,7 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
+
         # 0. Make a copy of self.all_metrics (will restore at the end)
         # eval() might accidentally mutate `self.all_metrics` since it is mutated in
         # methods like `self.generate()`.
@@ -164,7 +168,7 @@ class RayPPOTrainer:
         for _, prompts in enumerate(self.eval_dataloader):
             pbar.update(1)
             generator_input, uids = self._prepare_generator_input(
-                self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
+                self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params, "eval"
             )
             generator_output: GeneratorOutput = await self.generate(generator_input)
             generator_outputs.append(generator_output)
@@ -222,7 +226,6 @@ class RayPPOTrainer:
         Main training loop for PPO
         """
 
-        self.global_step = 0
         self.weights_manager = InferenceWeightsManager(
             self.policy_model,
             self.inference_engine_client,
@@ -271,7 +274,10 @@ class RayPPOTrainer:
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
                     generator_input, uids = self._prepare_generator_input(
-                        self.cfg.generator.n_samples_per_prompt, rand_prompts, self.cfg.generator.sampling_params
+                        self.cfg.generator.n_samples_per_prompt,
+                        rand_prompts,
+                        self.cfg.generator.sampling_params,
+                        "train",
                     )
 
                     # if the inference engine is already active due to continuing sampling or eval, we don't want to trigger weight management
@@ -414,7 +420,11 @@ class RayPPOTrainer:
         return entries[: (len(entries) // dp_size) * dp_size]
 
     def _prepare_generator_input(
-        self, n_samples_per_prompt: int, rand_prompts: List[Any], sampling_params: Dict[str, Any]
+        self,
+        n_samples_per_prompt: int,
+        rand_prompts: List[Any],
+        sampling_params: Dict[str, Any],
+        training_phase: TrainingPhase,
     ) -> Tuple[GeneratorInput, List[str]]:
         """
         Replicate prompts if needed and generate uids.
@@ -436,15 +446,27 @@ class RayPPOTrainer:
             [],
         )
         request_sampling_params = get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
+
+        # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
+        trajectory_ids = []
+        uids = []
+        for prompt_idx, prompt in enumerate(rand_prompts):
+            uid: str = prompt["uid"]
+
+            # Create TrajectoryID for each repetition
+            for repetition_id in range(n_samples_per_prompt):
+                trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
+                uids.append(uid)
+
         generator_input: GeneratorInput = {
             "prompts": all_prompts,
             "env_classes": all_envs,
             "env_extras": env_extras,
             "sampling_params": request_sampling_params,
+            "trajectory_ids": trajectory_ids,
+            "batch_metadata": BatchMetadata(global_step=self.global_step, training_phase=training_phase),
         }
 
-        # uids for each sample - NOTE: we assume that generate returns samples in the same order as passed in
-        uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
         return generator_input, uids
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
@@ -747,6 +769,7 @@ class RayPPOTrainer:
             be awake (i.e. on GPU).
         - after calling this method, the same model placement still holds.
         """
+        # NOTE: we assume that .generate returns samples in the same order as passed in
         generator_output: GeneratorOutput = await self.generator.generate(input_batch)
 
         # add rollout metrics to self.all_metrics
