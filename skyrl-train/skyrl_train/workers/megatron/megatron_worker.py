@@ -60,6 +60,7 @@ class MegatronWorker:
         self.bridge = bridge
 
         self.hf_config = hf_config
+        self.strategy.hf_config = hf_config
         self.tf_config = tf_config
         self.tokenizer = tokenizer
 
@@ -123,6 +124,15 @@ class MegatronWorker:
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
         return output
+
+    def save_hf_model(self, export_dir: str, tokenizer):
+        # Save model to HuggingFace format
+        self.strategy.save_hf_model(
+            self.bridge,
+            self.model,
+            export_dir,
+            tokenizer=tokenizer,
+        )
 
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):

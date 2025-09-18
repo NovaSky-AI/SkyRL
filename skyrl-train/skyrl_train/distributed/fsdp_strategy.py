@@ -354,11 +354,10 @@ class FSDPStrategy(DistributedStrategy):
 
         return config_to_save
 
-    def save_ckpt(
+    def save_checkpoint(
         self,
         model,
         ckpt_dir,
-        global_step,
         node_local_rank,
         optimizer=None,
         scheduler=None,
@@ -427,7 +426,6 @@ class FSDPStrategy(DistributedStrategy):
                     "fsdp_strategy": self.fsdp_strategy,
                     "world_size": world_size,
                     "rank": rank,
-                    "global_step": global_step,
                     "rng": self.get_rng_state(),  # Add RNG state for reproducibility
                 }
 
@@ -441,7 +439,8 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             config_save_model = self._unwrap_model(model)
-            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
+            hf_dir = os.path.join(ckpt_dir, "huggingface")
+            self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
@@ -453,7 +452,7 @@ class FSDPStrategy(DistributedStrategy):
         torch.cuda.synchronize()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
-    def load_ckpt(
+    def load_checkpoint(
         self,
         model,
         ckpt_dir,
@@ -463,7 +462,6 @@ class FSDPStrategy(DistributedStrategy):
         load_module_strict=True,
         load_optimizer_states=True,
         load_lr_scheduler_states=True,
-        load_module_only=False,
     ):
         """Load model checkpoint for FSDP"""
         import warnings
@@ -507,7 +505,7 @@ class FSDPStrategy(DistributedStrategy):
             extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         optimizer_state_dict = {}
-        if optim_exists and load_optimizer_states and not load_module_only:
+        if optim_exists and load_optimizer_states:
             with io.open_file(optim_path, "rb") as f:
                 optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
@@ -527,12 +525,12 @@ class FSDPStrategy(DistributedStrategy):
                 self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
                 # Load optimizer state dict if optimizer object is provided and loading is requested
-                if optimizer is not None and load_optimizer_states and not load_module_only and optimizer_state_dict:
+                if optimizer is not None and load_optimizer_states and optimizer_state_dict:
                     optimizer.load_state_dict(optimizer_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
 
                 # Load scheduler state dict if scheduler object is provided and loading is requested
-                if scheduler is not None and load_lr_scheduler_states and not load_module_only:
+                if scheduler is not None and load_lr_scheduler_states:
                     scheduler.load_state_dict(lr_scheduler_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
 
@@ -551,7 +549,6 @@ class FSDPStrategy(DistributedStrategy):
             "fsdp_strategy": extra_state_dict.get("fsdp_strategy", self.fsdp_strategy),
             "world_size": extra_state_dict.get("world_size", world_size),
             "rank": extra_state_dict.get("rank", rank),
-            "global_step": extra_state_dict.get("global_step", 0),  # Include global_step in return
         }
 
         self.print(f"[rank-{rank}]: Checkpoint loaded successfully from {ckpt_dir}")
