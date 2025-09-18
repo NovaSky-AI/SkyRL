@@ -49,7 +49,7 @@ class SearchEnv(BaseTextEnv):
             return compute_score(chat_history_str, self.ground_truth)
         else:
             # No reward for intermediate steps for Search tasks
-            return 0.0
+            return 0
 
     def _is_done(self, action: str) -> bool:
         if self.turns >= self.max_turns:
