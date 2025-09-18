@@ -90,8 +90,8 @@ def get_metrics_from_generator_output(
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
     # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
-    # any of its trajectories' reward is positive (i.e. `np.sum(v) > 0`), pass@n for that uid is 1.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if np.sum(v) > 0) / len(uid_to_trajectory_rewards)
+    # any of its trajectories' reward is positive, pass@n for that uid is 1.
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(uid_to_trajectory_rewards)
 
     return mean_raw_reward, pass_at_n
 
