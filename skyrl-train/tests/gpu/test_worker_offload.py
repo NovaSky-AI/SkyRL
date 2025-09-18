@@ -338,7 +338,7 @@ def test_offload_after_ckpt(strategy):
         checkpoint_dir = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1"))  # Store for cleanup
 
         # Step 2: Save checkpoint
-        ray.get(actor_group.async_run_ray_method("pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path))
+        ray.get(actor_group.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint_path))
         after_training = get_rank_0_memory(actor_group, "After ckpt")
 
         # Step 3:Offload model to CPU

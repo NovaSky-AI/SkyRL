@@ -239,17 +239,18 @@ class RayPPOTrainer:
             sleep_on_exit=False,
         )
 
-        # Load checkpoint state if resumption is enabled
+        # Initialize weight sync state between policy model and inference engines.
+        with Timer("init_weight_sync_state"):
+            self.init_weight_sync_state()
+
+        # Load policy model to GPU before loading checkpoint.
+        if self.cfg.trainer.placement.colocate_all:
+            self.policy_model.backload_to_gpu()
+
+        # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.load_checkpoints()
-                logger.info(f"Resumed training from global_step {self.global_step}")
-
-        # create rank0 policy model and inference_engines groups
-        with Timer("setup_policy_and_generator"):
-            self.setup_policy_and_generator()
-            if self.cfg.trainer.placement.colocate_all:
-                self.policy_model.backload_to_gpu()
+                self.global_step = self.load_checkpoints()
 
         # Eval before training
         inference_engine_is_active = False
@@ -695,7 +696,7 @@ class RayPPOTrainer:
 
         logger.info("init policy/ref/critic/reward models done")
 
-    def setup_policy_and_generator(self):
+    def init_weight_sync_state(self):
         """
         Setup the connection between policy model and inference engine for weight syncing.
         """
@@ -1228,8 +1229,7 @@ class RayPPOTrainer:
         ray.get(
             self.policy_model.async_run_ray_method(
                 "pass_through",
-                "save_ckpt",
-                global_step=self.global_step,
+                "save_checkpoint",
                 ckpt_dir=policy_save_dir,
                 tokenizer=self.tokenizer,
             )
@@ -1244,8 +1244,7 @@ class RayPPOTrainer:
             ray.get(
                 self.critic_model.async_run_ray_method(
                     "pass_through",
-                    "save_ckpt",
-                    global_step=self.global_step,
+                    "save_checkpoint",
                     ckpt_dir=critic_save_dir,
                     tokenizer=self.tokenizer,
                 )
@@ -1348,7 +1347,6 @@ class RayPPOTrainer:
         global_step = extract_step_from_path(Path(checkpoint_path))
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
-        self.global_step = global_step
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
@@ -1388,7 +1386,7 @@ class RayPPOTrainer:
         _ = ray.get(
             self.policy_model.async_run_ray_method(
                 "pass_through",
-                "load_ckpt",
+                "load_checkpoint",
                 ckpt_dir=policy_ckpt_dir,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
@@ -1402,7 +1400,7 @@ class RayPPOTrainer:
             _ = ray.get(
                 self.critic_model.async_run_ray_method(
                     "pass_through",
-                    "load_ckpt",
+                    "load_checkpoint",
                     ckpt_dir=critic_ckpt_dir,
                     load_optimizer_states=True,
                     load_lr_scheduler_states=True,
