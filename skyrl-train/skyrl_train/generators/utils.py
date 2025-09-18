@@ -66,23 +66,25 @@ def get_metrics_from_generator_output(
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-
-
     # TODO: We should make metrics customizable by the environment
     # map from the example's uid to each trajectory's reward on that same example
     uid_to_trajectory_rewards = defaultdict(list)
     if rewards and isinstance(rewards[0], list):
-        assert all(isinstance(reward, list) for reward in rewards), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float]"
+        assert all(
+            isinstance(reward, list) for reward in rewards
+        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
         # Token-level rewards: rewards is List[List[float]]
         # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
         mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
         # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
         for i, cur_trajectory_rewards in enumerate(rewards):
             if len(cur_trajectory_rewards) == 0:
-                raise ValueError(f"Token-level rewards must be a non-empty list.")
+                raise ValueError("Token-level rewards must be a non-empty list.")
             uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
-        assert all(not isinstance(reward, list) for reward in rewards), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float]"
+        assert all(
+            not isinstance(reward, list) for reward in rewards
+        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
         mean_raw_reward = float(np.mean(rewards))
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
