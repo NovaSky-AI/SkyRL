@@ -1,6 +1,6 @@
 ### Terminal-Bench integration (WIP)
 
-Integration with Terminal-Bench is a work in progress. For now, training tasks are hard-coded as "hello-world" in the prototype. The next TODO is to support specifying a training set of Terminal-Bench tasks.
+Integration with Terminal-Bench is a work in progress.
 
 This integration requires the `sandboxes` repo (ie, the new and improved terminal bench):
 ```bash
@@ -12,13 +12,22 @@ There is an existing package conflict between `skyrl-train` and `sandboxes`. Res
 * `rich==13.7.1`
 * `requires-python = ">=3.12"`
 
-- **Training**: run the GRPO training pipeline. Requires a dummy gsm8k dataset (for now).
+### Dataset Generation
+First, generate the training (and, optionally, validation) dataset. First, download `sandboxes` tasks to a local directory. Then:
 ```bash
-uv run -- python examples/gsm8k/gsm8k_dataset.py
-bash examples/terminal_bench/run_tbench.sh
+uv run examples/terminal_bench/prepare_dataset.py \
+  --task_dir "path/to/sandbox/tasks" \
+  --output_dir $HOME/data/terminal_bench \
+  --output_name train
 ```
 
-- **Generation only**: launch the generator/serving process. This entrypoint is primarily for rapid debugging to avoid the trainer setup overhead.
+### Training
+Run the GRPO training pipeline:
+```bash
+bash examples/terminal_bench/run_tbench.sh
+```
+### Generation Only
+Launch the generation process without training. This entrypoint is primarily for rapid debugging to avoid the trainer setup overhead.
 ```bash
 bash examples/terminal_bench/run_tbench_gen.sh
 ```
