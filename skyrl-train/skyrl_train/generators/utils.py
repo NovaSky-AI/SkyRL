@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
@@ -49,9 +49,7 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(
-    generator_output: GeneratorOutput, uids: List[str]
-) -> Tuple[float, float]:
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
 
@@ -91,7 +89,9 @@ def get_metrics_from_generator_output(
 
     # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
     # any of its trajectories' reward is positive, pass@n for that uid is 1.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(uid_to_trajectory_rewards)
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(
+        uid_to_trajectory_rewards
+    )
 
     return mean_raw_reward, pass_at_n
 
