@@ -51,7 +51,7 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 @torch.no_grad()
 def get_metrics_from_generator_output(
     generator_output: GeneratorOutput, uids: List[str]
-) -> Tuple[float, Optional[float]]:
+) -> Tuple[float, float]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
 
