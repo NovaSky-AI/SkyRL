@@ -149,6 +149,13 @@ def validate_megatron_cfg(cfg: DictConfig):
         if version > "2.7.4.post1":
             raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
 
+    try:
+        import transformer_engine
+    except ImportError:
+        raise ValueError("transformer_engine is required for using the megatron backend. \
+            For single node training follow the instructions in the pyproject.toml file to install transformer_engine. \
+            For multi node training, please install transformer_engine in the docker image, and set the PYTHONPATH accordingly.")
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # context, expert, and expert tensor parallel are not yet supported for megatron
@@ -434,7 +441,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
     # this is useful for dependencies that are baked into the docker image but that we don't want to ship + rebuild with UV (i.e. TransformerEngine)
-    env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
+    env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH", "")
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
