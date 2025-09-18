@@ -343,6 +343,7 @@ def test_generator_output_concatenation():
 
 
 def test_get_metrics_from_generator_output():
+    # Per trajectory rewards, where rewards are List[float]
     generator_output: GeneratorOutput = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
@@ -355,6 +356,14 @@ def test_get_metrics_from_generator_output():
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
     assert avg_score == 1.5
     assert pass_at_n == 1.0
+
+    # Per token rewards, where rewards are List[List[float]], so for pass_at_n we use the last
+    # token's reward to signify the trajectory's reward
+    generator_output["rewards"] = [[1.0, 0.0], [0.0, 1.0]]
+    uids = ["a", "b"]
+    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
+    assert avg_score == 1.0
+    assert pass_at_n == 0.5
 
 
 @pytest.mark.asyncio

@@ -143,6 +143,16 @@ The multi-turn version gives partial credit for formatting the answer correctly,
 
 The final implementation is available in `examples/multiply/env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py>`_.
 
+Turn-level Rewards And Metrics
+------------------------------
+
+In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single reward for the entire trajectory.
+You can experiment with turn-level rewards by returning a reward for each turn that is not necessarily ``0.0``.
+
+When computing metrics for logging purposes:
+- ``pass_at_n``: for each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and being positive signifies a "pass".
+- ``mean_raw_reward``: for each trajectory, we sum over all the turns' rewards. We then take the average over all the trajectories.
+
 Registering Your New Environment
 --------------------------------
 

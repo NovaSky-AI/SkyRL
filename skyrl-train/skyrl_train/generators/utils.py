@@ -54,25 +54,44 @@ def get_metrics_from_generator_output(
 ) -> Tuple[float, Optional[float]]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+
+    m: `len(uids)` is the number of unique examples.
+
+    n: `len(generator_output["rewards"]) / len(uids)` is the number of trajectories we generate
+    for each example.
+
+    Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
     """
     rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    if isinstance(rewards[0], list):
-        # We just compute mean over sequence reward.
-        # TODO: We should make metrics customizable by the environment
-        mean_raw_reward = float(np.mean([sum(seq_rewards) for seq_rewards in rewards]))
-        pass_at_n = None  # not computed for token-level rewards since it's ill-defined
+    is_per_trajectory_rewards = all(isinstance(reward, float) for reward in rewards)
+    is_per_token_rewards = all(
+        (isinstance(reward, list) and all(isinstance(r, float) for r in reward)) for reward in rewards
+    )
+
+    assert (
+        is_per_trajectory_rewards or is_per_token_rewards
+    ), "rewards must be either `List[float]` or `List[List[float]]`. But received neither."
+
+    # TODO: We should make metrics customizable by the environment
+    # map from the example's uid to each trajectory's reward on that same example
+    uid_to_trajectory_rewards = defaultdict(list)
+    if is_per_token_rewards:
+        # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
+        mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+        # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
+        for i, cur_trajectory_rewards in enumerate(rewards):
+            uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
         mean_raw_reward = float(np.mean(rewards))
-        # Compute pass@N metrics
-        pass_at_n_dict = defaultdict(list)
         for i, reward in enumerate(rewards):
-            pass_at_n_dict[uids[i]].append(reward)
+            uid_to_trajectory_rewards[uids[i]].append(reward)
 
-        # pass@N metric
-        pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
+    # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
+    # any of its trajectories' reward is positive (i.e. `np.sum(v) > 0`), pass@n for that uid is 1.
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if np.sum(v) > 0) / len(uid_to_trajectory_rewards)
 
     return mean_raw_reward, pass_at_n
 
