@@ -1,4 +1,8 @@
-"""Utils methods for checking. Caller uses `run_nccl_torch_distributed_check()` to determine if NCCL P2P/SHM is supported."""
+"""
+Util methods for checking torch.distributed support with NCCL.
+
+Caller uses `run_nccl_torch_distributed_check()` to determine if NCCL P2P/SHM is supported.
+"""
 
 import os
 import torch

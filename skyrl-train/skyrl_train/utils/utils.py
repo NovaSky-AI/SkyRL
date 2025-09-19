@@ -650,15 +650,12 @@ def _get_env_vars_for_p2p_access_helper() -> dict[str, str]:
 
     # 1) No overrides
     if run_nccl_torch_distributed_check(env_overrides=None, timeout_s=15):
-        logger.info("NCCL P2P/SHM checks passed with no overrides")
         return {}
     # 2) Disable P2P
     if run_nccl_torch_distributed_check(env_overrides={"NCCL_P2P_DISABLE": "1"}, timeout_s=15):
-        logger.info("NCCL P2P/SHM checks passed with NCCL_P2P_DISABLE")
         return {"NCCL_P2P_DISABLE": "1"}
     # 3) Disable P2P and SHM
     if run_nccl_torch_distributed_check(env_overrides={"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}, timeout_s=15):
-        logger.info("NCCL P2P/SHM checks passed with NCCL_P2P_DISABLE AND NCCL_SHM_DISABLE")
         return {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 
     raise RuntimeError("NCCL P2P/SHM checks failed even with fallbacks. Please verify drivers and interconnect.")
@@ -687,11 +684,12 @@ def get_env_vars_for_p2p_access(max_num_gpus_per_node: int) -> dict[str, str]:
     pg = placement_group([{"CPU": 1, "GPU": max_num_gpus_per_node}], strategy="PACK")
     get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
     result = ray.get(
-        ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
+        ray.remote(num_gpus=max_num_gpus_per_node, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
             _get_env_vars_for_p2p_access_helper
         ).remote()
     )
     ray.shutdown()
+    logger.info(f"NCCL P2P/SHM checks passed with env vars: {result}")
     return result
 
 
