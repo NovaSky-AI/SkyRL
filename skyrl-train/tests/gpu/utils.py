@@ -22,7 +22,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
-from skyrl_train.utils.utils import get_env_vars_override_for_peer_access, print_mem, initialize_ray, validate_cfg
+from skyrl_train.utils.utils import get_env_vars_for_p2p_access, print_mem, initialize_ray, validate_cfg
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -350,7 +350,7 @@ def log_once(msg):
 
 def ray_init_for_tests():
     env_vars = {}
-    overrides = get_env_vars_override_for_peer_access(max_num_gpus_per_node=4)
+    overrides = get_env_vars_for_p2p_access(max_num_gpus_per_node=4)
     if overrides != {}:
         log_once(f"Disabling NCCL P2P for test environment, setting the following env vars: {overrides}")
         env_vars = overrides
