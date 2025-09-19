@@ -79,6 +79,7 @@ def create_ray_wrapped_inference_engines(
     max_num_seqs=1024,
     tokenizer=None,
     backend="vllm",
+    engine_init_kwargs: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -167,6 +168,7 @@ def create_ray_wrapped_inference_engines(
                 max_num_seqs=max_num_seqs,
                 # only need the logprobs for the chosen token if any
                 max_logprobs=1,
+                **engine_init_kwargs,
             )
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
@@ -211,6 +213,7 @@ def create_ray_wrapped_inference_engines(
                     bundle_indices=bundle_indices,
                     num_gpus=0.2 if use_hybrid_engine else 1,
                     tokenizer=tokenizer,
+                    **engine_init_kwargs,
                 )
                 return engine
 

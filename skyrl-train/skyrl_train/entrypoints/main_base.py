@@ -57,6 +57,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         max_num_seqs=cfg.generator.max_num_seqs,
         tokenizer=tokenizer,
         backend=cfg.generator.backend,
+        engine_init_kwargs=cfg.generator.engine_init_kwargs,
     )
 
 
