@@ -661,9 +661,7 @@ def _get_env_vars_for_p2p_access_helper() -> dict[str, str]:
         logger.info("NCCL P2P/SHM checks passed with NCCL_P2P_DISABLE AND NCCL_SHM_DISABLE")
         return {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 
-    raise RuntimeError(
-        "NCCL P2P/SHM checks failed even with fallbacks. Please verify drivers and interconnect."
-    )
+    raise RuntimeError("NCCL P2P/SHM checks failed even with fallbacks. Please verify drivers and interconnect.")
 
 
 def get_env_vars_for_p2p_access(max_num_gpus_per_node: int) -> dict[str, str]:

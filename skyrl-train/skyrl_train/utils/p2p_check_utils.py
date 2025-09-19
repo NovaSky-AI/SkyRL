@@ -8,6 +8,7 @@ import torch.multiprocessing as mp
 import time
 from datetime import timedelta
 
+
 def _nccl_reduce_worker(rank: int, world_size: int, master_addr: str, master_port: int, env_overrides: dict):
     for k, v in (env_overrides or {}).items():
         os.environ[str(k)] = str(v)
