@@ -227,7 +227,7 @@ def create_ray_wrapped_inference_engines(
     if inference_engine_enable_sleep:
         if backend == "vllm":
             sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
-        else:
+        elif backend == "sglang":
             # TODO(Charlie): since our ray-wrapped SGLang's sleep API does not discard weights, it
             # can just sleep at the default level, whether testing or not. Revisit when changed.
             sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
