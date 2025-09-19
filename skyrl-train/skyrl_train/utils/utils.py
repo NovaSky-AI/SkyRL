@@ -11,6 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S
+from .p2p_check_utils import run_nccl_torch_distributed_check
 
 
 class Timer:
@@ -482,10 +483,13 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
-    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
-        logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
-        env_vars["NCCL_P2P_DISABLE"] = "1"
-        env_vars["NCCL_SHM_DISABLE"] = "1"
+    overrides = get_env_vars_override_for_peer_access(max_num_gpus_per_node=max_num_gpus_per_node)
+    if overrides != {}:
+        log_str = f"Peer access is not supported on this node type, setting the following env vars: {overrides}. "
+        if max_num_gpus_per_node > 1:
+            log_str += "This can affect performance, please fix hardware/drivers if possible."
+        logger.warning(log_str)
+        env_vars.update(overrides)
 
     if cfg.trainer.strategy == "megatron":
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
@@ -625,42 +629,64 @@ def print_mem(tag: str, mem: dict):
 
 
 def run_p2p_access_check():
+    """
+    Three levels of disabling P2P access:
+    - No disabling
+    - Disabling P2P
+    - Disabling P2P and SHM
+    """
     device_count = torch.cuda.device_count()
     if device_count < 2:
-        return False
+        return {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 
-    # Check P2P access between all GPU pairs
+    # Check basic P2P access between all GPU pairs
     for i in range(device_count):
         for j in range(device_count):
             if i != j:
                 # This checks if device i can access device j's memory
                 can_access = torch.cuda.can_device_access_peer(i, j)
                 if not can_access:
-                    return False
+                    return {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 
-    return True
+    # Check a simple torch.distributed NCCL all_reduce via multiprocessing with 15s timeout,
+    # progressively disabling P2P and SHM
+
+    # 1) No overrides
+    if run_nccl_torch_distributed_check(env_overrides=None, timeout_s=15):
+        logger.info("NCCL P2P/SHM checks passed with no overrides")
+        return {}
+    # 2) Disable P2P
+    if run_nccl_torch_distributed_check(env_overrides={"NCCL_P2P_DISABLE": "1"}, timeout_s=15):
+        logger.info("NCCL P2P/SHM checks passed with NCCL_P2P_DISABLE")
+        return {"NCCL_P2P_DISABLE": "1"}
+    # 3) Disable P2P and SHM
+    if run_nccl_torch_distributed_check(env_overrides={"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}, timeout_s=15):
+        logger.info("NCCL P2P/SHM checks passed with NCCL_P2P_DISABLE AND NCCL_SHM_DISABLE")
+        return {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
+
+    raise RuntimeError(
+        "NCCL P2P/SHM checks failed even with fallbacks. Please verify drivers and interconnect."
+    )
 
 
-def peer_access_supported(max_num_gpus_per_node: int):
+def get_env_vars_override_for_peer_access(max_num_gpus_per_node: int) -> dict[str, str]:
     # whatever the max num gpus per node is, we can check p2p access if there are at least 2 GPUs
     # if max is 1, p2p access is not supported
     if max_num_gpus_per_node <= 1:
-        return False
+        return {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 
-    if not torch.cuda.is_available():
-        # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
-        ray.init()
-        pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        result = ray.get(
-            ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
-                run_p2p_access_check
-            ).remote()
-        )
-        ray.shutdown()
-        return result
-    else:
-        return run_p2p_access_check()
+    # NOTE(Charlie): For some reason, if we directly run `run_p2p_access_check()` without a ray
+    # placement group, it might pass even when it shouldn't.
+    ray.init()
+    pg = placement_group([{"CPU": 1, "GPU": max_num_gpus_per_node}], strategy="PACK")
+    get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+    result = ray.get(
+        ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
+            run_p2p_access_check
+        ).remote()
+    )
+    ray.shutdown()
+    return result
 
 
 def update_model_config(module_config, override_config_kwargs):
