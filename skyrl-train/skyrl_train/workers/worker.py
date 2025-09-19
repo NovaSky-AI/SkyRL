@@ -775,19 +775,20 @@ class PolicyWorkerBase(Worker):
         status["response_length"] = num_actions
         return status
 
-    def save_ckpt(self, global_step: int, ckpt_dir: Path, tokenizer=None):
-        self.strategy.save_ckpt(
+    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+        self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             ckpt_dir=ckpt_dir,
-            global_step=global_step,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
 
-    def load_ckpt(self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
-        _, states = self.strategy.load_ckpt(
+    def load_checkpoint(
+        self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
+    ):
+        _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
             scheduler=self.scheduler if load_lr_scheduler_states else None,
@@ -983,19 +984,18 @@ class CriticWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         return status
 
-    def save_ckpt(self, global_step: int, ckpt_dir: str, tokenizer=None):
-        self.strategy.save_ckpt(
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+        self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             ckpt_dir=ckpt_dir,
-            global_step=global_step,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
 
-    def load_ckpt(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
-        _, states = self.strategy.load_ckpt(
+    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
+        _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
             scheduler=self.scheduler if load_lr_scheduler_states else None,

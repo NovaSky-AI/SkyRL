@@ -277,7 +277,7 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
     # Extract the actual prompts from the dataset
     prompts = []
     for i in range(min(num_samples, len(dataset))):
-        prompt_data, _, _ = dataset[i]  # dataset returns (messages, env_class, extra)
+        prompt_data, _, _, _ = dataset[i]  # dataset returns (messages, env_class, extra, uid)
         prompts.append(prompt_data)
 
     return prompts
@@ -305,7 +305,7 @@ def get_test_generator_input(
     prompts = []
     env_extras = []
     for i in range(min(num_prompts, len(dataset))):
-        prompt_data, _, env_extra = dataset[i]  # dataset returns (messages, env_class, extra)
+        prompt_data, _, env_extra, _ = dataset[i]  # dataset returns (messages, env_class, extra, uid)
         prompts.extend([prompt_data] * n_samples_per_prompt)
         env_extras.extend([env_extra] * n_samples_per_prompt)
 

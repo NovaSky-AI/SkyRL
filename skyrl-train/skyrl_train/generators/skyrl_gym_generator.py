@@ -15,7 +15,7 @@ from tqdm.asyncio import tqdm
 from dataclasses import dataclass
 from loguru import logger
 
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -115,6 +115,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_tokens: int,
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
+        trajectory_id: Optional[TrajectoryID] = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -148,7 +149,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
-        trajectory_id = uuid4().hex
+        session_id = (
+            f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
+        )
         done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
@@ -178,12 +181,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 1. Generate output
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
+                    prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
                 )
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
+                    prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
@@ -401,6 +404,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompts = input_batch["prompts"]
         env_classes = input_batch["env_classes"]
         env_extras = input_batch["env_extras"]
+        trajectory_ids = input_batch.get("trajectory_ids", None)
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
@@ -421,6 +425,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     max_tokens,
                     max_input_length,
                     sampling_params=sampling_params,
+                    trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
                 )
             )
 

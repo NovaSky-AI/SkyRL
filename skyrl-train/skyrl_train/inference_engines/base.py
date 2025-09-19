@@ -10,7 +10,7 @@ class InferenceEngineInput(TypedDict):
     prompts: Optional[List[ConversationType]]
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
-    trajectory_ids: Optional[List[Hashable]]
+    session_ids: Optional[List[Hashable]]
 
 
 class InferenceEngineOutput(TypedDict):

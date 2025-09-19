@@ -60,7 +60,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
-        trajectory_ids = input_batch.get("trajectory_ids")
+        session_ids = input_batch.get("session_ids")
         sampling_params = input_batch.get("sampling_params")
 
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
@@ -81,7 +81,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
             num_prompts=num_prompts,
             num_inference_engines=num_inference_engines,
-            trajectory_ids=trajectory_ids,
+            session_ids=session_ids,
         )
 
         # 2. Generate responses concurrently
@@ -125,15 +125,13 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        trajectory_id = request_payload["json"].pop("trajectory_id", None)
-        if trajectory_id is None:
-            # if trajectory_id is not provided, we'll use a random engine
+        session_id = request_payload["json"].pop("session_id", None)
+        if session_id is None:
+            # if session_id is not provided, we'll use a random engine
             engine_idx = random.randint(0, len(self.engines) - 1)
         else:
-            assert isinstance(
-                trajectory_id, (str, int)
-            ), "Trajectory ID must be an integer or string for `/chat/completions`"
-            engine_idx = hash_with_sha256(str(trajectory_id)) % len(self.engines)
+            assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
+            engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
         return await self.engines[engine_idx].chat_completion(request_payload)
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -142,11 +140,11 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         Since `request["prompt"]` can be `Union[list[int], list[list[int]], str, list[str]]`,
         (i.e. {batched, single} x {string, token IDs}), we need to route the request to engines
-        differently, based on whether it's a single or batched request, and whether `request["trajectory_id"]`
+        differently, based on whether it's a single or batched request, and whether `request["session_id"]`
         is provided. This is similar to `generate()` method.
 
         For single, we do the same routing logic as `chat_completion()`. For batched, we route by
-        `request["trajectory_id"]` if present, and if not we split evenly across engines.
+        `request["session_id"]` if present, and if not we split evenly across engines.
 
         Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
         """
@@ -155,14 +153,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         # NOTE(Charlie): do not reuse headers here as the single request may become various new requests
         headers = {"Content-Type": "application/json"}
 
-        # 1. Postprocess prompt, trajectory_id, and validate request.
+        # 1. Postprocess prompt, session_id, and validate request.
         prompt = body.get("prompt")
-        trajectory_id_value = body.pop("trajectory_id", None)
-        ret = postprocess_completion_request(prompt, trajectory_id_value)
-        trajectory_id_list: Optional[Union[List[int], List[str], ErrorResponse]] = ret[0]
+        session_id_value = body.pop("session_id", None)
+        ret = postprocess_completion_request(prompt, session_id_value)
+        session_id_list: Optional[Union[List[int], List[str], ErrorResponse]] = ret[0]
         prompt: Union[List[List[int]], List[str]] = ret[1]
-        if isinstance(trajectory_id_list, ErrorResponse):
-            return trajectory_id_list.model_dump()
+        if isinstance(session_id_list, ErrorResponse):
+            return session_id_list.model_dump()
 
         num_prompts = len(prompt)
         num_inference_engines = len(self.engines)
@@ -172,7 +170,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
             num_prompts=num_prompts,
             num_inference_engines=num_inference_engines,
-            trajectory_ids=trajectory_id_list,
+            session_ids=session_id_list,
         )
 
         # 2. Generate responses concurrently

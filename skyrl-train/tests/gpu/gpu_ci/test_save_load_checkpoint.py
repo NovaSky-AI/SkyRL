@@ -1,6 +1,9 @@
 """
-Run with:
-uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_load_ckpt.py
+For FSDP and DeepSpeed, run:
+uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
+
+For Megatron, run:
+uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
 """
 
 import ray
@@ -16,9 +19,30 @@ from transformers import AutoTokenizer
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor, validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 CKPT_PATH = "$HOME/ckpts/test/"
-NUM_GPUS = 1
+NUM_GPUS = 4
+
+
+def run_one_training_step(
+    actor_group,
+    strategy,
+    experience=None,
+    global_step=None,
+    local_step=None,
+    accumulation_steps=None,
+    megatron_batch=None,
+):
+    if strategy == "megatron":
+        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
+        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
+    else:
+        assert experience is not None, f"{strategy} requires an Experience for training_step"
+        return ray.get(
+            actor_group.async_run_ray_method(
+                "pass_through", "training_step", experience, global_step, local_step, accumulation_steps
+            )
+        )
 
 
 def get_test_actor_config(strategy: str) -> DictConfig:
@@ -31,6 +55,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 
     cfg.trainer.ckpt_path = CKPT_PATH
     cfg.trainer.export_path = CKPT_PATH
+    cfg.trainer.logger = "console"
 
     validate_cfg(cfg)
 
@@ -43,6 +68,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
         "deepspeed",
         "fsdp",
         "fsdp2",
+        pytest.param("megatron", marks=pytest.mark.megatron),
     ],
 )
 def test_save_load_checkpoint(ray_init_fixture, strategy):
@@ -75,13 +101,28 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         for i, seq in enumerate(dummy_experience_2.sequences):
             dummy_experience_2.sequences[i] = torch.randint(100, 200, seq.shape, device=seq.device)
 
+        # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
+        if "megatron" in strategy:
+            from tests.gpu.test_megatron_worker import get_test_training_batch
+
+            dp_size = actor_group.actor_infos[0].rank.dp_size
+            train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
+            train_batch_2 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
+        else:
+            train_batch_1 = None
+            train_batch_2 = None
+
         global_step, local_step, accumulation_steps = 0, 0, 1
 
         # Step 1: Do initial training step
-        ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
-            )
+        run_one_training_step(
+            actor_group,
+            strategy,
+            experience=dummy_experience_1,
+            global_step=global_step,
+            local_step=local_step,
+            accumulation_steps=accumulation_steps,
+            megatron_batch=train_batch_1,
         )
 
         checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))
@@ -90,7 +131,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         # Step 2: Save checkpoint
         ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "save_ckpt", global_step=1, ckpt_dir=checkpoint_path, tokenizer=tokenizer
+                "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
             )
         )
 
@@ -109,10 +150,14 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             assert fsdp_config["world_size"] == NUM_GPUS
 
         # Step 3: Do second training step and record results
-        ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_2, global_step + 1, local_step, accumulation_steps
-            )
+        run_one_training_step(
+            actor_group,
+            strategy,
+            experience=dummy_experience_2,
+            global_step=global_step + 1,
+            local_step=local_step,
+            accumulation_steps=accumulation_steps,
+            megatron_batch=train_batch_2,
         )
 
         # Create test input for comparing model outputs
@@ -123,15 +168,19 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
         # Step 4: Get logits after the second training step (this should be different from after checkpoint load)
         logits_after_second_training = get_model_logits_from_actor(actor_group, test_input, attention_mask)
 
-        # Step 5: Load checkpoint via strategy's load_ckpt method
+        # Step 5: Load checkpoint via strategy's load_checkpoint method
         assert os.path.exists(checkpoint_path), f"Checkpoint directory {checkpoint_path} does not exist"
-        ray.get(actor_group.async_run_ray_method("pass_through", "load_ckpt", ckpt_dir=checkpoint_path))
+        ray.get(actor_group.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
 
         # Step 6: Now repeat the exact same second training step
-        ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_2, global_step + 1, local_step, accumulation_steps
-            )
+        run_one_training_step(
+            actor_group,
+            strategy,
+            experience=dummy_experience_2,
+            global_step=global_step + 1,
+            local_step=local_step,
+            accumulation_steps=accumulation_steps,
+            megatron_batch=train_batch_2,
         )
 
         # Get logits after loading checkpoint and repeating second training

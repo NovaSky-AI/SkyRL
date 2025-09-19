@@ -60,6 +60,7 @@ class MegatronWorker:
         self.bridge = bridge
 
         self.hf_config = hf_config
+        self.strategy.hf_config = hf_config
         self.tf_config = tf_config
         self.tokenizer = tokenizer
 
