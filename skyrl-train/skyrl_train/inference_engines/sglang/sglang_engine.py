@@ -332,8 +332,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
     async def sleep(self, tags: Optional[List[str]] = None):
         """Put engine to sleep."""
-        # TODO(Charlie): our vLLM's behavior is sleeping at level 2 by default, which discards
-        # weights. Our SGLang's engine has different behaviors. Need to revisit later.
         obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.release_memory_occupation(obj, None)

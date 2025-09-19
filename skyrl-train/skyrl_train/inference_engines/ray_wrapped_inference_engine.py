@@ -228,8 +228,8 @@ def create_ray_wrapped_inference_engines(
         if backend == "vllm":
             sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
         elif backend == "sglang":
-            # TODO(Charlie): since our ray-wrapped SGLang's sleep API does not discard weights, it
-            # can just sleep at the default level, whether testing or not. Revisit when changed.
+            # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
+            assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
             sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
         ray.get(sleep_refs)
 
