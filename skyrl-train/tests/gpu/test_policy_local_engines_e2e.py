@@ -93,6 +93,7 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend=backend,
+            sleep_level=2,  # since we explicitly sync weights
         )
 
         policy = init_worker_with_type(

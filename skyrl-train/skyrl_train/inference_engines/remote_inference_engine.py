@@ -143,6 +143,8 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
     async def sleep(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
+            # TODO(Charlie): this is vLLM's API, not SGLang (which uses tags). Fix when need to
+            # support sleeping with remote engines.
             resp = await session.post(f"{self.url}/sleep", json={"level": kwargs.get("level", 1)})
             return await resp.json()
 

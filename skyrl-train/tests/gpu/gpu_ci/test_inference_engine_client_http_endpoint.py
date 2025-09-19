@@ -206,6 +206,7 @@ def test_http_endpoint_completions_routing_and_batching():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -282,6 +283,7 @@ def test_http_endpoint_openai_api_with_weight_sync():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=2,  # since we explicitly sync weights
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -565,6 +567,7 @@ def test_structured_generation():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
         )
 
         # Start server in background thread using serve function directly
@@ -607,8 +610,7 @@ def test_structured_generation():
 
         # assert is valid json
         text = output.choices[0].message.content
-        print(f"Output: {text}")
-        assert json.loads(text) is not None  # if json invalid
+        assert json.loads(text) is not None, f"Output is not valid JSON: {text}"
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
@@ -639,6 +641,7 @@ def test_http_endpoint_error_handling():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
         )
 
         from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
