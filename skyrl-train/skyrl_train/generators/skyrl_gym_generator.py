@@ -289,15 +289,18 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Build reward output
         if retokenize_chat_history:
+            # TODO(Charlie): Currently, the possible response truncation will not affect the reward
+            # in if branch, but some final rewards may be lost in the else branch. Fix this
+            # when we support turn-level rewards for the `retokenize_chat_history` codepath.
             reward_out = per_step_rewards[-1][0]
         else:
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for step_reward, idx in per_step_rewards:
+            for i, (step_reward, idx) in enumerate(per_step_rewards):
                 assert step_reward is not None
                 if idx >= len(response_ids):
                     break
-                if appended_eos_token and idx == len(response_ids) - 2:
+                if appended_eos_token and i == len(per_step_rewards) - 1:
                     # NOTE(Charlie): If we appended the eos token, we need to place
                     # the reward at the last token (the manually appended eos token)
                     # rather than the last turn's assistant-generated token. This matches
