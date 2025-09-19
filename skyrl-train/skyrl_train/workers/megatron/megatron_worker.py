@@ -39,8 +39,8 @@ from skyrl_train.utils.profiler import Profiler
 
 class MegatronWorker:
     def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs, flash_attn=False):
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        hf_config = AutoConfig.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
