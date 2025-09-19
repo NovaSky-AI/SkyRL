@@ -38,6 +38,18 @@ from skyrl_train.utils.profiler import Profiler
 
 
 class MegatronWorker:
+    def check_te_import(self):
+        try:
+            import transformer_engine  # noqa: F401
+        except ImportError:
+            raise ValueError("""
+                transformer_engine is required for using the megatron backend.
+                For single node training follow the instructions in the pyproject.toml file to install transformer_engine.
+                For multi node training, please install transformer_engine in the docker image, and set the PYTHONPATH
+                to `/home/ray/anaconda3/lib/python3.12/site-packages` or wherever your base installation of
+                transformer_engine lives.
+            """)
+
     def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs, flash_attn=False):
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
@@ -129,6 +141,7 @@ class MegatronWorker:
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.check_te_import()
         self.model: MegatronPPOPolicy = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -421,6 +434,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.check_te_import()
         self.model: MegatronPPOPolicy = None
         self.actor_module: List[nn.Module] = None
 
