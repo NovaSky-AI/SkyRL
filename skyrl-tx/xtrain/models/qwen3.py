@@ -1,7 +1,7 @@
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from transformers import AutoConfig, Qwen3Config
+from transformers import Qwen3Config
 
 
 def Param(*shape: int, rngs: nnx.Rngs):
@@ -78,11 +78,12 @@ class Qwen3Attention(nnx.Module):
         attn_weights = jnp.einsum("BMNH,BTNH->BNMT", q, k)
         attn_weights = attn_weights / jnp.sqrt(self.head_dim)
 
-        # TODO: Apply attention_mask here and make it compatible with huggingface
-        causal_mask = jnp.tril(jnp.ones((x.shape[1], x.shape[1])))
-        causal_mask = causal_mask[jnp.newaxis, jnp.newaxis, :, :]
+        causal_mask = jnp.tril(jnp.ones((x.shape[1], x.shape[1])))[None, None, :, :]
 
-        attn_weights = jnp.where(causal_mask == 0, -1e9, attn_weights)
+        if attention_mask is not None:
+            causal_mask *= attention_mask[:, None, None, :]
+
+        attn_weights = jnp.where(causal_mask == 0, -jnp.inf, attn_weights)
         attn_weights = nnx.softmax(attn_weights, axis=-1)
         attn_output = jnp.einsum("BNMT,BTNH->BMNH", attn_weights, v)
 

@@ -19,6 +19,9 @@ jobs:
     - name: Install uv
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
+    - name: Run lint
+      run: |
+        uvx ruff check
     - name: Run pytest
       run: |
         uv run --extra dev pytest -s tests
