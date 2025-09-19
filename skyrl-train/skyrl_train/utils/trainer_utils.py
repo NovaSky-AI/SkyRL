@@ -622,3 +622,14 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
         logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
+
+    # check that ther rewards is either List[float-like] or List[List[float-like]]
+    rewards = generator_output["rewards"]
+    if isinstance(rewards[0], list):
+        assert all(
+            isinstance(reward, list) for reward in rewards
+        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
+    else:
+        assert all(
+            not isinstance(reward, list) for reward in rewards
+        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"

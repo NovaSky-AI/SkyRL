@@ -68,9 +68,6 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     # map from the example's uid to each trajectory's reward on that same example
     uid_to_trajectory_rewards = defaultdict(list)
     if isinstance(rewards[0], list):
-        assert all(
-            isinstance(reward, list) for reward in rewards
-        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
         # Token-level rewards: rewards is List[List[float]]
         # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
         mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
@@ -80,9 +77,6 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
                 raise ValueError("Token-level rewards must be a non-empty list.")
             uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
-        assert all(
-            not isinstance(reward, list) for reward in rewards
-        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
         mean_raw_reward = float(np.mean(rewards))
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)

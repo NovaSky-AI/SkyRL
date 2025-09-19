@@ -267,11 +267,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
+        appended_eos_token = False
         if not self.use_conversation_multi_turn:
             # we might need to add the eos token to the response ids
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
+                appended_eos_token = True
 
         # need to truncate loss mask correctly for responses that go to max length
         if self.max_turns > 1:
@@ -295,7 +297,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 assert step_reward is not None
                 if idx >= len(response_ids):
                     break
-                token_level_rewards[idx] += step_reward
+                if appended_eos_token and idx == len(response_ids) - 2:
+                    # NOTE(Charlie): If we appended the eos token, we need to place
+                    # the reward at the last token (the manually appended eos token)
+                    # rather than the last turn's assistant-generated token. This matches
+                    # the logic in trainer.py::postprocess_generator_output when rewards are List[float].
+                    token_level_rewards[-1] = step_reward
+                else:
+                    token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
 
         return AgentLoopOutput(
