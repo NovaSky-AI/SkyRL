@@ -63,7 +63,14 @@ def get_metrics_from_generator_output(
         # We just compute mean over sequence reward.
         # TODO: We should make metrics customizable by the environment
         mean_raw_reward = float(np.mean([sum(seq_rewards) for seq_rewards in rewards]))
-        pass_at_n = None  # not computed for token-level rewards since it's ill-defined
+
+        breakpoint()
+        last_reward = [seq_rewards[-1] for seq_rewards in rewards]
+        pass_at_n_dict = defaultdict(list)
+        for i, reward in enumerate(last_reward):
+            pass_at_n_dict[uids[i]].append(reward)
+
+        pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
     else:
         mean_raw_reward = float(np.mean(rewards))
         # Compute pass@N metrics

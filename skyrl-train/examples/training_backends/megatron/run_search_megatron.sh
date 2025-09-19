@@ -22,11 +22,15 @@ MEGATRON_ETP=1
 MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
 MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 
-NUM_INFERENCE_ENGINES=8
-INFERENCE_ENGINE_TP=4
+NUM_INFERENCE_ENGINES=4
+INFERENCE_ENGINE_TP=8
 
+# /usr/local/cuda/lib64:/opt/amazon/efa/lib:/opt/cudnn/lib:
+# # /opt/cudnn/lib:/usr/local/cuda/lib64:
+# export 
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/amazon/efa/lib"
 
-uv run --isolated --frozen --extra mcore --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra mcore --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -57,7 +61,7 @@ uv run --isolated --frozen --extra mcore --extra vllm -m skyrl_train.entrypoints
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.gpu_memory_utilization=0.7 \
+  generator.gpu_memory_utilization=0.6 \
   trainer.epochs=1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=512 \

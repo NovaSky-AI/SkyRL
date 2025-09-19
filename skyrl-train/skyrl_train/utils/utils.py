@@ -150,13 +150,15 @@ def validate_megatron_cfg(cfg: DictConfig):
             raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
 
     try:
-        import transformer_engine
+        import transformer_engine  # noqa: F401
     except ImportError:
-        raise ValueError("transformer_engine is required for using the megatron backend. \
+        raise ValueError(
+            "transformer_engine is required for using the megatron backend. \
             For single node training follow the instructions in the pyproject.toml file to install transformer_engine. \
             For multi node training, please install transformer_engine in the docker image, and set the PYTHONPATH \
             to `/home/ray/anaconda3/lib/python3.12/site-packages` or whe your base installation of \
-            transformer_engine lives.")
+            transformer_engine lives."
+        )
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:

@@ -245,12 +245,12 @@ class RayPPOTrainer:
         # create rank0 policy model and inference_engines groups
         with Timer("setup_policy_and_generator"):
             self.setup_policy_and_generator()
+            if self.cfg.trainer.placement.colocate_all:
+                self.policy_model.backload_to_gpu()
 
         # Eval before training
         inference_engine_is_active = False
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
-            if self.cfg.trainer.placement.colocate_all:
-                self.policy_model.backload_to_gpu()
             with self.eval_weights_manager:
                 with Timer("eval", self.all_timings):
                     eval_metrics = asyncio.run(self.eval())
