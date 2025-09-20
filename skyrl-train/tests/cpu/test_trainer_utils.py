@@ -816,9 +816,7 @@ def test_validate_generator_output_invalid_rewards():
 
     with pytest.raises(
         AssertionError,
-        match=re.escape(
-            "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
-        ),
+        match=re.escape("rewards must be `List[float]` or `List[List[float]]`"),
     ):
         validate_generator_output(input_batch, generator_output)
 

@@ -628,8 +628,8 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
     if isinstance(rewards[0], list):
         assert all(
             isinstance(reward, list) for reward in rewards
-        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
+        ), "rewards must be `List[float]` or `List[List[float]]`"
     else:
         assert all(
             not isinstance(reward, list) for reward in rewards
-        ), "rewards must be List[float], or List[List[float]], but received a mixture of List[float] and float"
+        ), "rewards must be `List[float]` or `List[List[float]]`"
