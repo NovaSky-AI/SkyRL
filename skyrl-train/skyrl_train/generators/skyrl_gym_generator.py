@@ -290,7 +290,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Build reward output
         if retokenize_chat_history:
             # TODO(Charlie): Currently, the possible response truncation will not affect the reward
-            # in if branch, but some final rewards may be lost in the else branch. Fix this
+            # in the if branch, but some final rewards may be lost in the else branch. Fix this
             # when we support turn-level rewards for the `retokenize_chat_history` codepath.
             reward_out = per_step_rewards[-1][0]
         else:
