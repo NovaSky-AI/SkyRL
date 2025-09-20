@@ -79,6 +79,7 @@ def create_ray_wrapped_inference_engines(
     max_num_seqs=1024,
     tokenizer=None,
     backend="vllm",
+    sleep_level=2,  # we only set to 1 for unit tests that do not explicitly sync weights
     engine_init_kwargs: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
     """
@@ -224,7 +225,12 @@ def create_ray_wrapped_inference_engines(
     engines = [RayWrappedInferenceEngine(actor_handle) for actor_handle in inference_engine_actors]
 
     if inference_engine_enable_sleep:
-        sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
+        if backend == "vllm":
+            sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
+        elif backend == "sglang":
+            # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
+            assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
+            sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
         ray.get(sleep_refs)
 
     return engines
