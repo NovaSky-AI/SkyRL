@@ -53,10 +53,9 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
 
-    m: `len(uids)` is the number of unique examples.
-
-    n: `len(generator_output["rewards"]) / len(uids)` is the number of trajectories we generate
-    for each example.
+    The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
+    calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
+    unique examples.
 
     Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
     """
