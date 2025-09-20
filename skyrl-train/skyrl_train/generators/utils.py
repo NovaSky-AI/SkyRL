@@ -64,8 +64,8 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    # TODO: We should make metrics customizable by the environment
-    # map from the example's uid to each trajectory's reward on that same example
+    # TODO: We should make metrics customizable by the environment.
+    # Map from the example's uid to each trajectory's reward on that same example
     uid_to_trajectory_rewards = defaultdict(list)
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
