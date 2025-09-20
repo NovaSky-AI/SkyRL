@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 
 from flax import nnx
+import jax.numpy as jnp
 import numpy as np
 import safetensors.numpy
 import torch
@@ -40,7 +41,7 @@ def test_qwen3():
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
         config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
-        model = Qwen3ForCausalLM(config, rngs=nnx.Rngs(0))
+        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_checkpoint(Path(tmp) / "model.safetensors", config, model)
         
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True, output_attentions=True)

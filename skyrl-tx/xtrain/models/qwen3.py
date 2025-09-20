@@ -4,15 +4,15 @@ from jax import numpy as jnp
 from transformers import Qwen3Config
 
 
-def Param(*shape: int, rngs: nnx.Rngs):
-    return nnx.Param(nnx.initializers.normal()(rngs.param(), shape))
+def Param(*shape: int, dtype: jnp.dtype, rngs: nnx.Rngs):
+    return nnx.Param(nnx.initializers.normal()(rngs.param(), shape, dtype))
 
 
 class RMSNorm(nnx.Module):
 
-    def __init__(self, size: int, *, eps: float = 1e-6, rngs: nnx.Rngs) -> None:
+    def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.eps = eps
-        self.weight = Param(size, rngs=rngs)
+        self.weight = Param(size, dtype=dtype, rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.eps)
@@ -21,9 +21,9 @@ class RMSNorm(nnx.Module):
 
 class MultiHeadProj(nnx.Module):
 
-    def __init__(self, subscripts: str, *shape: int, rngs: nnx.Rngs) -> None:
+    def __init__(self, subscripts: str, *shape: int, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.subscripts = subscripts
-        self.weight = Param(*shape, rngs=rngs)
+        self.weight = Param(*shape, dtype=dtype, rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.einsum(self.subscripts, x, self.weight)
@@ -40,19 +40,19 @@ def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta:
 
 class Qwen3Attention(nnx.Module):
 
-    def __init__(self, config: Qwen3Config, *, rngs: nnx.Rngs) -> None:
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         
-        self.q_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_heads, self.head_dim, rngs=rngs)
-        self.k_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, rngs=rngs)
-        self.v_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, rngs=rngs)
-        self.o_proj = MultiHeadProj("BMKH,KHN->BMN", self.num_heads, self.head_dim, config.hidden_size, rngs=rngs)
+        self.q_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_heads, self.head_dim, dtype=dtype, rngs=rngs)
+        self.k_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, dtype=dtype, rngs=rngs)
+        self.v_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, dtype=dtype, rngs=rngs)
+        self.o_proj = MultiHeadProj("BMKH,KHN->BMN", self.num_heads, self.head_dim, config.hidden_size, dtype=dtype, rngs=rngs)
 
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, rngs=rngs)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, rngs=rngs)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -92,10 +92,10 @@ class Qwen3Attention(nnx.Module):
 
 class Qwen3MLP(nnx.Module):
 
-    def __init__(self, *, hidden_size: int, intermediate_size: int, rngs: nnx.Rngs) -> None:
-        self.gate_proj = nnx.Linear(hidden_size, intermediate_size, use_bias=False, rngs=rngs)
-        self.up_proj = nnx.Linear(hidden_size, intermediate_size, use_bias=False, rngs=rngs)
-        self.down_proj = nnx.Linear(intermediate_size, hidden_size, use_bias=False, rngs=rngs)
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.gate_proj = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
+        self.up_proj = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
+        self.down_proj = nnx.Linear(config.intermediate_size, config.hidden_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return self.down_proj(nnx.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -103,15 +103,11 @@ class Qwen3MLP(nnx.Module):
 
 class Qwen3DecoderLayer(nnx.Module):
 
-    def __init__(self, config: Qwen3Config, *, rngs: nnx.Rngs) -> None:
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, rngs=rngs)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, rngs=rngs)
-        self.self_attn = Qwen3Attention(config, rngs=rngs)
-        self.mlp = Qwen3MLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            rngs=rngs,
-        )
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+        self.self_attn = Qwen3Attention(config, dtype=dtype, rngs=rngs)
+        self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -144,15 +140,17 @@ class Qwen3DecoderLayer(nnx.Module):
 
 class Qwen3Model(nnx.Module):
 
-    def __init__(self, config: Qwen3Config, *, rngs: nnx.Rngs) -> None:
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.embed_tokens = nnx.Embed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            dtype=dtype,
+            param_dtype=dtype,
             rngs=rngs
         )
-        self.layers = [Qwen3DecoderLayer(config, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, rngs=rngs)
+        self.layers = [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -192,10 +190,10 @@ class Qwen3Model(nnx.Module):
 
 class Qwen3ForCausalLM(nnx.Module):
 
-    def __init__(self, config: Qwen3Config, *, rngs: nnx.Rngs) -> None:
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.model = Qwen3Model(config, rngs=rngs)
-        self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, rngs=rngs)
+        self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
+        self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
