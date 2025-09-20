@@ -164,7 +164,7 @@ Whether you use turn-level rewards or outcome rewards, the rewards used to train
       0.0, 0.0, 0.0, 3.0,
    ]
 
-If we only have a per-trajectory reward of ``1.0`` (i.e. intermediate turns' rewards are all ``0.0``), the per-token rewards will be:
+If there is only an outcome reward of ``1.0`` (i.e. intermediate turns' rewards are all ``0.0``), the per-token rewards are:
 
 .. code-block:: python
 
