@@ -146,18 +146,15 @@ The final implementation is available in `examples/multiply/env.py <https://gith
 (Turn-level) Rewards And Metrics
 --------------------------------
 
-In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single signal for the entire trajectory.
-You can experiment with turn-level rewards by returning a reward for each turn that is not necessarily ``0.0``.
+In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single reward for the entire trajectory.
+You can experiment with turn-level rewards by returning a non-zero in any turn. Otherwise, if you only want to use outcome rewards, you can simply return ``reward=0.0`` for all intermediate turns.
 
-When computing metrics for logging purposes:
+SkyRL automatically computes the following metrics for logging purposes:
 
-- ``pass_at_n``: for each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and being positive signifies a "pass".
+- ``pass_at_n``: for each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and any positive value is considered a "pass".
 - ``mean_raw_reward``: for each trajectory, we sum over all the turns' rewards. We then take the average over all the trajectories.
 
-If you do not want to provide turn-level rewards, you can simply return ``0.0`` for all intermediate turns.
-
-Whether you provide turn-level rewards or per-trajectory rewards, the final rewards used to train the model will be translated to per-token rewards.
-Say we have 3 turns and each turn has 4 response tokens. If the turn-level rewards are ``[1.0, 2.0, 3.0]``, then the per-token rewards will be:
+Whether you use turn-level rewards or outcome rewards, the rewards used to train the model will be translated to per-token rewards. For example, if there are 3 turns with 4 response tokens each and the turn-level rewards are ``[1.0, 2.0, 3.0]``, the resulting per-token rewards are:
 
 .. code-block:: python
 
