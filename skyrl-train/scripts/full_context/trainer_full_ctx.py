@@ -20,7 +20,7 @@ class FullCtxTrainer(RayPPOTrainer):
 
         self.global_step = 0
 
-        # Setup policy and generator
+        # Initialize weight sync state
         with Timer("init_weight_sync_state", self.all_timings):
             self.init_weight_sync_state()
 
