@@ -52,8 +52,8 @@ class RayPPOTestTrainer(RayPPOTrainer):
         self.all_timings = {}
 
         # create rank0 policy model and inference_engines groups, then broadcast weights to inference_engines
-        with Timer("setup_policy_and_generator"):
-            self.setup_policy_and_generator()
+        with Timer("init_weight_sync_state"):
+            self.init_weight_sync_state()
 
         # main training loop
         consumed_samples = 0
