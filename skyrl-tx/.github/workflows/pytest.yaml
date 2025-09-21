@@ -27,4 +27,4 @@ jobs:
         uv run --extra dev pytest -s tests
     - name: Run a single training step
       run: |
-        uv run xtrain --model pcmoritz/qwen3-tiny-test --dataset mahiatlinux/TinyStories-GPT4-V2-50K-SUBSET --output-dir /tmp --per-device-batch-size 2 --max-steps 1
+        uv run tx train --model pcmoritz/qwen3-tiny-test --dataset mahiatlinux/TinyStories-GPT4-V2-50K-SUBSET --output-dir /tmp --per-device-batch-size 2 --max-steps 1

@@ -7,7 +7,7 @@ import optax
 from transformers import AutoConfig, AutoTokenizer
 import typer
 
-from xtrain.utils import get_dtype, get_model_class, save_checkpoint
+from tx.utils import get_dtype, get_model_class, save_checkpoint
 
 app = typer.Typer()
 
@@ -27,9 +27,8 @@ def train_step(model, optimizer: nnx.Optimizer, batch):
     optimizer.update(model, grads)
     return loss
 
-    
-@app.command()
-def main(
+
+def train(
     model_name: str = typer.Option(..., "--model", help="HuggingFace model ID or local model path"),
     dataset: str = typer.Option(..., "--dataset", help="HuggingFace dataset to use for training"),
     output_dir: Path = typer.Option(..., "--output-dir", help="The output directory where the model predictions and checkpoints will be written"),
@@ -68,8 +67,3 @@ def main(
 
     # Save final checkpoint
     save_checkpoint(config, model, output_dir / "model.safetensors")
-
-
-if __name__ == "__main__":
-    app()
-

@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import safetensors.numpy
 from transformers import PretrainedConfig
 
-from xtrain import models
+from tx import models
 
 if TYPE_CHECKING:
     import torch

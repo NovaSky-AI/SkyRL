@@ -6,8 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from xtrain.models import Qwen3ForCausalLM
-from xtrain.utils import load_checkpoint
+from tx.models import Qwen3ForCausalLM
+from tx.utils import load_checkpoint
 
 
 def test_qwen3():
