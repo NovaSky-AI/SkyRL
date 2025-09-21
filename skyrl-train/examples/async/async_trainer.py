@@ -34,9 +34,9 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
 
-        # create rank0 policy model and inference_engines groups, then broadcast weights to inference_engines
-        with Timer("setup_policy_and_generator"):
-            self.setup_policy_and_generator()
+        # Initialize weight sync state
+        with Timer("init_weight_sync_state"):
+            self.init_weight_sync_state()
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
