@@ -10,6 +10,7 @@ import uuid
 import torch
 from loguru import logger
 from omegaconf import DictConfig
+from loguru import logger
 from ray.util.placement_group import PlacementGroup, placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -129,9 +130,9 @@ class RayPPOTrainer:
         )
         if is_train:
             self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
-            print(f"Total steps: {self.total_training_steps}")
+            logger.log("INFO", f"Total steps: {self.total_training_steps}")
         else:
-            print(f"Validation set size: {len(dataloader)}")
+            logger.log("INFO", f"Validation set size: {len(dataloader)}")
 
         return dataloader
 
@@ -176,7 +177,7 @@ class RayPPOTrainer:
         # Extract data_sources from env_extras
         concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("Eval output example: ", vis)
+        logger.log("INFO", "Eval output example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
         eval_metrics = calculate_per_dataset_metrics(

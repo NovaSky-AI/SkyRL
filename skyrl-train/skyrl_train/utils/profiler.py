@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.distributed
+from loguru import logger
 
 
 class Profiler:
@@ -26,7 +27,7 @@ class Profiler:
         self.prof = None
         self.rank = torch.distributed.get_rank()
         if self.rank in self.ranks:
-            print(f"[Profiler] Profiler init for rank {self.rank}")
+            logger.log("INFO", f"[Profiler] Profiler init for rank {self.rank}")
 
             self.prof = torch.profiler.profile(
                 activities=[
@@ -48,7 +49,7 @@ class Profiler:
 
     def start(self):
         if self.check():
-            print(f"[Profiler] started for rank {self.rank}")
+            logger.log("INFO", f"[Profiler] started for rank {self.rank}")
             self.prof.start()
 
     def step(self):
@@ -57,7 +58,7 @@ class Profiler:
 
     def stop(self):
         if self.check():
-            print(f"[Profiler] stopped for rank {self.rank}")
+            logger.log("INFO", f"[Profiler] stopped for rank {self.rank}")
             self.prof.stop()
 
     def save(self):
@@ -65,7 +66,7 @@ class Profiler:
             if not os.path.exists(self.save_path):
                 os.makedirs(self.save_path)
             save_file_name = f"/prof_rank_{self.rank}.json"
-            print(f"[Profiler] Saving trace to {self.save_path + save_file_name}")
+            logger.log("INFO", f"[Profiler] Saving trace to {self.save_path + save_file_name}")
             self.prof.export_chrome_trace(self.save_path + save_file_name)
             self.enable = False
             self.saved = True
@@ -77,5 +78,5 @@ class Profiler:
 
     def stop_trace(self):
         if self.check():
-            print(f"[Profiler] Trace stopped for rank {self.rank}")
+            logger.log("INFO", f"[Profiler] Trace stopped for rank {self.rank}")
             self.enable = False

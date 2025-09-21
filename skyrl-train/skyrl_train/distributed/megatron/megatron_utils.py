@@ -28,6 +28,7 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
+from loguru import logger
 from megatron.core.packed_seq_params import PackedSeqParams
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
@@ -62,7 +63,7 @@ def print_model_size(model: nn.Module, name: str = None):
     n_params, scale = get_model_size(model, scale="auto")
     if name is None:
         name = model.__class__.__name__
-    print(f"{name} contains {n_params:.2f}{scale} parameters")
+    logger.log("INFO", f"{name} contains {n_params:.2f}{scale} parameters")
 
 
 def get_model_size(model: nn.Module, scale="auto"):

@@ -13,6 +13,7 @@ from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils import io
+from loguru import logger
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -290,14 +291,14 @@ def dump_per_dataset_eval_results(
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        print(f"Dumped eval data for {data_source} to {filename}")
+        logger.log("INFO", f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
     aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
     with open(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
-    print(f"Dumped aggregated eval metrics to {aggregated_filename}")
+    logger.log("INFO", f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
 class DynamicSamplingState(TypedDict, total=False):

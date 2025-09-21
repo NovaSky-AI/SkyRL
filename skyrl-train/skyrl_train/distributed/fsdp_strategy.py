@@ -10,6 +10,7 @@ import json
 
 import numpy as np
 import torch
+from loguru import logger
 import torch.nn as nn
 from torch import optim
 from torch import distributed as dist
@@ -173,9 +174,9 @@ class FSDPStrategy(DistributedStrategy):
         if grad_norm is not None and not torch.isfinite(grad_norm):
             if torch.distributed.is_initialized():
                 rank = torch.distributed.get_rank()
-                print(f"WARN: rank {rank} grad_norm is not finite: {grad_norm}")
+                logger.log("WARNING", f"WARN: rank {rank} grad_norm is not finite: {grad_norm}")
             else:
-                print(f"WARN: grad_norm is not finite: {grad_norm}")
+                logger.log("WARNING", f"WARN: grad_norm is not finite: {grad_norm}")
             optimizer.zero_grad()
             return grad_norm
 

@@ -135,7 +135,7 @@ class Actor(nn.Module):
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
             if "output_router_logits" in model_config:
-                print("[MoE] set output_router_logits as True")
+                logger.log("INFO", "[MoE] set output_router_logits as True")
                 self.model.config.output_router_logits = True
 
             # https://github.com/huggingface/transformers/issues/26877
@@ -698,7 +698,7 @@ def get_llm_for_sequence_regression(
     # MoE - balancing loss
     model_config = model.config.to_dict()
     if "output_router_logits" in model_config:
-        print("[MoE] set output_router_logits as True")
+        logger.log("INFO", "[MoE] set output_router_logits as True")
         model.config.output_router_logits = True
 
     # https://github.com/huggingface/transformers/issues/26877

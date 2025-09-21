@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from loguru import logger
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
@@ -59,7 +60,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
     if bundle_indices is not None:
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
-        print(f"creating LLM with bundle_indices={bundle_indices}")
+        logger.log("INFO", f"creating LLM with bundle_indices={bundle_indices}")
 
 
 class WorkerWrap:
@@ -83,7 +84,7 @@ class WorkerWrap:
 
         if getattr(self, "_model_update_group", None):
             if override_existing:
-                print("Destroying existing model update group")
+                logger.log("INFO", "Destroying existing model update group")
                 destroy_process_group(self._model_update_group)
                 self._model_update_group = None
             else:
@@ -92,7 +93,7 @@ class WorkerWrap:
                 )
 
         rank = torch.distributed.get_rank() + rank_offset
-        print(
+        logger.log("INFO", 
             f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
         )
 
@@ -103,7 +104,7 @@ class WorkerWrap:
             rank=rank,
             group_name=group_name,
         )
-        print(
+        logger.log("INFO", 
             f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )

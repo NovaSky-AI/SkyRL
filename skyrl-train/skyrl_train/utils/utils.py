@@ -12,6 +12,7 @@ from ray.util.placement_group import placement_group, PlacementGroupSchedulingSt
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S
 
+from loguru import logger
 
 class Timer:
     def __init__(self, message, update_dict=None):
@@ -616,7 +617,7 @@ def format_gib(mem_bytes: int) -> str:
 
 
 def print_mem(tag: str, mem: dict):
-    print(
+    logger.log("INFO", 
         f"{tag} - Allocated: {format_gib(mem['allocated'])}, "
         f"Reserved: {format_gib(mem['reserved'])}, "
         f"Free: {format_gib(mem['free'])}, "
