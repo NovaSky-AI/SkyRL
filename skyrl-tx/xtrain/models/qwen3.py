@@ -193,7 +193,8 @@ class Qwen3ForCausalLM(nnx.Module):
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
-        self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
+        if not self.config.tie_word_embeddings:
+            self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -210,6 +211,9 @@ class Qwen3ForCausalLM(nnx.Module):
             output_attentions=output_attentions,
         )
         hidden_states = outputs["last_hidden_state"]
-        logits = self.lm_head(hidden_states)
+        if self.config.tie_word_embeddings:
+            logits = hidden_states @ self.model.embed_tokens.embedding.value.T
+        else:
+            logits = self.lm_head(hidden_states)
 
         return {"logits": logits, **outputs}

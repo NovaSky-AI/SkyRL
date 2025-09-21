@@ -1,8 +1,11 @@
 from __future__ import annotations
+
+import os
 from typing import TYPE_CHECKING
 
 from flax import nnx
 import jax.numpy as jnp
+import safetensors.numpy
 from transformers import PretrainedConfig
 
 from xtrain import models
@@ -37,19 +40,38 @@ def get_model_class(config: PretrainedConfig) -> type[nnx.Module]:
     )
 
 
-def get_param_mapping(config: PretrainedConfig, model: nnx.Module) -> dict[tuple, str]:
-    "Get the mapping from model parameter paths to safetensors keys."
+def get_param_key(path: tuple) -> str:
+    "Get the safetensors key for a given model path."
 
-    def get_key(path: tuple) -> str:
-        if path[-1] in {"embedding", "kernel"}:
-            path = (*path[:-1], "weight")
-        return ".".join(map(str, path))
+    if path[-1] in {"embedding", "kernel"}:
+        path = (*path[:-1], "weight")
+    return ".".join(map(str, path))
 
-    param_mapping = {}
+
+def load_checkpoint(filename: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
+    tensors = safetensors.numpy.load_file(filename)
     model_params = nnx.to_flat_state(nnx.state(model))
-    for path, _ in model_params:
-        key = get_key(path)
-        if "lm_head" in path and config.tie_word_embeddings:
-            key = next((get_key(p) for p, _ in model_params if "embed_tokens" in p), key)
-        param_mapping[path] = key
-    return param_mapping
+    updates = []
+    for path, param in model_params:
+        key = get_param_key(path)
+        tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
+        if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
+            tensors[key] = tensors[key].reshape(param.shape)
+        assert param.shape == tensors[key].shape, f"shape mismatch for {key}"
+        updates.append((path, tensors[key]))
+    nnx.update(model, nnx.from_flat_state(updates))
+
+
+def save_checkpoint(config: PretrainedConfig, model: nnx.Module, filename: str | os.PathLike) -> None:
+    model_params = nnx.to_flat_state(nnx.state(model))
+    tensors = {}
+    for path, param in model_params:
+        if "rngs" in path:
+            continue
+        key = get_param_key(path)
+        if "q_proj" in path or "k_proj" in path or "v_proj" in path:
+            param = param.reshape(param.shape[0], -1)
+        elif "o_proj" in path:
+            param = param.reshape(-1, param.shape[-1])
+        tensors[key] = param if "embed_tokens" in path else param.T
+    safetensors.numpy.save_file(tensors, filename)
