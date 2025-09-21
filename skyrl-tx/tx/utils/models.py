@@ -18,11 +18,11 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
     "Convert torch dtype to jax dtype."
 
     match str(dtype):
-        case "torch.float32":
+        case "torch.float32" | "float32":
             return jnp.float32
-        case "torch.bfloat16":
+        case "torch.bfloat16" | "bfloat16":
             return jnp.bfloat16
-        case "torch.float16":
+        case "torch.float16" | "float16":
             return jnp.float16
         case _:
             raise ValueError(f"Unsupported torch dtype: {dtype}")

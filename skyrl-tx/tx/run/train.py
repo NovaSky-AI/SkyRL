@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 from datasets import load_dataset
 import jax.numpy as jnp
@@ -7,7 +8,8 @@ import optax
 from transformers import AutoConfig, AutoTokenizer
 import typer
 
-from tx.utils import get_dtype, get_model_class, save_checkpoint
+from tx.utils.models import get_dtype, get_model_class, save_checkpoint
+from tx.utils.log import add_file_handler, logger
 
 app = typer.Typer()
 
@@ -24,8 +26,9 @@ def loss_fn(model, batch):
 def train_step(model, optimizer: nnx.Optimizer, batch):
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, logits), grads = grad_fn(model, batch)
+    gradnorm = optax.global_norm(grads)
     optimizer.update(model, grads)
-    return loss
+    return loss, gradnorm
 
 
 def train(
@@ -36,6 +39,10 @@ def train(
     max_steps: int | None = typer.Option(None, "--max-steps", help="The maximum number of training steps"),
     per_device_batch_size: int = typer.Option(..., "--per-device-batch-size", help="Batch size per device accelerator for training"),
 ) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    add_file_handler(output_dir / "tx.log")
+    logger.info(f"tx was invoked with 'tx {' '.join(sys.argv[1:])}'")
+
     train_dataset = load_dataset(dataset, split="train")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     config = AutoConfig.from_pretrained(model_name)
@@ -46,6 +53,7 @@ def train(
         model, optax.adamw(0.002, weight_decay=0.1), wrt=nnx.Param
     )
 
+    num_steps = len(train_dataset) / per_device_batch_size
     for step, data in enumerate(train_dataset.iter(batch_size=per_device_batch_size)):
         if max_steps and step >= max_steps:
             break
@@ -59,11 +67,12 @@ def train(
             "attention_mask": batch["attention_mask"][:,:-1],
             "target": batch["input_ids"][:, 1:],
         }
-        loss = train_step(model, optimizer, input_batch)
-        print("step", step, "loss", loss)
+        loss, gradnorm = train_step(model, optimizer, input_batch)
+        logger.info(f"step: {step}, epoch: {step / num_steps :.2e}, shape: {batch['input_ids'].shape}, tokens: {batch['attention_mask'].sum()}, gradnorm: {gradnorm.item() :5.2f}, loss: {loss.item() :5.2f}")
 
         if step % save_steps == 0:
+            logger.info(f"Saving checkpoint to {output_dir}")
             save_checkpoint(config, model, output_dir / "model.safetensors")
 
-    # Save final checkpoint
+    logger.info(f"Saving final checkpoint to {output_dir}")
     save_checkpoint(config, model, output_dir / "model.safetensors")

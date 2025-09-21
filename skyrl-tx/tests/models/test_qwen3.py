@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from tx.models import Qwen3ForCausalLM
-from tx.utils import load_checkpoint
+from tx.utils.models import load_checkpoint
 
 
 def test_qwen3():
