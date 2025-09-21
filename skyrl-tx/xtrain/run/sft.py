@@ -33,8 +33,9 @@ def main(
     model_name: str = typer.Option(..., "--model", help="HuggingFace model ID or local model path"),
     dataset: str = typer.Option(..., "--dataset", help="HuggingFace dataset to use for training"),
     output_dir: Path = typer.Option(..., "--output-dir", help="The output directory where the model predictions and checkpoints will be written"),
+    save_steps: int = typer.Option(500, "--save-steps", help="Number of steps between checkpoints"),
     max_steps: int | None = typer.Option(None, "--max-steps", help="The maximum number of training steps"),
-    per_device_batch_size: int = typer.Option(..., "--per-device-batch-size", help="Batch size per device accelerator for training."),
+    per_device_batch_size: int = typer.Option(..., "--per-device-batch-size", help="Batch size per device accelerator for training"),
 ) -> None:
     train_dataset = load_dataset(dataset, split="train")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -50,7 +51,9 @@ def main(
         if max_steps and step >= max_steps:
             break
 
-        batch = {k: jnp.asarray(v) for k, v in tokenizer(data["text"], return_tensors="np", padding=True).items()}
+        # We pad to multiples of 128 here so jax needs to compile less different shapes
+        batch = tokenizer(data["text"], return_tensors="np", padding=True, pad_to_multiple_of=128)
+        batch = {k: jnp.asarray(v) for k, v in batch.items()}
         model.train()
         input_batch = {
             "text": batch["input_ids"][:,:-1],
@@ -60,7 +63,7 @@ def main(
         loss = train_step(model, optimizer, input_batch)
         print("step", step, "loss", loss)
 
-        if step % 10 == 0:
+        if step % save_steps == 0:
             save_checkpoint(config, model, output_dir / "model.safetensors")
 
     # Save final checkpoint
