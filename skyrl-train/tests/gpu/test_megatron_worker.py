@@ -16,8 +16,6 @@ from tests.gpu.utils import (
     ray_init_for_tests,
     get_rank_0_memory,
     init_inference_engines,
-    run_inference,
-    get_test_prompts,
     Timer,
 )
 from skyrl_train.utils.utils import print_mem, validate_cfg
@@ -25,7 +23,6 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -114,15 +111,16 @@ def test_megatron_policy_weight_sync():
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config()
+        MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
+        cfg = get_test_actor_config(model_name=MODEL_NAME)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = 4
+        cfg.generator.inference_engine_tensor_parallel_size = 8
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
@@ -136,6 +134,8 @@ def test_megatron_policy_weight_sync():
             backend="vllm",
         )
 
+        asyncio.run(client.sleep())
+
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -145,11 +145,9 @@ def test_megatron_policy_weight_sync():
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
-
-        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+        asyncio.run(client.wake_up(tags=["weights"]))
+        with Timer("sync_weights"):
+            ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
     finally:
         ray.shutdown()
 
