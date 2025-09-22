@@ -26,6 +26,7 @@ from skyrl_train.generators.utils import (
     apply_overlong_filtering,
     get_rollout_metrics,
 )
+from skyrl_train.generators.trajectory_logger import create_trajectory_logger_from_config
 
 
 @dataclass
@@ -73,7 +74,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
         else:
             self.env_executor = None
-
+        
+        # Initialize trajectory logging if enabled
+        if generator_cfg.trajectory_logging.enabled:
+            self.trajectory_logger = create_trajectory_logger_from_config(
+                generator_cfg.trajectory_logging
+            )
+        else:
+            self.trajectory_logger = None
+    
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
@@ -453,6 +462,17 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:
             rollout_logprobs = None
+        
+        # Log trajectories if logging is enabled
+        if self.trajectory_logger:
+            # Detokenize prompts and responses for logging
+            log_prompts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in prompt_token_ids]
+            log_responses = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
+            
+            # Handle both single float and list of floats for rewards
+            log_rewards = [sum(r) if isinstance(r, list) else r for r in rewards]
+            
+            self.trajectory_logger.log(log_prompts, log_responses, log_rewards)
 
         rollout_metrics = get_rollout_metrics(responses, rewards)
 
@@ -671,3 +691,5 @@ class SkyRLGymGenerator(GeneratorInterface):
                 input_ids += obs_tokens
 
         return loss_mask, input_ids, logprobs, response_end_idx
+
+
