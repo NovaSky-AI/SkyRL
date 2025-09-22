@@ -151,7 +151,7 @@ You can experiment with turn-level rewards by returning a non-zero in any turn. 
 
 SkyRL automatically computes the following metrics for logging purposes:
 
-- ``pass_at_n``: for each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and any positive value is considered a "pass".
+- ``pass_at_n``: The ``n`` in ``pass_at_n`` is the number of trajectories we generate for each example. ``pass_at_n`` is 1 if any trajectory succeeded, and 0 otherwise. For each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and any positive value is considered a "pass".
 - ``mean_raw_reward``: for each trajectory, we sum over all the turns' rewards. We then take the average over all the trajectories.
 
 Whether you use turn-level rewards or outcome rewards, the rewards used to train the model will be translated to per-token rewards. For example, if there are 3 turns with 4 response tokens each and the turn-level rewards are ``[1.0, 2.0, 3.0]``, the resulting per-token rewards are:
