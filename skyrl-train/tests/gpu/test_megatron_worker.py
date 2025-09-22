@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
+PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
 """
 
 import ray
@@ -47,7 +47,7 @@ def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create(
             {"num_layers_in_last_pipeline_stage": 13}
         )
-    if "Qwen3-30B" or "Qwen1.5-MoE" in model_name:
+    if "Qwen3-30B" in model_name or "Qwen1.5-MoE" in model_name:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
 
     validate_cfg(cfg)

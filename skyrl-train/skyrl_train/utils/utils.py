@@ -523,7 +523,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # note that this could potentially cause unexpected issues if there are overlapping installations between the base image
         # and the pyproject.toml file - to resolve these, make sure to specify exact versions of dependencies in the pyproject.toml
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
-        env_vars["PYTHONPATH"] = os.environ.get["PYTHONPATH"]
+        env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
     return env_vars
 
