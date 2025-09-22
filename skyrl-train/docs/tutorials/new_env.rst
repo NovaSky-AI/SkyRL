@@ -147,7 +147,7 @@ The final implementation is available in `examples/multiply/env.py <https://gith
 --------------------------------
 
 In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single reward for the entire trajectory.
-You can experiment with turn-level rewards by returning a non-zero in any turn. Otherwise, if you only want to use outcome rewards, you can simply return ``reward=0.0`` for all intermediate turns.
+You can experiment with turn-level rewards by returning a non-zero reward in any turn. Otherwise, if you only want to use outcome rewards, you can simply return ``reward=0.0`` for all intermediate turns.
 
 SkyRL automatically computes the following metrics for logging purposes:
 
