@@ -343,6 +343,7 @@ def test_generator_output_concatenation():
 
 
 def test_get_metrics_from_generator_output():
+    # Per trajectory rewards, where rewards are List[float]
     generator_output: GeneratorOutput = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[1, 2], [3, 4]],
@@ -355,6 +356,14 @@ def test_get_metrics_from_generator_output():
     avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
     assert avg_score == 1.5
     assert pass_at_n == 1.0
+
+    # Per token rewards, where rewards are List[List[float]], so for pass_at_n we use the last
+    # token's reward to signify the trajectory's reward
+    generator_output["rewards"] = [[1.0, 0.0], [0.0, 1.0]]
+    uids = ["a", "b"]
+    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
+    assert avg_score == 1.0
+    assert pass_at_n == 0.5
 
 
 @pytest.mark.asyncio
@@ -956,8 +965,10 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
 
     # Response ids layout: step1 (3 tokens) + obs (1) + step2 (3) + final eos (1) = 8
     assert len(out.response_ids) == 8
-    # Rewards at indices: 2 (end of step1 assistant), 6 (end of step2 assistant), others zero
-    expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 1.7, 0.0]
+    # Indices: 2 (end of step1 assistant), 6 (end of step2 assistant), 7 (manually appended eos token)
+    # Note that the last reward is placed at the 7 instead of at 6 since we manually move
+    # it using the flag `appended_eos_token` in skyrl_gym_generator.py
+    expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 1.7]
     assert isinstance(out.reward, list)
     assert out.reward == expected_rewards
     assert out.stop_reason == "stop"
