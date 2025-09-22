@@ -27,7 +27,7 @@ INFERENCE_ENGINE_TP=8
 
 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/amazon/efa/lib"
 
-export PYTHONPATH_EXPORT=1
+export SKYRL_PYTHONPATH_EXPORT=1
 
 uv run --isolated --frozen --extra mcore --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \

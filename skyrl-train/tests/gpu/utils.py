@@ -27,7 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.utils.constants import PYTHONPATH_EXPORT
+from skyrl_train.utils.constants import SKYRL_PYTHONPATH_EXPORT
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -356,7 +356,7 @@ def ray_init_for_tests():
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
     # TODO (erictang000): refactor this to use the same prepare_runtime_environment function as in utils.py for tests
     # to remove duplicate code
-    if PYTHONPATH_EXPORT:
+    if SKYRL_PYTHONPATH_EXPORT:
         env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"

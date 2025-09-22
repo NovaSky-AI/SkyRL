@@ -18,7 +18,7 @@ Whether to export ``LD_LIBRARY_PATH`` environment variable from the driver to th
 For example, if you are using RDMA, you may need to customize the ``LD_LIBRARY_PATH`` to include the RDMA libraries (Ex: EFA on AWS).
 """
 
-PYTHONPATH_EXPORT = str(os.environ.get("PYTHONPATH_EXPORT", "False")).lower() in (
+SKYRL_PYTHONPATH_EXPORT = str(os.environ.get("SKYRL_PYTHONPATH_EXPORT", "False")).lower() in (
     "true",
     "1",
     "yes",
