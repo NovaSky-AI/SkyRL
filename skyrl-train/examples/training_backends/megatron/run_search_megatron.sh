@@ -25,10 +25,9 @@ MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=8
 
-# /usr/local/cuda/lib64:/opt/amazon/efa/lib:/opt/cudnn/lib:
-# # /opt/cudnn/lib:/usr/local/cuda/lib64:
-# export 
 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/amazon/efa/lib"
+
+export PYTHONPATH_EXPORT=1
 
 uv run --isolated --frozen --extra mcore --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \

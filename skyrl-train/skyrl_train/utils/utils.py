@@ -10,7 +10,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
 
-from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S
+from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, PYTHONPATH_EXPORT
 
 
 class Timer:
@@ -443,19 +443,20 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
 
-    # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-    # this is useful for dependencies that are baked into the docker image but that we don't want to ship + rebuild with UV (i.e. TransformerEngine)
-    env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH", "")
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
     if cfg.generator.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
-    if cfg.trainer.strategy == "megatron" and cfg.trainer.flash_attn:
-        # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
-        # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
-        env_vars["NVTE_FUSED_ATTN"] = "0"
+    if cfg.trainer.strategy == "megatron":
+        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
+        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
+        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        if cfg.trainer.flash_attn:
+            # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
+            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
+            env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
@@ -495,11 +496,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
 
-    if cfg.trainer.strategy == "megatron":
-        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
-        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
-        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
     if os.environ.get("WANDB_API_KEY"):
@@ -519,6 +515,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
+
+    if PYTHONPATH_EXPORT:
+        # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
+        # this is useful for dependencies that are baked into the docker image but that we don't want to ship + rebuild with UV (i.e. TransformerEngine)
+        # see https://github.com/ray-project/ray/issues/56697 for why this is needed
+        # note that this could potentially cause unexpected issues if there are overlapping installations between the base image
+        # and the pyproject.toml file - to resolve these, make sure to specify exact versions of dependencies in the pyproject.toml
+        logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
+        env_vars["PYTHONPATH"] = os.environ.get["PYTHONPATH"]
 
     return env_vars
 
