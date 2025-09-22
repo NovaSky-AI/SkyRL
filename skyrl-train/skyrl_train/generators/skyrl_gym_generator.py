@@ -175,7 +175,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
+        per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
             # 1. Generate output
@@ -210,7 +210,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
-            step_reward: Optional[float] = env_step_output["reward"]
+            step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
 
             if env_step_output.get("postprocessed_action", None) is not None:
@@ -270,11 +270,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
+        appended_eos_token = False
         if not self.use_conversation_multi_turn:
             # we might need to add the eos token to the response ids
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
+                appended_eos_token = True
 
         # need to truncate loss mask correctly for responses that go to max length
         if self.max_turns > 1:
@@ -290,16 +292,25 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Build reward output
         if retokenize_chat_history:
+            # TODO(Charlie): Currently, the possible response truncation will not affect the reward
+            # in the if branch, but some final rewards may be lost in the else branch. Fix this
+            # when we support turn-level rewards for the `retokenize_chat_history` codepath.
             reward_out = per_step_rewards[-1][0]
         else:
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for step_reward, idx in per_step_rewards:
-                if step_reward is None:
-                    continue
+            for i, (step_reward, idx) in enumerate(per_step_rewards):
+                assert step_reward is not None
                 if idx >= len(response_ids):
                     break
-                token_level_rewards[idx] += step_reward
+                if appended_eos_token and i == len(per_step_rewards) - 1:
+                    # NOTE(Charlie): If we appended the eos token, we need to place
+                    # the reward at the last token (the manually appended eos token)
+                    # rather than the last turn's assistant-generated token. This matches
+                    # the logic in trainer.py::postprocess_generator_output when rewards are List[float].
+                    token_level_rewards[-1] = step_reward
+                else:
+                    token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
 
         return AgentLoopOutput(

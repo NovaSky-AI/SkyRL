@@ -104,6 +104,7 @@ async def run_generator_end_to_end(
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         tokenizer=tokenizer,
+        sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
     )
 
     # Create a mock generator config

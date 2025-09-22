@@ -30,7 +30,7 @@ from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-NUM_GPUS = 4
+NUM_GPUS = 2
 
 
 class DummyDataset(Dataset):
