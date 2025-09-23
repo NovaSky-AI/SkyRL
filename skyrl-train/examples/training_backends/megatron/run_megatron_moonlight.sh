@@ -8,11 +8,10 @@ set -x
 
 # running moonlight16b
 # huggingface-cli download moonshotai/Moonlight-16B-A3B-Instruct --local-dir ~/moonlight16b
-# add "blobfile", to pyproject.toml
 
-DATA_DIR="/mnt/cluster_storage/gsm8k"
+DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
-MODEL_NAME="/home/ray/moonlight16b"
+MODEL_NAME="$HOME/moonlight16b"
 
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
@@ -34,7 +33,7 @@ FLASH_ATTN=false
 
 export SKYRL_PYTHONPATH_EXPORT=1
 
-uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with blobfile -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

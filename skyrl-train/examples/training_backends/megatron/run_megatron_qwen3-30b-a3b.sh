@@ -6,7 +6,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/training_backends/megatron/run_megatron_qwen3-30b-a3b.sh
 
-DATA_DIR="/mnt/cluster_storage/gsm8k"
+DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
 MODEL_NAME="Qwen/Qwen3-30B-A3B"
 

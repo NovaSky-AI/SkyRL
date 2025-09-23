@@ -9,7 +9,7 @@ set -x
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 MODEL_NAME="Qwen/Qwen3-30B-A3B"
 
-DATA_DIR="/mnt/cluster_storage/searchR1" # save to shared storage across nodes or use local storage on each node
+DATA_DIR="$HOME/data/searchR1" # save to shared storage across nodes or use local storage on each node
 NUM_NODES=4
 NUM_GPUS_PER_NODE=8
 
@@ -24,8 +24,6 @@ MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 
 NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=8
-
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/amazon/efa/lib"
 
 export SKYRL_PYTHONPATH_EXPORT=1
 
