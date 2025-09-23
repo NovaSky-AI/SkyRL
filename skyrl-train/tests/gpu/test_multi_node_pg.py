@@ -2,7 +2,7 @@
 Run with:
 uv run --isolated --extra dev -- pytest tests/gpu/test_multi_node_pg.py
 NOTE: Placement group bundle ordering across nodes only typically has race conditions when using >16 GPUs
-so this test is best run with >16 GPUs to check that ordering looks correct
+so this test is best run with >16 GPUs to actually see that ordering is correct
 """
 
 import ray
@@ -16,6 +16,9 @@ from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
+
+from tests.gpu.utils import ray_init_for_tests
+
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -61,33 +64,41 @@ def test_multi_node_pg_errors(ray_init_fixture, cfg):
     colocate_all = True
     num_nodes = 2
     num_gpus_per_node = 4
-    pg = get_pg("whole_node_bundle", num_gpus_per_node, num_nodes)
-    with pytest.raises(
-        AssertionError,
-        match="if colocate_all is True, the number of bundles in the shared placement group must match the world size",
-    ):
-        PPORayActorGroup(
-            cfg,
-            num_nodes=num_nodes,
-            num_gpus_per_node=num_gpus_per_node,
-            ray_actor_type=PolicyWorker,
-            pg=pg,
-            num_gpus_per_actor=0.2,
-            colocate_all=colocate_all,
-        )
+    try:
+        pg = get_pg("whole_node_bundle", num_gpus_per_node, num_nodes)
+        with pytest.raises(
+            AssertionError,
+            match="if colocate_all is True, the number of bundles in the shared placement group must match the world size",
+        ):
+            PPORayActorGroup(
+                cfg,
+                num_nodes=num_nodes,
+                num_gpus_per_node=num_gpus_per_node,
+                ray_actor_type=PolicyWorker,
+                pg=pg,
+                num_gpus_per_actor=0.2,
+                colocate_all=colocate_all,
+            )
+    finally:
+        ray.shutdown()
     pg = None
-    with pytest.raises(
-        AssertionError, match="if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
-    ):
-        PPORayActorGroup(
-            cfg,
-            num_nodes=num_nodes,
-            num_gpus_per_node=num_gpus_per_node,
-            ray_actor_type=PolicyWorker,
-            pg=pg,
-            num_gpus_per_actor=0.2,
-            colocate_all=colocate_all,
-        )
+    try:
+        ray_init_for_tests()
+        with pytest.raises(
+            AssertionError,
+            match="if colocate_all is True, the shared placement group must be provided to PPORayActorGroup",
+        ):
+            PPORayActorGroup(
+                cfg,
+                num_nodes=num_nodes,
+                num_gpus_per_node=num_gpus_per_node,
+                ray_actor_type=PolicyWorker,
+                pg=pg,
+                num_gpus_per_actor=0.2,
+                colocate_all=colocate_all,
+            )
+    finally:
+        ray.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -138,14 +149,13 @@ def test_multi_node_pg_init(ray_init_fixture, cfg, colocate_all, placement_group
                 rank % cfg.trainer.placement.policy_num_gpus_per_node == gpu_ids[rank]
             ), f"Mesh rank {mesh_rank} has incorrect gpu id"
 
-        # node ids should be in order
-        for i in range(len(set(node_ids))):
-            j = 0
-            node_id = node_ids[i * cfg.trainer.placement.policy_num_gpus_per_node]
-            while j < cfg.trainer.placement.policy_num_gpus_per_node:
-                assert (
-                    node_id == node_ids[i * cfg.trainer.placement.policy_num_gpus_per_node + j]
-                ), f"Node id {node_id} has incorrect node id"
-                j += 1
+        num_nodes = len(set(node_ids))
+        gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+        for i in range(num_nodes):
+            node_ids_for_group = node_ids[i * gpus_per_node : (i + 1) * gpus_per_node]
+            unique_node_ids = set(node_ids_for_group)
+            assert (
+                len(unique_node_ids) == 1
+            ), f"Node IDs are not consistent for node group {i}. Found: {unique_node_ids}"
     finally:
         ray.shutdown()

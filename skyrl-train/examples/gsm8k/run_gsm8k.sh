@@ -20,13 +20,13 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_nodes=2 \
-  trainer.placement.ref_num_nodes=2 \
+  trainer.placement.policy_num_nodes=1 \
+  trainer.placement.ref_num_nodes=1 \
   trainer.placement.policy_num_gpus_per_node=4 \
   trainer.placement.ref_num_gpus_per_node=4 \
-  generator.num_inference_engines=8 \
+  generator.num_inference_engines=4 \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \

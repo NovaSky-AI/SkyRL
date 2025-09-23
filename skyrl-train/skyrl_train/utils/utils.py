@@ -607,10 +607,13 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     for i in range(num_bundles):
         info_actors.append(
             InfoActor.options(
+                num_cpus=0.01,
+                num_gpus=0.01,
+                resources=None,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=i,
-                )
+                ),
             ).remote()
         )
 
