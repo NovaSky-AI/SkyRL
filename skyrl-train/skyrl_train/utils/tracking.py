@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Union
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
-from loguru import logger
 
 
 # TODO(tgriggs): Test all backends.
@@ -132,7 +131,7 @@ class _TensorboardAdapter:
 
         tensorboard_dir = os.environ.get("TENSORBOARD_DIR", "tensorboard_log")
         os.makedirs(tensorboard_dir, exist_ok=True)
-        logger.log("INFO", f"Saving tensorboard log to {tensorboard_dir}.")
+        logger.info(f"Saving tensorboard log to {tensorboard_dir}.")
         self.writer = SummaryWriter(tensorboard_dir)
 
     def log(self, data, step):

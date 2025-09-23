@@ -291,14 +291,14 @@ def dump_per_dataset_eval_results(
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        logger.log("INFO", f"Dumped eval data for {data_source} to {filename}")
+        logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
     aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
     with open(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
-    logger.log("INFO", f"Dumped aggregated eval metrics to {aggregated_filename}")
+    logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
 class DynamicSamplingState(TypedDict, total=False):
