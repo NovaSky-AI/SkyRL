@@ -72,13 +72,14 @@ class PromptDataset:
         env_class = row_dict.pop(self.env_class_key, None)
 
         extra = {key: value for key, value in row_dict.items() if key != self.prompt_key and key != self.env_class_key}
+        uid = str(item)
 
-        return messages, env_class, extra
+        return messages, env_class, extra, uid
 
     def collate_fn(self, item_list):
         all_inputs = []
-        for prompt, env_class, env_extras in item_list:
-            all_inputs.append({"prompt": prompt, "env_class": env_class, "env_extras": env_extras})
+        for prompt, env_class, env_extras, item_uids in item_list:
+            all_inputs.append({"prompt": prompt, "env_class": env_class, "env_extras": env_extras, "uid": item_uids})
         return all_inputs
 
     def __len__(self):

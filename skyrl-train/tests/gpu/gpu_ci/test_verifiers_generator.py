@@ -46,6 +46,7 @@ def verifiers_runtime():
         backend="vllm",
         max_model_len=3072,
         gpu_memory_utilization=0.8,
+        sleep_level=1,  # since we do not explicitly sync weights
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model)

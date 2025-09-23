@@ -179,7 +179,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 def test_http_endpoint_completions_routing_and_batching():
     """
     Since /completions endpoint supports both single and batched requests, and we support
-    either using trajectory_id or not, we test all combinations.
+    either using session_id or not, we test all combinations.
 
     We test with 2 engines of TP=1 to check if routing works.
     """
@@ -206,6 +206,7 @@ def test_http_endpoint_completions_routing_and_batching():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -232,12 +233,12 @@ def test_http_endpoint_completions_routing_and_batching():
                     for i, p in enumerate(text_prompts):
                         payload = {"model": MODEL, "prompt": p, **sampling_params}
                         if with_traj:
-                            payload["trajectory_id"] = i
+                            payload["session_id"] = i
                         outputs.append(requests.post(f"{base_url}/completions", json=payload).json())
                 else:
                     payload = {"model": MODEL, "prompt": text_prompts, **sampling_params}
                     if with_traj:
-                        payload["trajectory_id"] = list(range(len(text_prompts)))
+                        payload["session_id"] = list(range(len(text_prompts)))
                     outputs = [requests.post(f"{base_url}/completions", json=payload).json()]
 
                 _check_completions_outputs(text_prompts, outputs, "request_posting", "vllm")
@@ -282,6 +283,7 @@ def test_http_endpoint_openai_api_with_weight_sync():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=2,  # since we explicitly sync weights
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -318,19 +320,19 @@ def test_http_endpoint_openai_api_with_weight_sync():
         ]
 
         def _generate_outputs(test_type, endpoint):
-            def payload_builder(traj_id, prompt):
+            def payload_builder(session_id, prompt):
                 if endpoint == "chat_completions":
                     return {
                         "model": MODEL,
                         "messages": prompt,
-                        "trajectory_id": traj_id,
+                        "session_id": session_id,
                         **sampling_params,
                     }
                 else:
                     return {
                         "model": MODEL,
                         "prompt": prompt,
-                        "trajectory_id": traj_id,
+                        "session_id": session_id,
                         **sampling_params,
                     }
 
@@ -346,16 +348,16 @@ def test_http_endpoint_openai_api_with_weight_sync():
 
             if test_type == "request_posting":
 
-                def generate_output(traj_id, prompt):
+                def generate_output(session_id, prompt):
                     return requests.post(
                         f"{base_url}/{path}",
-                        json=payload_builder(traj_id, prompt),
+                        json=payload_builder(session_id, prompt),
                     ).json()
 
                 with ThreadPoolExecutor() as executor:
                     output_tasks = [
-                        executor.submit(generate_output, traj_id, prompt)
-                        for traj_id, prompt in enumerate(prompt_iterable)
+                        executor.submit(generate_output, session_id, prompt)
+                        for session_id, prompt in enumerate(prompt_iterable)
                     ]
                     outputs = [task.result() for task in output_tasks]
 
@@ -368,8 +370,8 @@ def test_http_endpoint_openai_api_with_weight_sync():
                     ) as session:
                         headers = {"Content-Type": "application/json"}
                         output_tasks = []
-                        for traj_id, prompt in enumerate(prompt_iterable):
-                            payload = payload_builder(traj_id, prompt)
+                        for session_id, prompt in enumerate(prompt_iterable):
+                            payload = payload_builder(session_id, prompt)
                             output_tasks.append(session.post(f"{base_url}/{path}", json=payload, headers=headers))
                         responses = await asyncio.gather(*output_tasks)
                         return [await response.json() for response in responses]
@@ -379,14 +381,14 @@ def test_http_endpoint_openai_api_with_weight_sync():
             elif test_type == "litellm":
 
                 async def generate_outputs_async():
-                    async def generate_output(traj_id, prompt):
+                    async def generate_output(session_id, prompt):
                         if endpoint == "chat_completions":
                             return await litellm_async_completion(
                                 model=f"openai/{MODEL}",
                                 messages=prompt,
                                 api_base=base_url,
                                 api_key="DUMMY_KEY",
-                                trajectory_id=traj_id,
+                                session_id=session_id,
                                 **sampling_params,
                             )
                         else:
@@ -395,11 +397,11 @@ def test_http_endpoint_openai_api_with_weight_sync():
                                 prompt=[prompt],
                                 api_base=base_url,
                                 api_key="DUMMY_KEY",
-                                trajectory_id=[traj_id],
+                                session_id=[session_id],
                                 **sampling_params,
                             )
 
-                    tasks = [generate_output(traj_id, prompt) for traj_id, prompt in enumerate(prompt_iterable)]
+                    tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
                     return await asyncio.gather(*tasks)
 
                 outputs = asyncio.run(generate_outputs_async())
@@ -499,14 +501,14 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
 
             # Default concurrency limit is 100 due to HTTP client pool capacity.
             async def generate_outputs_async():
-                async def generate_output(traj_id, prompt):
+                async def generate_output(session_id, prompt):
                     if endpoint == "chat_completions":
                         return await litellm_async_completion(
                             model=f"openai/{MODEL}",
                             messages=prompt,
                             api_base=base_url,
                             api_key="DUMMY_KEY",
-                            trajectory_id=traj_id,
+                            session_id=session_id,
                             **sampling_params,
                         )
                     else:
@@ -515,11 +517,11 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
                             prompt=[prompt],
                             api_base=base_url,
                             api_key="DUMMY_KEY",
-                            trajectory_id=[traj_id],
+                            session_id=[session_id],
                             **sampling_params,
                         )
 
-                tasks = [generate_output(traj_id, prompt) for traj_id, prompt in enumerate(prompt_iterable)]
+                tasks = [generate_output(session_id, prompt) for session_id, prompt in enumerate(prompt_iterable)]
                 return await asyncio.gather(*tasks)
 
             return asyncio.run(generate_outputs_async())
@@ -565,6 +567,7 @@ def test_structured_generation():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
         )
 
         # Start server in background thread using serve function directly
@@ -607,8 +610,7 @@ def test_structured_generation():
 
         # assert is valid json
         text = output.choices[0].message.content
-        print(f"Output: {text}")
-        assert json.loads(text) is not None  # if json invalid
+        assert json.loads(text) is not None, f"Output is not valid JSON: {text}"
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         ray.shutdown()
@@ -639,6 +641,7 @@ def test_http_endpoint_error_handling():
             backend="vllm",
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
         )
 
         from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
@@ -721,7 +724,7 @@ def test_http_endpoint_error_handling():
         assert health_data["status"] == "healthy"
 
         # Tests below are for `/completions` endpoint.
-        # e.g. trajectory id wrong length, etc.
+        # e.g. session id wrong length, etc.
         # Additional tests for /v1/completions
         # C1: streaming not supported
         response = requests.post(
@@ -751,8 +754,8 @@ def test_http_endpoint_error_handling():
         error_data = response.json()
         assert "n is not supported in SkyRL for /completions " in error_data["error"]["message"]
 
-        # When batched and trajectory_id wrong length -> 400 from server or client-side error
-        bad_payload = {"model": MODEL, "prompt": ["hi", "hello", "ok"], "trajectory_id": [0, 1]}
+        # When batched and session_id wrong length -> 400 from server or client-side error
+        bad_payload = {"model": MODEL, "prompt": ["hi", "hello", "ok"], "session_id": [0, 1]}
         r = requests.post(f"{base_url}/v1/completions", json=bad_payload)
         assert r.status_code == HTTPStatus.BAD_REQUEST
 

@@ -277,7 +277,7 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
     # Extract the actual prompts from the dataset
     prompts = []
     for i in range(min(num_samples, len(dataset))):
-        prompt_data, _, _ = dataset[i]  # dataset returns (messages, env_class, extra)
+        prompt_data, _, _, _ = dataset[i]  # dataset returns (messages, env_class, extra, uid)
         prompts.append(prompt_data)
 
     return prompts
@@ -305,7 +305,7 @@ def get_test_generator_input(
     prompts = []
     env_extras = []
     for i in range(min(num_prompts, len(dataset))):
-        prompt_data, _, env_extra = dataset[i]  # dataset returns (messages, env_class, extra)
+        prompt_data, _, env_extra, _ = dataset[i]  # dataset returns (messages, env_class, extra, uid)
         prompts.extend([prompt_data] * n_samples_per_prompt)
         env_extras.extend([env_extra] * n_samples_per_prompt)
 
@@ -374,6 +374,7 @@ def init_inference_engines(
     max_model_len=1536,
     gpu_memory_utilization=0.6,
     num_inference_engines=1,
+    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -404,6 +405,7 @@ def init_inference_engines(
         max_num_seqs=1024,
         tokenizer=tokenizer,
         backend=backend,
+        sleep_level=sleep_level,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:

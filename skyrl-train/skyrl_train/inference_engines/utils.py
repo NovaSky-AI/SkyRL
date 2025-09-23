@@ -69,22 +69,22 @@ def hash_with_sha256(x: Union[int, str]) -> int:
 
 
 def route_prompts_to_engines(
-    num_prompts: int, num_inference_engines: int, trajectory_ids: Optional[Union[list[int], list[str]]]
+    num_prompts: int, num_inference_engines: int, session_ids: Optional[Union[list[int], list[str]]]
 ) -> dict[int, list[int]]:
     """
-    Given the number of prompts, number of inference engines, and the trajectory_id, return a mapping
+    Given the number of prompts, number of inference engines, and the session_id, return a mapping
     from engine index to the list of prompt IDs the engine will process.
 
     Args:
     - num_prompts: int - The number of prompts.
     - num_inference_engines: int - The number of inference engines.
-    - trajectory_ids: Optional[Union[list[int], list[str]]] - The trajectory IDs.
+    - session_ids: Optional[Union[list[int], list[str]]] - The session IDs.
 
     Required:
     - num_prompts > 0
     - num_inference_engines > 0
-    - trajectory_ids is a list of integers or strings if provided
-    - len(trajectory_ids) == num_prompts if provided
+    - session_ids is a list of integers or strings if provided
+    - len(session_ids) == num_prompts if provided
 
     Returns:
     - dict[int, list[int]] - A mapping from engine index to the list of prompt IDs the engine will process.
@@ -92,20 +92,20 @@ def route_prompts_to_engines(
     # 0. Validation
     assert num_prompts > 0, "Number of prompts must be greater than 0"
     assert num_inference_engines > 0, "Number of inference engines must be greater than 0"
-    if trajectory_ids is not None:
-        assert isinstance(trajectory_ids, list) and all(
-            isinstance(tid, (int, str)) for tid in trajectory_ids
-        ), "Trajectory ID must be a list of integers or strings"
-        assert len(trajectory_ids) == num_prompts, "Trajectory ID must have the same length as the number of prompts"
+    if session_ids is not None:
+        assert isinstance(session_ids, list) and all(
+            isinstance(sid, (int, str)) for sid in session_ids
+        ), "Session ID must be a list of integers or strings"
+        assert len(session_ids) == num_prompts, "Session ID must have the same length as the number of prompts"
 
-    # 1. trajectory_id not provided, with a single prompt: route to a random engine for a naive load balancing.
-    if trajectory_ids is None and num_prompts == 1:
+    # 1. session_id not provided, with a single prompt: route to a random engine for a naive load balancing.
+    if session_ids is None and num_prompts == 1:
         engine_idx = random.randint(0, num_inference_engines - 1)
         return {engine_idx: [0]}
 
-    # 2. trajectory_id not provided, with a batched prompt: split evenly across engines.
+    # 2. session_id not provided, with a batched prompt: split evenly across engines.
     engine_idx_to_prompt_ids: dict[int, list[int]] = {}
-    if trajectory_ids is None:
+    if session_ids is None:
         dp_item_size = (num_prompts + num_inference_engines - 1) // num_inference_engines
         for dp_rank in range(num_inference_engines):
             start_idx = dp_rank * dp_item_size
@@ -115,29 +115,29 @@ def route_prompts_to_engines(
                 engine_idx_to_prompt_ids[dp_rank] = prompt_ids
         return engine_idx_to_prompt_ids
 
-    # 3. trajectory_id provided, we route by trajectory_id
-    for i, cur_tid in enumerate(trajectory_ids):
-        engine_idx = hash_with_sha256(str(cur_tid)) % num_inference_engines
+    # 3. session_id provided, we route by session_id
+    for i, cur_sid in enumerate(session_ids):
+        engine_idx = hash_with_sha256(str(cur_sid)) % num_inference_engines
         engine_idx_to_prompt_ids.setdefault(engine_idx, []).append(i)
     return engine_idx_to_prompt_ids
 
 
 def postprocess_completion_request(
     prompt: Union[List[int], List[List[int]], List[str], str],
-    trajectory_id_value: Optional[Union[List[int], List[str], int, str]],
+    session_id_value: Optional[Union[List[int], List[str], int, str]],
 ) -> tuple[Optional[Union[List[int], List[str], ErrorResponse]], Union[List[List[int]], List[str]]]:
     """
-    Postprocess the trajectory_id value and raise error if invalid.
+    Postprocess the session_id value and raise error if invalid.
 
-    Returns a list of trajectory_ids, or None if trajectory_id_value is None, or ErrorResponse if invalid.
+    Returns a list of session_ids, or None if session_id_value is None, or ErrorResponse if invalid.
     Also returns the processed prompt, where if the prompt is a single request, we make it
     a singleton list of a single request. That is, List[int] becomes List[List[int]] of length 1,
     and str becomes List[str] of length 1.
 
     Postconditions:
-    - If trajectory_id_value is None, we return None.
-    - If trajectory_id_value and prompt do not match, we return ErrorResponse.
-    - The returned trajectory_id_list has the same length as the prompt.
+    - If session_id_value is None, we return None.
+    - If session_id_value and prompt do not match, we return ErrorResponse.
+    - The returned session_id_list has the same length as the prompt.
     - The returned prompt is either List[List[int]], or List[str], whether batched or not.
     """
 
@@ -149,21 +149,21 @@ def postprocess_completion_request(
     if is_single:
         prompt = [prompt]
 
-    if trajectory_id_value is None:
+    if session_id_value is None:
         return None, prompt
 
-    if isinstance(trajectory_id_value, (int, str)):
-        trajectory_id_value = [trajectory_id_value]
+    if isinstance(session_id_value, (int, str)):
+        session_id_value = [session_id_value]
 
-    if len(trajectory_id_value) != len(prompt):
+    if len(session_id_value) != len(prompt):
         return (
             ErrorResponse(
                 error=ErrorInfo(
                     message=(
-                        "For /completions request with a single prompt, request.trajectory_id must "
+                        "For /completions request with a single prompt, request.session_id must "
                         f"be a single integer/string or a singleton list.\nFor batched requests, "
-                        f"request.trajectory_id must have the same length as request.prompt."
-                        f"However, received (len(trajectory_id_value): {len(trajectory_id_value)}, len(prompt): {len(prompt)})."
+                        f"request.session_id must have the same length as request.prompt."
+                        f"However, received (len(session_id_value): {len(session_id_value)}, len(prompt): {len(prompt)})."
                     ),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
@@ -172,7 +172,7 @@ def postprocess_completion_request(
             prompt,
         )
 
-    return trajectory_id_value, prompt
+    return session_id_value, prompt
 
 
 def aggregate_completion_usage_info(

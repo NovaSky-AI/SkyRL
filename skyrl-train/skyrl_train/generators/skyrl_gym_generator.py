@@ -15,7 +15,7 @@ from tqdm.asyncio import tqdm
 from dataclasses import dataclass
 from loguru import logger
 
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -115,6 +115,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_tokens: int,
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
+        trajectory_id: Optional[TrajectoryID] = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -148,7 +149,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
-        trajectory_id = uuid4().hex
+        session_id = (
+            f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
+        )
         done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
@@ -172,18 +175,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
+        per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
             # 1. Generate output
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
+                    prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
                 )
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids], trajectory_ids=[trajectory_id], sampling_params=sampling_params
+                    prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
@@ -207,7 +210,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
-            step_reward: Optional[float] = env_step_output["reward"]
+            step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
 
             if env_step_output.get("postprocessed_action", None) is not None:
@@ -267,11 +270,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
+        appended_eos_token = False
         if not self.use_conversation_multi_turn:
             # we might need to add the eos token to the response ids
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
+                appended_eos_token = True
 
         # need to truncate loss mask correctly for responses that go to max length
         if self.max_turns > 1:
@@ -287,16 +292,25 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Build reward output
         if retokenize_chat_history:
+            # TODO(Charlie): Currently, the possible response truncation will not affect the reward
+            # in the if branch, but some final rewards may be lost in the else branch. Fix this
+            # when we support turn-level rewards for the `retokenize_chat_history` codepath.
             reward_out = per_step_rewards[-1][0]
         else:
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for step_reward, idx in per_step_rewards:
-                if step_reward is None:
-                    continue
+            for i, (step_reward, idx) in enumerate(per_step_rewards):
+                assert step_reward is not None
                 if idx >= len(response_ids):
                     break
-                token_level_rewards[idx] += step_reward
+                if appended_eos_token and i == len(per_step_rewards) - 1:
+                    # NOTE(Charlie): If we appended the eos token, we need to place
+                    # the reward at the last token (the manually appended eos token)
+                    # rather than the last turn's assistant-generated token. This matches
+                    # the logic in trainer.py::postprocess_generator_output when rewards are List[float].
+                    token_level_rewards[-1] = step_reward
+                else:
+                    token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
 
         return AgentLoopOutput(
@@ -401,6 +415,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompts = input_batch["prompts"]
         env_classes = input_batch["env_classes"]
         env_extras = input_batch["env_extras"]
+        trajectory_ids = input_batch.get("trajectory_ids", None)
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
@@ -421,6 +436,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     max_tokens,
                     max_input_length,
                     sampling_params=sampling_params,
+                    trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
                 )
             )
 

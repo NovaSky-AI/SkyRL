@@ -6,7 +6,6 @@ from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
-import uuid
 import torch
 from loguru import logger
 from omegaconf import DictConfig
@@ -23,6 +22,9 @@ from skyrl_train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     GeneratorInterface,
+    TrajectoryID,
+    BatchMetadata,
+    TrainingPhase,
 )
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_train.dataset.preprocess import (
@@ -90,6 +92,7 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
+        self.global_step = 0
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -150,6 +153,7 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
+
         # 0. Make a copy of self.all_metrics (will restore at the end)
         # eval() might accidentally mutate `self.all_metrics` since it is mutated in
         # methods like `self.generate()`.
@@ -165,7 +169,7 @@ class RayPPOTrainer:
         for _, prompts in enumerate(self.eval_dataloader):
             pbar.update(1)
             generator_input, uids = self._prepare_generator_input(
-                self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
+                self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params, "eval"
             )
             generator_output: GeneratorOutput = await self.generate(generator_input)
             generator_outputs.append(generator_output)
@@ -223,7 +227,6 @@ class RayPPOTrainer:
         Main training loop for PPO
         """
 
-        self.global_step = 0
         self.weights_manager = InferenceWeightsManager(
             self.policy_model,
             self.inference_engine_client,
@@ -237,17 +240,18 @@ class RayPPOTrainer:
             sleep_on_exit=False,
         )
 
-        # Load checkpoint state if resumption is enabled
+        # Initialize weight sync state between policy model and inference engines.
+        with Timer("init_weight_sync_state"):
+            self.init_weight_sync_state()
+
+        # Load policy model to GPU before loading checkpoint.
+        if self.cfg.trainer.placement.colocate_all:
+            self.policy_model.backload_to_gpu()
+
+        # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.load_checkpoints()
-                logger.info(f"Resumed training from global_step {self.global_step}")
-
-        # create rank0 policy model and inference_engines groups
-        with Timer("setup_policy_and_generator"):
-            self.setup_policy_and_generator()
-            if self.cfg.trainer.placement.colocate_all:
-                self.policy_model.backload_to_gpu()
+                self.global_step = self.load_checkpoints()
 
         # Eval before training
         inference_engine_is_active = False
@@ -272,7 +276,10 @@ class RayPPOTrainer:
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
                     generator_input, uids = self._prepare_generator_input(
-                        self.cfg.generator.n_samples_per_prompt, rand_prompts, self.cfg.generator.sampling_params
+                        self.cfg.generator.n_samples_per_prompt,
+                        rand_prompts,
+                        self.cfg.generator.sampling_params,
+                        "train",
                     )
 
                     # if the inference engine is already active due to continuing sampling or eval, we don't want to trigger weight management
@@ -415,7 +422,11 @@ class RayPPOTrainer:
         return entries[: (len(entries) // dp_size) * dp_size]
 
     def _prepare_generator_input(
-        self, n_samples_per_prompt: int, rand_prompts: List[Any], sampling_params: Dict[str, Any]
+        self,
+        n_samples_per_prompt: int,
+        rand_prompts: List[Any],
+        sampling_params: Dict[str, Any],
+        training_phase: TrainingPhase,
     ) -> Tuple[GeneratorInput, List[str]]:
         """
         Replicate prompts if needed and generate uids.
@@ -425,7 +436,7 @@ class RayPPOTrainer:
         all_envs = sum(
             [
                 [prompt["env_class"] if prompt["env_class"] is not None else self.cfg.environment.env_class]
-                * self.cfg.generator.n_samples_per_prompt
+                * n_samples_per_prompt
                 for prompt in rand_prompts
             ],
             [],
@@ -437,15 +448,27 @@ class RayPPOTrainer:
             [],
         )
         request_sampling_params = get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
+
+        # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
+        trajectory_ids = []
+        uids = []
+        for prompt_idx, prompt in enumerate(rand_prompts):
+            uid: str = prompt["uid"]
+
+            # Create TrajectoryID for each repetition
+            for repetition_id in range(n_samples_per_prompt):
+                trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
+                uids.append(uid)
+
         generator_input: GeneratorInput = {
             "prompts": all_prompts,
             "env_classes": all_envs,
             "env_extras": env_extras,
             "sampling_params": request_sampling_params,
+            "trajectory_ids": trajectory_ids,
+            "batch_metadata": BatchMetadata(global_step=self.global_step, training_phase=training_phase),
         }
 
-        # uids for each sample - NOTE: we assume that generate returns samples in the same order as passed in
-        uids = sum([[str(uuid.uuid4())] * n_samples_per_prompt for _ in rand_prompts], [])
         return generator_input, uids
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
@@ -674,7 +697,7 @@ class RayPPOTrainer:
 
         logger.info("init policy/ref/critic/reward models done")
 
-    def setup_policy_and_generator(self):
+    def init_weight_sync_state(self):
         """
         Setup the connection between policy model and inference engine for weight syncing.
         """
@@ -748,6 +771,7 @@ class RayPPOTrainer:
             be awake (i.e. on GPU).
         - after calling this method, the same model placement still holds.
         """
+        # NOTE: we assume that .generate returns samples in the same order as passed in
         generator_output: GeneratorOutput = await self.generator.generate(input_batch)
 
         # add rollout metrics to self.all_metrics
@@ -1206,8 +1230,7 @@ class RayPPOTrainer:
         ray.get(
             self.policy_model.async_run_ray_method(
                 "pass_through",
-                "save_ckpt",
-                global_step=self.global_step,
+                "save_checkpoint",
                 ckpt_dir=policy_save_dir,
                 tokenizer=self.tokenizer,
             )
@@ -1222,8 +1245,7 @@ class RayPPOTrainer:
             ray.get(
                 self.critic_model.async_run_ray_method(
                     "pass_through",
-                    "save_ckpt",
-                    global_step=self.global_step,
+                    "save_checkpoint",
                     ckpt_dir=critic_save_dir,
                     tokenizer=self.tokenizer,
                 )
@@ -1326,7 +1348,6 @@ class RayPPOTrainer:
         global_step = extract_step_from_path(Path(checkpoint_path))
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
-        self.global_step = global_step
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
@@ -1366,7 +1387,7 @@ class RayPPOTrainer:
         _ = ray.get(
             self.policy_model.async_run_ray_method(
                 "pass_through",
-                "load_ckpt",
+                "load_checkpoint",
                 ckpt_dir=policy_ckpt_dir,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
@@ -1380,7 +1401,7 @@ class RayPPOTrainer:
             _ = ray.get(
                 self.critic_model.async_run_ray_method(
                     "pass_through",
-                    "load_ckpt",
+                    "load_checkpoint",
                     ckpt_dir=critic_ckpt_dir,
                     load_optimizer_states=True,
                     load_lr_scheduler_states=True,
