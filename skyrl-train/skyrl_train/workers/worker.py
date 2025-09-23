@@ -14,9 +14,14 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.optim import Optimizer
 import torch.distributed
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import (
+    PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
+    placement_group_table,
+)
 
-from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils import io
 from skyrl_train.utils.ppo_utils import masked_mean
@@ -107,6 +112,9 @@ class DistributedTorchRayActor:
 
     def get_mesh_rank(self):
         return self.mesh_rank
+
+    def get_gpu_id(self):
+        return ray.get_gpu_ids()[0]
 
     @staticmethod
     def _get_current_node_ip():
@@ -375,7 +383,11 @@ class PPORayActorGroup:
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
-        # Use placement group to lock resources for models of same type
+        if pg:
+            pg_data = placement_group_table(pg)
+            assert len(pg_data["bundles"]) == world_size
+            reordered_bundle_indices = get_reordered_bundle_indices(pg)
+
         if self._num_gpus_per_node > 1 and pg is None:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
@@ -391,7 +403,7 @@ class PPORayActorGroup:
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg, placement_group_bundle_index=0
+                    placement_group=pg, placement_group_bundle_index=reordered_bundle_indices[0]
                 ),
             ).remote(
                 cfg=self.cfg,
@@ -432,7 +444,9 @@ class PPORayActorGroup:
                         resources=self._resources,
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
-                            placement_group_bundle_index=rank if self.colocate_all else rank // self._num_gpus_per_node,
+                            placement_group_bundle_index=(
+                                reordered_bundle_indices[rank] if self.colocate_all else rank // self._num_gpus_per_node
+                            ),
                         ),
                     ).remote(
                         cfg=self.cfg,
