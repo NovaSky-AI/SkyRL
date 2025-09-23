@@ -63,7 +63,7 @@ def print_model_size(model: nn.Module, name: str = None):
     n_params, scale = get_model_size(model, scale="auto")
     if name is None:
         name = model.__class__.__name__
-    logger.log("INFO", f"{name} contains {n_params:.2f}{scale} parameters")
+    logger.info(f"{name} contains {n_params:.2f}{scale} parameters")
 
 
 def get_model_size(model: nn.Module, scale="auto"):

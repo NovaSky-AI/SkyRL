@@ -97,7 +97,7 @@ def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: Proc
     """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if not group:
-        logger.log("WARNING", "No group found for gather_heads_scatter_seq")
+        logger.warning("No group found for gather_heads_scatter_seq")
         return x
     dim_size = x.size(seq_dim)
     sp_world = get_ulysses_sequence_parallel_world_size(group)
@@ -250,7 +250,7 @@ def gather_outputs_and_unpad(
 ):
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if group is None:
-        logger.log("WARNING", "No group found for gather_outputs_and_unpad")
+        logger.warning("No group found for gather_outputs_and_unpad")
         return x
     x = Gather.apply(group, x, gather_dim, grad_scaler)
     if unpad_dim is not None:

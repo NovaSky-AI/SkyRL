@@ -27,7 +27,7 @@ class Profiler:
         self.prof = None
         self.rank = torch.distributed.get_rank()
         if self.rank in self.ranks:
-            logger.log("INFO", f"[Profiler] Profiler init for rank {self.rank}")
+            logger.info(f"[Profiler] Profiler init for rank {self.rank}")
 
             self.prof = torch.profiler.profile(
                 activities=[
