@@ -250,7 +250,7 @@ def gather_outputs_and_unpad(
 ):
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if group is None:
-        logger.log("WARNING", "No group found for gather_outputs_and_unpad")
+        logger.warning("No group found for gather_outputs_and_unpad")
         return x
     x = Gather.apply(group, x, gather_dim, grad_scaler)
     if unpad_dim is not None:
