@@ -174,9 +174,9 @@ class FSDPStrategy(DistributedStrategy):
         if grad_norm is not None and not torch.isfinite(grad_norm):
             if torch.distributed.is_initialized():
                 rank = torch.distributed.get_rank()
-                logger.log("WARNING", f"WARN: rank {rank} grad_norm is not finite: {grad_norm}")
+                logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}")
             else:
-                logger.log("WARNING", f"WARN: grad_norm is not finite: {grad_norm}")
+                logger.warning(f"grad_norm is not finite: {grad_norm}")
             optimizer.zero_grad()
             return grad_norm
 

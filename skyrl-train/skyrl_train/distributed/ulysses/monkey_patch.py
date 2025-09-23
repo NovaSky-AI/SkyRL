@@ -130,7 +130,7 @@ def apply_monkey_patch(
     """Replace _flash_attention_forward to _ulysses_flash_attention_forward"""
     if use_parent_class:
         parent_cls = type(model).__bases__[0]
-        logger.log("INFO", f"Applying monkey patch to {parent_cls.__name__} in {parent_cls.__module__}")
+        logger.info(f"Applying monkey patch to {parent_cls.__name__} in {parent_cls.__module__}")
         module = sys.modules[parent_cls.__module__]
     else:
         module = sys.modules[model.__module__]
