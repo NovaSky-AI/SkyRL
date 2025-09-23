@@ -4,15 +4,14 @@ from jax import numpy as jnp
 from transformers import Qwen3Config
 
 
-def Param(*shape: int, dtype: jnp.dtype, rngs: nnx.Rngs):
-    return nnx.Param(nnx.initializers.normal()(rngs.param(), shape, dtype))
+def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
+    return nnx.Param(kernel_init(rngs.param(), shape, dtype))
 
 
 class RMSNorm(nnx.Module):
-
     def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.eps = eps
-        self.weight = Param(size, dtype=dtype, rngs=rngs)
+        self.weight = Param(size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P(None)), rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.eps)
@@ -21,9 +20,9 @@ class RMSNorm(nnx.Module):
 
 class MultiHeadProj(nnx.Module):
 
-    def __init__(self, subscripts: str, *shape: int, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(self, subscripts: str, *shape: int, sharding: jax.P, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.subscripts = subscripts
-        self.weight = Param(*shape, dtype=dtype, rngs=rngs)
+        self.weight = Param(*shape, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), sharding), rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.einsum(self.subscripts, x, self.weight)
@@ -46,10 +45,10 @@ class Qwen3Attention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         
-        self.q_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_heads, self.head_dim, dtype=dtype, rngs=rngs)
-        self.k_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, dtype=dtype, rngs=rngs)
-        self.v_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, dtype=dtype, rngs=rngs)
-        self.o_proj = MultiHeadProj("BMKH,KHN->BMN", self.num_heads, self.head_dim, config.hidden_size, dtype=dtype, rngs=rngs)
+        self.q_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_heads, self.head_dim, sharding=jax.P(None, "tp", None), dtype=dtype, rngs=rngs)
+        self.k_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, sharding=jax.P(None, "tp", None), dtype=dtype, rngs=rngs)
+        self.v_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, sharding=jax.P(None, "tp", None), dtype=dtype, rngs=rngs)
+        self.o_proj = MultiHeadProj("BMKH,KHN->BMN", self.num_heads, self.head_dim, config.hidden_size, sharding=jax.P("tp", None, None), dtype=dtype, rngs=rngs)
 
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
@@ -93,9 +92,18 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.gate_proj = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
-        self.up_proj = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
-        self.down_proj = nnx.Linear(config.intermediate_size, config.hidden_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
+        self.gate_proj = nnx.Linear(
+            config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.nn.linear.default_kernel_init, jax.P(None, "tp")), rngs=rngs
+        )
+        self.up_proj = nnx.Linear(
+            config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.nn.linear.default_kernel_init, jax.P(None, "tp")), rngs=rngs
+        )
+        self.down_proj = nnx.Linear(
+            config.intermediate_size, config.hidden_size, use_bias=False, dtype=dtype, param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.nn.linear.default_kernel_init, jax.P("tp", None)), rngs=rngs
+        )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return self.down_proj(nnx.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -147,7 +155,8 @@ class Qwen3Model(nnx.Module):
             features=config.hidden_size,
             dtype=dtype,
             param_dtype=dtype,
-            rngs=rngs
+            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
+            rngs=rngs,
         )
         self.layers = [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
@@ -180,7 +189,7 @@ class Qwen3Model(nnx.Module):
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+            all_hidden_states.append(hidden_states)
 
         return {
             "last_hidden_state": hidden_states,
@@ -188,13 +197,17 @@ class Qwen3Model(nnx.Module):
             "attentions": all_self_attns,
         }
 
+
 class Qwen3ForCausalLM(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
         if not self.config.tie_word_embeddings:
-            self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, dtype=dtype, param_dtype=dtype, rngs=rngs)
+            self.lm_head = nnx.Linear(
+                config.hidden_size, config.vocab_size, use_bias=False, dtype=dtype, param_dtype=dtype,
+                kernel_init=nnx.with_partitioning(nnx.nn.linear.default_kernel_init, jax.P(None, "tp")), rngs=rngs
+            )
 
     def __call__(
         self,

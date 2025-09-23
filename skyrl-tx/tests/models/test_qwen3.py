@@ -1,16 +1,27 @@
+import os
 from pathlib import Path
 import tempfile
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
 from tx.models import Qwen3ForCausalLM
 from tx.utils.models import load_checkpoint
 
 
-def test_qwen3():
+@pytest.mark.parametrize("tp", [1, 2])
+def test_qwen3(tp: int):
+    if not jax._src.xla_bridge.backends_are_initialized():
+        jax.config.update("jax_num_cpu_devices", 2)
+
+    if tp > 1 and os.getenv("CI"):
+        pytest.skip("TP > 1 currently runs out of memory in the CI")
+
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
     hf_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", attn_implementation="eager", use_safetensors=True)
 
@@ -24,7 +35,9 @@ def test_qwen3():
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
         config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        mesh = jax.make_mesh((1, tp), ("dp", "tp"))
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_checkpoint(Path(tmp) / "model.safetensors", config, model)
         
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True, output_attentions=True)
