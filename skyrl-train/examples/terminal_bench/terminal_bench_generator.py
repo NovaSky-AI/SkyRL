@@ -49,13 +49,11 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.max_episodes = terminal_bench_cfg.max_episodes
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        # TODO(tgriggs): Plumb the sandboxes task list here instead of using (and ignoring) empty prompts
-        prompts = input_batch["prompts"]
         tasks = []
-        for _ in range(len(prompts)):
+        for prompt in input_batch["prompts"]:
             tasks.append(
                 self.terminal_bench_agent_loop(
-                    prompt="",
+                    prompt=prompt,
                 )
             )
 
@@ -86,7 +84,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=LocalTaskConfig(id=LocalTaskId(path=prompt)),
                 trials_dir=Path(self.trials_dir),
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
@@ -96,7 +94,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
         elif self.agent_name == "oracle":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=LocalTaskConfig(id=LocalTaskId(path=prompt)),
                 trials_dir=Path(self.trials_dir),
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
