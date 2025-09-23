@@ -23,6 +23,7 @@ from tests.gpu.utils import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from ray.util.placement_group import placement_group
 
@@ -72,8 +73,8 @@ def _get_test_cfg() -> DictConfig:
     return cfg
 
 
-async def _run_single_generation(client: InferenceEngineClient, prompts):
-    tasks = [client.generate(InferenceEngineInput(prompts=[p])) for p in prompts]
+async def _run_single_generation(client: InferenceEngineClient, prompts, sampling_params):
+    tasks = [client.generate(InferenceEngineInput(prompts=[p], sampling_params=sampling_params)) for p in prompts]
     results = await asyncio.gather(*tasks)
     responses, reasons = [], []
     for r in results:
@@ -97,7 +98,6 @@ def init_ray_inference_engines(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        max_model_len=1536,
         shared_pg=shared_pg,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
@@ -134,8 +134,9 @@ def test_ep_generation():
         )
 
         prompts = get_test_prompts(MODEL, num_samples=4)
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
-        responses, reasons = asyncio.run(_run_single_generation(client, prompts))
+        responses, reasons = asyncio.run(_run_single_generation(client, prompts, sampling_params))
         assert len(responses) == len(prompts)
         assert len(reasons) == len(prompts)
     finally:
@@ -174,7 +175,10 @@ def test_ep_weight_sync():
 
         # Generate before weight sync
         prompts = get_test_prompts(MODEL, num_samples=4)
-        out_before = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts)))
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        out_before = asyncio.run(
+            client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
+        )
         assert len(out_before["responses"]) == len(prompts)
 
         asyncio.run(client.sleep())
@@ -197,7 +201,7 @@ def test_ep_weight_sync():
         asyncio.run(client.reset_prefix_cache())
 
         # Generate after weight sync
-        out_after = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts)))
+        out_after = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)))
         assert len(out_after["responses"]) == len(prompts)
         assert len(out_after["stop_reasons"]) == len(prompts)
 
