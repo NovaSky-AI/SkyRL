@@ -191,6 +191,7 @@ generator:
   # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}
+  
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:
