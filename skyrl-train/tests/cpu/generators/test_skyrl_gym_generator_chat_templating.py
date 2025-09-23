@@ -50,20 +50,31 @@ def _register_test_env_if_needed():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name",
+    ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FROM_PATH"],
 )
 async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     _register_test_env_if_needed()  # Register only when needed
+    is_custom_jinja_from_file = model_name.endswith("-FROM_PATH")
+    model_name = model_name.replace("-FROM_PATH", "")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     mock_llm = MagicMock()
 
     # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        mock_llm_output_text = "b" + tokenizer.eos_token
+
+        # Use different mock responses for thinking vs non-thinking templates
+        if is_custom_jinja_from_file:
+            mock_llm_output_text = "<think>Some random thought process</think>b" + tokenizer.eos_token
+            mock_response_text = "<think>Some random thought process</think>b"
+        else:
+            mock_llm_output_text = "b" + tokenizer.eos_token
+            mock_response_text = "b"
+
         return {
             # no tokenizer.eos_token for responses because `skip_special_tokens` is True in sampling params
-            "responses": ["b"] * num_prompts,
+            "responses": [mock_response_text] * num_prompts,
             "stop_reasons": ["stop"] * num_prompts,
             "response_logprobs": None,
             # add_special_tokens needs to be False, otherwise for instance Llama will always
@@ -73,8 +84,12 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
+
     chat_template_config = None
-    if "Qwen3" in model_name:
+    if is_custom_jinja_from_file:
+        template_path = Path(__file__).parent / "qwen3_acc_thinking.jinja2"
+        chat_template_config = {"source": "file", "name_or_path": str(template_path)}
+    elif "Qwen3" in model_name:
         chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
     else:
         chat_template_config = {"source": "name", "name_or_path": None}
@@ -116,14 +131,43 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     }
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
+    if is_custom_jinja_from_file:
+        assert len(generator_output["prompt_token_ids"]) == 1
+        assert len(generator_output["response_ids"]) == 1
+        assert len(generator_output["loss_masks"]) == 1
+        assert generator_output["stop_reasons"][0] == "stop"
+
+        custom_chat_template = get_custom_chat_template(chat_template_config)
+        assert custom_chat_template is not None
+
+        assert "<think>" in custom_chat_template
+        assert "</think>" in custom_chat_template
+        assert "reasoning_content" in custom_chat_template
+
+        prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
+        resp_str = tokenizer.decode(generator_output["response_ids"][0])
+
+        assert len(prompt_str) > 0
+        assert len(resp_str) > 0
+
+        print(f"  Custom jinja2 template test passed for {model_name}")
+        print(f"  Template file: {chat_template_config['name_or_path']}")
+        print(f"  Prompt length: {len(generator_output['prompt_token_ids'][0])} tokens")
+        print(f"  Response length: {len(generator_output['response_ids'][0])} tokens")
+
     # assume every actual message is 1 token for loss mask checking
+    if is_custom_jinja_from_file:
+        expected_assistant_content = "<think>Some random thought process</think>b"
+    else:
+        expected_assistant_content = "b"
+
     expected_chat_history = [
         {"role": "user", "content": "a"},
-        {"role": "assistant", "content": "b"},
+        {"role": "assistant", "content": expected_assistant_content},
         {"role": "user", "content": "1"},
-        {"role": "assistant", "content": "b"},
+        {"role": "assistant", "content": expected_assistant_content},
         {"role": "user", "content": "2"},
-        {"role": "assistant", "content": "b"},
+        {"role": "assistant", "content": expected_assistant_content},
     ]
 
     # For Qwen2.5 generator_output_str, we have (note the missing \n after the eos token):
@@ -174,11 +218,25 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
 
     if custom_chat_template is not None:
-        # For custom_chat_template, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
-        expected_loss_masks = (
-            expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
-            + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
-        ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
+        if is_custom_jinja_from_file:
+            actual_loss_masks = generator_output["loss_masks"][0]
+            actual_response_ids = generator_output["response_ids"][0]
+            resp_str = tokenizer.decode(actual_response_ids)
+
+            print(f"  Thinking template response string: {repr(resp_str)}")
+            print(f"  Thinking template loss mask: {actual_loss_masks}")
+
+            assert len(actual_loss_masks) == len(actual_response_ids)
+            assert 0 in actual_loss_masks, "Should have loss mask = 0 for thinking tokens"
+            assert 1 in actual_loss_masks, "Should have loss mask = 1 for actual response tokens"
+
+        else:
+            expected_loss_masks = (
+                expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
+                + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
+            ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
+            assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
+            assert generator_output["loss_masks"][0] == expected_loss_masks
     else:
         # For non-custom_chat_template, `resp_str` directly starts with what the model generates
         expected_loss_masks = (
@@ -191,8 +249,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         )
         if "Qwen" in model_name:
             expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
-    assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
-    assert generator_output["loss_masks"][0] == expected_loss_masks
+        assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
+        assert generator_output["loss_masks"][0] == expected_loss_masks
 
 
 def test_qwen3_original_vs_without_thinking_chat_template():
@@ -322,150 +380,3 @@ async def test_append_eos_after_stop_multi_turn(model_name):
         last_token_id_false = out_false["response_ids"][0][-1]
         assert last_token_id_true == tokenizer.eos_token_id
         assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
-
-
-def test_load_custom_jinja2_file_template():
-    """Simple test to verify loading the custom jinja2 template file"""
-
-    # Get the directory of the current test file and build path dynamically
-    test_file_dir = Path(__file__).parent
-    template_path = (
-        test_file_dir
-        / ".."
-        / ".."
-        / ".."
-        / ".."
-        / "skyagent"
-        / "skyagent"
-        / "functional"
-        / "templates"
-        / "qwen3_acc_thinking.jinja2"
-    )
-    template_path = template_path.resolve()
-
-    chat_template_config = {"source": "file", "name_or_path": str(template_path)}
-
-    # Load the custom template
-    custom_template = get_custom_chat_template(chat_template_config)
-
-    # Verify it loaded successfully
-    assert custom_template is not None
-    assert isinstance(custom_template, str)
-    assert len(custom_template) > 0
-
-    # Check that the template contains expected Qwen3 thinking-related content
-    assert "<think>" in custom_template
-    assert "</think>" in custom_template
-    assert "reasoning_content" in custom_template
-    assert "|im_start|" in custom_template
-    assert "|im_end|" in custom_template
-
-    # Verify it's the actual jinja2 template content we expect
-    assert "message.reasoning_content" in custom_template
-    assert "add_generation_prompt" in custom_template
-    assert "enable_thinking" in custom_template
-
-    print("✓ Successfully loaded custom jinja2 template")
-    print(f"  Template file: {chat_template_config['name_or_path']}")
-    print(f"  Template length: {len(custom_template)} characters")
-    print(f"  Contains thinking tags: {'<think>' in custom_template and '</think>' in custom_template}")
-
-
-@pytest.mark.asyncio
-async def test_generate_custom_jinja2_file_template():
-    """Test using a custom jinja2 template file via the file source"""
-    _register_test_env_if_needed()
-
-    model_name = "Qwen/Qwen3-0.6B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    mock_llm = MagicMock()
-
-    def mock_generate(input_batch):
-        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        mock_llm_output_text = "test response" + tokenizer.eos_token
-        return {
-            "responses": ["test response"] * num_prompts,
-            "stop_reasons": ["stop"] * num_prompts,
-            "response_logprobs": None,
-            "response_ids": [tokenizer.encode(mock_llm_output_text, add_special_tokens=False)] * num_prompts,
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=mock_generate)
-
-    test_file_dir = Path(__file__).parent
-    template_path = (
-        test_file_dir
-        / ".."
-        / ".."
-        / ".."
-        / ".."
-        / "skyagent"
-        / "skyagent"
-        / "functional"
-        / "templates"
-        / "qwen3_acc_thinking.jinja2"
-    )
-    template_path = template_path.resolve()
-
-    chat_template_config = {"source": "file", "name_or_path": str(template_path)}
-
-    generator_cfg = DictConfig(
-        {
-            "sampling_params": {"max_generate_length": 200, "logprobs": None},
-            "max_input_length": 200,
-            "batched": False,
-            "max_turns": 2,
-            "zero_reward_on_non_stop": False,
-            "apply_overlong_filtering": False,
-            "use_conversation_multi_turn": True,
-            "chat_template": chat_template_config,
-            "append_eos_token_after_stop_str_in_multi_turn": True,
-        }
-    )
-    env_cfg = DictConfig(
-        {
-            "max_env_workers": 0,
-            "env_class": "cpu_test_env",
-        }
-    )
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=tokenizer,
-        model_name=model_name,
-    )
-
-    prompt = [[{"role": "user", "content": "Hello"}]]
-    extras = [{"answer": "4"}]
-
-    input_batch: GeneratorInput = {
-        "prompts": prompt,
-        "env_extras": extras,
-        "env_classes": [env_cfg.env_class],
-    }
-
-    generator_output: GeneratorOutput = await generator.generate(input_batch)
-
-    assert len(generator_output["prompt_token_ids"]) == 1
-    assert len(generator_output["response_ids"]) == 1
-    assert len(generator_output["loss_masks"]) == 1
-    assert generator_output["stop_reasons"][0] == "stop"
-
-    custom_chat_template = get_custom_chat_template(chat_template_config)
-    assert custom_chat_template is not None
-
-    assert "<think>" in custom_chat_template
-    assert "</think>" in custom_chat_template
-    assert "reasoning_content" in custom_chat_template
-
-    prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
-    resp_str = tokenizer.decode(generator_output["response_ids"][0])
-
-    assert len(prompt_str) > 0
-    assert len(resp_str) > 0
-
-    print(f"✓ Custom jinja2 template test passed for {model_name}")
-    print(f"  Template file: {chat_template_config['name_or_path']}")
-    print(f"  Prompt length: {len(generator_output['prompt_token_ids'][0])} tokens")
-    print(f"  Response length: {len(generator_output['response_ids'][0])} tokens")

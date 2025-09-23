@@ -111,7 +111,6 @@ def mock_env_cfg():
     cfg = MagicMock()
     cfg.max_env_workers = 0
     cfg.env_class = "gsm8k"
-    # cfg.get.return_value = MagicMock()
     return cfg
 
 
@@ -1137,8 +1136,8 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     cfg.use_conversation_multi_turn = True
     cfg.chat_template = {
         "source": "name",
-        "name_or_path": "qwen3_without_thinking",
-    }  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
+        "name_or_path": "qwen3_without_thinking",  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
+    }
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
