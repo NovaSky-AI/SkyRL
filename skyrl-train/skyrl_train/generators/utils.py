@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput
@@ -95,30 +95,42 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(
-    generator_output: GeneratorOutput, uids: List[str]
-) -> Tuple[float, Optional[float]]:
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+
+    The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
+    calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
+    unique examples.
+
+    Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
     """
     rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
+    # TODO: We should make metrics customizable by the environment.
+    # Map from the example's uid to each trajectory's reward on that same example
+    uid_to_trajectory_rewards = defaultdict(list)
     if isinstance(rewards[0], list):
-        # We just compute mean over sequence reward.
-        # TODO: We should make metrics customizable by the environment
-        mean_raw_reward = float(np.mean([sum(seq_rewards) for seq_rewards in rewards]))
-        pass_at_n = None  # not computed for token-level rewards since it's ill-defined
+        # Token-level rewards: rewards is List[List[float]]
+        # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
+        mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+        # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
+        for i, cur_trajectory_rewards in enumerate(rewards):
+            if len(cur_trajectory_rewards) == 0:
+                raise ValueError("Token-level rewards must be a non-empty list.")
+            uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
         mean_raw_reward = float(np.mean(rewards))
-        # Compute pass@N metrics
-        pass_at_n_dict = defaultdict(list)
         for i, reward in enumerate(rewards):
-            pass_at_n_dict[uids[i]].append(reward)
+            uid_to_trajectory_rewards[uids[i]].append(reward)
 
-        # pass@N metric
-        pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
+    # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
+    # any of its trajectories' reward is positive, pass@n for that uid is 1.
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(
+        uid_to_trajectory_rewards
+    )
 
     return mean_raw_reward, pass_at_n
 
@@ -146,7 +158,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
             else None
         ),
     }
-    if "stop_reasons" in generator_outputs[0]:
+    if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     return result
@@ -169,3 +181,32 @@ def apply_overlong_filtering(
         [0] * len(mask) if not response or response[-1] != eos_token_id else mask
         for mask, response in zip(loss_masks, response_ids)
     ]
+
+
+def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], List[List[float]]]):
+    num_tokens_arr = np.array([len(response) for response in responses])
+    # Support both response-level and token-level rewards
+    flat_rewards = []
+    for r in rewards:
+        if isinstance(r, list):
+            flat_rewards.append(float(np.sum(r)))
+        else:
+            flat_rewards.append(float(r))
+    flat_rewards_arr = np.array(flat_rewards)
+    non_zero_rewards_arr = flat_rewards_arr > 0.0
+    zero_rewards_arr = flat_rewards_arr == 0.0
+    # average tokens for non zero rewards
+    avg_tokens_non_zero_rewards = (
+        np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
+    )
+    # average tokens for zero rewards
+    avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
+
+    return {
+        "generate/min_num_tokens": np.min(num_tokens_arr).item(),
+        "generate/max_num_tokens": np.max(num_tokens_arr).item(),
+        "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
+        "generate/std_num_tokens": np.std(num_tokens_arr).item(),
+        "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
+        "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
+    }

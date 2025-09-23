@@ -1,25 +1,31 @@
+#!/bin/bash
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K with HTTP endpoint.
-
+# Example of Clip-Cov policy loss training
+# Covariance-based clipping for improved training stability on GSM8K.
+#
+# Run data preparation first:
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-# bash examples/inference_http_endpoint/run_gsm8k_with_inference_http_endpoint.sh
-
-# NOTE (charlie): The only difference between this and the original run_gsm8k.sh is that we set
-# `generator.enable_http_endpoint` to true and set the HTTP endpoint host and port.
-# Besides, we run `main.py` in this folder which uses the SkyRLGymHTTPGenerator, a simple wrapper
-# of SkyRLGymGenerator that uses the HTTP endpoint for rollout as a demonstration.
+# export WANDB_API_KEY=<your_key_here>
+# bash examples/algorithms/clip_cov_kl_cov/run_clip_cov.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
-LOGGER="console"  # change to "console" to print to stdout
+LOGGER="wandb"  # change to "console" to print to stdout
 
-INFERENCE_BACKEND="vllm"
-# INFERENCE_BACKEND="sglang"
-uv run --isolated --extra $INFERENCE_BACKEND -m examples.inference_http_endpoint.main \
+# Configure Clip-Cov parameters
+POLICY_LOSS="clip_cov"
+CLIP_COV_RATIO=0.0002
+CLIP_COV_LB=1.0
+CLIP_COV_UB=5.0
+
+uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS" \
+  trainer.algorithm.clip_cov.clip_ratio=$CLIP_COV_RATIO \
+  trainer.algorithm.clip_cov.clip_cov_lb=$CLIP_COV_LB \
+  trainer.algorithm.clip_cov.clip_cov_ub=$CLIP_COV_UB \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -41,7 +47,8 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.inference_http_endpoint
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
-  generator.backend=$INFERENCE_BACKEND \
+  trainer.algorithm.kl_loss_coef=0.001 \
+  generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
@@ -49,12 +56,9 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.inference_http_endpoint
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
-  generator.enable_http_endpoint=true \
-  generator.http_endpoint_host="127.0.0.1" \
-  generator.http_endpoint_port=8000 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_test" \
+  trainer.project_name="clip_cov_gsm8k" \
+  trainer.run_name="clip_cov_gsm8k_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/clip_cov_gsm8k_1.5B_ckpt" \
   $@

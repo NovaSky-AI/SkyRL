@@ -76,6 +76,8 @@ Finally, the configuration for specifying node and GPU counts for each model (al
       # InferenceEngine resources
       num_inference_engines: 1
       inference_engine_tensor_parallel_size: 4
+      inference_engine_expert_parallel_size: 1
+      inference_engine_data_parallel_size: 1
 
 .. note::
    **Resource Allocation Guidelines**

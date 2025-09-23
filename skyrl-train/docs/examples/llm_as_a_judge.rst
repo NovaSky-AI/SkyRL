@@ -27,7 +27,7 @@ To download and prepare the dataset, run the following script:
 This script downloads the GSM8K dataset, extracts ground truth answers, and formats it for the LLM judge environment.
 
 Environment Implementation
--------------------------
+---------------------------
 
 The LLM judge environment is implemented in ``examples/llm_as_a_judge/llm_judge_env.py``. We use the OpenAI API to access the LLM judge.
 

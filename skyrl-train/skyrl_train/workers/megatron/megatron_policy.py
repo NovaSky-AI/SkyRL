@@ -5,10 +5,16 @@ import torch.nn as nn
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
+from megatron.core.distributed import finalize_model_grads
+
 from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs, vocab_parallel_entropy
+from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.utils.ppo_utils import compute_approx_kl, masked_mean
+
 from skyrl_train.distributed.megatron.megatron_utils import (
     make_batch_generator,
+    preprocess_packed_seqs,
+    postprocess_packed_seqs,
     remove_left_padding,
     recover_left_padding,
 )
@@ -30,6 +36,12 @@ class MegatronPPOPolicy:
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
+        self.use_sample_packing = self.cfg.trainer.use_sample_packing
+
+        config = get_model_config(self.actor_module[0])
+        # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
+        # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
+        config.finalize_model_grads_func = finalize_model_grads
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -77,6 +89,7 @@ class MegatronPPOPolicy:
                 vocab_end_index=(tp_rank + 1) * logits.shape[-1],
                 tp_group=tp_grp,
                 inference_only=True,
+                cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
                 chunk_size=None,
             )
             return 0.0, {"log_probs": token_logprobs}
@@ -87,27 +100,48 @@ class MegatronPPOPolicy:
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
-                sequences,
-                attention_mask,
-                position_ids,
-                self.tf_config.sequence_parallel,
-                pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-            )
+            if self.use_sample_packing:
+                new_sequences, packed_seq_params = preprocess_packed_seqs(
+                    sequences,
+                    attention_mask,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                )
+                new_attention_mask = None
+                new_position_ids = None
+            else:
+                new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
+                    sequences,
+                    attention_mask,
+                    position_ids,
+                    self.tf_config.sequence_parallel,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                )
+                packed_seq_params = None
 
             outputs = model(
                 new_sequences,
                 new_position_ids,
                 new_attention_mask,
+                packed_seq_params=packed_seq_params,
             )
 
-            outputs = recover_left_padding(
-                outputs,
-                new_attention_mask,
-                attention_mask,
-                seq_len,
-                post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-            )
+            if self.use_sample_packing:
+                outputs = postprocess_packed_seqs(
+                    outputs,
+                    packed_seq_params,
+                    attention_mask,
+                    micro_batch_size,
+                    seq_len,
+                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                )
+            else:
+                outputs = recover_left_padding(
+                    outputs,
+                    new_attention_mask,
+                    attention_mask,
+                    seq_len,
+                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                )
 
             return outputs, partial(collection_func, data=batch)
 
@@ -183,6 +217,7 @@ class MegatronPPOPolicy:
                 vocab_end_index=(tp_rank + 1) * logits.shape[-1],
                 tp_group=tp_grp,
                 inference_only=False,
+                cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
                 chunk_size=None,
             )
 
@@ -231,27 +266,48 @@ class MegatronPPOPolicy:
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
-                sequences,
-                attention_mask,
-                position_ids,
-                self.tf_config.sequence_parallel,
-                pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-            )
+            if self.use_sample_packing:
+                new_sequences, packed_seq_params = preprocess_packed_seqs(
+                    sequences,
+                    attention_mask,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                )
+                new_attention_mask = None
+                new_position_ids = None
+            else:
+                new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
+                    sequences,
+                    attention_mask,
+                    position_ids,
+                    self.tf_config.sequence_parallel,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                )
+                packed_seq_params = None
 
             outputs = model(
                 new_sequences,
                 new_position_ids,
                 new_attention_mask,
+                packed_seq_params=packed_seq_params,
             )
 
-            outputs = recover_left_padding(
-                outputs,
-                new_attention_mask,
-                attention_mask,
-                seq_len,
-                post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-            )
+            if self.use_sample_packing:
+                outputs = postprocess_packed_seqs(
+                    outputs,
+                    packed_seq_params,
+                    attention_mask,
+                    micro_batch_size,
+                    seq_len,
+                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                )
+            else:
+                outputs = recover_left_padding(
+                    outputs,
+                    new_attention_mask,
+                    attention_mask,
+                    seq_len,
+                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                )
 
             return outputs, partial(loss_func, data=batch)
 

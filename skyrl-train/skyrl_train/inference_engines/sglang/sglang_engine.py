@@ -4,7 +4,7 @@ import pickle
 import base64
 import torch
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 import ray
 import multiprocessing as mp
 
@@ -195,8 +195,11 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         print(f"Created SGLang engine with kwargs: {kwargs}")
 
     def tp_size(self):
-        """Return the tensor parallel size."""
         return self._tp_size
+
+    def dp_size(self):
+        # TODO(tgriggs): EP/DP not yet supported for SGLang
+        return 1
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
         """Preprocess prompts for SGLang generation."""
@@ -236,6 +239,14 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         token_ids_prompts, sampling_params = self._preprocess_prompts(input_batch)
         outputs = await self.engine.async_generate(input_ids=token_ids_prompts, sampling_params=sampling_params)
         return self._postprocess_outputs(outputs)
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO(charlie): implement this in the future
+        raise NotImplementedError()
+
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO(charlie): implement this in the future
+        raise NotImplementedError()
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False

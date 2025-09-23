@@ -11,40 +11,43 @@ Main functions:
 """
 
 import asyncio
+import json
 import logging
 import time
 import requests
 import traceback
-import uuid
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Dict, Any
 
 import fastapi
 import uvicorn
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput, ConversationType
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.openai_api_protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionResponseChoice,
-    ChatMessage,
-    ErrorResponse,
-    check_unsupported_fields,
-    build_sampling_params,
-)
 
 logger = logging.getLogger(__name__)
 
 # Global state to hold the inference engine client and backend
 _global_inference_engine_client: Optional["InferenceEngineClient"] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
+
+
+# Adapted from vllm.entrypoints.openai.protocol.ErrorResponse
+class ErrorInfo(BaseModel):
+    message: str
+    type: str
+    param: Optional[str] = None
+    code: int
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorInfo
 
 
 def set_global_state(inference_engine_client: "InferenceEngineClient", uvicorn_server: uvicorn.Server):
@@ -55,70 +58,104 @@ def set_global_state(inference_engine_client: "InferenceEngineClient", uvicorn_s
     _global_uvicorn_server = uvicorn_server
 
 
-def convert_openai_to_inference_input(request: ChatCompletionRequest, backend: str) -> InferenceEngineInput:
-    """Convert OpenAI request to InferenceEngineInput format."""
-    # Convert messages to our ConversationType format
-    conversation: ConversationType = []
-    for msg in request.messages:
-        conversation.append({"role": msg.role, "content": msg.content})
+def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Optional[ErrorResponse]:
+    """Common validation for /chat/completions and /completions endpoints."""
+    assert endpoint in ["/completions", "/chat/completions"]
 
-    sampling_params = build_sampling_params(request, backend)
-
-    engine_input: InferenceEngineInput = {
-        "prompts": [conversation],
-        "prompt_token_ids": None,
-        "sampling_params": sampling_params if sampling_params else None,
-        "trajectory_ids": [request.trajectory_id] if request.trajectory_id else None,
-    }
-    return engine_input
-
-
-def convert_inference_output_to_openai(engine_output: InferenceEngineOutput, model_name: str) -> ChatCompletionResponse:
-    """Convert InferenceEngineOutput to OpenAI response format."""
-    response_text = engine_output["responses"][0]
-    stop_reason = engine_output["stop_reasons"][0]
-
-    choice = ChatCompletionResponseChoice(
-        index=0,
-        message=ChatMessage(role="assistant", content=response_text),
-        finish_reason=stop_reason,
-    )
-
-    return ChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        model=model_name,
-        choices=[choice],
-    )
-
-
-async def handle_chat_completion(request: ChatCompletionRequest, raw_request: Request) -> ChatCompletionResponse:
-    """Handle chat completion request."""
     if _global_inference_engine_client is None:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Inference engine client not initialized"
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="Inference engine client not initialized",
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            ),
         )
-    if _global_inference_engine_client.model_name != request.model:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request.model}",
+    if "model" not in request_json:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=f"The field `model` is required in your `{endpoint}` request.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
         )
+    if _global_inference_engine_client.model_name != request_json["model"]:
+        # TODO(Charlie): add a config similar to vllm's `served_model_name`.
+        # See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request_json['model']}",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+    if request_json.get("stream", False):
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="Streaming is not supported in SkyRL yet, please set stream to False.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+    if endpoint == "/completions" and "n" in request_json and request_json["n"] > 1:
+        # TODO(Charlie): this constraint can be removed when we leave DP routing to
+        # inference frameworks. Or we could try to resolve it when needed.
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="n is not supported in SkyRL for /completions request yet, please set n to 1.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+    return None
 
+
+async def handle_openai_request(raw_request: Request, endpoint: str) -> JSONResponse:
+    """Handle /completions or /chat/completions request."""
+    assert endpoint in ["/completions", "/chat/completions"]
     try:
-        check_unsupported_fields(request)
-        # Convert to our internal format
-        engine_input = convert_openai_to_inference_input(request, _global_inference_engine_client.backend)
+        request_json = await raw_request.json()
 
-        # Call the inference engine
-        engine_output = await _global_inference_engine_client.generate(engine_input)
+        # SkyRL-side validation
+        error_response = _validate_openai_request(request_json, endpoint=endpoint)
+        if error_response is not None:
+            return JSONResponse(content=error_response.model_dump(), status_code=error_response.error.code)
 
-        # Convert back to OpenAI format
-        response = convert_inference_output_to_openai(engine_output, _global_inference_engine_client.model_name)
+        # Serialize fastapi.Request because it is not pickable, which causes ray methods to fail.
+        payload = {
+            "json": request_json,
+            "headers": dict(raw_request.headers) if hasattr(raw_request, "headers") else {},
+        }
+        if endpoint == "/chat/completions":
+            response = await _global_inference_engine_client.chat_completion(payload)
+        else:
+            response = await _global_inference_engine_client.completion(payload)
 
-        return response
+        if "error" in response or response.get("object", "") == "error":
+            # former is vllm format, latter is sglang format
+            error_code = response["error"]["code"] if "error" in response else response["code"]
+            return JSONResponse(content=response, status_code=error_code)
+        else:
+            return JSONResponse(content=response)
 
+    except json.JSONDecodeError as e:
+        # To catch possible raw_request.json() errors
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Invalid JSON error: {str(e)}",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
     except Exception as e:
-        logger.error(f"Error in chat completion: {str(e)}\n{traceback.format_exc()}")
-        raise e
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Error when handling {endpoint} request in SkyRL: {str(e)}",
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            ),
+        )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
 
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
@@ -201,10 +238,50 @@ def create_app() -> fastapi.FastAPI:
         allow_headers=["*"],
     )
 
-    # Chat completion endpoint
-    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-    async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
-        return await handle_chat_completion(request, raw_request)
+    @app.post("/v1/chat/completions")
+    async def chat_completion(raw_request: Request):
+        """
+        Takes in OpenAI's `ChatCompletionRequest` and returns OpenAI's `ChatCompletionResponse`.
+
+        Note that the specific fields inside the request and response depend on the backend you use.
+        If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
+        Same for SGLang. SkyRL does not perform field validation beyond `model` and `session_id`,
+        and otherwise depends on the underlying engines' validation.
+
+        Make sure you add in `session_id` (a string or an integer) to ensure load balancing and
+        sticky routing. The same agentic rollout / session should share the same `session_id` so
+        they get routed to the same engine for better prefix caching. If unprovided, we will route
+        to a random engine which is not performant.
+
+        API reference:
+        - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+        - https://docs.sglang.ai/basic_usage/openai_api_completions.html
+        """
+        return await handle_openai_request(raw_request, endpoint="/chat/completions")
+
+    @app.post("/v1/completions")
+    async def completions(raw_request: Request):
+        """
+        Takes in OpenAI's `CompletionRequest` and returns OpenAI's `CompletionResponse`.
+
+        Note that the specific fields inside the request and response depend on the backend you use.
+        If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
+        SkyRL only validates the fields `model` and `session_id`, and otherwise offloads
+        field validation to the underlying engines.
+
+        Make sure you add in `session_id` to ensure load balancing and sticky routing. Since
+        `request["prompt"]` can be `Union[list[int], list[list[int]], str, list[str]]`, i.e.
+        {batched, single} x {string, token IDs}, we follow the following logic for request routing:
+        - For batched request: `session_id`, if provided, must have the same length as `request["prompt"]`
+          so that each `request["prompt"][i]` is routed based on `session_id[i]`.
+        - For single request: `session_id`, if provided, must be a single integer or a singleton
+          list, where each `session_id` is a string or an integer.
+
+        API reference:
+        - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+        - https://docs.sglang.ai/basic_usage/openai_api_completions.html
+        """
+        return await handle_openai_request(raw_request, endpoint="/completions")
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
@@ -213,20 +290,18 @@ def create_app() -> fastapi.FastAPI:
     async def health_check():
         return {"status": "healthy"}
 
-    # Exception handler for unhandled server errors
-    # Note: Pydantic validation errors (400-level) are handled automatically by FastAPI
     # This handler only catches unexpected server-side exceptions
     @app.exception_handler(Exception)
     async def general_exception_handler(request: Request, exc: Exception):
         logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()}")
-        return JSONResponse(
-            status_code=500,
-            content=ErrorResponse(
-                message=f"Internal server error: {str(exc)}",
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Unhandled exception: {str(exc)}",
                 type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            ).model_dump(),
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            ),
         )
+        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
 
     return app
 

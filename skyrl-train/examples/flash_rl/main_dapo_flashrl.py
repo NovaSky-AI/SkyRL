@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra flashrl -m examples.flash_rl.main_dapo_flashrl
+Main entrypoint for DAPO training with FlashRL.
 """
 
 import ray

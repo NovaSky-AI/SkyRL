@@ -379,3 +379,129 @@ def test_gspo_importance_sampling_levels():
             assert torch.allclose(
                 seq_weights, seq_weights[0], rtol=1e-6
             ), f"GSPO should have uniform importance weights within sequence {seq_idx}"
+
+
+def test_clip_cov_policy_loss():
+    """Tests Clip-Cov policy loss function with covariance-based correction."""
+
+    device = "cpu"
+    torch.manual_seed(42)  # For reproducible randomization in clip-cov
+
+    # Create test data
+    advantages = torch.tensor(
+        [
+            [2.0, -1.0, 1.5, 0.8],
+            [1.0, 0.5, -2.0, 1.2],
+        ],
+        device=device,
+    )
+
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]], device=device)
+
+    log_probs = torch.tensor([[-0.5, -1.5, -0.8, -1.2], [-1.3, -0.7, -1.8, -0.9]], device=device)
+
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device)  # Last token masked
+
+    # Create Clip-Cov config
+    config = DictConfig(
+        {
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "policy_loss_type": "clip_cov",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "clip_cov": {"clip_ratio": 0.5, "clip_cov_lb": -5.0, "clip_cov_ub": 5.0},  # Large ratio for testing
+        }
+    )
+
+    # Get loss function
+    clip_cov_fn = PolicyLossRegistry.get("clip_cov")
+
+    # Calculate loss
+    loss, clip_frac = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+
+    # Basic sanity checks
+    assert torch.isfinite(loss), "Loss should be finite"
+    assert 0 <= clip_frac <= 1, f"Clip fraction should be between 0 and 1, got {clip_frac}"
+
+    # Compare with regular PPO (should be different due to covariance correction)
+    regular_config = DictConfig(
+        {
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    regular_fn = PolicyLossRegistry.get("regular")
+    regular_loss, regular_clip_frac = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
+
+    # Clip-Cov should give different results due to covariance-based correction
+    assert not torch.allclose(
+        loss, regular_loss, rtol=1e-3
+    ), f"Clip-Cov and regular PPO should differ: clip_cov={loss:.6f} vs regular={regular_loss:.6f}"
+
+
+def test_kl_cov_policy_loss():
+    """Tests KL-Cov policy loss function with covariance-based token selection."""
+
+    device = "cpu"
+    torch.manual_seed(42)  # For reproducible token selection
+
+    # Create test data
+    advantages = torch.tensor(
+        [
+            [1.5, -0.5, 2.0, 0.8],
+            [0.5, 1.0, -1.5, 1.2],
+        ],
+        device=device,
+    )
+
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]], device=device)
+
+    log_probs = torch.tensor([[-0.8, -1.2, -0.6, -1.1], [-1.1, -0.9, -1.4, -0.7]], device=device)
+
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device)  # Last token masked
+
+    # Create KL-Cov config
+    config = DictConfig(
+        {
+            "policy_loss_type": "kl_cov",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "kl_cov": {"kl_cov_frac": 0.5, "ppo_kl_coef": 1.0},  # Apply KL to 50% of tokens
+        }
+    )
+
+    # Get loss function
+    kl_cov_fn = PolicyLossRegistry.get("kl_cov")
+
+    # Calculate loss
+    loss, clip_frac = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+
+    # Basic sanity checks
+    assert torch.isfinite(loss), "Loss should be finite"
+    assert clip_frac == 0.0, "KL-Cov should return 0.0 for clipfrac value"
+
+    # Compare with regular PPO (should be different due to KL regularization)
+    regular_config = DictConfig(
+        {
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    regular_fn = PolicyLossRegistry.get("regular")
+    regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
+
+    # KL-Cov should give different results due to KL regularization on selected tokens
+    assert not torch.allclose(
+        loss, regular_loss, rtol=1e-3
+    ), f"KL-Cov and regular PPO should differ: kl_cov={loss:.6f} vs regular={regular_loss:.6f}"
