@@ -201,7 +201,7 @@ def test_ep_weight_sync():
         asyncio.run(client.reset_prefix_cache())
 
         # Generate after weight sync
-        out_after = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts)))
+        out_after = asyncio.run(client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)))
         assert len(out_after["responses"]) == len(prompts)
         assert len(out_after["stop_reasons"]) == len(prompts)
 
