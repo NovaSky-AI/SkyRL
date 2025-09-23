@@ -383,10 +383,21 @@ class PPORayActorGroup:
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
-        if pg:
+        if self.colocate_all:
+            assert (
+                pg is not None
+            ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
             pg_data = placement_group_table(pg)
-            assert len(pg_data["bundles"]) == world_size
-            reordered_bundle_indices = get_reordered_bundle_indices(pg)
+            assert (
+                len(pg_data["bundles"]) == world_size
+            ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
+
+        reordered_bundle_indices = []
+        if pg is not None:
+            pg_data = placement_group_table(pg)
+            should_reorder_bundles = len(pg_data["bundles"]) == world_size
+            if should_reorder_bundles:
+                reordered_bundle_indices = get_reordered_bundle_indices(pg)
 
         if self._num_gpus_per_node > 1 and pg is None:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
@@ -403,7 +414,8 @@ class PPORayActorGroup:
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg, placement_group_bundle_index=reordered_bundle_indices[0]
+                    placement_group=pg,
+                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
                 ),
             ).remote(
                 cfg=self.cfg,
@@ -445,7 +457,9 @@ class PPORayActorGroup:
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
                             placement_group_bundle_index=(
-                                reordered_bundle_indices[rank] if self.colocate_all else rank // self._num_gpus_per_node
+                                reordered_bundle_indices[rank]
+                                if reordered_bundle_indices
+                                else rank // self._num_gpus_per_node
                             ),
                         ),
                     ).remote(

@@ -152,7 +152,7 @@ def init_worker_with_type(
         pg = shared_pg
         num_gpus_per_actor = 0.2
     else:
-        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}]
+        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}] * num_nodes
         pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         num_gpus_per_actor = 0.75
