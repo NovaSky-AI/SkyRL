@@ -1,4 +1,5 @@
 from functools import partial
+import json
 from pathlib import Path
 import sys
 
@@ -11,7 +12,7 @@ from transformers import AutoConfig, AutoTokenizer
 import typer
 
 from tx.utils.models import FrozenModelConfig, get_dtype, get_model_class, save_checkpoint
-from tx.utils.log import add_file_handler, logger
+from tx.utils.log import ExperimentTracker, add_file_handler, get_tracker, logger
 
 app = typer.Typer()
 
@@ -51,6 +52,8 @@ def train(
     max_steps: int | None = typer.Option(None, "--max-steps", help="The maximum number of training steps"),
     per_device_batch_size: int = typer.Option(..., "--per-device-batch-size", help="Batch size per device accelerator for training"),
     tp_size: int = typer.Option(1, "--tp-size", help="Tensor parallelism degree to use for the model"),
+    report_to: ExperimentTracker | None = typer.Option(None, "--report-to", help="Experiment tracker to report results to"),
+    report_config: str = typer.Option("{}", "--report-config", help="Configuration that will be passed to the experiment tracker"),
 ) -> None:
     if not jax._src.xla_bridge.backends_are_initialized():
         jax.config.update('jax_num_cpu_devices', tp_size)
@@ -58,6 +61,7 @@ def train(
     output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(output_dir / "tx.log")
     logger.info(f"tx was invoked with 'tx {' '.join(sys.argv[1:])}'")
+    tracker = get_tracker(report_to, json.loads(report_config))
 
     train_dataset = load_dataset(dataset, split="train")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -87,7 +91,7 @@ def train(
             "target": batch["input_ids"][:, 1:],
         }
         loss, gradnorm = train_step(model, optimizer, input_batch)
-        logger.info(f"step: {step}, epoch: {step / num_steps :.2e}, shape: {batch['input_ids'].shape}, tokens: {batch['attention_mask'].sum()}, gradnorm: {gradnorm.item() :5.2f}, loss: {loss.item() :5.2f}")
+        tracker.log({"epoch": step / num_steps, "shape": batch['input_ids'].shape, "tokens": batch['attention_mask'].sum(), "gradnorm": gradnorm.item(), "loss": loss.item()}, step)
 
         if step % save_steps == 0:
             logger.info(f"Saving checkpoint to {output_dir}")
