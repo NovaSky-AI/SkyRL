@@ -607,7 +607,7 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     for i in range(num_bundles):
         info_actors.append(
             InfoActor.options(
-                num_cpus=0.01,
+                num_cpus=0.01,  # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
                 num_gpus=0.01,
                 resources=None,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(

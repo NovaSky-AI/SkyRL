@@ -17,8 +17,6 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 
-from tests.gpu.utils import ray_init_for_tests
-
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -60,45 +58,44 @@ def get_pg(placement_group_type, num_gpus_per_node, num_nodes):
         raise ValueError(f"Invalid placement group type: {placement_group_type}")
 
 
-def test_multi_node_pg_errors(ray_init_fixture, cfg):
+def test_multi_node_pg_invalid_pg(ray_init_fixture, cfg):
     colocate_all = True
     num_nodes = 2
     num_gpus_per_node = 4
-    try:
-        pg = get_pg("whole_node_bundle", num_gpus_per_node, num_nodes)
-        with pytest.raises(
-            AssertionError,
-            match="if colocate_all is True, the number of bundles in the shared placement group must match the world size",
-        ):
-            PPORayActorGroup(
-                cfg,
-                num_nodes=num_nodes,
-                num_gpus_per_node=num_gpus_per_node,
-                ray_actor_type=PolicyWorker,
-                pg=pg,
-                num_gpus_per_actor=0.2,
-                colocate_all=colocate_all,
-            )
-    finally:
-        ray.shutdown()
+    pg = get_pg("whole_node_bundle", num_gpus_per_node, num_nodes)
+    with pytest.raises(
+        AssertionError,
+        match="if colocate_all is True, the number of bundles in the shared placement group must match the world size",
+    ):
+        PPORayActorGroup(
+            cfg,
+            num_nodes=num_nodes,
+            num_gpus_per_node=num_gpus_per_node,
+            ray_actor_type=PolicyWorker,
+            pg=pg,
+            num_gpus_per_actor=0.2,
+            colocate_all=colocate_all,
+        )
+
+
+def test_multi_node_pg_errors_no_pg(ray_init_fixture, cfg):
+    colocate_all = True
+    num_nodes = 2
+    num_gpus_per_node = 4
     pg = None
-    try:
-        ray_init_for_tests()
-        with pytest.raises(
-            AssertionError,
-            match="if colocate_all is True, the shared placement group must be provided to PPORayActorGroup",
-        ):
-            PPORayActorGroup(
-                cfg,
-                num_nodes=num_nodes,
-                num_gpus_per_node=num_gpus_per_node,
-                ray_actor_type=PolicyWorker,
-                pg=pg,
-                num_gpus_per_actor=0.2,
-                colocate_all=colocate_all,
-            )
-    finally:
-        ray.shutdown()
+    with pytest.raises(
+        AssertionError,
+        match="if colocate_all is True, the shared placement group must be provided to PPORayActorGroup",
+    ):
+        PPORayActorGroup(
+            cfg,
+            num_nodes=num_nodes,
+            num_gpus_per_node=num_gpus_per_node,
+            ray_actor_type=PolicyWorker,
+            pg=pg,
+            num_gpus_per_actor=0.2,
+            colocate_all=colocate_all,
+        )
 
 
 @pytest.mark.parametrize(
