@@ -870,19 +870,19 @@ async def test_apply_overlong_filtering_batched(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_env_metrics_statistical_aggregation(
+async def test_env_metrics_export(
     mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
 ):
     """
-    Test that environment metrics are statistically aggregated (mean, min, max, std)
-    as scalar values.
+    Test that environment metrics are exported with proper indexing (env/metric_0, env/metric_1, etc.)
+    to preserve all individual environment data without statistical aggregation.
     """
     mock_make.return_value = mock_env
     mock_generator_cfg.batched = True
     mock_generator_cfg.max_turns = 1
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    # Hard-coded metrics with known statistical properties
+    # Hard-coded metrics for each environment
     expected_metrics = [
         {"response_length": 10, "word_count": 2, "contains_boxed": 1.0},
         {"response_length": 20, "word_count": 4, "contains_boxed": 0.0},
@@ -931,43 +931,39 @@ async def test_env_metrics_statistical_aggregation(
     generator_output: GeneratorOutput = await generator.generate(input_batch)
     rollout_metrics = generator_output["rollout_metrics"]
 
-    # Test that scalar statistical aggregations are present
-    expected_stats = {
-        # Response length stats: [10, 20, 30]
-        "environment/response_length/avg": 20.0,
-        "environment/response_length/min": 10,
-        "environment/response_length/max": 30,
-        "environment/response_length/std": 8.16496580927726,
+    # Test that indexed metrics are present with correct values
+    expected_indexed_metrics = {
+        # Environment 0 metrics
+        "env/response_length_0": 10,
+        "env/word_count_0": 2,
+        "env/contains_boxed_0": 1.0,
         
-        # Word count stats: [2, 4, 6]  
-        "environment/word_count/avg": 4.0,
-        "environment/word_count/min": 2,
-        "environment/word_count/max": 6,
-        "environment/word_count/std": 1.632993161855452,
+        # Environment 1 metrics  
+        "env/response_length_1": 20,
+        "env/word_count_1": 4,
+        "env/contains_boxed_1": 0.0,
         
-        # Contains boxed stats: [1.0, 0.0, 1.0]
-        "environment/contains_boxed/avg": 0.6666666666666666,
-        "environment/contains_boxed/min": 0.0,
-        "environment/contains_boxed/max": 1.0,
-        "environment/contains_boxed/std": 0.4714045207910317,
+        # Environment 2 metrics
+        "env/response_length_2": 30,
+        "env/word_count_2": 6,
+        "env/contains_boxed_2": 1.0,
     }
 
-    # Verify all expected stats are present and correct
-    for stat_key, expected_value in expected_stats.items():
-        assert stat_key in rollout_metrics, f"Missing statistical aggregation: {stat_key}"
-        actual_value = rollout_metrics[stat_key]
-        assert isinstance(actual_value, (int, float)), f"Stat {stat_key} should be scalar, got {type(actual_value)}"
-        
-        if isinstance(expected_value, float):
-            assert abs(actual_value - expected_value) < 1e-10, f"Stat {stat_key}: expected {expected_value}, got {actual_value}"
-        else:
-            assert actual_value == expected_value, f"Stat {stat_key}: expected {expected_value}, got {actual_value}"
+    # Verify all expected indexed metrics are present and correct
+    for metric_key, expected_value in expected_indexed_metrics.items():
+        assert metric_key in rollout_metrics, f"Missing indexed metric: {metric_key}"
+        actual_value = rollout_metrics[metric_key]
+        assert isinstance(actual_value, (int, float)), f"Metric {metric_key} should be scalar, got {type(actual_value)}"
+        assert actual_value == expected_value, f"Metric {metric_key}: expected {expected_value}, got {actual_value}"
     
     # Verify generation metrics are still present
     generation_metrics = [key for key in rollout_metrics.keys() if key.startswith("generate/")]
     assert len(generation_metrics) > 0, "Should still contain generation metrics"
     
-    # Verify all environment metrics are scalars
-    env_metrics = {k: v for k, v in rollout_metrics.items() if k.startswith("environment/")}
+    # Verify all environment metrics are raw indexed values
+    env_metrics = {k: v for k, v in rollout_metrics.items() if k.startswith("env/")}
+    assert len(env_metrics) == 9, f"Expected 9 indexed environment metrics (3 envs × 3 metrics), got {len(env_metrics)}"
+    
     for key, value in env_metrics.items():
         assert isinstance(value, (int, float)), f"Environment metric {key} should be scalar, got {type(value)}"
+        assert "_" in key and key.split("_")[-1].isdigit(), f"Environment metric {key} should have index suffix"
