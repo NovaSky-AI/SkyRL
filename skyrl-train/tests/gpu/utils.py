@@ -379,7 +379,6 @@ def init_inference_engines(
     tp_size,
     colocate_all,
     backend,
-    max_model_len=1536,
     gpu_memory_utilization=0.6,
     num_inference_engines=1,
     sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights
@@ -404,7 +403,6 @@ def init_inference_engines(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        max_model_len=max_model_len,
         shared_pg=pg,
         gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,

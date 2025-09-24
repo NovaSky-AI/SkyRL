@@ -62,7 +62,7 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
         all_envs = sum(
             [
                 [prompt["env_class"] if prompt["env_class"] is not None else self.cfg.environment.env_class]
-                * self.cfg.generator.n_samples_per_prompt
+                * n_samples_per_prompt
                 for prompt in rand_prompts
             ],
             [],
