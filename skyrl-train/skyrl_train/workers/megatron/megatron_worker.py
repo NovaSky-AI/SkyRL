@@ -416,8 +416,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
             await inference_engine_client.update_named_weights(weights_update_request)
-            current_size = 0
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            torch.cuda.ipc_collect()
         torch.distributed.barrier()
         torch.cuda.synchronize()
 
