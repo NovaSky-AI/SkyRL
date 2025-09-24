@@ -147,7 +147,6 @@ def test_megatron_policy_weight_sync():
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.reset_prefix_cache())
         asyncio.run(client.wake_up(tags=["weights"]))
         # TODO (erictang000): improve this timing
         # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
