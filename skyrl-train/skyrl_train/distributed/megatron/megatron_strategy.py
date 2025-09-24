@@ -11,7 +11,6 @@ from torch import optim
 from torch import distributed as dist
 
 from skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl_train.models import Actor
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils import io
 from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
@@ -86,7 +85,7 @@ class MegatronStrategy(DistributedStrategy):
         Offload model weights and optimizer to CPU memory.
         """
         offload_megatron_model_to_cpu(model)
-        if optimizer is not None:
+        if optimizer:
             offload_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -94,7 +93,7 @@ class MegatronStrategy(DistributedStrategy):
     def backload_to_gpu(self, model, optimizer, non_blocking=True):
         """Reload model weights back to GPU."""
         load_megatron_model_to_gpu(model)
-        if optimizer is not None:
+        if optimizer:
             load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 
@@ -171,8 +170,9 @@ class MegatronStrategy(DistributedStrategy):
         assert async_save_request is None, "Async save is not yet supported for Megatron"
 
         # Only global rank 0 saves the Huggingface config and tokenizer.
-        if self.get_rank() == 0:
-            self.save_hf_configs(self.hf_config, ckpt_dir, tokenizer)
+        if self.is_rank_0():
+            hf_dir = os.path.join(ckpt_dir, "huggingface")
+            self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
         dist.barrier()
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
@@ -242,5 +242,20 @@ class MegatronStrategy(DistributedStrategy):
 
         return ckpt_dir, {}
 
-    def save_hf_model(self, model: Union[Actor, nn.Module], output_dir: str, tokenizer=None, **kwargs) -> None:
-        pass
+    def save_hf_model(self, bridge, model: MegatronPPOPolicy, output_dir: str, tokenizer=None, **kwargs) -> None:
+        # Create checkpoint directory if it doesn't exist.
+        if self.is_rank_0():
+            io.makedirs(output_dir, exist_ok=True)
+        dist.barrier()
+
+        # All ranks call into bridge.
+        with io.local_work_dir(output_dir) as work_dir:
+            bridge.save_weights(model.actor_module, work_dir)
+            self.print(f"Successfully saved HF safetensors model to {output_dir}")
+
+            # Only rank 0 saves the Huggingface config and tokenizer.
+            if self.is_rank_0():
+                self.save_hf_configs(self.hf_config, work_dir, tokenizer)
+                self.print(f"Successfully saved HF config and tokenizer to {output_dir}")
+
+        dist.barrier()

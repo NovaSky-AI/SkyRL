@@ -439,7 +439,8 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             config_save_model = self._unwrap_model(model)
-            self.save_hf_configs(config_save_model.config, ckpt_dir, tokenizer)
+            hf_dir = os.path.join(ckpt_dir, "huggingface")
+            self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")

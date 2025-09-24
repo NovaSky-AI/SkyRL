@@ -138,6 +138,15 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
+    def save_hf_model(self, export_dir: str, tokenizer):
+        # Save model in HuggingFace safetensors format
+        self.strategy.save_hf_model(
+            self.bridge,
+            self.model,
+            export_dir,
+            tokenizer=tokenizer,
+        )
+
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
