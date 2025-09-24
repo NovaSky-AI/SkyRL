@@ -114,7 +114,7 @@ def test_megatron_policy_weight_sync():
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config()
+        cfg = get_test_actor_config(model_name=MODEL_NAME)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
@@ -137,6 +137,8 @@ def test_megatron_policy_weight_sync():
             sleep_level=2,  # since we explicitly sync weights
         )
 
+        asyncio.run(client.sleep())
+
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -145,8 +147,16 @@ def test_megatron_policy_weight_sync():
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        asyncio.run(client.wake_up(tags=["weights"]))
+        # TODO (erictang000): improve this timing
+        # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
+        # or ~20 seconds on 8xH100
+        # ~75 seconds on 8xH100 for Qwen3-30B-A3B
+        with Timer("sync_weights"):
+            ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        policy.offload_to_cpu()
+        asyncio.run(client.wake_up(tags=["kv_cache"]))
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
 
