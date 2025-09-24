@@ -19,7 +19,6 @@ fi
 
 cd "$(dirname "$0")"  # Ensure we're in the docs directory
 
-# Simple flag handling - if more flags are added, consider using case statement or getopts
 BUILD_ONLY=false
 ARGS=()
 
