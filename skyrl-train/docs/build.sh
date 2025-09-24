@@ -33,7 +33,9 @@ for arg in "$@"; do
 done
 
 if [ "$BUILD_ONLY" = true ]; then
-    uv run --extra docs --extra cpu --isolated sphinx-build -b html . _build/html "${ARGS[@]}"
+    CMD_AND_ARGS=("sphinx-build" "-b" "html")
 else
-    uv run --extra docs --extra cpu --isolated sphinx-autobuild . _build/html "${ARGS[@]}"
+    CMD_AND_ARGS=("sphinx-autobuild")
 fi
+
+uv run --extra docs --extra cpu --isolated "${CMD_AND_ARGS[@]}" . _build/html "${ARGS[@]}"
