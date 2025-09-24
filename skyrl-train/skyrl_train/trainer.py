@@ -10,7 +10,6 @@ import torch
 from loguru import logger
 from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
-from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -21,11 +20,8 @@ from skyrl_train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     GeneratorInterface,
-    TrajectoryID,
-    BatchMetadata,
-    TrainingPhase,
 )
-from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
+from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
@@ -52,14 +48,14 @@ from skyrl_train.utils.trainer_utils import (
     get_node_ids,
     extract_step_from_path,
     validate_consistency_for_latest_checkpoint,
-    calculate_per_dataset_metrics,
-    dump_per_dataset_eval_results,
     validate_generator_output,
     GLOBAL_STEP_PREFIX,
     ResumeMode,
     DynamicSamplingState,
+    build_dataloader,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.evaluate import evaluate
 
 
 class RayPPOTrainer:
@@ -81,10 +77,11 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
-        self.train_dataloader = (
-            self.build_dataloader(train_dataset, is_train=True) if train_dataset is not None else None
+        self.train_dataloader = build_dataloader(self.cfg, train_dataset, is_train=True)
+        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        self.eval_dataloader = (
+            build_dataloader(self.cfg, eval_dataset, is_train=False) if eval_dataset is not None else None
         )
-        self.eval_dataloader = self.build_dataloader(eval_dataset, is_train=False) if eval_dataset is not None else None
         self.colocate_pg = colocate_pg
 
         self.resume_mode = ResumeMode(cfg.trainer.resume_mode)
@@ -109,116 +106,24 @@ class RayPPOTrainer:
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
 
-    def build_dataloader(self, dataset: PromptDataset, is_train=True):
-        """
-        Build the dataloader for the training or evaluation dataset
-        """
-        # prepare dataloader
-        batch_size = self.cfg.trainer.train_batch_size if is_train else self.cfg.trainer.eval_batch_size
-
-        # Seed the dataloader for reproducibility.
-        seeded_generator = torch.Generator()
-        seeded_generator.manual_seed(self.cfg.trainer.seed)
-
-        dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=True if is_train else False,
-            collate_fn=dataset.collate_fn,
-            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-            num_workers=0 if self.cfg.generator.enable_http_endpoint else 8,
-            drop_last=True if is_train else False,
-            generator=seeded_generator,
-        )
-        if is_train:
-            self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
-            print(f"Total steps: {self.total_training_steps}")
-        else:
-            print(f"Validation set size: {len(dataloader)}")
-
-        return dataloader
-
     @torch.no_grad()
-    async def eval(self, eval_only: bool = False) -> Dict[str, float]:
+    async def eval(self) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
         The eval metrics are recorded after having finished training `self.global_step` steps.
         Metrics recorded in global_step 0 corresponds to evaluations before training.
 
-        Args:
-            eval_only: True for eval-only (ie, non-training) runs
-
         Returns:
             A dictionary of evaluation metrics.
         """
-
-        # 0. Make a copy of self.all_metrics (will restore at the end)
-        # eval() might accidentally mutate `self.all_metrics` since it is mutated in
-        # methods like `self.generate()`.
-        all_metrics_copy = self.all_metrics.copy()
-
-        # 1. Get all generator outputs
-        generator_outputs: List[GeneratorOutput] = []
-        concat_all_envs: List[str] = []
-        concat_env_extras: List[Dict[str, Any]] = []
-        concat_uids: List[str] = []
-        sampling_params = self.cfg.generator.eval_sampling_params
-        pbar = tqdm(total=len(self.eval_dataloader), initial=0, desc="Evaluation Progress")
-        for _, prompts in enumerate(self.eval_dataloader):
-            pbar.update(1)
-            generator_input, uids = self._prepare_generator_input(
-                self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params, "eval"
-            )
-            generator_output: GeneratorOutput = await self.generate(generator_input)
-            generator_outputs.append(generator_output)
-            concat_all_envs.extend(generator_input["env_classes"])
-            concat_env_extras.extend(generator_input["env_extras"])
-            concat_uids.extend(uids)
-        concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
-
-        # Extract data_sources from env_extras
-        concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-        vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("Eval output example: ", vis)
-
-        # 2. Group data by data source and calculate per-dataset metrics
-        eval_metrics = calculate_per_dataset_metrics(
-            concat_generator_outputs, concat_uids, concat_data_sources, self.cfg.generator.eval_n_samples_per_prompt
+        eval_metrics = await evaluate(
+            eval_dataloader=self.eval_dataloader,
+            generator=self.generator,
+            cfg=self.cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
         )
-
-        # 3. Calculate overall metrics across all datasets
-        overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
-        eval_metrics.update(
-            {
-                "eval/all/avg_score": overall_avg_score,
-                f"eval/all/pass_at_{self.cfg.generator.eval_n_samples_per_prompt}": overall_pass_at_n,
-            }
-        )
-
-        # 4. Prepare dumping data
-        # TODO[Ben] update this to be cloud-compatible
-        if self.cfg.trainer.dump_eval_results:
-            with Timer("dump_eval_results"):
-                data_save_dir = (
-                    Path(self.cfg.trainer.export_path)
-                    / "dumped_evals"
-                    / ("eval_only" if eval_only else f"global_step_{self.global_step}_evals")
-                )
-                data_save_dir.mkdir(parents=True, exist_ok=True)
-                dump_per_dataset_eval_results(
-                    data_save_dir,
-                    self.tokenizer,
-                    concat_generator_outputs,
-                    concat_data_sources,
-                    concat_all_envs,
-                    concat_env_extras,
-                    eval_metrics,
-                )
-
-        # 5. Restore self.all_metrics
-        self.all_metrics = all_metrics_copy
-
         return eval_metrics
 
     def train(self):
@@ -274,11 +179,13 @@ class RayPPOTrainer:
 
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
-                    generator_input, uids = self._prepare_generator_input(
-                        self.cfg.generator.n_samples_per_prompt,
+                    generator_input, uids = prepare_generator_input(
                         rand_prompts,
-                        self.cfg.generator.sampling_params,
+                        self.cfg.generator.n_samples_per_prompt,
+                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        self.cfg.environment.env_class,
                         "train",
+                        self.global_step,
                     )
 
                     # if the inference engine is already active due to continuing sampling or eval, we don't want to trigger weight management
@@ -419,56 +326,6 @@ class RayPPOTrainer:
         if self.reward_model is not None:
             dp_size = math.lcm(dp_size, self.reward_model.actor_infos[0].rank.dp_size)
         return entries[: (len(entries) // dp_size) * dp_size]
-
-    def _prepare_generator_input(
-        self,
-        n_samples_per_prompt: int,
-        rand_prompts: List[Any],
-        sampling_params: Dict[str, Any],
-        training_phase: TrainingPhase,
-    ) -> Tuple[GeneratorInput, List[str]]:
-        """
-        Replicate prompts if needed and generate uids.
-        """
-        all_prompts = sum([[prompt["prompt"]] * n_samples_per_prompt for prompt in rand_prompts], [])
-
-        all_envs = sum(
-            [
-                [prompt["env_class"] if prompt["env_class"] is not None else self.cfg.environment.env_class]
-                * n_samples_per_prompt
-                for prompt in rand_prompts
-            ],
-            [],
-        )
-
-        # all the other columns are env_extras
-        env_extras = sum(
-            [[prompt["env_extras"]] * n_samples_per_prompt for prompt in rand_prompts],
-            [],
-        )
-        request_sampling_params = get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
-
-        # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
-        trajectory_ids = []
-        uids = []
-        for prompt_idx, prompt in enumerate(rand_prompts):
-            uid: str = prompt["uid"]
-
-            # Create TrajectoryID for each repetition
-            for repetition_id in range(n_samples_per_prompt):
-                trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
-                uids.append(uid)
-
-        generator_input: GeneratorInput = {
-            "prompts": all_prompts,
-            "env_classes": all_envs,
-            "env_extras": env_extras,
-            "sampling_params": request_sampling_params,
-            "trajectory_ids": trajectory_ids,
-            "batch_metadata": BatchMetadata(global_step=self.global_step, training_phase=training_phase),
-        }
-
-        return generator_input, uids
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
         """

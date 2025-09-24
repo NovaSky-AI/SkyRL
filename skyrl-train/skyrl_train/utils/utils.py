@@ -526,7 +526,7 @@ def configure_ray_worker_logging() -> None:
     """
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third‑party logs match formatting
+    through Loguru so third-party logs match formatting
     """
     # 1) Loguru formatting (force colors)
     logger.remove()
