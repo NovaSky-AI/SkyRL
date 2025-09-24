@@ -3,7 +3,7 @@ tensor_model_parallel_size: 1
 pipeline_model_parallel_size: 1
 context_parallel_size: 1
 expert_model_parallel_size: 1
-expert_tensor_parallel_size: 1
+expert_tensor_parallel_size: null
 
 # Settings for the Distributed Data Parallel (DDP) config
 ddp_config:

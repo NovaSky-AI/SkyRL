@@ -27,6 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+from skyrl_train.utils.constants import SKYRL_PYTHONPATH_EXPORT
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -143,7 +144,7 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, cfg=None
+    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
@@ -152,7 +153,7 @@ def init_worker_with_type(
         pg = shared_pg
         num_gpus_per_actor = 0.2
     else:
-        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}]
+        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
         pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         num_gpus_per_actor = 0.75
@@ -160,7 +161,7 @@ def init_worker_with_type(
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
         cfg,
-        num_nodes=1,  # single node for testing
+        num_nodes=num_nodes,
         num_gpus_per_node=num_gpus_per_node,
         ray_actor_type=worker_cls,
         pg=pg,
@@ -353,6 +354,13 @@ def ray_init_for_tests():
     if not peer_access_supported(max_num_gpus_per_node=4):
         log_once("Disabling NCCL P2P for test environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
+    # TODO (erictang000): refactor this to use the same prepare_runtime_environment function as in utils.py for tests
+    # to remove duplicate code
+    if SKYRL_PYTHONPATH_EXPORT:
+        env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
+    env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    env_vars["NVTE_FUSED_ATTN"] = "0"
+    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
     ray.init(runtime_env={"env_vars": env_vars})
 
 
