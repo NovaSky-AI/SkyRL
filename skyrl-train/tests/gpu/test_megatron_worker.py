@@ -116,16 +116,15 @@ def test_megatron_policy_weight_sync():
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
         cfg = get_test_actor_config(model_name=MODEL_NAME)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = 8
+        cfg.generator.inference_engine_tensor_parallel_size = 4
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
