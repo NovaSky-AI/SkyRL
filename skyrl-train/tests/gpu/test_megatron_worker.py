@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
+SKYRL_PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
 """
 
 import ray
@@ -16,6 +16,8 @@ from tests.gpu.utils import (
     ray_init_for_tests,
     get_rank_0_memory,
     init_inference_engines,
+    run_inference,
+    get_test_prompts,
     Timer,
 )
 from skyrl_train.utils.utils import print_mem, validate_cfg
@@ -26,7 +28,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-# TODO (erictang000): we would prefer to use this smaller MoEmodel for testing, but seeing incorrect logprobs when using EP > 1
+# TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
@@ -44,7 +46,7 @@ def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create(
             {"num_layers_in_last_pipeline_stage": 13}
         )
-    if "Qwen3-30B" or "Qwen1.5-MoE" in model_name:
+    if "Qwen3-30B" in model_name or "Qwen1.5-MoE" in model_name:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
 
     validate_cfg(cfg)

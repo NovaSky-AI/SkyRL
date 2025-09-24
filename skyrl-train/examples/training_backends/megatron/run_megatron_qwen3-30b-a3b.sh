@@ -6,7 +6,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/training_backends/megatron/run_megatron_qwen3-30b-a3b.sh
 
-DATA_DIR="/mnt/cluster_storage/gsm8k"
+DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
 MODEL_NAME="Qwen/Qwen3-30B-A3B"
 
@@ -25,6 +25,11 @@ NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TP=8
 FLASH_ATTN=true
 
+<<<<<<< HEAD
+=======
+export SKYRL_PYTHONPATH_EXPORT=1
+
+>>>>>>> 15d7782c9c70eb2ed6b929a53bdaa4f797781712
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

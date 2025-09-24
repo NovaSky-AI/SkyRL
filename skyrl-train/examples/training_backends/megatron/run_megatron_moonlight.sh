@@ -8,11 +8,10 @@ set -x
 
 # running moonlight16b
 # huggingface-cli download moonshotai/Moonlight-16B-A3B-Instruct --local-dir ~/moonlight16b
-# add "blobfile", to pyproject.toml
 
-DATA_DIR="/mnt/cluster_storage/gsm8k"
+DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
-MODEL_NAME="/home/ray/moonlight16b"
+MODEL_NAME="$HOME/moonlight16b"
 
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
@@ -32,7 +31,13 @@ INFERENCE_ENGINE_TP=8
 # https://github.com/NVIDIA/TransformerEngine/blob/483d9594fb070f62966f6a12ed6c90942310b48e/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L483
 FLASH_ATTN=false
 
+<<<<<<< HEAD
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
+=======
+export SKYRL_PYTHONPATH_EXPORT=1
+
+uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with blobfile -m skyrl_train.entrypoints.main_base \
+>>>>>>> 15d7782c9c70eb2ed6b929a53bdaa4f797781712
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
