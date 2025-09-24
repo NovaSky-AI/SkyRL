@@ -92,7 +92,7 @@ class MegatronPPOPolicy:
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
                 chunk_size=None,
             )
-            return 0.0, {"log_probs": token_logprobs}
+            return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)

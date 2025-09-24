@@ -33,7 +33,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets>=3.6.0",
+    "datasets==4.0.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
@@ -118,16 +118,16 @@ sglang = [
 mcore = [
   # Make sure to change the flash attention source (under tool.uv.sources) above to a compatible version (<= 2.7.4.post1) for TransformerEngine==2.5.0
   # https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
-  # Build transformer-engine separately first!
+  # For single node: build transformer-engine separately first, and uncomment the transformer-engine library import below
   # uv pip install "torch==2.7.1"
   # uv pip install "nvidia-cudnn-cu12>=9.3"
   # export CUDNN_PATH="$(python -c 'import inspect, nvidia.cudnn as c, os; print(os.path.dirname(inspect.getfile(c)))')"
   # export CPATH="$CUDNN_PATH/include:${CPATH:-}"
   # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
   # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
-  "mbridge==0.13.0",
+  # "transformer-engine[pytorch]==2.5.0",
+  "mbridge==0.13.1",
   "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
-  "transformer-engine[pytorch]==2.5.0",
 ]
 flashrl = [
     # TODO (sumanthrh): Shift to install from git source
