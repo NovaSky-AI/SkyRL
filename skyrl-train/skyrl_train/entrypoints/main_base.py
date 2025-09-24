@@ -46,7 +46,6 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         vllm_v1_disable_multiproc=cfg.generator.vllm_v1_disable_multiproc,
         enable_prefix_caching=cfg.generator.enable_prefix_caching,
         enforce_eager=cfg.generator.enforce_eager,
-        max_model_len=cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
         data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         shared_pg=colocate_pg,
@@ -57,6 +56,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         max_num_seqs=cfg.generator.max_num_seqs,
         tokenizer=tokenizer,
         backend=cfg.generator.backend,
+        engine_init_kwargs=cfg.generator.engine_init_kwargs,
     )
 
 

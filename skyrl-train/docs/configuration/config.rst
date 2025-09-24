@@ -451,6 +451,7 @@ Generator Configuration
     max_num_seqs: 1024
     remote_inference_engine_urls: ["127.0.0.1:8001"]
     max_turns: 1
+    engine_init_kwargs: {}
 
     override_existing_update_group: "auto" # "auto", "enable", "disable"
     # sampling params for generation phase
@@ -531,6 +532,7 @@ Generation Parameters
 - ``generator.eval_n_samples_per_prompt``: Number of samples to generate per prompt for evaluation.
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
 - ``generator.use_conversation_multi_turn``: Whether to use conversation format for multi-turn generation. If set to ``true`` then observations are appended to the chat history as a new turn. If set to ``false`` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus ``false`` can be used for full control over the exact tokens added after environment interaction.
+- ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
 
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~

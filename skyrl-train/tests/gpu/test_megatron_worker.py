@@ -132,6 +132,7 @@ def test_megatron_policy_weight_sync():
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
+            sleep_level=2,  # since we explicitly sync weights
         )
 
         asyncio.run(client.sleep())
