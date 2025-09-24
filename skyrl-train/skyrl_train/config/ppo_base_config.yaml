@@ -29,6 +29,9 @@ trainer:
   policy:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      lora_rank: 0
+      lora_alpha: 16
+      lora_dropout: 0
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
@@ -57,6 +60,9 @@ trainer:
   critic:
     model:
       path: null
+      lora_rank: 0
+      lora_alpha: 16
+      lora_dropout: 0
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
@@ -157,6 +163,7 @@ trainer:
   flash_attn: true
   disable_fast_tokenizer: false
   target_modules: "all-linear"
+  exclude_modules: null
   use_orm_score: false
   project_name: "skyrl"
   run_name: "test_run"

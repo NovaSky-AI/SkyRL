@@ -448,6 +448,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
+        # NOTE(shu): for LoRA
+        env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
+
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"

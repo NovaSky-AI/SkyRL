@@ -173,6 +173,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
+        self._is_lora = kwargs.get("enable_lora", False)
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
@@ -255,13 +256,50 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         return vllm.LLM(*args, **kwargs)
 
+    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
+        """Check if this is a LoRA disk loading request."""
+        is_lora_disk = (
+            request.get("extras")
+            and len(request["extras"]) > 0
+            and "lora_disk_path" in request["extras"][0]
+            and request["names"][0].startswith("lora_disk_load")
+        )
+        return is_lora_disk
+
+    async def _load_lora_from_disk(self, lora_path: str):
+        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+        from vllm.lora.request import LoRARequest
+        import time
+
+        lora_id = int(time.time_ns() % 0x7FFFFFFF)
+        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        try:
+            result = self.llm.add_lora(lora_request)
+            return result
+        except Exception as e:
+            raise Exception(f"Error loading LoRA adapter: {e}")
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
+
+        # Check if LoRA is enabled and create LoRA requests
+        lora_requests = None
+        if self._is_lora:
+            lora_int_ids = list(self.llm.list_loras())
+            if len(lora_int_ids) > 0:
+                lora_int_id = lora_int_ids[0]
+                from vllm.lora.request import LoRARequest
+
+                batch_size = len(prompt_token_ids)
+                lora_requests = [
+                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")
+                ] * batch_size
 
         outputs = await asyncio.to_thread(
             self.llm.generate,
             prompts=[TokensPrompt(prompt_token_ids=r) for r in prompt_token_ids],
             sampling_params=sampling_params,
+            lora_request=lora_requests,
         )
 
         return self._postprocess_outputs(outputs)
@@ -278,7 +316,8 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
-        await asyncio.to_thread(self.llm.sleep, level=kwargs.get("level", 2))
+        level = 1 if self._is_lora else kwargs.get("level", 2)
+        await asyncio.to_thread(self.llm.sleep, level=level)
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
@@ -296,6 +335,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         if not len(request["names"]):
             raise ValueError("Update weight request should have atleast one entry in 'names'")
+
+        # Handle LoRA disk loading request
+        if self._is_lora_disk_loading_request(request):
+            lora_path = request["extras"][0]["lora_disk_path"]
+            return await self._load_lora_from_disk(lora_path)
 
         engine = self._get_engine()
         # Use IPC if handles are provided
@@ -369,15 +413,52 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
+        # Check if LoRA is enabled and create LoRA request
         final_output = None
+        lora_request = None
+
+        if self._is_lora:
+            lora_int_ids = list(await self.llm.list_loras())
+            if len(lora_int_ids) > 0:
+                lora_int_id = lora_int_ids[0]
+                from vllm.lora.request import LoRARequest
+
+                lora_request = LoRARequest(
+                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path"
+                )
+
         async for request_output in self.llm.generate(
             prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
             sampling_params=sampling_params,
             request_id=request_id,
+            lora_request=lora_request,
         ):
             final_output = request_output
 
         return final_output
+
+    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
+        """Check if this is a LoRA disk loading request."""
+        is_lora_disk = (
+            request.get("extras")
+            and len(request["extras"]) > 0
+            and "lora_disk_path" in request["extras"][0]
+            and request["names"][0].startswith("lora_disk_load")
+        )
+        return is_lora_disk
+
+    async def _load_lora_from_disk(self, lora_path: str):
+        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+        from vllm.lora.request import LoRARequest
+        import time
+
+        lora_id = int(time.time_ns() % 0x7FFFFFFF)
+        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        try:
+            result = await self.llm.add_lora(lora_request)
+            return result
+        except Exception as e:
+            raise Exception(f"Error loading LoRA adapter: {e}")
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine."""
@@ -401,7 +482,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
         await self.reset_prefix_cache()
-        await self.llm.sleep(level=kwargs.get("level", 2))
+        level = 1 if self._is_lora else kwargs.get("level", 2)
+        await self.llm.sleep(level=level)
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
@@ -418,6 +500,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         if not len(request["names"]):
             raise ValueError("Update weight request should have atleast one entry in 'names'")
+
+        # Check for LoRA disk loading request
+        if self._is_lora_disk_loading_request(request):
+            lora_path = request["extras"][0]["lora_disk_path"]
+            return await self._load_lora_from_disk(lora_path)
 
         engine = self._get_engine()
         # Use IPC if handles are provided

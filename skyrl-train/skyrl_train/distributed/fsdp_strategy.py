@@ -60,6 +60,7 @@ class FSDPStrategy(DistributedStrategy):
         self,
         fsdp_config,
         optimizer_config=None,
+        model_config=None,
         fsdp_strategy: str = "fsdp",
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
@@ -70,6 +71,7 @@ class FSDPStrategy(DistributedStrategy):
         assert fsdp_strategy in ("fsdp", "fsdp2"), f"Unsupported FSDP strategy: {fsdp_strategy}"
         self.fsdp_config = fsdp_config
         self.optimizer_config = optimizer_config
+        self.model_config = model_config
         self.fsdp_strategy = fsdp_strategy
         self.max_norm = optimizer_config.max_grad_norm if optimizer_config is not None else 1.0
         self.train_batch_size = train_batch_size
@@ -86,6 +88,9 @@ class FSDPStrategy(DistributedStrategy):
             )
         else:
             self.manual_offload_optimizer = False
+
+        # LoRA related configs
+        self.is_lora = self.model_config.lora_rank > 0 if self.model_config is not None else False
 
         self.time_steps = defaultdict(int)
 
@@ -201,7 +206,9 @@ class FSDPStrategy(DistributedStrategy):
 
     def _fsdp_init_model(self, model, is_train=True, is_actor=False):
         # Initialize FSDP wrapping policy
-        wrap_policy = get_fsdp_wrap_policy(module=model, config=self.fsdp_config.get("wrap_policy", None))
+        wrap_policy = get_fsdp_wrap_policy(
+            module=model, config=self.fsdp_config.get("wrap_policy", None), is_lora=self.is_lora
+        )
 
         # Setup mixed precision
         mixed_precision_config = self.fsdp_config.get("mixed_precision", None)
@@ -354,6 +361,38 @@ class FSDPStrategy(DistributedStrategy):
 
         return config_to_save
 
+    def _save_lora_adapters(self, model, ckpt_dir):
+        """Save LoRA adapters in HuggingFace PEFT format"""
+        from dataclasses import asdict
+        from safetensors.torch import save_file
+        from skyrl_train.distributed.fsdp_utils import layered_summon_lora_params
+
+        lora_save_path = os.path.join(ckpt_dir, "lora_adapter")
+        peft_config = {}
+
+        if self.is_rank_0():
+            io.makedirs(lora_save_path, exist_ok=True)
+            peft_config = asdict(model.peft_config.get("default", {}))
+            peft_config["task_type"] = peft_config["task_type"].value
+            peft_config["peft_type"] = peft_config["peft_type"].value
+            peft_config["target_modules"] = list(peft_config["target_modules"])
+
+        try:
+            if fsdp_version(model) > 0:
+                model = model.to(torch.cuda.current_device())
+                lora_params = layered_summon_lora_params(model)
+
+                if self.is_rank_0():
+                    save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
+                    with io.open_file(os.path.join(lora_save_path, "adapter_config.json"), "w") as f:
+                        json.dump(peft_config, f, ensure_ascii=False, indent=4)
+
+                    self.print(f"[rank-0]: Saved LoRA adapter to: {lora_save_path}")
+        except Exception as e:
+            self.print(f"Save LoRA Adapter Error ({e})")
+
+        dist.barrier()
+
     def save_checkpoint(
         self,
         model,
@@ -445,6 +484,10 @@ class FSDPStrategy(DistributedStrategy):
             fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
             with io.open_file(fsdp_config_path, "w") as f:
                 json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+
+        # Save LoRA adapters if using LoRA
+        if self.is_lora and hasattr(save_model, "peft_config"):
+            self._save_lora_adapters(save_model, ckpt_dir)
 
         # Final barrier to ensure all operations complete
         dist.barrier()

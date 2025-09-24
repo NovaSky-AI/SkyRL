@@ -37,27 +37,36 @@ __all__ = ["BasePPOExp", "config_dir"]
 def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
-    return create_ray_wrapped_inference_engines(
-        num_inference_engines=cfg.generator.num_inference_engines,
-        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
-        model_dtype=cfg.generator.model_dtype,
-        pretrain=cfg.trainer.policy.model.path,
-        seed=cfg.trainer.seed,
-        vllm_v1_disable_multiproc=cfg.generator.vllm_v1_disable_multiproc,
-        enable_prefix_caching=cfg.generator.enable_prefix_caching,
-        enforce_eager=cfg.generator.enforce_eager,
-        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
-        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
-        shared_pg=colocate_pg,
-        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
-        async_engine=cfg.generator.async_engine,
-        max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
-        max_num_seqs=cfg.generator.max_num_seqs,
-        tokenizer=tokenizer,
-        backend=cfg.generator.backend,
-        engine_init_kwargs=cfg.generator.engine_init_kwargs,
-    )
+    engine_kwargs = {
+        "num_inference_engines": cfg.generator.num_inference_engines,
+        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
+        "model_dtype": cfg.generator.model_dtype,
+        "pretrain": cfg.trainer.policy.model.path,
+        "seed": cfg.trainer.seed,
+        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
+        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
+        "enforce_eager": cfg.generator.enforce_eager,
+        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
+        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
+        "shared_pg": colocate_pg,
+        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
+        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
+        "async_engine": cfg.generator.async_engine,
+        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
+        "max_num_seqs": cfg.generator.max_num_seqs,
+        "tokenizer": tokenizer,
+        "backend": cfg.generator.backend,
+        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+    }
+
+    # Conditionally add LoRA parameters if LoRA is enabled
+    if cfg.trainer.policy.model.lora_rank > 0:
+        engine_kwargs["enable_lora"] = True
+        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora_rank
+        engine_kwargs["sleep_level"] = 1
+        engine_kwargs["max_loras"] = 1
+
+    return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
