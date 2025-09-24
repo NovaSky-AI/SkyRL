@@ -391,7 +391,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ipc_handle = reduce_tensor(weight)
 
             ipc_handle = {get_physical_gpu_id(): ipc_handle}
-
             ipc_handle_list = [None] * torch.distributed.get_world_size()
             torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
@@ -414,6 +413,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             torch.distributed.barrier()
             torch.cuda.synchronize()
+
+        if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
+            await inference_engine_client.update_named_weights(weights_update_request)
+            current_size = 0
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
