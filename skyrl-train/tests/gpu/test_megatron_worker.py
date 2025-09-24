@@ -16,6 +16,8 @@ from tests.gpu.utils import (
     ray_init_for_tests,
     get_rank_0_memory,
     init_inference_engines,
+    run_inference,
+    get_test_prompts,
     Timer,
 )
 from skyrl_train.utils.utils import print_mem, validate_cfg
@@ -23,6 +25,9 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+
+
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -147,8 +152,17 @@ def test_megatron_policy_weight_sync():
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         asyncio.run(client.wake_up(tags=["weights"]))
+        # TODO (erictang000): improve this timing
+        # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
         with Timer("sync_weights"):
             ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        policy.offload_to_cpu()
+        asyncio.run(client.wake_up(tags=["kv_cache"]))
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
+
+        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
 
