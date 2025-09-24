@@ -132,9 +132,9 @@ class RayPPOTrainer:
         )
         if is_train:
             self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
-            print(f"Total steps: {self.total_training_steps}")
+            logger.info(f"Total steps: {self.total_training_steps}")
         else:
-            print(f"Validation set size: {len(dataloader)}")
+            logger.info(f"Validation set size: {len(dataloader)}")
 
         return dataloader
 
@@ -180,7 +180,7 @@ class RayPPOTrainer:
         # Extract data_sources from env_extras
         concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("Eval output example: ", vis)
+        logger.info("Eval output example: ", vis)
 
         # 2. Group data by data source and calculate per-dataset metrics
         eval_metrics = calculate_per_dataset_metrics(

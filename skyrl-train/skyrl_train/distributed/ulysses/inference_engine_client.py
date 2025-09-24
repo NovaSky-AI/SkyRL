@@ -16,8 +16,8 @@ from skyrl_train.inference_engines.utils import (
 )
 from omegaconf import DictConfig
 import threading
-from loguru import logger
 import random
+from loguru import logger
 
 
 class InferenceEngineClient(InferenceEngineInterface):
