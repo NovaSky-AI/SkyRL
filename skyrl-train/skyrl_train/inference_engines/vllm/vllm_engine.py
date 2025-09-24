@@ -419,7 +419,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
         try:
-            result = self.llm.add_lora(lora_request)
+            result = await self.llm.add_lora(lora_request)
             return result
         except Exception as e:
             raise Exception(f"Error loading LoRA adapter: {e}")
