@@ -373,9 +373,10 @@ class FSDPStrategy(DistributedStrategy):
         if self.is_rank_0():
             io.makedirs(lora_save_path, exist_ok=True)
             peft_config = asdict(model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            if peft_config:
+                peft_config["task_type"] = peft_config["task_type"].value
+                peft_config["peft_type"] = peft_config["peft_type"].value
+                peft_config["target_modules"] = list(peft_config["target_modules"])
 
         try:
             if fsdp_version(model) > 0:

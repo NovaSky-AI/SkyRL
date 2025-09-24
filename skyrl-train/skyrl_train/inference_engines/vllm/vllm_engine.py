@@ -245,17 +245,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
-    def reset_prefix_cache(self):
-        """Reset the prefix cache. Subclasses override for async version."""
-        return self.llm.llm_engine.reset_prefix_cache()
-
-
-class VLLMInferenceEngine(BaseVLLMInferenceEngine):
-    """Synchronous VLLM engine."""
-
-    def _create_engine(self, *args, **kwargs):
-        return vllm.LLM(*args, **kwargs)
-
     def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
         """Check if this is a LoRA disk loading request."""
         is_lora_disk = (
@@ -279,6 +268,17 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         except Exception as e:
             raise Exception(f"Error loading LoRA adapter: {e}")
 
+    def reset_prefix_cache(self):
+        """Reset the prefix cache. Subclasses override for async version."""
+        return self.llm.llm_engine.reset_prefix_cache()
+
+
+class VLLMInferenceEngine(BaseVLLMInferenceEngine):
+    """Synchronous VLLM engine."""
+
+    def _create_engine(self, *args, **kwargs):
+        return vllm.LLM(*args, **kwargs)
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
@@ -292,7 +292,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
                 batch_size = len(prompt_token_ids)
                 lora_requests = [
-                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")
+                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path")
                 ] * batch_size
 
         outputs = await asyncio.to_thread(
@@ -424,7 +424,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 from vllm.lora.request import LoRARequest
 
                 lora_request = LoRARequest(
-                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path"
+                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
                 )
 
         async for request_output in self.llm.generate(
@@ -436,29 +436,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             final_output = request_output
 
         return final_output
-
-    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
-        """Check if this is a LoRA disk loading request."""
-        is_lora_disk = (
-            request.get("extras")
-            and len(request["extras"]) > 0
-            and "lora_disk_path" in request["extras"][0]
-            and request["names"][0].startswith("lora_disk_load")
-        )
-        return is_lora_disk
-
-    async def _load_lora_from_disk(self, lora_path: str):
-        """Load LoRA adapters from disk using vLLM's native add_lora method."""
-        from vllm.lora.request import LoRARequest
-        import time
-
-        lora_id = int(time.time_ns() % 0x7FFFFFFF)
-        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        try:
-            result = await self.llm.add_lora(lora_request)
-            return result
-        except Exception as e:
-            raise Exception(f"Error loading LoRA adapter: {e}")
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine."""

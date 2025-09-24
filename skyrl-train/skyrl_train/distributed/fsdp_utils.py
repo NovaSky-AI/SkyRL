@@ -484,6 +484,7 @@ class PrecisionType:
             raise RuntimeError(f"unexpected precision: {precision}")
 
 
+# Reference: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
 def layered_summon_lora_params(fsdp_module) -> OrderedDict:
     from peft.utils.save_and_load import get_peft_model_state_dict
 

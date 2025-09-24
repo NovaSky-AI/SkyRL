@@ -54,7 +54,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND -m sky
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_0.5b_lora" \
-  trainer.run_name="gsm8k_0.5b_lora" \
+  trainer.run_name="gsm8k_0.5b_lora_test" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_0.5b_lora_ckpt" \
   $@
