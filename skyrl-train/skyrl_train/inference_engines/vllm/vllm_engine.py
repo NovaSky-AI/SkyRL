@@ -255,19 +255,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         )
         return is_lora_disk
 
-    async def _load_lora_from_disk(self, lora_path: str):
-        """Load LoRA adapters from disk using vLLM's native add_lora method."""
-        from vllm.lora.request import LoRARequest
-        import time
-
-        lora_id = int(time.time_ns() % 0x7FFFFFFF)
-        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        try:
-            result = self.llm.add_lora(lora_request)
-            return result
-        except Exception as e:
-            raise Exception(f"Error loading LoRA adapter: {e}")
-
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
@@ -328,6 +315,19 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
+
+    async def _load_lora_from_disk(self, lora_path: str):
+        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+        from vllm.lora.request import LoRARequest
+        import time
+
+        lora_id = int(time.time_ns() % 0x7FFFFFFF)
+        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        try:
+            result = self.llm.add_lora(lora_request)
+            return result
+        except Exception as e:
+            raise Exception(f"Error loading LoRA adapter: {e}")
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:
@@ -410,6 +410,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             request_logger=None,
         )
         return engine
+
+    async def _load_lora_from_disk(self, lora_path: str):
+        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+        from vllm.lora.request import LoRARequest
+        import time
+
+        lora_id = int(time.time_ns() % 0x7FFFFFFF)
+        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        try:
+            result = self.llm.add_lora(lora_request)
+            return result
+        except Exception as e:
+            raise Exception(f"Error loading LoRA adapter: {e}")
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
