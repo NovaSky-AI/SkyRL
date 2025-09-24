@@ -220,8 +220,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             # sync any remaining weights
             if torch.distributed.get_rank() == 0 and len(weights_update_request["names"]) > 0:
                 await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
-                current_size = 0
-                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                torch.cuda.ipc_collect()
             torch.distributed.barrier()
 
         if cache_reset_task is not None:
