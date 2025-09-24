@@ -25,11 +25,8 @@ NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TP=8
 FLASH_ATTN=true
 
-<<<<<<< HEAD
-=======
 export SKYRL_PYTHONPATH_EXPORT=1
 
->>>>>>> 15d7782c9c70eb2ed6b929a53bdaa4f797781712
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

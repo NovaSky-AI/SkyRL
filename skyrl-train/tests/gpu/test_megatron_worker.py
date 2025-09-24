@@ -16,8 +16,6 @@ from tests.gpu.utils import (
     ray_init_for_tests,
     get_rank_0_memory,
     init_inference_engines,
-    run_inference,
-    get_test_prompts,
     Timer,
 )
 from skyrl_train.utils.utils import print_mem, validate_cfg
