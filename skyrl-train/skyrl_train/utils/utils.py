@@ -8,7 +8,12 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
+from ray.util.placement_group import (
+    placement_group,
+    PlacementGroupSchedulingStrategy,
+    PlacementGroup,
+    placement_group_table,
+)
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
 
@@ -586,6 +591,44 @@ def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
             f"This might indicate insufficient GPU resources.\n"
             f"Error: {e}"
         )
+
+
+@ray.remote(num_gpus=1)
+class InfoActor:
+    def get_gpu_id(self):
+        return ray.get_gpu_ids()[0]
+
+
+def get_reordered_bundle_indices(pg: PlacementGroup):
+    pg_data = placement_group_table(pg)
+    num_bundles = len(pg_data["bundles"])
+    bundle_to_node_ids = pg_data["bundles_to_node_id"]
+
+    # use info actor to get the GPU id
+    info_actors = []
+    for i in range(num_bundles):
+        info_actors.append(
+            InfoActor.options(
+                num_cpus=0.01,  # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
+                num_gpus=0.01,
+                resources=None,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=i,
+                ),
+            ).remote()
+        )
+
+    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
+    for actor in info_actors:
+        ray.kill(actor)
+
+    # original index, node_id, gpu_id
+    bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
+    pg_reordered_bundle_indices = [
+        bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
+    ]  # sort by node_id, then gpu_id
+    return pg_reordered_bundle_indices
 
 
 # NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
