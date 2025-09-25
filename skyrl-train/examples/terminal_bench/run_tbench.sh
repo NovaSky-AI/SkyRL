@@ -7,15 +7,15 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/terminal_bench/run_tbench.sh
 
-DATA_DIR="$HOME/data/gsm8k"
+DATA_DIR="$HOME/data/tasks"
 NUM_GPUS=1
 LOGGER="console"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
 SANDBOXES_DIR="sandboxes" # TODO: For now, `sandboxes` is cloned into SkyRL/skyrl-train.
 
 uv run --isolated --extra vllm --extra sandboxes --with "sandbox@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
-  data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/validation.parquet']" \
+  data.train_data="['$DATA_DIR']" \
+  data.val_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
   terminal_bench_config.max_episodes=16 \
@@ -34,7 +34,7 @@ uv run --isolated --extra vllm --extra sandboxes --with "sandbox@./sandboxes" -m
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=8 \
-  trainer.policy_mini_batch_size=2 \
+  trainer.policy_mini_batch_size=8 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=-1 \

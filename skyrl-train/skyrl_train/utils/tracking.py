@@ -41,7 +41,33 @@ class Tracking:
             import wandb
             from omegaconf import OmegaConf
 
-            wandb.init(project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True))
+            # TODO(tgriggs): Remove once we clean up some broken packages in TACC environment
+            try:
+                import importlib.metadata as _im
+                import wandb.util as _wandb_util
+                from wandb.util import InstalledDistribution as _InstalledDistribution
+
+                def _safe_working_set():
+                    for _d in _im.distributions():
+                        try:
+                            _meta = _d.metadata or {}
+                            _name = _meta["Name"] if isinstance(_meta, dict) and "Name" in _meta else None
+                            if not _name:
+                                continue
+                            yield _InstalledDistribution(key=_name, version=_d.version)
+                        except Exception:
+                            continue
+
+                _wandb_util.working_set = _safe_working_set
+            except Exception:
+                pass
+            # Disable package and meta stats to further reduce chances of env introspection errors
+            wandb.init(
+                project=project_name,
+                name=experiment_name,
+                config=OmegaConf.to_container(config, resolve=True),
+                settings=wandb.Settings(_disable_stats=True, _disable_meta=True),
+            )
             self.logger["wandb"] = wandb
 
         if "mlflow" in backends:

@@ -7,10 +7,10 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
-from sandbox.models.trial.config import TrialConfig, AgentConfig, LocalTaskConfig
-from sandbox.models.task.id import LocalTaskId
-from sandbox.models.agent.name import AgentName
-from sandbox.trial.trial import Trial
+from sandboxes.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
+from sandboxes.models.environment_type import EnvironmentType
+from sandboxes.models.agent.name import AgentName
+from sandboxes.trial.trial import Trial
 
 
 @dataclass
@@ -45,17 +45,14 @@ class TerminalBenchGenerator(GeneratorInterface):
         # TerminalBench config
         self.trials_dir = terminal_bench_cfg.trials_dir
         self.agent_name = terminal_bench_cfg.agent_name
-        self.sandboxes_dir = terminal_bench_cfg.sandboxes_dir
         self.max_episodes = terminal_bench_cfg.max_episodes
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        # TODO(tgriggs): Plumb the sandboxes task list here instead of using (and ignoring) empty prompts
-        prompts = input_batch["prompts"]
         tasks = []
-        for _ in range(len(prompts)):
+        for prompt in input_batch["prompts"]:
             tasks.append(
                 self.terminal_bench_agent_loop(
-                    prompt="",
+                    prompt=prompt,
                 )
             )
 
@@ -86,21 +83,23 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
+                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
-                    model_name=f"{self.model_name}",
+                    model_name=f"hosted_vllm/{self.model_name}",
                     kwargs={"api_base": f"{self.base_url}/v1", "key": "fake_key", "max_episodes": self.max_episodes},
                 ),
             )
         elif self.agent_name == "oracle":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
+                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
-                    model_name=self.model_name,
+                    model_name=f"hosted_vllm/{self.model_name}",
                 ),
             )
         else:
@@ -109,13 +108,21 @@ class TerminalBenchGenerator(GeneratorInterface):
         trial = Trial(trial_config)
         # Run the trial
         while True:
-            results = await trial.run()
-            reward = results.verifier_result.rewards
-            chat_history = results.agent_result.all_messages
-            if len(chat_history) > 0:
-                break
-            else:
-                print(f"[WARNING] Agent {self.agent_name} did not return a response")
+            try:
+                results = await trial.run()
+                print(f"Results: {results}")
+                if not results.verifier_result:
+                    print(f"[WARNING] Exception info: {results.exception_info}")
+                    continue
+                reward = results.verifier_result.reward
+                chat_history = results.agent_result.all_messages
+                if len(chat_history) > 0:
+                    break
+                else:
+                    print(f"[WARNING] Agent {self.agent_name} did not return a response")
+            except Exception as e:
+                print(f"Error running trial: {e}")
+                continue
 
         # Use the first message as the prompt
         prompt = [chat_history[0]]
