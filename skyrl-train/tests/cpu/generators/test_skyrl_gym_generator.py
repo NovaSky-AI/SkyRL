@@ -759,16 +759,7 @@ async def test_apply_overlong_filtering_non_batched(
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
-
-    # TODO(Dev): Uncomment and delete modified test below for the CPU
-    # mock_llm.generate = AsyncMock(
-    #     return_value={
-    #         "responses": ["truncated response"],
-    #         "stop_reasons": ["length"],
-    #         "response_ids": [[10, 11, 12, 13, 14, 15, 16, 17, 18, 19]],  # 10 tokens, will be truncated
-    #     }
-    # )
-
+    # TODO(Dev): Fix is fine for now, will revisit in case issues arise
     async def llm_generate_side_effect(input_batch):
         max_len = input_batch["sampling_params"]["max_generate_length"]
         base_response = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]  # 10 token base
@@ -777,7 +768,6 @@ async def test_apply_overlong_filtering_non_batched(
         return {
             "responses": ["truncated response"] * num,
             "stop_reasons": ["length"] * num,
-            "response_logprobs": None,
             "response_ids": response_tokens,
         }
 

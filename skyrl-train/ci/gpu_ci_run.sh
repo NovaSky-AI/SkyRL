@@ -2,9 +2,11 @@
 set -xeuo pipefail
 
 export CI=true
+
 # Prepare datasets used in tests.
 uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 uv run examples/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
+
 # Run all non-SGLang tests
 # TODO: enable megatron when tests and dependencies are fixed
 uv run --directory . --isolated --extra dev --extra vllm --extra deepspeed pytest -s tests/gpu/gpu_ci -m "not (sglang or integrations or megatron)"
