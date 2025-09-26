@@ -37,7 +37,7 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn",
+    "flash-attn; extra != 'cpu'",
     "polars",
 ]
 
@@ -65,8 +65,15 @@ conflicts = [
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+# Torch sources: GPU by default, CPU when 'cpu' extra is used
+torch = [
+    { index = "pytorch-cu128", marker = "extra != 'cpu'" },  # Default GPU version
+    { index = "pytorch-cpu", marker = "extra == 'cpu'" }  # CPU version when cpu extra is used
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "extra != 'cpu'" },  # Default GPU version
+    { index = "pytorch-cpu", marker = "extra == 'cpu'" }  # CPU version when cpu extra is used
+]
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
 # NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
 # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime which is slow.
@@ -78,6 +85,9 @@ flashinfer-python = [
 
 
 [project.optional-dependencies]
+cpu = [
+    # CPU-only versions for documentation building and development on machines without CUDA
+]
 deepspeed = [
     "deepspeed==0.16.5"
 ]
@@ -148,6 +158,11 @@ miniswe = [
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.setuptools.packages.find]
