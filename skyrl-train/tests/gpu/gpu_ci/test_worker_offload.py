@@ -352,10 +352,8 @@ def test_offload_after_ckpt(strategy):
         assert offload_delta > 2.5 * 1024**3, f"Offload memory is {offload_delta} bytes, should be > 2.5GB"
 
     finally:
-        # Clean up ray
-        ray.shutdown()
-
-        # Clean up checkpoint directory
         if checkpoint_dir and os.path.exists(checkpoint_dir):
             print(f"Removing checkpoint directory: {checkpoint_dir}")
             shutil.rmtree(checkpoint_dir)
+        ray.shutdown()
+
