@@ -67,7 +67,6 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                 # NOTE (sumanthrh): Model initialization should always be in fp32
                 # during training
                 bf16=False,
-                # LoRA specific configs
                 lora_rank=self.cfg.trainer.policy.model.lora_rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora_alpha,
                 lora_dropout=self.cfg.trainer.policy.model.lora_dropout,
