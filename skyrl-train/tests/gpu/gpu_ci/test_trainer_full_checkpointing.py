@@ -260,3 +260,4 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         if checkpoint_dir and os.path.exists(os.path.dirname(checkpoint_dir)):
             print(f"Cleaning up checkpoint directory: {os.path.dirname(checkpoint_dir)}")
             shutil.rmtree(os.path.dirname(checkpoint_dir))
+        ray.shutdown()
