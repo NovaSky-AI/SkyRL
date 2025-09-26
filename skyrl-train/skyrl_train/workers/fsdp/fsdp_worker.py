@@ -50,7 +50,6 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
-        # LoRA specific configs
         self._is_lora = self.cfg.trainer.policy.model.lora_rank > 0
 
         # Update per-gpu mini batch size based on device mesh
