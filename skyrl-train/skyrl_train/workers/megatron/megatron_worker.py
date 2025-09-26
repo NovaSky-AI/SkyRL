@@ -228,7 +228,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        optim_config = init_megatron_optim_config(self.cfg.trainer.policy.optimizer_config)
+        optim_config = init_megatron_optim_config(
+            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
+        )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
         self._normalize_mini_batch_size()
