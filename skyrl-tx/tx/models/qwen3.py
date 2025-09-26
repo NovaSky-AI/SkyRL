@@ -158,7 +158,7 @@ class Qwen3Model(nnx.Module):
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
             rngs=rngs,
         )
-        self.layers = [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
+        self.layers = nnx.List([Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
