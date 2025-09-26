@@ -85,7 +85,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
-                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
+                environment=EnvironmentConfig(type=EnvironmentType.DOCKER),
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
                     model_name=f"hosted_vllm/{self.model_name}",
@@ -96,7 +96,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
-                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
+                environment=EnvironmentConfig(type=EnvironmentType.DOCKER),
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
                     model_name=f"hosted_vllm/{self.model_name}",
