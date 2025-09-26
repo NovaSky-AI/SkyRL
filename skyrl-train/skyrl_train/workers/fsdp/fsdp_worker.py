@@ -125,9 +125,10 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                     f"[LoRA-TRACK][rank-{torch.distributed.get_rank()}]: Error saving LoRA adapters to disk: {e}"
                 )
 
-            # Send LoRA disk loading request to inference engine
+            # Send LoRA disk loading request to inference engine. `lora_disk_load` is a specific identifier 
+            # to tell the inference engine to extract the `lora_disk_path`. 
             lora_request = {
-                "names": ["lora_disk_load"],  # hard code this...
+                "names": ["lora_disk_load"], 
                 "extras": [{"lora_disk_path": lora_sync_path}],
             }
             await inference_engine_client.update_named_weights(lora_request)
