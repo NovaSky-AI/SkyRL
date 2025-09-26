@@ -7,4 +7,8 @@ compute_config: l4_ci
 working_dir: . # (Optional) Use current working directory "." as the working_dir. Can be any local path or remote .zip file in cloud storage.
 env_vars:
   RAY_RUNTIME_ENV_HOOK: ray._private.runtime_env.uv_runtime_env_hook.hook
+  ## NCCL P2P is disabled in CI environment to avoid issues in virtualized environments
+  NCCL_P2P_DISABLE: "1"
+  NCCL_SHM_DISABLE: "1"
+  NCCL_CUMEM_ENABLE: "0"
 max_retries: 0 # (Optional) Maximum number of times the job will be retried before being marked failed. Defaults to `1`.

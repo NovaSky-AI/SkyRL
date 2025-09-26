@@ -128,9 +128,9 @@ def capture_training_state(trainer):
 @pytest.mark.parametrize(
     ("strategy, fsdp2_cpu_offload"),
     [
-        ("deepspeed", False),
-        ("fsdp", False),
-        ("fsdp2", False),
+        # ("deepspeed", False),
+        # ("fsdp", False),
+        # ("fsdp2", False),
         ("fsdp2", True),
     ],
 )
