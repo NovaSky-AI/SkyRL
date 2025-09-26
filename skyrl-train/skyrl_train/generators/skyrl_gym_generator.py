@@ -525,7 +525,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_end_index: The updated chat end index.
             input_ids: The new input IDs after tokenizing the chat history.
         """
-        assert self.use_conversation_multi_turn and self.custom_chat_template
+        assert self.use_conversation_multi_turn and self.retokenize_chat_history
         # remove eos token from end of output if it exists, since it will be reapplied by the chat template
         if output.endswith(self.tokenizer.eos_token):
             output = output[: -len(self.tokenizer.eos_token)]
