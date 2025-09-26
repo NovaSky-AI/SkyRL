@@ -9,7 +9,9 @@ from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode
+from skyrl_train.generators.utils import prepare_generator_input
 from skyrl_train.weights_manager import InferenceWeightsManager
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
 class AsyncRayPPOTrainer(RayPPOTrainer):
@@ -166,8 +168,13 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             for i, rand_prompts in enumerate(self.train_dataloader):
                 # truncate data to have even shards
                 rand_prompts = self._remove_tail_data(rand_prompts)
-                generator_input, uids = self._prepare_generator_input(
-                    self.cfg.generator.n_samples_per_prompt, rand_prompts, self.cfg.generator.sampling_params, "train"
+                generator_input, uids = prepare_generator_input(
+                    rand_prompts,
+                    self.cfg.generator.n_samples_per_prompt,
+                    get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                    self.cfg.environment.env_class,
+                    "train",
+                    self.global_step,
                 )
 
                 # generation phase
