@@ -144,7 +144,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        retokenize_chat_history = self.use_conversation_multi_turn and self.retokenize_chat_history
+        retokenize_chat_history = self.use_conversation_multi_turn and self.retokenize_enabled
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
