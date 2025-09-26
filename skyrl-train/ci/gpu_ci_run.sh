@@ -7,7 +7,7 @@ export CI=true
 uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 uv run examples/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
 
-uv run --directory . --isolated --extra dev --extra vllm --extra deepspeed pytest -s tests/gpu/gpu_ci -m "not (sglang or integrations)"
+uv run --directory . --isolated --extra dev --extra vllm --extra deepspeed pytest -s tests/gpu/gpu_ci -m "not (sglang or integrations) -n 1"
 
 # Run tests for "integrations" folder
 if add_integrations=$(uv add --active wordle --index https://hub.primeintellect.ai/will/simple/ 2>&1); then
