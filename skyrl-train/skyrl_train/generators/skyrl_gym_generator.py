@@ -62,7 +62,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-        self.retokenize_chat_history = generator_cfg.get("retokenize", False)
+        self.retokenize_chat_history = generator_cfg.get("retokenize", True)
         
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
