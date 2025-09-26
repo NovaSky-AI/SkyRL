@@ -512,14 +512,14 @@ def repopulate_default_registries():
         if name not in registry.list_available():
             registry.register(name, func)
     
-    # Re-register policy loss functions
+    # re-register policy loss functions
     safe_register(PolicyLossRegistry, PolicyLossType.REGULAR.value, ppo_policy_loss)
     safe_register(PolicyLossRegistry, PolicyLossType.DUAL_CLIP.value, ppo_policy_loss)
     safe_register(PolicyLossRegistry, PolicyLossType.GSPO.value, gspo_policy_loss)
     safe_register(PolicyLossRegistry, PolicyLossType.CLIP_COV.value, compute_policy_loss_clip_cov)
     safe_register(PolicyLossRegistry, PolicyLossType.KL_COV.value, compute_policy_loss_kl_cov)
     
-    # Re-register advantage estimator functions
+    # re-register advantage estimator functions
     safe_register(AdvantageEstimatorRegistry, AdvantageEstimator.REINFORCE_PP.value, compute_reinforce_plus_plus_outcome_advantage)
     safe_register(AdvantageEstimatorRegistry, AdvantageEstimator.RLOO.value, compute_rloo_outcome_advantage)
     safe_register(AdvantageEstimatorRegistry, AdvantageEstimator.GAE.value, compute_gae_advantage_return)

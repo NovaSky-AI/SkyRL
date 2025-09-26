@@ -2,7 +2,7 @@
 Run with:
 uv run --isolated --extra dev --extra deepspeed pytest tests/gpu/gpu_ci/test_training_step.py
 
-Ensure you set WANDB_API_KEY in your environment.
+Ensure you set WANDB_API_KEY in your environment. Currently set to "console for tests"
 """
 
 import ray
@@ -23,7 +23,7 @@ def get_test_actor_config() -> DictConfig:
 
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.trainer.logger = "console" 
+    cfg.trainer.logger = "console"
 
     return cfg
 
