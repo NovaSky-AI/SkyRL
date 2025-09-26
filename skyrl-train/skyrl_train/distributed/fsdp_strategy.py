@@ -7,7 +7,7 @@ from typing import List, Union, Optional
 from jaxtyping import Float
 import gc
 import json
-
+from loguru import logger
 import numpy as np
 import torch
 import torch.nn as nn
@@ -173,9 +173,9 @@ class FSDPStrategy(DistributedStrategy):
         if grad_norm is not None and not torch.isfinite(grad_norm):
             if torch.distributed.is_initialized():
                 rank = torch.distributed.get_rank()
-                print(f"WARN: rank {rank} grad_norm is not finite: {grad_norm}")
+                logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}")
             else:
-                print(f"WARN: grad_norm is not finite: {grad_norm}")
+                logger.warning(f"grad_norm is not finite: {grad_norm}")
             optimizer.zero_grad()
             return grad_norm
 
