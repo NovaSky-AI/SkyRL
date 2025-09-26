@@ -181,14 +181,20 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[float, Optional[int]]] = []
-
+        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
+        
+        cumulative_response_tokens = 0
+    
         while not done:
+            remaining_tokens = max_tokens - cumulative_response_tokens
+            
+            if remaining_tokens <= 0:
+                stop_reason = "length"
+                break
+                
             updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
-            updated_sampling_params["max_generate_length"] = min(
-                max_tokens, max_tokens + max_input_length - len(input_ids)
-            )
-            max_response_tokens = updated_sampling_params["max_generate_length"]
+            updated_sampling_params["max_generate_length"] = remaining_tokens
+
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=updated_sampling_params
@@ -219,12 +225,18 @@ class SkyRLGymGenerator(GeneratorInterface):
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
-
+                    
+            cumulative_response_tokens += len(output_ids)
+            
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
+            
+            # If we hit the token limit, don't include this step's reward
+            if cumulative_response_tokens >= max_tokens:
+                step_reward = None
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
@@ -288,6 +300,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
 <<<<<<< HEAD
+<<<<<<< HEAD
         appended_eos_token = False
 =======
         if self.max_turns > 1:
@@ -296,9 +309,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_response_tokens = max_tokens
 
 >>>>>>> dc49242 (mask losses and response ids if they exceed max_response_tokens (final check for multiturn))
+=======
+>>>>>>> ff865bf (All CPU tests pass except one -> modified test to account for proper max len support)
         if not self.use_conversation_multi_turn:
-            # we might need to add the eos token to the response ids
             if response_ids[-1] != self.tokenizer.eos_token_id:
+<<<<<<< HEAD
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 appended_eos_token = True
@@ -308,6 +323,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             stop_reason = "length"
             response_ids = response_ids[:max_response_tokens]
             loss_mask = loss_mask[:max_response_tokens]
+=======
+                if len(response_ids) < max_tokens:
+                    response_ids.append(self.tokenizer.eos_token_id)
+                    loss_mask.append(1)
+                else:
+                    stop_reason = "length"
+>>>>>>> ff865bf (All CPU tests pass except one -> modified test to account for proper max len support)
 
         # Build reward output
         if retokenize_chat_history:
