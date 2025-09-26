@@ -1228,3 +1228,95 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     assert out.reward[3] == 1.0
     assert sum(out.reward) == 1.0
     assert out.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_env_metrics_direct_export(
+    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+):
+    """
+    Test that environment metrics are exported directly with "environment/" prefix
+    without statistical aggregation.
+    """
+    mock_make.return_value = mock_env
+    mock_generator_cfg.batched = True
+    mock_generator_cfg.max_turns = 1
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    # Hard-coded metrics with known statistical properties
+    expected_metrics = [
+        {"response_length": 10, "word_count": 2, "contains_boxed": 1.0},
+        {"response_length": 20, "word_count": 4, "contains_boxed": 0.0},
+        {"response_length": 30, "word_count": 6, "contains_boxed": 1.0},
+    ]
+
+    step_call_count = 0
+
+    def mock_step_with_metrics(action):
+        nonlocal step_call_count
+        metrics = expected_metrics[step_call_count % len(expected_metrics)]
+        step_call_count += 1
+
+        return BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": f"response_{step_call_count}"}],
+            reward=metrics["contains_boxed"],  # Use contains_boxed as reward
+            done=True,
+            metadata={},
+            metrics=metrics
+        )
+
+    mock_env.step.side_effect = mock_step_with_metrics
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=mock_generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        model_name="test_model",
+    )
+
+    prompts = [
+        [{"role": "user", "content": "Problem 1"}],
+        [{"role": "user", "content": "Problem 2"}],
+        [{"role": "user", "content": "Problem 3"}]
+    ]
+    env_extras = [{"answer": "1"}, {"answer": "2"}, {"answer": "3"}]
+    env_classes = [mock_env_cfg.env_class] * 3
+
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": env_extras,
+        "env_classes": env_classes,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+    rollout_metrics = generator_output["rollout_metrics"]
+
+    # Test that environment metrics are exported directly with "environment/" prefix and indexed
+    # We should have metrics from all 3 test cases with indices 0, 1, 2
+    expected_metrics = {
+        # From the 1st test case (index 0)
+        "environment/response_length_0": 10,
+        "environment/word_count_0": 2,
+        "environment/contains_boxed_0": 1.0,
+        # From the 2nd test case (index 1)
+        "environment/response_length_1": 20,
+        "environment/word_count_1": 4,
+        "environment/contains_boxed_1": 0.0,
+        # From the 3rd test case (index 2)
+        "environment/response_length_2": 30,
+        "environment/word_count_2": 6,
+        "environment/contains_boxed_2": 1.0,
+    }
+
+    # Verify all expected metrics are present and correct
+    for metric_key, expected_value in expected_metrics.items():
+        assert metric_key in rollout_metrics, f"Missing environment metric: {metric_key}"
+        actual_value = rollout_metrics[metric_key]
+        assert isinstance(actual_value, (int, float)), f"Metric {metric_key} should be scalar, got {type(actual_value)}"
+        assert actual_value == expected_value, f"Metric {metric_key}: expected {expected_value}, got {actual_value}"
+
+    # Verify generation metrics are still present
+    generation_metrics = [key for key in rollout_metrics.keys() if key.startswith("generate/")]
+    assert len(generation_metrics) > 0, "Should still contain generation metrics"
