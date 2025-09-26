@@ -1,6 +1,6 @@
 """
 # Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm --extra deepspeed pytest tests/gpu/test_policy_local_engines_e2e.py -m "vllm"
+uv run --isolated --extra dev --extra vllm pytest tests/gpu/test_policy_local_engines_e2e.py -m "vllm"
 """
 
 import pytest
