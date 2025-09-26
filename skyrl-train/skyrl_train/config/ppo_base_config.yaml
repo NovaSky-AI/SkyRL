@@ -219,6 +219,7 @@ generator:
   # if false, append multi-turn model responses and env observations to the original assistant response
   # if true, each multi-turn model response and env observations is stored in a separate assistant/user message respectively
   use_conversation_multi_turn: true
+  retokenize: false
 
   # Used when use_conversation_multi_turn is true, and sampling_params.stop is not null.
   # If true, append tokenizer.eos_token_id to the end of the generation if the generation ends

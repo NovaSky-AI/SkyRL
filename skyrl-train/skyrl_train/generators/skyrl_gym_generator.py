@@ -62,6 +62,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+        self.retokenize_chat_history = generator_cfg.get("retokenize", False)
+        
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
@@ -76,7 +78,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
-        # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
+        # base_conversation is used when `use_conversation_multi_turn==True` to
         # correctly format and tokenize observations into `observation_ids`.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
         self.base_conversation = [
@@ -87,6 +89,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.base_conversation_token_ids = tokenizer.apply_chat_template(
             self.base_conversation,
             add_generation_prompt=False,
+            chat_template=self.custom_chat_template,
             tokenize=True,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
@@ -123,7 +126,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             We ensure token-in-token-out generation. With two exceptions:
             - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
               This will likely be deprecated soon.
-            - When custom_chat_template = True and use_conversation_multi_turn = True. We always
+            - When retokenize_chat_history = True and use_conversation_multi_turn = True. We always
               re-tokenize the entire chat history every turn and at the end. This is used for cases
               like removing Qwen3 thinking tokens in non-last-round assistant message.
 
@@ -141,7 +144,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
+        retokenize_chat_history = self.use_conversation_multi_turn and self.retokenize_chat_history
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
@@ -166,7 +169,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
             add_generation_prompt=not retokenize_chat_history,
-            chat_template=self.custom_chat_template if retokenize_chat_history else None,
+            chat_template=self.custom_chat_template,
             tokenize=True,
         )
 
@@ -594,7 +597,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask: List[int]
             input_ids: List[int]
         """
-        assert self.use_conversation_multi_turn and not self.custom_chat_template
+        assert self.use_conversation_multi_turn
 
         # 1. Directly append generated output
         input_ids += output_ids
@@ -608,6 +611,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,
+                chat_template=self.custom_chat_template,
                 tokenize=True,
             )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
