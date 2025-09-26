@@ -890,9 +890,11 @@ class RayPPOTrainer:
 
         if self.cfg.generator.sampling_params.logprobs is not None:
             # calculates the difference in probs between inference and trainer components
-            logprobs_diff = training_input["rollout_logprobs"] - action_log_probs
             # only consider response tokens
-            logprobs_diff = logprobs_diff[training_input["loss_mask"] > 0]
+            logprobs_diff = (
+                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
+                - action_log_probs[training_input["loss_mask"] > 0]
+            )
             prob_diff = logprobs_diff.exp().abs()
             prob_diff_mean = prob_diff.mean().item()
             prob_diff_std = prob_diff.std().item()
