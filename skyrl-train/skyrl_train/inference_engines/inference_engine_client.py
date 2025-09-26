@@ -16,6 +16,7 @@ from skyrl_train.inference_engines.utils import (
 )
 from omegaconf import DictConfig
 import threading
+from loguru import logger
 import random
 
 
@@ -45,7 +46,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
-        print(f"InferenceEngineClient initialized with {len(engines)} engines.")
+        logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """
@@ -309,7 +310,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if hasattr(self, "_server_thread") and self._server_thread.is_alive():
                     self._server_thread.join(timeout=10)
             except Exception as e:
-                print(f"Error shutting down HTTP endpoint: {e}")
+                logger.error(f"Error shutting down HTTP endpoint: {e}")
 
     def __getstate__(self):
         """
@@ -342,4 +343,4 @@ class InferenceEngineClient(InferenceEngineInterface):
             port=self.http_endpoint_port,
             max_wait_seconds=30,
         )
-        print(f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}")
+        logger.info(f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}")

@@ -6,6 +6,7 @@ import torch
 import os
 from typing import List, Optional, Tuple, Dict, Any
 import ray
+from loguru import logger
 import multiprocessing as mp
 
 import sglang.srt.entrypoints.engine
@@ -192,7 +193,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
         # Create the SGLang engine (signal handler issue is now fixed by patching)
         self.engine = Engine(**kwargs)
-        print(f"Created SGLang engine with kwargs: {kwargs}")
+        logger.info(f"Created SGLang engine with kwargs: {kwargs}")
 
     def tp_size(self):
         return self._tp_size
@@ -325,7 +326,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         obj = ResumeMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
-        print(
+        logger.info(
             f"From SGLang engine -- Free GPU memory after wake up with tags {tags if tags is not None else 'None'}: "
             + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
         )
@@ -335,7 +336,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
-        print(
+        logger.info(
             f"From SGLang engine -- Free GPU memory after sleep with tags {tags if tags is not None else 'None'}: "
             + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
         )
