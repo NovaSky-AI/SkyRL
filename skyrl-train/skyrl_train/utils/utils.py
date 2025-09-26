@@ -6,7 +6,7 @@ import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
-from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
+import skyrl_train.utils.ppo_utils as ppo_utils
 
 
 class Timer:
