@@ -86,6 +86,7 @@ dev = [
     "black==24.10.0",
     "pytest>=6.2.5",
     "pytest-asyncio",
+    "pytest-xdist",
     "pre-commit",
     "fastapi",
     "uvicorn",
