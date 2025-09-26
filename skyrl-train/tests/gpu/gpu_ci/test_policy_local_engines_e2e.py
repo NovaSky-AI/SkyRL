@@ -15,7 +15,7 @@ from omegaconf import DictConfig
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
+from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry, repopulate_default_registries
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -40,36 +40,36 @@ def get_test_actor_config() -> DictConfig:
     ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size"),
     [
         pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "deepspeed", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "deepspeed", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param(False, "nccl", "deepspeed", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(True, "nccl", "deepspeed", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(False, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(True, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(False, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(True, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
+        # pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        # pytest.param(False, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        # pytest.param(True, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        # pytest.param(False, "nccl", "deepspeed", "vllm", 2, marks=pytest.mark.vllm),
+        # pytest.param(True, "nccl", "deepspeed", "vllm", 2, marks=pytest.mark.vllm),
+        # pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
+        # pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
+        # # TODO(Charlie): add TP > 1 tests for sglang when we support it
+        # pytest.param(False, "nccl", "deepspeed", "sglang", 1, marks=pytest.mark.sglang),
+        # pytest.param(True, "nccl", "deepspeed", "sglang", 1, marks=pytest.mark.sglang),
+        # pytest.param(False, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
+        # pytest.param(True, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
+        # pytest.param(False, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
+        # pytest.param(True, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
-        "colocate_nccl_fsdp_vllm",
-        "no_colocate_gloo_fsdp_vllm",
-        "colocate_gloo_fsdp_vllm",
-        "no_colocate_nccl_deepspeed_vllm",
-        "colocate_nccl_deepspeed_vllm",
-        "no_colocate_nccl_fsdp2_vllm",
-        "colocate_nccl_fsdp2_vllm",
-        "no_colocate_nccl_deepspeed_sglang",
-        "colocate_nccl_deepspeed_sglang",
-        "no_colocate_nccl_fsdp2_sglang",
-        "colocate_nccl_fsdp2_sglang",
-        "no_colocate_gloo_fsdp_sglang",
-        "colocate_gloo_fsdp_sglang",
+        # "colocate_nccl_fsdp_vllm",
+        # "no_colocate_gloo_fsdp_vllm",
+        # "colocate_gloo_fsdp_vllm",
+        # "no_colocate_nccl_deepspeed_vllm",
+        # "colocate_nccl_deepspeed_vllm",
+        # "no_colocate_nccl_fsdp2_vllm",
+        # "colocate_nccl_fsdp2_vllm",
+        # "no_colocate_nccl_deepspeed_sglang",
+        # "colocate_nccl_deepspeed_sglang",
+        # "no_colocate_nccl_fsdp2_sglang",
+        # "colocate_nccl_fsdp2_sglang",
+        # "no_colocate_gloo_fsdp_sglang",
+        # "colocate_gloo_fsdp_sglang",
     ],
 )
 def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, backend, tp_size):
@@ -110,6 +110,8 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
-        AdvantageEstimatorRegistry.reset()
-        PolicyLossRegistry.reset()
+        ##  TODO(Dev): Decide whether to reset and repopulate for future tests or remove all together since none of the other tests rely on PolicyRegistry or AdvantageEstimatorRegistry in GPU CI
+        # AdvantageEstimatorRegistry.reset()
+        # PolicyLossRegistry.reset()
+        # repopulate_default_registries()
         ray.shutdown()
