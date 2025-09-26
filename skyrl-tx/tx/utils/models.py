@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from flax import nnx
@@ -49,8 +50,10 @@ def get_param_key(path: tuple) -> str:
     return ".".join(map(str, path))
 
 
-def load_checkpoint(filename: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
-    tensors = safetensors.numpy.load_file(filename)
+def load_checkpoint(path: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
+    tensors = {}
+    for file in Path(path).glob("*.safetensors"):
+        tensors.update(safetensors.numpy.load_file(file))
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
     for path, param in model_params:

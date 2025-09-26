@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 import tempfile
 
 from flax import nnx
@@ -38,7 +37,7 @@ def test_qwen3(tp: int):
         mesh = jax.make_mesh((1, tp), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_checkpoint(Path(tmp) / "model.safetensors", config, model)
+        load_checkpoint(tmp, config, model)
         
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True, output_attentions=True)
         assert np.allclose(hf_outputs.hidden_states[0], outputs["hidden_states"][0], rtol=1e-6)
