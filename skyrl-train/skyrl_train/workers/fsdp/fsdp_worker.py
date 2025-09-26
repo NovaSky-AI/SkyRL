@@ -7,6 +7,7 @@ import torch.distributed
 from transformers import AutoModel, AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
+import io
 
 try:
     # for torch 2.5+
@@ -50,7 +51,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
-        self._is_lora = self.cfg.trainer.policy.model.lora_rank > 0
+        self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
 
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
@@ -67,9 +68,9 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
                 # NOTE (sumanthrh): Model initialization should always be in fp32
                 # during training
                 bf16=False,
-                lora_rank=self.cfg.trainer.policy.model.lora_rank,
-                lora_alpha=self.cfg.trainer.policy.model.lora_alpha,
-                lora_dropout=self.cfg.trainer.policy.model.lora_dropout,
+                lora_rank=self.cfg.trainer.policy.model.lora.rank,
+                lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
+                lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
                 target_modules=self.cfg.trainer.target_modules,
                 exclude_modules=self.cfg.trainer.exclude_modules,
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
@@ -97,12 +98,15 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
             self.use_cuda_ipc = True
 
-    async def _save_lora_adapters_and_sync(self, lora_params, peft_model, lora_sync_path, inference_engine_client):
+    async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
         import os
         import json
         from dataclasses import asdict
         from safetensors.torch import save_file
+        from skyrl_train.distributed.fsdp_utils import collect_lora_params
+
+        lora_params = collect_lora_params(module=self.model.model)
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
@@ -113,19 +117,14 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             peft_config["target_modules"] = list(peft_config["target_modules"])
 
             # Save LoRA parameters and config
-            try:
-                save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
-                with open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
-                    json.dump(peft_config, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                raise Exception(
-                    f"[LoRA-TRACK][rank-{torch.distributed.get_rank()}]: Error saving LoRA adapters to disk: {e}"
-                )
+            save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
+            with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+                json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine. `lora_disk_load` is a specific identifier 
-            # to tell the inference engine to extract the `lora_disk_path`. 
+            # Send LoRA disk loading request to inference engine. `lora_disk_load` is a specific identifier
+            # to tell the inference engine to extract the `lora_disk_path`.
             lora_request = {
-                "names": ["lora_disk_load"], 
+                "names": ["lora_disk_load"],
                 "extras": [{"lora_disk_path": lora_sync_path}],
             }
             await inference_engine_client.update_named_weights(lora_request)
@@ -151,15 +150,10 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
 
-        if self._is_lora and hasattr(peft_model, "peft_config"):
-            from skyrl_train.distributed.fsdp_utils import collect_lora_params
-
+        if hasattr(peft_model, "peft_config"):
             # assume base model is already synced, sync LoRA adapters
-            # TODO(shu): add a lora disk path to the config?
-
-            params = collect_lora_params(module=self.model.model)
-            lora_sync_path = getattr(self.cfg.generator, "lora_sync_path", "/tmp/skyrl_lora_sync")
-            await self._save_lora_adapters_and_sync(params, peft_model, lora_sync_path, inference_engine_client)
+            lora_sync_path = self.cfg.trainer.policy.model.lora.lora_sync_path
+            await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
             return
         else:
             # Regular model without LoRA
@@ -329,9 +323,9 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
                 # NOTE (sumanthrh): Model initialization should always be in fp32
                 # during training
                 bf16=False,
-                lora_rank=self.cfg.trainer.critic.model.lora_rank,
-                lora_alpha=self.cfg.trainer.critic.model.lora_alpha,
-                lora_dropout=self.cfg.trainer.critic.model.lora_dropout,
+                lora_rank=self.cfg.trainer.critic.model.lora.rank,
+                lora_alpha=self.cfg.trainer.critic.model.lora.alpha,
+                lora_dropout=self.cfg.trainer.critic.model.lora.dropout,
                 target_modules=self.cfg.trainer.target_modules,
                 value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
                 init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,

@@ -32,9 +32,9 @@ def get_test_actor_config(enable_lora: bool = False) -> DictConfig:
 
         # LoRA configuration
         if enable_lora:
-            cfg.trainer.policy.model.lora_rank = 32
-            cfg.trainer.policy.model.lora_alpha = 32
-            cfg.trainer.policy.model.lora_dropout = 0.1
+            cfg.trainer.policy.model.lora.rank = 32
+            cfg.trainer.policy.model.lora.alpha = 32
+            cfg.trainer.policy.model.lora.dropout = 0.1
             cfg.trainer.target_modules = "all-linear"
 
         return cfg

@@ -274,6 +274,12 @@ def validate_cfg(cfg: DictConfig):
                 "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
             )
 
+    if cfg.trainer.policy.model.lora.rank > 0:
+        # LoRA enabled
+        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
+        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
+        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+
 
 def validate_generator_cfg(cfg: DictConfig):
     """Validates the correctness of generator-related config.

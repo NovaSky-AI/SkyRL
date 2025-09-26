@@ -247,13 +247,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
         """Check if this is a LoRA disk loading request."""
-        is_lora_disk = (
-            request.get("extras")
-            and len(request["extras"]) > 0
-            and "lora_disk_path" in request["extras"][0]
-            and request["names"][0].startswith("lora_disk_load")
-        )
-        return is_lora_disk
+        is_lora = request["names"][0] == "lora_disk_load"
+        if is_lora:
+            assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
+                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
+            )
+        return is_lora
 
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
@@ -323,11 +322,8 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        try:
-            result = self.llm.add_lora(lora_request)
-            return result
-        except Exception as e:
-            raise Exception(f"Error loading LoRA adapter: {e}")
+        result = self.llm.add_lora(lora_request)
+        return result
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:

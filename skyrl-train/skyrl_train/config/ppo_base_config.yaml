@@ -29,9 +29,11 @@ trainer:
   policy:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
-      lora_rank: 0
-      lora_alpha: 16
-      lora_dropout: 0
+      lora:
+          rank: 0
+          alpha: 16
+          dropout: 0
+          lora_sync_path: "/tmp/skyrl_lora_sync"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6

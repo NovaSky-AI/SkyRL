@@ -90,7 +90,7 @@ class FSDPStrategy(DistributedStrategy):
             self.manual_offload_optimizer = False
 
         # LoRA related configs
-        self.is_lora = self.model_config.lora_rank > 0 if self.model_config is not None else False
+        self.is_lora = self.model_config.lora.rank > 0 if self.model_config is not None else False
 
         self.time_steps = defaultdict(int)
 
@@ -378,19 +378,14 @@ class FSDPStrategy(DistributedStrategy):
                 peft_config["peft_type"] = peft_config["peft_type"].value
                 peft_config["target_modules"] = list(peft_config["target_modules"])
 
-        try:
-            if fsdp_version(model) > 0:
-                model = model.to(torch.cuda.current_device())
-                lora_params = layered_summon_lora_params(model)
+        lora_params = layered_summon_lora_params(model)
 
-                if self.is_rank_0():
-                    save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
-                    with io.open_file(os.path.join(lora_save_path, "adapter_config.json"), "w") as f:
-                        json.dump(peft_config, f, ensure_ascii=False, indent=4)
+        if self.is_rank_0():
+            save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
+            with io.open_file(os.path.join(lora_save_path, "adapter_config.json"), "w") as f:
+                json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-                    self.print(f"[rank-0]: Saved LoRA adapter to: {lora_save_path}")
-        except Exception as e:
-            self.print(f"Save LoRA Adapter Error ({e})")
+            self.print(f"[rank-0]: Saved LoRA adapter to: {lora_save_path}")
 
         dist.barrier()
 
