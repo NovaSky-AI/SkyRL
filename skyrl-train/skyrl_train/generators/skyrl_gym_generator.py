@@ -65,7 +65,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.retokenize_enabled = generator_cfg.get("retokenize", True)
         
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
+        self.custom_chat_template = get_custom_chat_template(generator_cfg.get("chat_template"))
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:
