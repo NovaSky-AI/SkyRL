@@ -8,10 +8,6 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-<<<<<<< HEAD
-from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
-import skyrl_train.utils.ppo_utils as ppo_utils
-=======
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -20,7 +16,6 @@ from ray.util.placement_group import (
 )
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
->>>>>>> origin/main
 
 
 class Timer:
@@ -171,32 +166,11 @@ def validate_megatron_cfg(cfg: DictConfig):
 
 
 def validate_cfg(cfg: DictConfig):
-<<<<<<< HEAD
-    if cfg.generator.max_turns == 1:
-        assert (
-            cfg.generator.max_input_length == cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
-    else:
-        assert (
-            cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
-
-    if not cfg.generator.run_engines_locally:
-        assert cfg.generator.num_inference_engines == len(
-            cfg.generator.remote_inference_engine_urls
-        ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
-
-    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
-        assert (
-            cfg.generator.batched
-        ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
-=======
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
 
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
->>>>>>> origin/main
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -232,7 +206,6 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-<<<<<<< HEAD
     # resolve override_existing_update_group
     if cfg.generator.override_existing_update_group == "auto":
         if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
@@ -248,8 +221,6 @@ def validate_cfg(cfg: DictConfig):
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
     
-=======
->>>>>>> origin/main
     assert (
         cfg.trainer.algorithm.policy_loss_type in available_policy_losses
     ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
