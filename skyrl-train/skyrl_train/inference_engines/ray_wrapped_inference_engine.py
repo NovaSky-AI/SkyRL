@@ -78,7 +78,10 @@ def create_ray_wrapped_inference_engines(
     max_num_seqs=1024,
     tokenizer=None,
     backend="vllm",
-    sleep_level=2,  # we only set to 1 for unit tests that do not explicitly sync weights
+    sleep_level=2,  # we only set to 1 for unit tests that do not explicitly sync weights or for LoRA
+    enable_lora=False,
+    max_lora_rank=64,
+    max_loras=1,
     engine_init_kwargs: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
     """
@@ -140,6 +143,12 @@ def create_ray_wrapped_inference_engines(
             else:
                 actor_class = VLLMRayActor
 
+            lora_kwargs = {
+                "enable_lora": enable_lora,
+                "max_lora_rank": max_lora_rank,
+                "max_loras": max_loras,
+            }
+
             engine = actor_class.options(
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
@@ -168,6 +177,7 @@ def create_ray_wrapped_inference_engines(
                 # only need the logprobs for the chosen token if any
                 max_logprobs=1,
                 **engine_init_kwargs,
+                **lora_kwargs,
             )
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
@@ -223,6 +233,8 @@ def create_ray_wrapped_inference_engines(
 
     if inference_engine_enable_sleep:
         if backend == "vllm":
+            # NOTE(shu): set to 1 for LoRA
+            sleep_level = 1 if enable_lora else sleep_level
             sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
         elif backend == "sglang":
             # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
