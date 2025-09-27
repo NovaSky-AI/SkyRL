@@ -3,19 +3,23 @@ set -x
 # WORK IN PROGRESS
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on TerminalBench tasks.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/terminal_bench/prepare_dataset.py --task_dir $HOME/data/terminal_bench/tasks --output_dir $HOME/data/terminal_bench --output_name train
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/terminal_bench/run_tbench.sh
 
-DATA_DIR="$HOME/data/gsm8k"
+# If you have a validation set, run:
+#   uv run examples/terminal_bench/prepare_dataset.py --task_dir $HOME/data/terminal_bench/validation_tasks --output_dir $HOME/data/terminal_bench --output_name validation
+# and add the following to the script below:
+#   data.val_data="['$DATA_DIR/validation.parquet']" \
+
+DATA_DIR="$HOME/data/terminal_bench"
 NUM_GPUS=1
-LOGGER="console"  # change to "console" to print to stdout
+LOGGER="console"  # change to "wandb" to export to wandb
 TBENCH_CONFIG_DIR="examples/terminal_bench"
 SANDBOXES_DIR="sandboxes" # TODO: For now, `sandboxes` is cloned into SkyRL/skyrl-train.
 
 uv run --isolated --extra vllm --extra sandboxes --with "sandbox@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/validation.parquet']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
   terminal_bench_config.max_episodes=16 \
