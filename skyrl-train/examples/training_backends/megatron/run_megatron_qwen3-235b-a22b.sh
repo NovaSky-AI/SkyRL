@@ -10,6 +10,9 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 # Make sure these paths are accessible by or present on all nodes
 DATA_DIR="$HOME/data/gsm8k"
+# download Qwen/Qwen3-235B-A22B-Instruct-2507 from huggingface
+# `pip install huggingface_hub hf_transfer`
+# `HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
 MODEL_NAME="$HOME/qwen235b"
 
 NUM_NODES=8
@@ -35,6 +38,10 @@ NUM_INFERENCE_ENGINES=4
 # this is not ideal at the moment - enable inference engine pp in order to avoid this
 # https://github.com/NovaSky-AI/SkyRL/issues/353
 INFERENCE_ENGINE_TP=16
+# the default max model len for Qwen3-235B-A22B-Instruct-2507 is 262K, and VLLM checks that 
+# the KV cache memory allocated is enough to serve 1 request with max model len. Lowering to the actual
+# max model len value for this script.
+INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 
 # no kl loss, so just use the policy model
 USE_KL_LOSS=false
@@ -62,7 +69,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   +trainer.policy.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage=$MEGATRON_LAST_PIPELINE_STAGE_LAYER \
-  +generator.engine_init_kwargs.max_model_len=2048 \
+  +generator.engine_init_kwargs.max_model_len=$INFERENCE_ENGINE_MAX_MODEL_LEN \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
