@@ -11,6 +11,4 @@ env_vars:
   NCCL_P2P_DISABLE: "1"
   NCCL_SHM_DISABLE: "1"
   NCCL_CUMEM_ENABLE: "0"
-  ## Disable NUMA affinity if library is not available
-  SKYRL_DISABLE_NUMA_AFFINITY: "1"
 max_retries: 0 # (Optional) Maximum number of times the job will be retried before being marked failed. Defaults to `1`.

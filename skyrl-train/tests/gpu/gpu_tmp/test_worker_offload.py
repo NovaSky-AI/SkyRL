@@ -13,7 +13,6 @@ from tests.gpu.utils import init_worker_with_type, make_dummy_experience, make_d
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -356,4 +355,3 @@ def test_offload_after_ckpt(strategy):
             print(f"Removing checkpoint directory: {checkpoint_dir}")
             shutil.rmtree(checkpoint_dir)
         ray.shutdown()
-

@@ -136,13 +136,6 @@ class DistributedTorchRayActor:
 
     # TODO(tgriggs): For numa affinity, pass in the Worker._local_rank for the second arg here. Distinguish 'rank' and 'local_rank' differ here.
     def _set_numa_affinity(self, rank):
-        # Skip NUMA affinity if explicitly disabled via environment variable
-        if os.environ.get("SKYRL_DISABLE_NUMA_AFFINITY", "").lower() in ("1", "true", "yes"):
-            logging.info("NUMA affinity disabled via SKYRL_DISABLE_NUMA_AFFINITY environment variable")
-            global _SET_AFFINITY
-            _SET_AFFINITY = True
-            return
-
         def local_rank_to_real_gpu_id(local_rank):
             cuda_visible_devices = [
                 int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(",")
