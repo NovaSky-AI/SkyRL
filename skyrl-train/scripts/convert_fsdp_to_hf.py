@@ -27,13 +27,17 @@ import sys
 from pathlib import Path
 import shutil
 from safetensors.torch import save_file
-from typing import Dict
+from typing import Dict, List
 
 
 import torch
 
 
-def find_policy_dir(chkpt_dir):
+def find_policy_dir(chkpt_dir: Path) -> Path:
+    """
+    Return a Path object to the policy directory
+        - Path to the policy directory
+    """
     pol = chkpt_dir / "policy"
     if not pol.exists():
         print(f"[error] Expected 'policy/' under {chkpt_dir}")
@@ -41,7 +45,11 @@ def find_policy_dir(chkpt_dir):
     return pol
 
 
-def get_model_shards(policy_dir: Path):
+def get_model_shards(policy_dir: Path) -> List[Path]:
+    """
+    Return a list of model Path objects
+        - List[Path] of the model shards (the model*.pt files)
+    """
     shards = sorted(policy_dir.glob("model_world_size_*_rank_*.pt"))
     if not shards:
         shards = sorted(policy_dir.glob("model*.pt"))
@@ -52,12 +60,26 @@ def get_model_shards(policy_dir: Path):
 
 
 def normalize_key(k: str) -> str:
+    """
+    Return a normalized key to ensure consistency across checkpointing frameworks
+    Example - Attention layer training:
+        "module.encoder.layer.0.attention.self.query.weight"
+        "model.module.encoder.layer.0.attention.self.query.weight"
+        "encoder.layer.0.attention.self.query.weight"
+    These 3 should refer to the same thing, so they should be normalized.
+
+    Function takes string and removes all possible prefixes.
+    """
     k = re.sub(r"^(module|model)\.", "", k)
     k = k.replace("_fsdp_wrapped_module.", "")
     return k
 
 
 def load_single_shard(path: Path) -> Dict[str, torch.Tensor]:
+    """
+    Load a single model shard and return a dictionary of tensors
+        - Dict[str, torch.Tensor]
+    """
     obj = torch.load(path, map_location="cpu", weights_only=False)
     for key in ("state_dict", "model", "module"):
         if isinstance(obj, dict) and key in obj and isinstance(obj[key], dict):
@@ -68,6 +90,10 @@ def load_single_shard(path: Path) -> Dict[str, torch.Tensor]:
 
 
 def merge_shards(shards) -> Dict[str, torch.Tensor]:
+    """
+    Merge all model shards into a single dictionary of string-based keys to their corresponding tensors
+        - Dict[str, torch.Tensor]
+    """
     merged: Dict[str, torch.Tensor] = {}
     for shard in shards:
         sd = load_single_shard(shard)
@@ -91,7 +117,11 @@ def merge_shards(shards) -> Dict[str, torch.Tensor]:
     return merged
 
 
-def copy_hf_artifacts(policy_dir: Path, out_dir: Path):
+def copy_hf_artifacts(policy_dir: Path, out_dir: Path) -> None:
+    """
+    Copy huggingface artifacts from the policy directory to the output directory
+    - A utility function that copies huggingface artifacts from the policy directory to the output directory
+    """
     hf_src = policy_dir / "huggingface"
     out_dir.mkdir(parents=True, exist_ok=True)
     if hf_src.exists():
@@ -107,7 +137,17 @@ def copy_hf_artifacts(policy_dir: Path, out_dir: Path):
         print("[warn] policy/huggingface not found; you must supply a proper config/tokenizer.", file=sys.stderr)
 
 
-def _materialize_for_safetensors(state_dict):
+def _materialize_for_safetensors(state_dict) -> Dict[str, torch.Tensor]:
+    """
+    Materialize the state dict for safetensors
+    - A utility function that materializes the state dict for safetensors
+    Essentially converts all torch tensors to local tensors so they can actually be saved.
+    1) DTensor to local tensor
+    2) ShardedTensor to local tensor
+    We do not save meta tensors because they have no data and are not materializable.
+
+    Then after that, convert these local tensors to cpu tensors, and create a new dictionary of keys -> Tensors.
+    """
     import torch
 
     new_sd = {}
@@ -133,7 +173,15 @@ def _materialize_for_safetensors(state_dict):
     return new_sd
 
 
-def _untie_shared_tensors(sd):
+def _untie_shared_tensors(sd) -> Dict[str, torch.Tensor]:
+    """
+    Untie shared tensors
+    - A utility function that unties shared tensors
+    Some tensors may be shared by different keys in that the tensors they point to have the same data pointer.
+    This function takes a state dict and returns a new state dict where the shared tensors have been untied.
+    This is done by creating a new tensor (clone it) for each shared tensor.
+    This allows each key to refer to a UNIQUE tensor
+    """
     seen = {}
     for k, v in list(sd.items()):
         if not isinstance(v, torch.Tensor):
