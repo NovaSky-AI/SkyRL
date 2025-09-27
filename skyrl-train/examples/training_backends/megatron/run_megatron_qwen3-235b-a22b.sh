@@ -9,8 +9,8 @@ set -x
 LOGGER="wandb"  # change to "console" to print to stdout
 
 # Make sure these paths are accessible by or present on all nodes
-DATA_DIR="/mnt/cluster_storage/gsm8k"
-MODEL_NAME="/home/ray/qwen235b"
+DATA_DIR="$HOME/data/gsm8k"
+MODEL_NAME="$HOME/qwen235b"
 
 NUM_NODES=8
 NUM_GPUS=8
