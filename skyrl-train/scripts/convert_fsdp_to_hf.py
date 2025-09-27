@@ -30,7 +30,6 @@ from safetensors.torch import save_file
 from typing import Dict
 
 
-
 import torch
 
 
@@ -87,16 +86,13 @@ def merge_shards(shards) -> Dict[str, torch.Tensor]:
             else:
                 merged[nk] = v.detach().cpu().contiguous()
     if not merged:
-        
         print("[error] No tensors found in shards")
         raise RuntimeError("No tensors found in shards")
     return merged
 
 
 def copy_hf_artifacts(policy_dir: Path, out_dir: Path):
-    
     hf_src = policy_dir / "huggingface"
-    
     out_dir.mkdir(parents=True, exist_ok=True)
     if hf_src.exists():
         for p in hf_src.iterdir():
@@ -109,11 +105,11 @@ def copy_hf_artifacts(policy_dir: Path, out_dir: Path):
                 shutil.copytree(p, dst)
     else:
         print("[warn] policy/huggingface not found; you must supply a proper config/tokenizer.", file=sys.stderr)
-        
 
 
 def _materialize_for_safetensors(state_dict):
     import torch
+
     new_sd = {}
     for k, v in state_dict.items():
         if not isinstance(v, torch.Tensor):
@@ -128,13 +124,14 @@ def _materialize_for_safetensors(state_dict):
             raise RuntimeError(f"Tensor {k} is on meta device; load the real weights before saving.")
         if type(t).__name__ == "FakeTensor":
             raise RuntimeError(f"Tensor {k} is a FakeTensor; disable fake tensor mode for save")
-        if t.device.type != "cpu":  
+        if t.device.type != "cpu":
             t = t.to("cpu", non_blocking=False)
         t = t.detach()
         if not t.is_contiguous():
             t = t.contiguous()
         new_sd[k] = t
     return new_sd
+
 
 def _untie_shared_tensors(sd):
     seen = {}
@@ -166,14 +163,14 @@ def main():
     print(f"[info] Found {len(shards)} model shard(s). ")
     for s in shards:
         print(f"[info] - {s}")
-    
+
     print("[info] Merging shards...")
     state_dict = merge_shards(shards)
     print(f"[info] Merged {len(state_dict)} tensors.")
-    
+
     copy_hf_artifacts(policy_dir, output_dir)
     weights_path = output_dir / "model.safetensors"
-    
+
     clean_sd = _materialize_for_safetensors(state_dict)
     clean_sd = _untie_shared_tensors(clean_sd)
 
