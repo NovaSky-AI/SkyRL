@@ -22,13 +22,21 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         engine_backend: str,
         tokenizer: PreTrainedTokenizerBase,
         tp_size: Optional[int] = None,
+        dp_size: Optional[int] = None,
     ):
         """Initialize the InferenceEngine."""
         self.url = f"http://{url}"
         self.model_name = model_name
         self.engine_backend = engine_backend
-        self.tp_size = tp_size
+        self._tp_size = tp_size
+        self._dp_size = dp_size
         self.tokenizer = tokenizer
+
+    def tp_size(self) -> int:
+        return self._tp_size
+
+    def dp_size(self) -> int:
+        return self._dp_size
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 1. Prepare inputs
@@ -117,6 +125,17 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
         return response
 
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = request_payload.get("json", {})
+        headers = {"Content-Type": "application/json"}
+        response = None
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            request_url = f"{self.url}/v1/completions"
+            async with session.post(request_url, json=body, headers=headers) as resp:
+                response = await resp.json()
+
+        return response
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
             resp = await session.post(f"{self.url}/wake_up", json={"tags": kwargs.get("tags", 1)})
@@ -124,6 +143,8 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
     async def sleep(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
+            # TODO(Charlie): this is vLLM's API, not SGLang (which uses tags). Fix when need to
+            # support sleeping with remote engines.
             resp = await session.post(f"{self.url}/sleep", json={"level": kwargs.get("level", 1)})
             return await resp.json()
 
@@ -222,6 +243,7 @@ def create_remote_inference_engines(
     engine_backend: str,
     tokenizer: PreTrainedTokenizerBase,
     tensor_parallel_size: Optional[int] = None,
+    data_parallel_size: Optional[int] = None,
 ):
     return [
         RemoteInferenceEngine(
@@ -230,6 +252,7 @@ def create_remote_inference_engines(
             tokenizer=tokenizer,
             engine_backend=engine_backend,
             tp_size=tensor_parallel_size,
+            dp_size=data_parallel_size,
         )
         for url in urls
     ]

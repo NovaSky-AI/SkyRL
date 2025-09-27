@@ -263,7 +263,7 @@ Reference Model Configuration
     ref:
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
-        cpu_offload: true
+        cpu_offload: false
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
@@ -437,6 +437,8 @@ Generator Configuration
     backend: "vllm"
     weight_sync_backend: "nccl"
     inference_engine_tensor_parallel_size: 4
+    inference_engine_expert_parallel_size: 1  
+    inference_engine_data_parallel_size: 1
     n_samples_per_prompt: 5
     async_engine: true
     batched: true
@@ -449,6 +451,7 @@ Generator Configuration
     max_num_seqs: 1024
     remote_inference_engine_urls: ["127.0.0.1:8001"]
     max_turns: 1
+    engine_init_kwargs: {}
 
     override_existing_update_group: "auto" # "auto", "enable", "disable"
     # sampling params for generation phase
@@ -502,6 +505,8 @@ Inference Engine Configuration
 - ``generator.model_dtype``: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
 - ``generator.async_engine``:  Whether to use an asynchronous/ offline inference engine. Applicable only when ``backend="vllm"``.
 - ``generator.inference_engine_tensor_parallel_size``: Tensor parallel size for the inference engine.
+- ``generator.inference_engine_expert_parallel_size``: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
+- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
 - ``generator.gpu_memory_utilization``: GPU memory utilization for the inference engine. Applicable only for ``run_engines_locally=true``.
 - ``generator.vllm_v1_disable_multiproc``: If ``true``, this will set ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
 - ``generator.enable_prefix_caching``: Whether to enable prefix caching for the inference engine. Applicable only when ``backend="vllm"``. This can be left to the default ``true`` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
@@ -527,6 +532,7 @@ Generation Parameters
 - ``generator.eval_n_samples_per_prompt``: Number of samples to generate per prompt for evaluation.
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
 - ``generator.use_conversation_multi_turn``: Whether to use conversation format for multi-turn generation. If set to ``true`` then observations are appended to the chat history as a new turn. If set to ``false`` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus ``false`` can be used for full control over the exact tokens added after environment interaction.
+- ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
 
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~

@@ -42,5 +42,6 @@ jobs:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           envsubst < ci/anyscale_gpu_e2e_test.yaml > ci/anyscale_gpu_e2e_test_envsubst.yaml
-          anyscale job submit -f ci/anyscale_gpu_e2e_test_envsubst.yaml --wait
+          anyscale job submit -f ci/anyscale_gpu_e2e_test_envsubst.yaml --timeout 4500
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-e2e-test --timeout 4500
           rm -f ci/anyscale_gpu_e2e_test_envsubst.yaml

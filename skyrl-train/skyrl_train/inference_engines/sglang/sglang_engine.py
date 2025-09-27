@@ -6,6 +6,7 @@ import torch
 import os
 from typing import List, Optional, Tuple, Dict, Any
 import ray
+from loguru import logger
 import multiprocessing as mp
 
 import sglang.srt.entrypoints.engine
@@ -192,11 +193,14 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
         # Create the SGLang engine (signal handler issue is now fixed by patching)
         self.engine = Engine(**kwargs)
-        print(f"Created SGLang engine with kwargs: {kwargs}")
+        logger.info(f"Created SGLang engine with kwargs: {kwargs}")
 
     def tp_size(self):
-        """Return the tensor parallel size."""
         return self._tp_size
+
+    def dp_size(self):
+        # TODO(tgriggs): EP/DP not yet supported for SGLang
+        return 1
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
         """Preprocess prompts for SGLang generation."""
@@ -238,6 +242,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         return self._postprocess_outputs(outputs)
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        # TODO(charlie): implement this in the future
+        raise NotImplementedError()
+
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         # TODO(charlie): implement this in the future
         raise NotImplementedError()
 
@@ -318,7 +326,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         obj = ResumeMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
-        print(
+        logger.info(
             f"From SGLang engine -- Free GPU memory after wake up with tags {tags if tags is not None else 'None'}: "
             + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
         )
@@ -328,7 +336,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
-        print(
+        logger.info(
             f"From SGLang engine -- Free GPU memory after sleep with tags {tags if tags is not None else 'None'}: "
             + f"{torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB"
         )

@@ -21,9 +21,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     def __init__(self, inference_engine_actor: ActorHandle):
         self.inference_engine_actor = inference_engine_actor
 
-    @property
     def tp_size(self):
         return ray.get(self.inference_engine_actor.tp_size.remote())
+
+    def dp_size(self):
+        return ray.get(self.inference_engine_actor.dp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
@@ -53,6 +55,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.chat_completion.remote(request_payload)
 
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.inference_engine_actor.completion.remote(request_payload)
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
@@ -63,7 +68,8 @@ def create_ray_wrapped_inference_engines(
     vllm_v1_disable_multiproc: bool,
     enable_prefix_caching: bool,
     enforce_eager: bool,
-    max_model_len: int,
+    expert_parallel_size: int = 1,
+    data_parallel_size: int = 1,
     shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
@@ -72,17 +78,24 @@ def create_ray_wrapped_inference_engines(
     max_num_seqs=1024,
     tokenizer=None,
     backend="vllm",
+    sleep_level=2,  # we only set to 1 for unit tests that do not explicitly sync weights
+    engine_init_kwargs: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
+    from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+
+    assert data_parallel_size == 1, "Data parallel size > 1 is not yet supported"
 
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
 
-        assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
+        # if a dev version is being used, skip the version check
+        if "dev" not in vllm.__version__:
+            assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
     elif backend == "sglang":
         # We import SGLang later to avoid importing vllm. See `get_sglang_engine` for more.
         pass
@@ -94,28 +107,31 @@ def create_ray_wrapped_inference_engines(
     # NOTE: we use the ray backend for tensor parallel size > 1 to explicitly manage resource allocation
     # TODO: we should be able to support mp backend by allocating resources at engine level
     distributed_executor_backend = "uni" if tensor_parallel_size == 1 else "ray"
+    data_parallel_backend = "mp"
     use_hybrid_engine = shared_pg is not None
-    num_gpus = int(tensor_parallel_size == 1)
-    if use_hybrid_engine and tensor_parallel_size == 1:
-        # every worker will use 0.2 GPU, so that we can schedule
-        # 2 instances on the same GPUs.
-        num_gpus = 0.2
+    num_gpus_per_actor = int(tensor_parallel_size == 1)
 
+    if use_hybrid_engine and tensor_parallel_size == 1:
+        # Every worker will use 0.2 GPU, so that we can schedule
+        # inference and training workers on the same GPUs.
+        num_gpus_per_actor = 0.2
+
+    per_engine_gpu_count = tensor_parallel_size * data_parallel_size
     if not use_hybrid_engine:
         # Create a big placement group to ensure that all inference engines are packed
-        bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * tensor_parallel_size)]
+        bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
         shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=30)
+        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
     for i in range(num_inference_engines):
         bundle_indices = None
-        if tensor_parallel_size > 1:
-            bundle_indices = list(range(i * tensor_parallel_size, (i + 1) * tensor_parallel_size))
+        if per_engine_gpu_count > 1:
+            bundle_indices = list(range(i * per_engine_gpu_count, (i + 1) * per_engine_gpu_count))
 
         scheduling_strategy = PlacementGroupSchedulingStrategy(
             placement_group=shared_pg,
             placement_group_capture_child_tasks=True,
-            placement_group_bundle_index=i * tensor_parallel_size,
+            placement_group_bundle_index=i * per_engine_gpu_count,
         )
 
         if backend == "vllm":
@@ -125,17 +141,19 @@ def create_ray_wrapped_inference_engines(
                 actor_class = VLLMRayActor
 
             engine = actor_class.options(
-                num_cpus=num_gpus,
-                num_gpus=num_gpus,
+                num_cpus=num_gpus_per_actor,
+                num_gpus=num_gpus_per_actor,
                 scheduling_strategy=scheduling_strategy,
             ).remote(
                 model=pretrain,
                 enforce_eager=enforce_eager,
                 worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
                 tensor_parallel_size=tensor_parallel_size,
+                enable_expert_parallel=expert_parallel_size > 1,
+                data_parallel_size=data_parallel_size,
                 seed=seed + i,
                 distributed_executor_backend=distributed_executor_backend,
-                max_model_len=max_model_len,
+                data_parallel_backend=data_parallel_backend,
                 enable_prefix_caching=enable_prefix_caching,
                 dtype=model_dtype,
                 trust_remote_code=True,
@@ -149,6 +167,7 @@ def create_ray_wrapped_inference_engines(
                 max_num_seqs=max_num_seqs,
                 # only need the logprobs for the chosen token if any
                 max_logprobs=1,
+                **engine_init_kwargs,
             )
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
@@ -169,15 +188,14 @@ def create_ray_wrapped_inference_engines(
 
                 actor_class = SGLangRayActor
                 engine = actor_class.options(
-                    num_cpus=num_gpus,
-                    num_gpus=num_gpus,
+                    num_cpus=num_gpus_per_actor,
+                    num_gpus=num_gpus_per_actor,
                     scheduling_strategy=scheduling_strategy,
                 ).remote(
                     model_path=pretrain,
                     tp_size=tensor_parallel_size,
                     mem_fraction_static=gpu_memory_utilization,
                     random_seed=seed + i,
-                    context_length=max_model_len,
                     disable_radix_cache=not enable_prefix_caching,
                     dtype=model_dtype,
                     trust_remote_code=True,
@@ -193,6 +211,7 @@ def create_ray_wrapped_inference_engines(
                     bundle_indices=bundle_indices,
                     num_gpus=0.2 if use_hybrid_engine else 1,
                     tokenizer=tokenizer,
+                    **engine_init_kwargs,
                 )
                 return engine
 
@@ -203,7 +222,12 @@ def create_ray_wrapped_inference_engines(
     engines = [RayWrappedInferenceEngine(actor_handle) for actor_handle in inference_engine_actors]
 
     if inference_engine_enable_sleep:
-        sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
+        if backend == "vllm":
+            sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
+        elif backend == "sglang":
+            # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
+            assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
+            sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
         ray.get(sleep_refs)
 
     return engines

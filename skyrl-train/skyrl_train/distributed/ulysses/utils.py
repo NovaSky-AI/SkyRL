@@ -25,6 +25,7 @@ from typing import Any, Optional, Tuple
 
 import torch
 import torch.distributed as dist
+from loguru import logger
 from torch import Tensor
 from torch.distributed import ProcessGroup
 
@@ -96,7 +97,7 @@ def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: Proc
     """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if not group:
-        print("No group found for gather_heads_scatter_seq")
+        logger.info("No group found for gather_heads_scatter_seq")
         return x
     dim_size = x.size(seq_dim)
     sp_world = get_ulysses_sequence_parallel_world_size(group)
@@ -249,7 +250,7 @@ def gather_outputs_and_unpad(
 ):
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if group is None:
-        print("No group found for gather_outputs_and_unpad")
+        logger.info("No group found for gather_outputs_and_unpad")
         return x
     x = Gather.apply(group, x, gather_dim, grad_scaler)
     if unpad_dim is not None:

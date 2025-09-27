@@ -4,12 +4,19 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from transformers import PreTrainedTokenizerBase
 import asyncio
-from typing import List, Any, Optional, Dict
-from skyrl_train.inference_engines.utils import route_prompts_to_engines, hash_with_sha256
+from typing import List, Any, Optional, Dict, Union
+from skyrl_train.inference_engines.utils import (
+    route_prompts_to_engines,
+    hash_with_sha256,
+    postprocess_completion_request,
+    aggregate_completion_usage_info,
+)
 from omegaconf import DictConfig
 import threading
+from loguru import logger
 import random
 
 
@@ -39,7 +46,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
-        print(f"InferenceEngineClient initialized with {len(engines)} engines.")
+        logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 
     async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
         """
@@ -54,7 +61,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
-        trajectory_ids = input_batch.get("trajectory_ids")
+        session_ids = input_batch.get("session_ids")
         sampling_params = input_batch.get("sampling_params")
 
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
@@ -75,12 +82,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
             num_prompts=num_prompts,
             num_inference_engines=num_inference_engines,
-            trajectory_ids=trajectory_ids,
+            session_ids=session_ids,
         )
 
         # 2. Generate responses concurrently
         tasks: list[asyncio.Task] = []
-        indices_list: list[list[int]] = []
+        indices_list: list[list[int]] = []  # the original prompt indices that each task works on
         for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
             # index prompt_token_ids with prompt_ids
             cur_prompt_token_ids = [prompt_token_ids[i] for i in prompt_ids]
@@ -119,13 +126,111 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        trajectory_id = request_payload["json"].pop("trajectory_id", None)
-        if trajectory_id is None:
-            # if trajectory_id is not provided, we'll use a random engine
+        session_id = request_payload["json"].pop("session_id", None)
+        if session_id is None:
+            # if session_id is not provided, we'll use a random engine
             engine_idx = random.randint(0, len(self.engines) - 1)
         else:
-            engine_idx = hash_with_sha256(str(trajectory_id)) % len(self.engines)
+            assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
+            engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
         return await self.engines[engine_idx].chat_completion(request_payload)
+
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handles an OpenAI /completions request.
+
+        Since `request["prompt"]` can be `Union[list[int], list[list[int]], str, list[str]]`,
+        (i.e. {batched, single} x {string, token IDs}), we need to route the request to engines
+        differently, based on whether it's a single or batched request, and whether `request["session_id"]`
+        is provided. This is similar to `generate()` method.
+
+        For single, we do the same routing logic as `chat_completion()`. For batched, we route by
+        `request["session_id"]` if present, and if not we split evenly across engines.
+
+        Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
+        """
+        body = request_payload.get("json", {})
+
+        # NOTE(Charlie): do not reuse headers here as the single request may become various new requests
+        headers = {"Content-Type": "application/json"}
+
+        # 1. Postprocess prompt, session_id, and validate request.
+        prompt = body.get("prompt")
+        session_id_value = body.pop("session_id", None)
+        ret = postprocess_completion_request(prompt, session_id_value)
+        session_id_list: Optional[Union[List[int], List[str], ErrorResponse]] = ret[0]
+        prompt: Union[List[List[int]], List[str]] = ret[1]
+        if isinstance(session_id_list, ErrorResponse):
+            return session_id_list.model_dump()
+
+        num_prompts = len(prompt)
+        num_inference_engines = len(self.engines)
+        assert num_prompts > 0, "Number of prompts must be greater than 0"
+
+        # 1. Route prompts to engines
+        engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
+            num_prompts=num_prompts,
+            num_inference_engines=num_inference_engines,
+            session_ids=session_id_list,
+        )
+
+        # 2. Generate responses concurrently
+        tasks: list[asyncio.Task] = []
+        indices_list: list[list[int]] = []  # the original prompt indices that each task works on
+        for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
+            cur_prompt = [prompt[i] for i in prompt_ids]
+            # reuse the exact same request except for the prompt
+            cur_json = dict(body)
+            cur_json["prompt"] = cur_prompt
+            coro = self.engines[engine_idx].completion({"json": cur_json, "headers": headers})
+            tasks.append(asyncio.create_task(coro))
+            indices_list.append(prompt_ids)
+
+        results = await asyncio.gather(*tasks)
+
+        # 3. Check for errors.
+        # results can be ErrorResponse or CompletionResponse. If one of the sub-requests fails, we
+        # return an error response. That is, there is no partial success, following vLLM and SGLang's behavior.
+        for result in results:
+            if "error" in result or result.get("object", "") == "error":
+                # former is vllm format, latter is sglang format
+                error_details = result.get("error", result)  # resolves vllm/sglang format difference
+                error_code = error_details["code"]
+                error_type = error_details["type"]
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=f"In one of the engines that SkyRL manages, an error occurred: {error_details['message']}",
+                        type=error_type,
+                        code=error_code,
+                    ),
+                ).model_dump()
+
+        # 4. Combine choices and preserve original order.
+        # If there is only one result, we return it directly.
+        if len(results) == 1:
+            return results[0]
+
+        # Use the first result as base response. There are some fields that cannot be shared
+        # across sub-requests. For now it is just the usage field.
+        final_response = dict(results[0])
+        final_response["usage"] = aggregate_completion_usage_info(results, self.backend)
+
+        # Aggregate choices. TODO(Charlie): improve logic when we need to support n > 1
+        # vLLM sets index positions per sub-batch, so we reset indices to be 0..n-1 for the combined response.
+        combined_choices: list[Dict[str, Any]] = [None] * num_prompts
+        for indices, result in zip(indices_list, results):
+            # indices are the original prompt indices that the task's response corresponds to
+            for local_idx, original_idx in enumerate(indices):
+                choice = result["choices"][local_idx]
+                choice["index"] = original_idx  # overwrite index with the global position
+                combined_choices[original_idx] = choice
+
+        # sanity check that the index is correct
+        for new_idx in range(len(combined_choices)):
+            assert combined_choices[new_idx]["index"] == new_idx
+
+        final_response["choices"] = combined_choices
+        return final_response
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("wake_up", *args, **kwargs)
@@ -147,7 +252,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         rank_offset_count = rank_offset
 
         for engine in self.engines:
-            assert engine.tp_size is not None, "Engine must have a tp_size"
             tasks.append(
                 engine.init_weight_update_communicator(
                     master_addr=master_addr,
@@ -159,7 +263,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     override_existing=override_existing,
                 )
             )
-            rank_offset_count += engine.tp_size
+            rank_offset_count += engine.tp_size() * engine.dp_size()
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -170,6 +274,12 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def teardown(self):
         return await self._run_on_all_engines("teardown")
+
+    def tp_size(self) -> int:
+        raise NotImplementedError("InferenceEngineClient does not implement tp_size()")
+
+    def dp_size(self) -> int:
+        raise NotImplementedError("InferenceEngineClient does not implement dp_size()")
 
     # ----------------------------
     # HTTP endpoint related methods
@@ -200,7 +310,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if hasattr(self, "_server_thread") and self._server_thread.is_alive():
                     self._server_thread.join(timeout=10)
             except Exception as e:
-                print(f"Error shutting down HTTP endpoint: {e}")
+                logger.error(f"Error shutting down HTTP endpoint: {e}")
 
     def __getstate__(self):
         """
@@ -233,4 +343,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             port=self.http_endpoint_port,
             max_wait_seconds=30,
         )
-        print(f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}")
+        logger.info(
+            f"InferenceEngineClient HTTP endpoint started on {self.http_endpoint_host}:{self.http_endpoint_port}"
+        )

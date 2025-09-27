@@ -1,8 +1,8 @@
 import torch
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Dict, Any
 from collections import defaultdict
 import numpy as np
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
@@ -49,30 +49,42 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(
-    generator_output: GeneratorOutput, uids: List[str]
-) -> Tuple[float, Optional[float]]:
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
     """
     Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+
+    The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
+    calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
+    unique examples.
+
+    Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
     """
     rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
+    # TODO: We should make metrics customizable by the environment.
+    # Map from the example's uid to each trajectory's reward on that same example
+    uid_to_trajectory_rewards = defaultdict(list)
     if isinstance(rewards[0], list):
-        # We just compute mean over sequence reward.
-        # TODO: We should make metrics customizable by the environment
-        mean_raw_reward = float(np.mean([sum(seq_rewards) for seq_rewards in rewards]))
-        pass_at_n = None  # not computed for token-level rewards since it's ill-defined
+        # Token-level rewards: rewards is List[List[float]]
+        # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
+        mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+        # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
+        for i, cur_trajectory_rewards in enumerate(rewards):
+            if len(cur_trajectory_rewards) == 0:
+                raise ValueError("Token-level rewards must be a non-empty list.")
+            uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
         mean_raw_reward = float(np.mean(rewards))
-        # Compute pass@N metrics
-        pass_at_n_dict = defaultdict(list)
         for i, reward in enumerate(rewards):
-            pass_at_n_dict[uids[i]].append(reward)
+            uid_to_trajectory_rewards[uids[i]].append(reward)
 
-        # pass@N metric
-        pass_at_n = sum(1 for v in pass_at_n_dict.values() if np.sum(v) > 0) / len(pass_at_n_dict)
+    # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
+    # any of its trajectories' reward is positive, pass@n for that uid is 1.
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(
+        uid_to_trajectory_rewards
+    )
 
     return mean_raw_reward, pass_at_n
 
@@ -152,3 +164,59 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+
+def prepare_generator_input(
+    prompts: List[Any],
+    n_samples_per_prompt: int,
+    sampling_params: Dict[str, Any],
+    default_env_class: str,
+    training_phase: TrainingPhase,
+    global_step: int,
+) -> Tuple[GeneratorInput, List[str]]:
+    """Prepares the generator input for training and eval
+
+    Args:
+        prompts (List[Any]): list of prompts
+        n_samples_per_prompt (int): how many samples to create per prompt
+        sampling_params (Dict[str, Any]): sampling parameters
+        default_env_class (str): env class to use if env class missing from prompts
+        training_phase (TrainingPhase): training or eval
+        global_step (int): current global step
+
+    Returns:
+        Tuple[GeneratorInput, List[str]]: generator input and list of uuids
+    """
+
+    all_prompts = [prompt["prompt"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+
+    all_envs = [
+        prompt["env_class"] if prompt["env_class"] is not None else default_env_class
+        for prompt in prompts
+        for _ in range(n_samples_per_prompt)
+    ]
+
+    # all the other columns are env_extras
+    env_extras = [prompt["env_extras"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+
+    # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
+    trajectory_ids = []
+    uids = []
+    for _, prompt in enumerate(prompts):
+        uid: str = prompt["uid"]
+
+        # Create TrajectoryID for each repetition
+        for repetition_id in range(n_samples_per_prompt):
+            trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
+            uids.append(uid)
+
+    generator_input: GeneratorInput = {
+        "prompts": all_prompts,
+        "env_classes": all_envs,
+        "env_extras": env_extras,
+        "sampling_params": sampling_params,
+        "trajectory_ids": trajectory_ids,
+        "batch_metadata": BatchMetadata(global_step=global_step, training_phase=training_phase),
+    }
+
+    return generator_input, uids
