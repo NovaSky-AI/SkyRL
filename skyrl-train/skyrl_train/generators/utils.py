@@ -5,6 +5,20 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 
 CUSTOM_CHAT_TEMPLATES = {
+    # to fix generation tag missing for Qwen2.5 templates
+    "qwen25_bug_free": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
     # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
     "qwen3_thinking": (
         "{% for message in messages %}"
@@ -31,8 +45,9 @@ CUSTOM_CHAT_TEMPLATES = {
 def get_custom_chat_template(model_name: str) -> str:
     if "Qwen3" in model_name:
         return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
-    else:
-        return None
+    if "Qwen2.5" in model_name:
+        return CUSTOM_CHAT_TEMPLATES["qwen25_bug_free"]
+    return None
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
