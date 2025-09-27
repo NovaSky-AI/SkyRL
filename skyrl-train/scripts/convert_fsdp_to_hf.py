@@ -50,13 +50,13 @@ def get_model_shards(policy_dir: Path) -> List[Path]:
     Return a list of model Path objects
         - List[Path] of the model shards (the model*.pt files)
     """
-    shards = sorted(policy_dir.glob("model_world_size_*_rank_*.pt"))
-    if not shards:
-        shards = sorted(policy_dir.glob("model*.pt"))
-    if not shards:
+    shards_paths = sorted(policy_dir.glob("model_world_size_*_rank_*.pt"))
+    if not shards_paths:
+        shards_paths = sorted(policy_dir.glob("model*.pt"))
+    if not shards_paths:
         print(f"[error] No model shards found under {policy_dir}")
         raise FileNotFoundError(f"No model shards found under {policy_dir}")
-    return shards
+    return shards_paths
 
 
 def normalize_key(k: str) -> str:
@@ -89,13 +89,13 @@ def load_single_shard(path: Path) -> Dict[str, torch.Tensor]:
     return {k: v for k, v in obj.items() if isinstance(v, torch.Tensor)}
 
 
-def merge_shards(shards) -> Dict[str, torch.Tensor]:
+def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
     """
     Merge all model shards into a single dictionary of string-based keys to their corresponding tensors
         - Dict[str, torch.Tensor]
     """
     merged: Dict[str, torch.Tensor] = {}
-    for shard in shards:
+    for shard in shards_paths:
         sd = load_single_shard(shard)
         for k, v in sd.items():
             nk = normalize_key(k)
@@ -207,13 +207,13 @@ def main():
     ckpt_dir = Path(args.ckpt_dir).resolve()
     output_dir = Path(args.out_dir).resolve()
     policy_dir = find_policy_dir(ckpt_dir)
-    shards = get_model_shards(policy_dir)
-    print(f"[info] Found {len(shards)} model shard(s). ")
-    for s in shards:
+    shards_paths = get_model_shards(policy_dir)
+    print(f"[info] Found {len(shards_paths)} model shard(s). ")
+    for s in shards_paths:
         print(f"[info] - {s}")
 
     print("[info] Merging shards...")
-    state_dict = merge_shards(shards)
+    state_dict = merge_shards(shards_paths)
     print(f"[info] Merged {len(state_dict)} tensors.")
 
     copy_hf_artifacts(policy_dir, output_dir)
