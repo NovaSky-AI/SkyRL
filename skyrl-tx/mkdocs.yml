@@ -1,0 +1,12 @@
+site_name: tx documentation
+theme:
+  name: material
+  palette:
+    primary: yellow
+
+repo_url: https://github.com/tx-project/tx
+
+nav:
+  - "Overview": index.md
+  - "CLI Reference": reference.md
+  - "Contributing": contributing.md

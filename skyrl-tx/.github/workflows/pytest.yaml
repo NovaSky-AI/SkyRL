@@ -22,6 +22,12 @@ jobs:
     - name: Install uv
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
+    - name: Check if reference docs are up to date
+      run: |
+        uv run --extra dev typer tx/run/main.py utils docs --name tx --output docs/reference.md && git diff --exit-code docs/reference.md
+    - name: Test docs
+      run: |
+        uv run --extra dev mkdocs build --strict
     - name: Run lint
       run: |
         uvx ruff check
