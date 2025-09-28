@@ -13,9 +13,9 @@ def log_once(msg):
     return None
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def ray_init_fixture():
-    """Per-test Ray initialization with proper cleanup"""
+    """Session-scoped Ray initialization with proper cleanup"""
     if ray.is_initialized():
         ray.shutdown()
 
@@ -27,6 +27,7 @@ def ray_init_fixture():
     ray.init(runtime_env={"env_vars": env_vars})
     yield
 
+    # Cleanup at the end of the session
     try:
         ray.kill(ray.get_actor("*", allow_unknown=True), no_restart=True)
     except Exception:
