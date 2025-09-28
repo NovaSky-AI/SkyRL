@@ -49,7 +49,7 @@ class Tracker:
         logger.info(f"model config: {config}")
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
-        data = {"step": step, **metrics} if step else metrics
+        data = metrics if step is None else {"step": step, **metrics}
         logger.info(", ".join(f"{key}: {value:.3e}" if isinstance(value, float) else f"{key}: {value}" for key, value in data.items()))
 
 
