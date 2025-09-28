@@ -46,7 +46,7 @@ def cfg() -> DictConfig:
         "unpacked-fsdp2",
     ],
 )
-async def test_policy_training_step(cfg, packed, strategy):
+async def test_policy_training_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
@@ -102,7 +102,7 @@ async def test_policy_training_step(cfg, packed, strategy):
         "unpacked-fsdp2",
     ],
 )
-async def test_critic_training_step(cfg, packed, strategy):
+async def test_critic_training_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize critic actor group, send dummy experience to training_step, validate output.
     """

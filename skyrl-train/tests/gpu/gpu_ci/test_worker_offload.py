@@ -57,7 +57,7 @@ def cfg() -> DictConfig:
         "fsdp2_critic",
     ],
 )
-async def test_critic_policy_offload_memory_and_correctness(cfg, worker_type, strategy):
+async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that offloading model memory to cpu lowers memory usage and that correctness
     is maintained after backloading and running a training step.
@@ -160,7 +160,7 @@ async def test_critic_policy_offload_memory_and_correctness(cfg, worker_type, st
         "fsdp2_ref",
     ],
 )
-async def test_fsdp_ref_offload_memory_and_correctness(cfg, worker_type, strategy):
+async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that offloading model memory to cpu lowers memory usage and that correctness
     is maintained after backloading and running a forward pass. Note we don't test
@@ -252,7 +252,7 @@ async def test_fsdp_ref_offload_memory_and_correctness(cfg, worker_type, strateg
         "fsdp2_ref",
     ],
 )
-async def test_cpu_offload_correctness(cfg, worker_type, strategy):
+async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that the cpu_offload is working correctly for different backends.
 
@@ -298,7 +298,7 @@ async def test_cpu_offload_correctness(cfg, worker_type, strategy):
         "fsdp2",
     ],
 )
-def test_offload_after_ckpt(strategy):
+def test_offload_after_ckpt(ray_init_fixture, strategy):
     """
     Test ckpt+offload logic by:
     1. Creating model and doing one training step
