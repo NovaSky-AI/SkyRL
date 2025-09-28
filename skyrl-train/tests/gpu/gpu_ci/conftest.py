@@ -13,7 +13,7 @@ def log_once(msg):
     return None
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture()
 def ray_init_fixture():
     """Session-scoped Ray initialization with proper cleanup"""
     if ray.is_initialized():
