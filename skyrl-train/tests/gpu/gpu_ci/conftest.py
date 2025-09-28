@@ -27,7 +27,6 @@ def ray_init_fixture():
     ray.init(runtime_env={"env_vars": env_vars})
     yield
 
-    # Cleanup at the end of the session
     try:
         ray.kill(ray.get_actor("*", allow_unknown=True), no_restart=True)
     except Exception:
