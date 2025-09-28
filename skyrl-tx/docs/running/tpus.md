@@ -18,7 +18,7 @@ gcloud compute tpus tpu-vm ssh <TPU_NAME>
 
 ## Setting up tx
 
-Once you are logged into the VM, install `uv` and clone the repository with
+Once you are logged into the VM, install `uv` and clone the `tx` repository with
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
