@@ -133,9 +133,9 @@ def create_minimal_trainer(cfg: DictConfig):
 @pytest.mark.parametrize(
     ("strategy, fsdp2_cpu_offload"),
     [
-        # ("deepspeed", False),
-        # ("fsdp", False),
-        # ("fsdp2", False),
+        ("deepspeed", False),
+        ("fsdp", False),
+        ("fsdp2", False),
         ("fsdp2", True),
         pytest.param("megatron", False, marks=pytest.mark.megatron),
     ],
