@@ -21,6 +21,10 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_optimizer,
     load_megatron_optimizer,
 )
+
+from megatron.core.dist_checkpointing.strategies import base as ckpt_base
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
+
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
@@ -51,6 +55,10 @@ class MegatronStrategy(DistributedStrategy):
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
+
+        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
+        # short-lived background workers, which does not work well with Ray.
+        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
