@@ -506,6 +506,7 @@ def sync_registries():
     AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
 
+
 def repopulate_default_registries():
     # Helper function to register only if not already registered
     def safe_register(registry, name, func):
@@ -530,6 +531,7 @@ def repopulate_default_registries():
     }
     for name, func in advantage_estimators_to_register.items():
         safe_register(AdvantageEstimatorRegistry, name, func)
+
 
 def _safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> torch.Tensor:
     """

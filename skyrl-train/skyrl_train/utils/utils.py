@@ -216,11 +216,11 @@ def validate_cfg(cfg: DictConfig):
             cfg.generator.override_existing_update_group = "disable"
 
     # Ensure the policy loss registry is populated by importing the module directly
-    from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
-    
+    # (imports already done above on line 173)
+
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
-    
+
     assert (
         cfg.trainer.algorithm.policy_loss_type in available_policy_losses
     ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
