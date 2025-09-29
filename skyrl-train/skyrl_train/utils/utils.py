@@ -215,9 +215,6 @@ def validate_cfg(cfg: DictConfig):
             # for local engines or sglang, we disable
             cfg.generator.override_existing_update_group = "disable"
 
-    # Ensure the policy loss registry is populated by importing the module directly
-    # (imports already done above on line 173)
-
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
 

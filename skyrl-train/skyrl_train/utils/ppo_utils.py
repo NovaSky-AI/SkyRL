@@ -507,32 +507,6 @@ def sync_registries():
     logger.info("Synced registries to ray actor")
 
 
-def repopulate_default_registries():
-    # Helper function to register only if not already registered
-    def safe_register(registry, name, func):
-        if name not in registry.list_available():
-            registry.register(name, func)
-
-    policy_losses_to_register = {
-        PolicyLossType.REGULAR.value: ppo_policy_loss,
-        PolicyLossType.DUAL_CLIP.value: ppo_policy_loss,
-        PolicyLossType.GSPO.value: gspo_policy_loss,
-        PolicyLossType.CLIP_COV.value: compute_policy_loss_clip_cov,
-        PolicyLossType.KL_COV.value: compute_policy_loss_kl_cov,
-    }
-    for name, func in policy_losses_to_register.items():
-        safe_register(PolicyLossRegistry, name, func)
-
-    advantage_estimators_to_register = {
-        AdvantageEstimator.REINFORCE_PP.value: compute_reinforce_plus_plus_outcome_advantage,
-        AdvantageEstimator.RLOO.value: compute_rloo_outcome_advantage,
-        AdvantageEstimator.GAE.value: compute_gae_advantage_return,
-        AdvantageEstimator.GRPO.value: compute_grpo_outcome_advantage,
-    }
-    for name, func in advantage_estimators_to_register.items():
-        safe_register(AdvantageEstimatorRegistry, name, func)
-
-
 def _safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> torch.Tensor:
     """
     Clamp the delta before exponentiating to avoid potential overflow.

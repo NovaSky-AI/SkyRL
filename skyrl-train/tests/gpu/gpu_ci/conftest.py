@@ -15,7 +15,6 @@ def log_once(msg):
 
 @pytest.fixture()
 def ray_init_fixture():
-    """Session-scoped Ray initialization with proper cleanup"""
     if ray.is_initialized():
         ray.shutdown()
 

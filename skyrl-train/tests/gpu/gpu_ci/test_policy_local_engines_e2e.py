@@ -110,8 +110,4 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
-        ##  TODO(Dev): Decide whether to reset and repopulate for future tests or remove all together since none of the other tests rely on PolicyRegistry or AdvantageEstimatorRegistry in GPU CI
-        # AdvantageEstimatorRegistry.reset()
-        # PolicyLossRegistry.reset()
-        # repopulate_default_registries()
         ray.shutdown()
