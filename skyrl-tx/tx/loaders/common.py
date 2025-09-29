@@ -3,13 +3,13 @@ from operator import attrgetter
 from typing import Callable, Iterator
 
 import jax
-from datasets import IterableDataset
+from datasets import Dataset
 from transformers import PretrainedConfig
 
 LoaderIterator = Iterator[tuple[dict[str, jax.Array], dict[str, str]]]
 
 
-def get_loader(loader_name: str) -> Callable[[PretrainedConfig, IterableDataset, int], LoaderIterator]:
+def get_loader(loader_name: str) -> Callable[[PretrainedConfig, Dataset, int], LoaderIterator]:
     module_name, function_name = loader_name.split(".", 1)
     try:
         module = importlib.import_module(module_name)

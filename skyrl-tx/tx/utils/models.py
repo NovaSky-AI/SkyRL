@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from enum import Enum
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from flax import nnx
 import jax.numpy as jnp
+import optax
 import safetensors.numpy
 from transformers import PretrainedConfig
 
@@ -29,7 +31,7 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
             raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 
-def get_model_class(config: PretrainedConfig) -> type[nnx.Module]:
+def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
 
     for architecture in config.architectures or []:
@@ -49,9 +51,9 @@ def get_param_key(path: tuple) -> str:
     return ".".join(map(str, path))
 
 
-def load_checkpoint(path: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
+def load_checkpoint(checkpoint_dir: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
     tensors = {}
-    for file in Path(path).glob("*.safetensors"):
+    for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
@@ -78,3 +80,17 @@ def save_checkpoint(config: PretrainedConfig, model: nnx.Module, filename: str |
             param = param.reshape(-1, param.shape[-1])
         tensors[key] = param if "embed_tokens" in path else param.T
     safetensors.numpy.save_file(tensors, filename)
+
+
+class OptimizerName(str, Enum):
+    adamw = "adamw"
+
+
+def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.GradientTransformation:
+    match (optimizer_name, optimizer_args):
+        case (OptimizerName.adamw, {"learning_rate": lr, **kwargs}):
+            return optax.adamw(lr, **kwargs)
+        case (_, {"learning_rate": _}):
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+        case _:
+            raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")

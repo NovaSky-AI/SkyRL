@@ -15,7 +15,7 @@ from tx.utils.models import load_checkpoint
 
 @pytest.mark.parametrize("tp", [1, 2])
 def test_qwen3(tp: int):
-    if not jax._src.xla_bridge.backends_are_initialized():
+    if not jax._src.xla_bridge.backends_are_initialized():  # ty: ignore
         jax.config.update("jax_num_cpu_devices", 2)
 
     if tp > 1 and os.getenv("CI"):

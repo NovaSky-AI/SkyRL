@@ -7,7 +7,7 @@ from typing import Any
 from rich.logging import RichHandler
 
 try:
-    import wandb
+    import wandb  # type: ignore[import-untyped]
 except ImportError:
     wandb = None
 
