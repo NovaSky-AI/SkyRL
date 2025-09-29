@@ -206,14 +206,6 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    # resolve override_existing_update_group
-    if cfg.generator.override_existing_update_group == "auto":
-        if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
-            # remote engines can be launched separately so we `enable` by default
-            cfg.generator.override_existing_update_group = "enable"
-        else:
-            # for local engines or sglang, we disable
-            cfg.generator.override_existing_update_group = "disable"
 
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
