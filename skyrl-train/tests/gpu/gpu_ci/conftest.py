@@ -21,7 +21,7 @@ def ray_init_fixture():
         log_once("Disabling NCCL P2P for CI environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
 
-    ray.init(runtime_env={"env_vars": env_vars})
+    ray.init(runtime_env={"env_vars": env_vars}, ignore_reinit_error=True)
     # yield
 
     # try:
