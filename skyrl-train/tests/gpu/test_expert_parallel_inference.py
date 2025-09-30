@@ -102,7 +102,7 @@ def init_ray_inference_engines(
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
         async_engine=True,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=32768,
         max_num_seqs=1024,
         tokenizer=tokenizer,
         backend=backend,

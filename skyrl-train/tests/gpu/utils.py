@@ -407,7 +407,7 @@ def init_inference_engines(
         gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,
         async_engine=async_engine,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=32768,
         max_num_seqs=1024,
         tokenizer=tokenizer,
         backend=backend,
