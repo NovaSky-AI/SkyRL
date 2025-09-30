@@ -62,9 +62,9 @@ def test_qwen3_moe():
         moe_layer = Qwen3MoE(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
         for i, expert in enumerate(hf_moe_layer.experts):
-            moe_layer.gate_proj[i,:,:] = expert.gate_proj.weight.detach().numpy().T
-            moe_layer.up_proj[i,:,:] = expert.up_proj.weight.detach().numpy().T
-            moe_layer.down_proj[i,:,:] = expert.down_proj.weight.detach().numpy().T
+            moe_layer.experts.gate_proj[i,:,:] = expert.gate_proj.weight.detach().numpy().T
+            moe_layer.experts.up_proj[i,:,:] = expert.up_proj.weight.detach().numpy().T
+            moe_layer.experts.down_proj[i,:,:] = expert.down_proj.weight.detach().numpy().T
 
     final_hidden_states, router_logits = moe_layer(x.numpy())
 
