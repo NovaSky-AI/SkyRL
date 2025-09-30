@@ -31,18 +31,18 @@ optimizer_config_kwargs:
 # kwargs to override the Megatron TransformerConfig object
 transformer_config_kwargs:
   # Recompute config - used for gradient/activation checkpointing
-  # default use minimal performance-interference recompute methods
-  # Recompute granualarity, choices: ["full", "selective"]
+  # for details see: https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
+  # options: ["full", "selective", null]
   recompute_granularity: null
 
-  # Recompute modules, multiple choices: ["core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe"]
-  # Please use correct module in matched model
   recompute_modules: ["core_attn"]
 
-  # 'uniform', 'block'
+  # options: ["uniform", "block", null]
   # 'uniform' divides the total number of transformer layers and checkpoints the input activation of each chunk
   # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
   recompute_method: null
 
-  # 'full' will checkpoint the entire transformer layer and 'selective' only checkpoints memory intensive part of attention
+  # when recompute_method is uniform, recompute_num_layers is the number of transformer layers in each recompute unit
+  # when recompute_method is block, recompute_num_layers is the number of transformer layers to recompute in each block
+  # must be set to None when recompute_granularity is "selective"
   recompute_num_layers: null

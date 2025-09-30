@@ -4,7 +4,7 @@ set -x
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/training_backends/megatron/run_megatron_qwen3-30b-a3b.sh
+# bash examples/megatron/run_megatron_qwen3-30b-a3b.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
@@ -26,6 +26,8 @@ INFERENCE_ENGINE_TP=8
 FLASH_ATTN=true
 
 export SKYRL_PYTHONPATH_EXPORT=1
+# make sure PYTHONPATH is set to the location of TransformerEngine installation
+export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
 
 uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \

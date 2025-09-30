@@ -1986,11 +1986,11 @@ wheels = [
 
 [[package]]
 name = "mbridge"
-version = "0.13.1"
+version = "0.15.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/6a/10/42be17b46b0e0214b8bb960421b7e1eb53e351b07cff98ca08f9d32ff3c2/mbridge-0.13.1.tar.gz", hash = "sha256:2507f9fa3d258acdfb713ab9aeacd9f3c9a03233f2bb8fa131eaf4277ce08c04", size = 69017, upload-time = "2025-09-05T08:58:52.734Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/65/3f/04534fb2b4ddf6b293ee41f839de8ae6542ef2dc1b32c7d25a4b5b18c1bb/mbridge-0.15.1.tar.gz", hash = "sha256:26028dbe7dc9193c6c6b3de56e82691c9a484f46ded1ed18a41f2747a08e8104", size = 99287, upload-time = "2025-09-22T09:48:30.141Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/06/9cc5ca552973590b8c88a2298f7e3252916ed095e83670411cf25509813f/mbridge-0.13.1-py3-none-any.whl", hash = "sha256:9798f88d90c20c546e13326aca757539821a112b28d9cb8fbe097fe46eb491d8", size = 85785, upload-time = "2025-09-05T08:58:51.262Z" },
+    { url = "https://files.pythonhosted.org/packages/51/dc/8208746f41ff08d0b6eb8c261569d57af97648ee0d1631ea273e68c627dc/mbridge-0.15.1-py3-none-any.whl", hash = "sha256:5c7c007c2eb13bb2d0ce9bd6b313537024d0a7fad52179ff367635eafe5cd4cd", size = 122168, upload-time = "2025-09-22T09:48:28.384Z" },
 ]
 
 [[package]]
@@ -4011,7 +4011,7 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'miniswe'" },
     { name = "litellm", extras = ["proxy"], marker = "extra == 'sandboxes'", specifier = ">=1.67.5" },
     { name = "loguru" },
-    { name = "mbridge", marker = "extra == 'mcore'", specifier = "==0.13.1" },
+    { name = "mbridge", marker = "extra == 'mcore'", specifier = "==0.15.1" },
     { name = "megatron-core", marker = "extra == 'mcore'", git = "https://github.com/NVIDIA/Megatron-LM.git?rev=core_r0.13.0" },
     { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },

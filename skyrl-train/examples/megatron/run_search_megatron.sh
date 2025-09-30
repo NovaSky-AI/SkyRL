@@ -4,7 +4,7 @@ set -x
 # follow the instructions in examples/search/README.md for setting up the dataset
 # and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/training_backends/megatron/run_search_megatron.sh
+# bash examples/megatron/run_search_megatron.sh
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 MODEL_NAME="Qwen/Qwen3-30B-A3B"
@@ -26,8 +26,10 @@ NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=8
 
 export SKYRL_PYTHONPATH_EXPORT=1
+# make sure PYTHONPATH is set to the location of TransformerEngine installation
+export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
 
-uv run --isolated --frozen --extra mcore --extra vllm --env-file .env -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra mcore --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
