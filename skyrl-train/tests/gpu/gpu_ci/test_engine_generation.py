@@ -17,7 +17,6 @@ from tests.gpu.utils import are_responses_similar, get_test_prompts, init_remote
 from transformers import AutoTokenizer
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -122,14 +121,13 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
     ],
     ids=["vllm", "sglang"],
 )
-def test_inference_engines_generation(backend: str, tp_size: int):
+def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int):
     """
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
     try:
         cfg = get_test_actor_config()
         cfg.generator.backend = backend
-        initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -225,13 +223,12 @@ def test_inference_engines_generation(backend: str, tp_size: int):
     ],
     ids=["vllm", "sglang"],
 )
-def test_token_based_generation(backend: str, tp_size: int):
+def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int):
     """Test generation using prompt_token_ids for the specified backend."""
 
     try:
         cfg = get_test_actor_config()
         cfg.generator.backend = backend
-        initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL, 3)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)

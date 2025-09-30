@@ -13,7 +13,7 @@ def log_once(msg):
     return None
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def ray_init_fixture():
     if ray.is_initialized():
         ray.shutdown()
