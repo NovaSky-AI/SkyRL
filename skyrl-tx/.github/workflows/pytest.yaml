@@ -44,6 +44,10 @@ jobs:
     - name: Run a single fine-tuning step on a chat dataset
       run: |
         uv run --with jinja2 tx train --model pcmoritz/qwen3-tiny-test --dataset smangrul/ultrachat-feedback-10k-chatml --output-dir /tmp --batch-size 2 --max-steps 1 --loader tx.loaders.chat --load-checkpoint-path /tmp
+    - name: Run a single fine-tuning step with Qwen3 MoE
+      run: |
+        uv run --with huggingface_hub hf download trl-internal-testing/tiny-Qwen3MoeForCausalLM --local-dir /tmp/qwen3_moe
+        uv run --with jinja2 tx train --model trl-internal-testing/tiny-Qwen3MoeForCausalLM --dataset smangrul/ultrachat-feedback-10k-chatml --output-dir /tmp --batch-size 2 --max-steps 1 --loader tx.loaders.chat --load-checkpoint-path /tmp/qwen3_moe
     - name: Test experiment tracker integration
       run: |
         WANDB_MODE=offline WANDB_API_KEY=dummy uv run --with wandb tx train --model pcmoritz/qwen3-tiny-test --dataset mahiatlinux/TinyStories-GPT4-V2-50K-SUBSET --output-dir /tmp --batch-size 2 --max-steps 1 --tracker wandb --tracker-args '{"name": "Qwen3-8B", "project": "tx"}'

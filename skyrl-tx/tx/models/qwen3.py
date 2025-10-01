@@ -43,7 +43,7 @@ class Qwen3Attention(nnx.Module):
         self.config = config
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.head_dim = config.head_dim
+        self.head_dim = getattr(config, 'head_dim', None) or config.hidden_size // self.num_heads
         
         self.q_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_heads, self.head_dim, sharding=jax.P(None, "tp", None), dtype=dtype, rngs=rngs)
         self.k_proj = MultiHeadProj("BMK,KNH->BMNH", config.hidden_size, self.num_kv_heads, self.head_dim, sharding=jax.P(None, "tp", None), dtype=dtype, rngs=rngs)
@@ -163,23 +163,27 @@ class Qwen3Experts(nnx.Module):
         return jnp.sum(reshaped_out * routing_weights[..., None], axis=1)
 
 
-class Qwen3MoE(nnx.Module):
+class Qwen3MoeSparseMoeBlock(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.gate = nnx.Linear(
             config.hidden_size, config.num_experts,
             use_bias=False, dtype=dtype, param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")), rngs=rngs,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)), rngs=rngs,
         )
         self.experts = Qwen3Experts(config, dtype=dtype, rngs=rngs)
 
-    def __call__(self, hidden_states: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def __call__(self, hidden_states: jax.Array, *, return_router_logits: bool = False) -> jax.Array | tuple[jax.Array, jax.Array]:
         original_shape = hidden_states.shape
         hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
         router_logits = self.gate(hidden_states)
         hidden_states = self.experts(hidden_states, router_logits)
-        return hidden_states.reshape(original_shape), router_logits
+        hidden_states = hidden_states.reshape(original_shape)
+
+        if return_router_logits:
+            return hidden_states, router_logits
+        return hidden_states
         
 
 class Qwen3DecoderLayer(nnx.Module):
@@ -188,7 +192,10 @@ class Qwen3DecoderLayer(nnx.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.self_attn = Qwen3Attention(config, dtype=dtype, rngs=rngs)
-        self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
+        if getattr(config, "num_experts", None):
+            self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
+        else:
+            self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -309,3 +316,4 @@ class Qwen3ForCausalLM(nnx.Module):
             logits = self.lm_head(hidden_states)
 
         return {"logits": logits, **outputs}
+
