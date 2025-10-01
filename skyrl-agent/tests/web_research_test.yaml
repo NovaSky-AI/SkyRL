@@ -1,0 +1,46 @@
+# Configuration for Web Research Task using ReAct Agent with search and browse tools
+agent_cls: skyrl_agent.agents.react.ReActAgent
+
+task: skyrl_agent.tasks.web_research_task.WebResearchTask
+
+# Enable search_engine and web_browser tools
+tools: ["search_engine", "web_browser", "finish"]
+
+data:
+  data_source_key: data_source
+  # Remove instance_key to pass full record instead of just prompt field
+  # This preserves all HLE dataset fields (Question, answer, category, etc.)
+  # instance_key: prompt  # Commented out to pass full record
+  instance_id_key: id
+  # HLE/GPQA data compatibility
+  # The converted data already has all fields preserved
+
+generator:
+  infer_backend: openai_server
+  backend_config: 
+    model_name: Qwen/Qwen3-8B # 
+    api_url: http://localhost:8000  # Change to your API endpoint
+  num_trajectories: 1
+  max_iterations: 20  # Allow multiple tool calls for research
+  max_prompt_length: 81920
+  sampling_params:
+    temperature: 0.7
+    top_p: 0.8
+    max_tokens: 81920
+    repetition_penalty: 1.05
+    # Explicitly define stop sequences to avoid early termination
+    # We don't want to stop on im_end as it's part of the chat template
+    stop: []
+  remove_think_tokens: false
+  vision_is_active: false
+  qwen3_enable_thinking: true
+  qwen3_acc_thinking: true
+  profile_tools: false
+  debug_log: false
+  
+
+dispatcher:
+  type: async_pipeline
+  scheduler: naive
+  max_parallel_agents: 32
+  max_eval_parallel_agents: 32
