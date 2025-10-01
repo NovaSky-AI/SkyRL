@@ -98,7 +98,8 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
     for shard in shards_paths:
         sd = load_single_shard(shard)
         for k, v in sd.items():
-            nk = normalize_key(k)
+            #nk = normalize_key(k)
+            nk = k
             if nk in merged:
                 if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
                     print(
@@ -224,6 +225,9 @@ def main():
 
     save_file(clean_sd, str(weights_path))
     print(f"[success] Saved weights to {weights_path}")
+
+    # cfg = AutoConfig.from_pretrained(output_dir, local_files_only=True, trust_remote_code=True)
+    # HFClass = guess_hf_class
 
 
 if __name__ == "__main__":
