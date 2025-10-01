@@ -6,7 +6,7 @@ from datasets import Dataset, load_dataset
 import jax
 from flax import nnx
 import optax
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 import typer
 
 from tx.loaders import get_loader
@@ -61,6 +61,7 @@ def train(
     train_dataset = load_dataset(dataset, split=split)
     assert isinstance(train_dataset, Dataset)
     config = AutoConfig.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     tracker = get_tracker(tracker_name, config, **tracker_args)
     loader = get_loader(loader_name)
 
@@ -74,7 +75,7 @@ def train(
         load_checkpoint(load_checkpoint_path, config, model)
 
     num_steps = train_dataset.num_rows / batch_size
-    for step, (batch, metrics) in enumerate(loader(config, train_dataset, batch_size)):
+    for step, (batch, metrics) in enumerate(loader(tokenizer, train_dataset, batch_size)):
         if max_steps and step >= max_steps:
             break
 
@@ -87,4 +88,6 @@ def train(
             save_checkpoint(config, model, output_dir / "model.safetensors")
 
     logger.info(f"Saving final checkpoint to {output_dir}")
+    config.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
     save_checkpoint(config, model, output_dir / "model.safetensors")

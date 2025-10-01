@@ -1,14 +1,13 @@
 import jax.numpy as jnp
 from datasets import Dataset
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import PreTrainedTokenizer
 
 from tx.loaders.common import LoaderIterator
 
 
-def chat(config: PretrainedConfig, dataset: Dataset, batch_size: int) -> LoaderIterator:
+def chat(tokenizer: PreTrainedTokenizer, dataset: Dataset, batch_size: int) -> LoaderIterator:
     "Data loader that applies the chat template. It returns an iterator over (batch, metrics) elements."
 
-    tokenizer = AutoTokenizer.from_pretrained(config.name_or_path)
     for data in dataset.shuffle().iter(batch_size=batch_size):
         batch = tokenizer.apply_chat_template(data["messages"], tokenize=False)
         # We pad to multiples of 512 here so jax needs to compile less different shapes
