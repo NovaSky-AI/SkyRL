@@ -258,11 +258,12 @@ class Worker(DistributedTorchRayActor):
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
 
-            num_inference_engines, tensor_parallel_size = (
+            num_inference_engines, tensor_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
                 self.cfg.generator.inference_engine_tensor_parallel_size,
+                self.cfg.generator.inference_engine_data_parallel_size,
             )
-            world_size = num_inference_engines * tensor_parallel_size + 1
+            world_size = num_inference_engines * tensor_parallel_size * data_parallel_size + 1
 
             backend = self.cfg.generator.weight_sync_backend
 
