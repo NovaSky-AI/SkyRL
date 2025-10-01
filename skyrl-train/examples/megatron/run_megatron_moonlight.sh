@@ -1,6 +1,7 @@
 set -x
 
 # Colocated GRPO training+generation for Moonlight-16B-A3B-Instruct on GSM8K with Megatron.
+# Runs on 2 nodes of 8xH100s
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>

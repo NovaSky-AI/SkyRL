@@ -5,6 +5,7 @@ set -x
 # and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/megatron/run_search_megatron.sh
+# Runs on 4 nodes of 8xH100s
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 MODEL_NAME="Qwen/Qwen3-30B-A3B"

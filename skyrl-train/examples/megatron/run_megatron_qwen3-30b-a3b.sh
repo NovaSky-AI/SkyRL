@@ -1,6 +1,7 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen3-30B-A3B on GSM8K with Megatron.
+# Runs on 2 nodes of 8xH100s
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
@@ -15,8 +16,8 @@ INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 NUM_NODES=2
 NUM_GPUS=8
 
-MEGATRON_TP=2
-MEGATRON_PP=1
+MEGATRON_TP=4
+MEGATRON_PP=2
 MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
@@ -24,6 +25,11 @@ MEGATRON_ETP=1
 NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TP=8
 FLASH_ATTN=true
+
+# Megatron gradient checkpointing config
+RECOMPUTE_GRANULARITY="full"
+RECOMPUTE_METHOD="uniform"
+RECOMPUTE_NUM_LAYERS=1
 
 export SKYRL_PYTHONPATH_EXPORT=1
 # make sure PYTHONPATH is set to the location of TransformerEngine installation
@@ -52,6 +58,9 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.ref.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.ref.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity=$RECOMPUTE_GRANULARITY \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=$RECOMPUTE_METHOD \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=$RECOMPUTE_NUM_LAYERS \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
@@ -75,7 +84,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entryp
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.85 \
+  generator.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
   trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_qwen3_30b_a3b" \

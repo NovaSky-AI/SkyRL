@@ -23,6 +23,7 @@ torch_profiler_config:
 # kwargs to override the Megatron OptimizerConfig object
 # any overlapping arguments with those in trainer.policy.optimizer_config will be overridden by the values here
 optimizer_config_kwargs:
+  # set these all to true (and optimizer_offload_fraction=1.0) for optimizer cpu offloading
   overlap_cpu_optimizer_d2h_h2d: false
   use_precision_aware_optimizer: false
   optimizer_cpu_offload: false
@@ -32,17 +33,8 @@ optimizer_config_kwargs:
 transformer_config_kwargs:
   # Recompute config - used for gradient/activation checkpointing
   # for details see: https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
-  # options: ["full", "selective", null]
+  # for the most aggresive memory savings, set recompute_granularity to "full", recompute_method to "uniform", and recompute_num_layers to 1
   recompute_granularity: null
-
   recompute_modules: ["core_attn"]
-
-  # options: ["uniform", "block", null]
-  # 'uniform' divides the total number of transformer layers and checkpoints the input activation of each chunk
-  # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
   recompute_method: null
-
-  # when recompute_method is uniform, recompute_num_layers is the number of transformer layers in each recompute unit
-  # when recompute_method is block, recompute_num_layers is the number of transformer layers to recompute in each block
-  # must be set to None when recompute_granularity is "selective"
   recompute_num_layers: null
