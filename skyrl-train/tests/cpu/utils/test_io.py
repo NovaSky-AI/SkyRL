@@ -276,7 +276,9 @@ class TestCheckpointScenarios:
             assert exists(latest_checkpoint_file)
 
             # Verify latest step can be retrieved
-            assert get_latest_checkpoint_step(temp_dir) == global_step
+            with open_file(latest_checkpoint_file, "r") as f:
+                ckpt_iteration = int(f.read().strip())
+            assert ckpt_iteration == global_step
 
 
 class TestContextManagers:
