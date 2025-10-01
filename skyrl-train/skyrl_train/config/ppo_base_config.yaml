@@ -15,15 +15,12 @@ trainer:
   placement:
     colocate_all: true
     colocate_policy_ref: true
-    colocate_critic_reward: false
     policy_num_nodes: 1
     policy_num_gpus_per_node: 4
     critic_num_nodes: 1
     critic_num_gpus_per_node: 4
     ref_num_nodes: 1
     ref_num_gpus_per_node: 4
-    reward_num_nodes: 1
-    reward_num_gpus_per_node: 4
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
@@ -68,15 +65,6 @@ trainer:
       scheduler: "constant_with_warmup"
     fsdp_config:
       cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: -1
-    sequence_parallel_size: 1
-  reward:
-    model:
-      path: null
-    deepspeed_config: ${deepspeed_config.eval}
-    fsdp_config:
-      cpu_offload: true
       reshard_after_forward: true
       fsdp_size: -1
     sequence_parallel_size: 1
@@ -157,7 +145,6 @@ trainer:
   flash_attn: true
   disable_fast_tokenizer: false
   target_modules: "all-linear"
-  use_orm_score: false
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"

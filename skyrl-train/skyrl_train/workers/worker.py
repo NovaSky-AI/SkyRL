@@ -1034,30 +1034,6 @@ class CriticWorkerBase(Worker):
         return states
 
 
-class RewardWorkerBase(Worker):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model: nn.Module = None
-
-    def _forward_micro_batch(
-        self,
-        micro_batch: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        attention_mask = micro_batch["attention_mask"]
-        self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            reward = self.model(sequences, attention_mask)
-        reward = reward.to("cpu")
-        output = TrainingOutputBatch(
-            {"output": reward},
-        )
-        output.metadata = micro_batch.metadata
-        return output
-
-
 class RefWorkerBase(Worker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

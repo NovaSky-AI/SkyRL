@@ -29,7 +29,6 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
-    RewardWorkerBase,
     CriticWorkerBase,
 )
 from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
@@ -518,11 +517,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         pass
 
 
-class MegatronRewardWorkerBase(MegatronWorker, RewardWorkerBase):
-    def __init__(self, **kwargs):
-        raise NotImplementedError()
-
-
 class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
     def __init__(self, **kwargs):
         raise NotImplementedError()
@@ -531,4 +525,3 @@ class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
 PolicyWorker = ray.remote(num_gpus=1)(MegatronPolicyWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(MegatronRefWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(MegatronCriticWorkerBase)
-RewardWorker = ray.remote(num_gpus=1)(MegatronRewardWorkerBase)
