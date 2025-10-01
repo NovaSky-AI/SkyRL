@@ -21,7 +21,6 @@ from skyrl_train.utils.io import (
     list_dir,
 )
 from skyrl_train.utils.trainer_utils import (
-    get_latest_checkpoint_step,
     list_checkpoint_dirs,
     cleanup_old_checkpoints,
 )
@@ -151,24 +150,6 @@ class TestCheckpointUtilities:
         non_existent_path = "/non/existent/path"
         found_dirs = list_checkpoint_dirs(non_existent_path)
         assert found_dirs == []
-
-    def test_get_latest_checkpoint_step_local(self):
-        """Test getting latest checkpoint step for local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            latest_file = os.path.join(temp_dir, "latest_ckpt_global_step.txt")
-
-            # Test non-existent file
-            assert get_latest_checkpoint_step(temp_dir) == 0
-
-            # Test with valid step
-            with open_file(latest_file, "w") as f:
-                f.write("1500")
-            assert get_latest_checkpoint_step(temp_dir) == 1500
-
-            # Test with whitespace
-            with open_file(latest_file, "w") as f:
-                f.write("  2000  \n")
-            assert get_latest_checkpoint_step(temp_dir) == 2000
 
     def test_cleanup_old_checkpoints_local(self):
         """Test cleanup of old checkpoints for local paths."""
