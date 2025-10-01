@@ -58,8 +58,7 @@ class Qwen3Attention(nnx.Module):
         x: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
-        output_attentions: bool | None = None
-    ) -> tuple[jax.Array, jax.Array | None]:
+    ) -> jax.Array:
         q = self.q_norm(self.q_proj(x))
         k = self.k_norm(self.k_proj(x))
         v = self.v_proj(x)
@@ -74,22 +73,14 @@ class Qwen3Attention(nnx.Module):
             k = jnp.repeat(k, num_groups, axis=2)
             v = jnp.repeat(v, num_groups, axis=2)
 
-        attn_weights = jnp.einsum("BMNH,BTNH->BNMT", q, k)
-        attn_weights = attn_weights / jnp.sqrt(self.head_dim)
+        attn_output = jax.nn.dot_product_attention(
+            q, k, v,
+            scale=1.0 / self.head_dim ** 0.5,
+            mask=attention_mask[:, None, None, :].astype(bool) if attention_mask is not None else None,
+            is_causal=True,
+        )
 
-        causal_mask = jnp.tril(jnp.ones((x.shape[1], x.shape[1])))[None, None, :, :]
-
-        if attention_mask is not None:
-            causal_mask *= attention_mask[:, None, None, :]
-
-        attn_weights = jnp.where(causal_mask == 0, -jnp.inf, attn_weights)
-        attn_weights = nnx.softmax(attn_weights, axis=-1)
-        attn_output = jnp.einsum("BNMT,BTNH->BMNH", attn_weights, v)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return self.o_proj(attn_output), attn_weights
+        return self.o_proj(attn_output)
         
 
 class Qwen3MLP(nnx.Module):
@@ -202,14 +193,12 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
-        output_attentions: bool | None = None
-    ) -> tuple[jax.Array, jax.Array | None]:
+    ) -> jax.Array:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, self_attn_weights = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
-            output_attentions=output_attentions,
         )
         hidden_states = residual + hidden_states
 
@@ -218,7 +207,7 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states, self_attn_weights
+        return hidden_states
 
 
 class Qwen3Model(nnx.Module):
@@ -242,36 +231,25 @@ class Qwen3Model(nnx.Module):
         *,
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
-        output_attentions: bool | None = None
     ) -> dict[str, jax.Array | list[jax.Array]]:
         output_hidden_states = (
             output_hidden_states
             if output_hidden_states is not None
             else self.config.output_hidden_states
         )
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
 
         hidden_states = self.embed_tokens(input_ids)
 
         all_hidden_states: list[jax.Array] = []
-        all_self_attns: list[jax.Array] = []
 
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            hidden_states, self_attns = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
-                output_attentions=output_attentions,
             )
-
-            if output_attentions:
-                all_self_attns.append(self_attns)
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -280,7 +258,6 @@ class Qwen3Model(nnx.Module):
         return {
             "last_hidden_state": hidden_states,
             "hidden_states": all_hidden_states,
-            "attentions": all_self_attns,
         }
 
 
@@ -301,13 +278,11 @@ class Qwen3ForCausalLM(nnx.Module):
         *,
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
-        output_attentions: bool | None = None
     ) -> dict[str, jax.Array | list[jax.Array]]:
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
         )
         hidden_states = outputs["last_hidden_state"]
         if self.config.tie_word_embeddings:
