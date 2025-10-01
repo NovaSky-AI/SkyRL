@@ -241,7 +241,7 @@ class RayPPOTrainer:
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
                         # remove some unwanted keys
-                        for key in ["custom_rewards"]:
+                        for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
 
@@ -626,7 +626,7 @@ class RayPPOTrainer:
             - `["response_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["loss_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size"]
-            - `["custom_rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `.metadata["uids"]`: List[str]
 
         Adds:
@@ -634,7 +634,7 @@ class RayPPOTrainer:
             - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
         # TODO (erictang000): we are just supporting custom rewards for now
-        token_level_rewards = data["custom_rewards"]
+        token_level_rewards = data["rewards"]
 
         advantages, returns = ppo_utils.compute_advantages_and_returns(
             token_level_rewards=token_level_rewards,
@@ -820,7 +820,7 @@ class RayPPOTrainer:
     ) -> TrainingInputBatch:
         """Applies a penalty for KL divergence between the policy log probs and the base model log probs to the rewards."""
         loss_masks_all: torch.Tensor = data["loss_mask"]
-        custom_rewards: torch.Tensor = data["custom_rewards"]
+        rewards: torch.Tensor = data["rewards"]
         base_action_log_probs: torch.Tensor = data["base_action_log_probs"]
         action_log_probs: torch.Tensor = data["action_log_probs"]
 
@@ -840,8 +840,8 @@ class RayPPOTrainer:
             if self.reward_kl_controller is not None
             else self.cfg.trainer.algorithm.kl_loss_coef
         )
-        custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
-        data["custom_rewards"] = custom_rewards
+        rewards = rewards - kl * max(0, kl_loss_coef)
+        data["rewards"] = rewards
 
         avg_kl: float = kl_mean.mean().item()
         avg_kl_max: float = kl_max.mean().item()
