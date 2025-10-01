@@ -1,5 +1,5 @@
 """
-uv run tests/test_openai_backend.py
+uv run --frozen tests/test_openai_backend.py
 """
 
 from skyrl_agent.integrations.openai import OpenAIBackend

@@ -44,5 +44,5 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct --host 0.0.0.0 --port 8000
 You also need set up the sandbox fusion following instructions here: https://github.com/bytedance/SandboxFusion.
 
 ```bash
-uv run --isolated --directory . --env-file .env --frozen python ./tests/react_task_tests/test.py --yaml tests/react_task_tests/react_interpreter.yaml --dataset NovaSky-AI/AIME-Repeated-8x-240 --split test
+uv run --isolated --frozen --directory . --env-file .env --frozen python ./tests/react_task_tests/test.py --yaml tests/react_task_tests/react_interpreter.yaml --dataset NovaSky-AI/AIME-Repeated-8x-240 --split test
 ```
