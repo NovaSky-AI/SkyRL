@@ -276,7 +276,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         critic = get_llm_for_sequence_regression(
             model_id_or_path,
             "critic",
-            normalize_reward=False,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
             bf16=self.cfg.trainer.bf16,
             target_modules=self.cfg.trainer.target_modules,

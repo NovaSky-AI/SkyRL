@@ -101,7 +101,6 @@ trainer:
     
     # value loss parameters
     value_clip: 0.2
-    normalize_reward: true
     dynamic_sampling:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever

@@ -469,7 +469,6 @@ def get_llm_for_sequence_regression(
     lora_alpha=16,
     target_modules=None,
     lora_dropout=0,
-    normalize_reward=False,
     use_flash_attention_2=False,
     ds_config: dict = None,
     init_value_head: bool = False,
@@ -485,7 +484,6 @@ def get_llm_for_sequence_regression(
         model_name_or_path (str): Path to pretrained model.
         model_type (str): Type of sequence classification model. Only `critic` is supported.
         bf16 (bool, optional): Whether enable bfloat16. Defaults to True.
-        normalize_reward (bool, optional): Whether normalize reward. Defaults to False.
         use_flash_attention_2 (bool, optional): Whether use Flash Attention 2.0. Defaults to False.
         ds_config (dict, optional): Deepspeed config, used to automatically splitting the model onto
             multiple gpus during from_pretrained when ZeRO-3 enabled. Defaults to None.
