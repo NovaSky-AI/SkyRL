@@ -26,10 +26,9 @@ import re
 import sys
 from pathlib import Path
 import shutil
-from safetensors.torch import save_file
 from typing import Dict, List
 
-
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoModel
 import torch
 
 
@@ -98,7 +97,7 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
     for shard in shards_paths:
         sd = load_single_shard(shard)
         for k, v in sd.items():
-            #nk = normalize_key(k)
+            # nk = normalize_key(k)
             nk = k
             if nk in merged:
                 if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
@@ -174,6 +173,39 @@ def _materialize_for_safetensors(state_dict) -> Dict[str, torch.Tensor]:
     return new_sd
 
 
+def guess_hf_class(cfg: AutoConfig):
+    """
+    Tries to find a reasonable HF class from config
+    Falls back to the AutoModel architecture if an LM head can't be detected
+    """
+    if getattr(cfg, "is_encoder_decoder", False):
+        return AutoModelForSeq2SeqLM
+    archs = getattr(cfg, "architectures", []) or []
+    if any(a.endswith("ForCausalLM") for a in archs):
+        return AutoModelForCausalLM
+    decoders = {"gpt2", "gpt_bigcode", "llama", "mistral", "qwen", "qwen2", "internlm", "mpt", "phi", "falcon"}
+    if getattr(cfg, "model_type", "") in decoders:
+        return AutoModelForCausalLM
+    return AutoModel
+
+
+def validate_load(out_dir: Path):
+    """
+    Optional: sanity-load with HF to ensure the saved safetensors is consumable
+    Loads on the CPU to avoid device / dtype quirk (this may be a problem for loading on GPU which could cause data loading issues)
+    """
+    try:
+        cfg = AutoConfig.from_pretrained(out_dir, local_files_only=True, trust_remote_code=True)
+        HFClass = guess_hf_class(cfg)
+        _ = HFClass.from_pretrained(
+            out_dir, local_files_only=True, device_map=None, dtype="auto", trust_remote_code=True
+        )
+        print("[validate] HF Load OK")
+    except Exception as e:
+        print("[validate][error] HF Load failed: {e} ", e)
+        raise RuntimeError("HF Load failed")
+
+
 def _untie_shared_tensors(sd) -> Dict[str, torch.Tensor]:
     """
     Untie shared tensors
@@ -218,16 +250,23 @@ def main():
     print(f"[info] Merged {len(state_dict)} tensors.")
 
     copy_hf_artifacts(policy_dir, output_dir)
-    weights_path = output_dir / "model.safetensors"
 
     clean_sd = _materialize_for_safetensors(state_dict)
     clean_sd = _untie_shared_tensors(clean_sd)
 
-    save_file(clean_sd, str(weights_path))
-    print(f"[success] Saved weights to {weights_path}")
+    # save_file(clean_sd, str(weights_path))
+    # print(f"[success] Saved weights to {weights_path}")
 
-    # cfg = AutoConfig.from_pretrained(output_dir, local_files_only=True, trust_remote_code=True)
-    # HFClass = guess_hf_class
+    cfg = AutoConfig.from_pretrained(output_dir, local_files_only=True, trust_remote_code=True)
+    HFClass = guess_hf_class(cfg)
+    hf_model = HFClass.from_config(cfg)
+    hf_model.save_pretrained(
+        save_directory=output_dir,
+        state_dict=clean_sd,
+    )
+
+    if args.validate_load:
+        validate_load(output_dir)
 
 
 if __name__ == "__main__":
