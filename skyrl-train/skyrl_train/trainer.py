@@ -507,7 +507,7 @@ class RayPPOTrainer:
         """Converts lists to a padded batch of tensors for training"""
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
-        custom_rewards: List[List[float]] = generator_output["rewards"]
+        rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
@@ -516,14 +516,14 @@ class RayPPOTrainer:
             sequences_tensor,
             attention_masks_tensor,
             response_masks_tensor,
-            custom_rewards_tensor,
+            rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
             response_ids,
-            custom_rewards,
+            rewards,
             loss_masks,
             logprobs,
         )
@@ -538,7 +538,7 @@ class RayPPOTrainer:
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
                 "attention_mask": attention_masks_tensor,
                 "response_mask": response_masks_tensor,
-                "custom_rewards": custom_rewards_tensor,
+                "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
             },
