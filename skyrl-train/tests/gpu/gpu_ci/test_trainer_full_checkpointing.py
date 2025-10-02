@@ -228,7 +228,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         trainer2 = create_minimal_trainer(cfg_resume)
 
         # Build models again
-        trainer2.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer2.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         # Load checkpoints
         loaded_global_step = trainer2.load_checkpoints()
