@@ -481,7 +481,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
                 placement.policy_num_gpus_per_node,
                 placement.critic_num_gpus_per_node,
                 placement.ref_num_gpus_per_node,
-                placement.reward_num_gpus_per_node,
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1

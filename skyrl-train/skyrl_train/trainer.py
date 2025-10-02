@@ -94,7 +94,6 @@ class RayPPOTrainer:
         self.policy_model: PPORayActorGroup = None
         self.critic_model: Optional[PPORayActorGroup] = None
         self.ref_model: Optional[PPORayActorGroup] = None
-        self.reward_model: Optional[PPORayActorGroup] = None
         # used for checkpoint cleanup
         self._node_ids: Optional[List[str]] = None
 
@@ -242,7 +241,7 @@ class RayPPOTrainer:
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
                         # remove some unwanted keys
-                        for key in ["custom_rewards", "rm_rewards"]:
+                        for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
 
@@ -323,19 +322,14 @@ class RayPPOTrainer:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
         if self.ref_model is not None:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-        if self.reward_model is not None:
-            dp_size = math.lcm(dp_size, self.reward_model.actor_infos[0].rank.dp_size)
         return entries[: (len(entries) // dp_size) * dp_size]
 
-    def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
+    def build_models(self, PolicyWorker, CriticWorker, RefWorker):
         """
         Initialize the actors for training, and handle colocation logic
         """
         cfg = self.cfg
         pg = None
-
-        if RewardWorker is not None and cfg.trainer.reward.model.path:
-            raise NotImplementedError("reward models are not supported yet")
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
@@ -398,21 +392,6 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
-            # reward model
-            if RewardWorker is not None and cfg.trainer.reward.model.path:
-                reward_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.reward_num_nodes,
-                    cfg.trainer.placement.reward_num_gpus_per_node,
-                    RewardWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.2,
-                    colocate_all=True,
-                    sequence_parallel_size=cfg.trainer.reward.sequence_parallel_size,
-                )
-            else:
-                reward_model = None
-
         else:
             if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
                 assert (
@@ -454,52 +433,18 @@ class RayPPOTrainer:
             else:
                 ref_model = None
 
-            # if colocated, create placement group for critic and reward model explicitly.
-            pg = None
-            if cfg.trainer.placement.colocate_critic_reward:
-                assert (
-                    cfg.trainer.placement.critic_num_nodes == cfg.trainer.placement.reward_num_nodes
-                    and cfg.trainer.placement.critic_num_gpus_per_node == cfg.trainer.placement.reward_num_gpus_per_node
-                ), "num_nodes and num_gpus_per_node must be the same when colocate critic and reward model."
-
-                bundles = [
-                    {
-                        "GPU": cfg.trainer.placement.critic_num_gpus_per_node,
-                        "CPU": cfg.trainer.placement.critic_num_gpus_per_node,
-                    }
-                    for _ in range(cfg.trainer.placement.critic_num_nodes)
-                ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(
                     cfg,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.75 if pg else 1,
+                    num_gpus_per_actor=1,
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
                 )
             else:
                 critic_model = None
-
-            # reward model
-            if RewardWorker is not None and cfg.trainer.reward.model.path:
-                reward_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.reward_num_nodes,
-                    cfg.trainer.placement.reward_num_gpus_per_node,
-                    RewardWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.25 if pg else 1,
-                    colocate_all=False,
-                    sequence_parallel_size=cfg.trainer.reward.sequence_parallel_size,
-                )
-            else:
-                reward_model = None
 
         if not cfg.trainer.placement.colocate_all:
             refs = []
@@ -518,8 +463,6 @@ class RayPPOTrainer:
                         num_training_steps=self.total_training_steps,
                     )
                 )
-            if cfg.trainer.reward.model.path:
-                refs.extend(reward_model.async_init_model(cfg.trainer.reward.model.path))
             ray.get(refs)
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
         else:
@@ -542,16 +485,12 @@ class RayPPOTrainer:
                     )
                 )
                 critic_model.offload_to_cpu()
-            if cfg.trainer.reward.model.path:
-                ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
-                reward_model.offload_to_cpu()
 
         self.policy_model: PPORayActorGroup = policy_model
         self.critic_model: Optional[PPORayActorGroup] = critic_model
         self.ref_model: Optional[PPORayActorGroup] = ref_model
-        self.reward_model: Optional[PPORayActorGroup] = reward_model
 
-        logger.info("init policy/ref/critic/reward models done")
+        logger.info("init policy/ref/critic models done")
 
     def init_weight_sync_state(self):
         """
@@ -568,7 +507,7 @@ class RayPPOTrainer:
         """Converts lists to a padded batch of tensors for training"""
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
-        custom_rewards: List[List[float]] = generator_output["rewards"]
+        rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
@@ -577,14 +516,14 @@ class RayPPOTrainer:
             sequences_tensor,
             attention_masks_tensor,
             response_masks_tensor,
-            custom_rewards_tensor,
+            rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
             response_ids,
-            custom_rewards,
+            rewards,
             loss_masks,
             logprobs,
         )
@@ -599,7 +538,7 @@ class RayPPOTrainer:
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
                 "attention_mask": attention_masks_tensor,
                 "response_mask": response_masks_tensor,
-                "custom_rewards": custom_rewards_tensor,
+                "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
             },
@@ -687,16 +626,14 @@ class RayPPOTrainer:
             - `["response_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["loss_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size"]
-            - `["rm_rewards"]`: Float[torch.Tensor, "batch_size"]
-            - `["custom_rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `.metadata["uids"]`: List[str]
 
         Adds:
             - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        # TODO (erictang000): we are just supporting custom rewards for now
-        token_level_rewards = data["custom_rewards"]
+        token_level_rewards = data["rewards"]
 
         advantages, returns = ppo_utils.compute_advantages_and_returns(
             token_level_rewards=token_level_rewards,
@@ -769,7 +706,6 @@ class RayPPOTrainer:
             - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size"]
-            - `["rm_rewards"]`: Float[torch.Tensor, "batch_size"]
         """
         data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
 
@@ -799,16 +735,6 @@ class RayPPOTrainer:
 
             base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
 
-        # handle colocate critic and reward model
-        if (
-            self.cfg.trainer.placement.colocate_critic_reward
-            and not self.cfg.trainer.placement.colocate_all
-            and self.critic_model is not None
-        ):
-            all_rank_values = ray.get(value_refs)
-            values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
-            ray.get(self.critic_model.async_run_ray_method("pass_through", "empty_cache"))
-
         if self.ref_model is not None:
             # handle colocate policy and ref model
             if self.cfg.trainer.placement.colocate_policy_ref or self.cfg.trainer.placement.colocate_all:
@@ -818,15 +744,6 @@ class RayPPOTrainer:
                 ray.get(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
         else:
             base_log_probs = None
-
-        # calculate rewards
-        rewards = None
-        if self.cfg.trainer.use_orm_score and self.reward_model:
-            reward_refs = self.reward_model.async_run_ray_method("mesh", "forward")
-
-            if self.cfg.trainer.placement.colocate_all:
-                all_rank_rewards = ray.get(reward_refs)
-                rewards = collect_results(self.reward_model.actor_infos, all_rank_rewards, key="output")
 
         # calculate action log probs
         if self.cfg.trainer.placement.colocate_all:
@@ -840,11 +757,10 @@ class RayPPOTrainer:
 
         # wait all models done
         # if not colocate_policy_ref, then need to gather base_log_probs
-        # if not colocate_critic_reward and self.critic_model is not None, then need to gather value
-        # reward_refs is always handled at last
+        # if self.critic_model is not None, then need to gather value
         if not self.cfg.trainer.placement.colocate_all:
             if not self.cfg.trainer.placement.colocate_policy_ref:
-                if not self.cfg.trainer.placement.colocate_critic_reward and self.critic_model is not None:
+                if self.critic_model is not None:
                     all_rank_values = ray.get(value_refs)
                     values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
@@ -854,16 +770,12 @@ class RayPPOTrainer:
                 else:
                     base_log_probs = None
 
-            elif not self.cfg.trainer.placement.colocate_critic_reward and self.critic_model is not None:
+            elif self.critic_model is not None:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
-
-            if self.cfg.trainer.use_orm_score and self.reward_model:
-                all_rank_rewards: List[TrainingOutputBatch] = ray.get(reward_refs)
-                rewards = collect_results(self.reward_model.actor_infos, all_rank_rewards, key="output")
 
         if not self.cfg.trainer.placement.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
@@ -871,13 +783,10 @@ class RayPPOTrainer:
                 empty_cache_refs.extend(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
             if self.critic_model is not None:
                 empty_cache_refs.extend(self.critic_model.async_run_ray_method("pass_through", "empty_cache"))
-            if self.reward_model is not None:
-                empty_cache_refs.extend(self.reward_model.async_run_ray_method("pass_through", "empty_cache"))
             ray.get(empty_cache_refs)
 
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
-        rewards = rewards[: len(sequences_all)] if rewards is not None else None
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
@@ -885,8 +794,6 @@ class RayPPOTrainer:
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
-        # rewards from the reward model
-        training_input["rm_rewards"] = rewards  # `None` or torch.Tensor
 
         if self.cfg.generator.sampling_params.logprobs is not None:
             # calculates the difference in probs between inference and trainer components
@@ -912,7 +819,7 @@ class RayPPOTrainer:
     ) -> TrainingInputBatch:
         """Applies a penalty for KL divergence between the policy log probs and the base model log probs to the rewards."""
         loss_masks_all: torch.Tensor = data["loss_mask"]
-        custom_rewards: torch.Tensor = data["custom_rewards"]
+        rewards: torch.Tensor = data["rewards"]
         base_action_log_probs: torch.Tensor = data["base_action_log_probs"]
         action_log_probs: torch.Tensor = data["action_log_probs"]
 
@@ -932,8 +839,8 @@ class RayPPOTrainer:
             if self.reward_kl_controller is not None
             else self.cfg.trainer.algorithm.kl_loss_coef
         )
-        custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
-        data["custom_rewards"] = custom_rewards
+        rewards = rewards - kl * max(0, kl_loss_coef)
+        data["rewards"] = rewards
 
         avg_kl: float = kl_mean.mean().item()
         avg_kl_max: float = kl_max.mean().item()
@@ -1066,8 +973,6 @@ class RayPPOTrainer:
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)
-        if model_type == "reward_model":
-            model = model[0]
         return model._actor_handlers[rank]
 
     def _get_mesh_rank(self, rank: int, model_type: str = "") -> MeshRank:
@@ -1083,7 +988,6 @@ class RayPPOTrainer:
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
         critic_save_dir = os.path.join(global_step_folder, "critic")
-        # TODO(tgriggs): Add reward model checkpointing.
 
         io.makedirs(global_step_folder, exist_ok=True)
 

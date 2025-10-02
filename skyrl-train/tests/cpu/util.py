@@ -34,7 +34,6 @@ def example_dummy_config():
                     "eps_clip_high": 0.2,
                     "clip_ratio_c": 3.0,
                     "value_clip": 0.2,
-                    "normalize_reward": True,
                     "policy_loss_type": "regular",
                     "loss_reduction": "token_mean",
                     "grpo_norm_by_std": True,

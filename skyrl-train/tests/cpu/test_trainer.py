@@ -86,11 +86,10 @@ def _get_test_data(trainer: RayPPOTrainer):
         [torch.tensor([1, 1, 1, 0, 0], dtype=torch.int32), torch.tensor([1, 1, 1, 1, 1], dtype=torch.int32)], dim=0
     )
     actual_response_lengths: Float[torch.Tensor, "batch_size"] = action_masks.sum(dim=-1).to(float)
-    custom_rewards_all: Float[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
+    rewards_all: Float[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
         [torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0]), torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0])], dim=0
     )
     values: Float[torch.Tensor, "batch_size action_len"] = torch.randn(batch_size, action_len)
-    r: Float[torch.Tensor, "batch_size action_len"] = torch.randn(batch_size, action_len)
     uids: np.ndarray[str] = np.array(["0", "0"])
 
     # Run method
@@ -102,9 +101,8 @@ def _get_test_data(trainer: RayPPOTrainer):
             "base_action_log_probs": base_log_probs,
             "action_log_probs": action_log_probs,
             "response_mask": action_masks,
-            "custom_rewards": custom_rewards_all,
+            "rewards": rewards_all,
             "values": values,
-            "rm_rewards": r,
         },
     )
     data.metadata = {
