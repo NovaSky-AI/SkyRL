@@ -165,10 +165,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         PolicyWorker = import_worker(strategy, "policy")
         CriticWorker = import_worker(strategy, "critic")
         RefWorker = import_worker(strategy, "ref")
-        RewardWorker = import_worker(strategy, "reward")
 
         # Build models
-        trainer1.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         # Set initial global step as if 2 steps were completed
         trainer1.global_step = 2
