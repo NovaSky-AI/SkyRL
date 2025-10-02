@@ -62,9 +62,10 @@ trainer:
   critic:
     model:
       path: null
-      lora_rank: 0
-      lora_alpha: 16
-      lora_dropout: 0
+      lora:
+        rank: 0
+        alpha: 16
+        dropout: 0
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6

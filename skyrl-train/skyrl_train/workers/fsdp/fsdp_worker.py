@@ -150,7 +150,9 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
 
-        if hasattr(peft_model, "peft_config"):
+        if self._is_lora:
+            assert hasattr(peft_model, "peft_config"), "LoRA model should have peft_config"
+
             # assume base model is already synced, sync LoRA adapters
             lora_sync_path = self.cfg.trainer.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)

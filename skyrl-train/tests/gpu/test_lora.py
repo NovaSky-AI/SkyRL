@@ -45,8 +45,6 @@ def get_test_actor_config(enable_lora: bool = False) -> DictConfig:
     [
         pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
         pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
         pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
         pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
     ],

@@ -277,6 +277,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 from vllm.lora.request import LoRARequest
 
                 batch_size = len(prompt_token_ids)
+                # dummy_lora_path for placeholder (actual loading done in add_lora())
                 lora_requests = [
                     LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path")
                 ] * batch_size
@@ -414,11 +415,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        try:
-            result = await self.llm.add_lora(lora_request)
-            return result
-        except Exception as e:
-            raise Exception(f"Error loading LoRA adapter: {e}")
+        result = await self.llm.add_lora(lora_request)
+        return result
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
@@ -432,6 +430,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 lora_int_id = lora_int_ids[0]
                 from vllm.lora.request import LoRARequest
 
+                # dummy_lora_path for placeholder (actual loading done in add_lora())
                 lora_request = LoRARequest(
                     lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
                 )

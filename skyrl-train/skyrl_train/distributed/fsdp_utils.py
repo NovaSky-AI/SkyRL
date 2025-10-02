@@ -532,7 +532,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
 def collect_lora_params(module: FSDP) -> OrderedDict:
     """
     collect lora params or full params if base model is not ready in vllm
-    work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
+    requires `module._fsdp_wrapped_module` to be a `PeftModel`
     """
     from peft.utils.save_and_load import get_peft_model_state_dict
 
