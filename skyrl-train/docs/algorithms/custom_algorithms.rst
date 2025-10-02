@@ -85,6 +85,8 @@ The registry system handles Ray actor synchronization when Ray is initialized. F
         exp = BasePPOExp(cfg)
         exp.run()
 
+.. _custom-trainer:
+
 Creating a Custom Trainer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
