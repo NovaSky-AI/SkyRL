@@ -633,7 +633,6 @@ class RayPPOTrainer:
             - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        # TODO (erictang000): we are just supporting custom rewards for now
         token_level_rewards = data["rewards"]
 
         advantages, returns = ppo_utils.compute_advantages_and_returns(
