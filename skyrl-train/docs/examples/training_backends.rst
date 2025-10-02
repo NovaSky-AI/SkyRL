@@ -5,6 +5,7 @@ In SkyRL, you can switch between different training backends with minimal change
 Currently, we support the following training backends:
 
 - DeepSpeed
+- Megatron
 - FSDP
 - FSDP2
 
@@ -97,3 +98,8 @@ Note that ``cpu_offload`` is distinct from worker state offloading with model co
 .. note:: 
     ``cpu_offload`` cannot be enabled for the policy or critic model with FSDP1, since gradient accumulation outside ``no_sync`` mode is not supported with CPU offloading. 
     See the limitations section in `FSDP docs <https://docs.pytorch.org/docs/stable/fsdp.html>`_ for more details.
+
+Megatron
+~~~~~~~~
+
+Switching to the megatron backend is more involved, requiring additional dependencies and configuration. For more details, see the docs on Megatron :ref:`megatron-installation`.

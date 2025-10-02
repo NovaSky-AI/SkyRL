@@ -131,7 +131,7 @@ Logging and Debugging Configuration
 Training Backends
 -----------------
 
-We support three backends: FSDP1, FSDP2 and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
+We support four backends: FSDP1, FSDP2, Megatron, and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
 
 .. _fsdp-configurations:
 
@@ -157,6 +157,47 @@ We use the same configuration group for FSDP1 and FSDP2
     In FSDP, ``cpu_offload`` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
 
     In `skyrl-train`, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on :doc:`model placement and colocation <placement>`
+
+.. _megatron-configurations:
+
+Megatron Configuration
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+    megatron_config:
+      tensor_model_parallel_size: 1 
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: null
+
+      ddp_config: # pass-through config to Megatron's `DistributedDataParallelConfig` object
+        # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
+        ...
+      optimizer_config_kwargs: # pass-through kwargs to Megatron's `OptimizerConfig` object
+        # any overlapping arguments with those we attempt to resolve in trainer.policy.optimizer_config will be overridden by the values here
+        # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/optimizer/optimizer_config.py#L12
+        ...
+      model_config_kwargs: # pass-through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
+        ...
+      transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
+        # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
+        ...
+
+
+- ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.
+- ``megatron_config.pipeline_model_parallel_size``: Pipeline model parallel size for sharding model layers across multiple GPUs.
+- ``megatron_config.context_parallel_size``: Context parallel size for reducing activation memory across the sequence length dimension.
+- ``megatron_config.expert_model_parallel_size``: The expert parallel size for sharding expert modules across multiple GPUs.
+- ``megatron_config.expert_tensor_parallel_size``: The tensor parallel size for each expert module. If set to ``null``, then the value will be resolved to ``tensor_model_parallel_size`` by Megatron. It is recommended to set this to ``1`` when enabling ``expert_model_parallel_size > 1`` for the best performance.
+
+Some rules for configuring these parameters:
+
+- ``model_size = pp_size * tp_size * cp_size``
+- ``dp_size = world_size / model_size``
+- ``world_size % (pp_size * ep_size * etp_size) == 0``
+    - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
 .. _deepspeed-configurations:
 
@@ -190,7 +231,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
 - ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
-- ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from ([Hugging Face Docs](https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType)).
+- ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from `Huggingface <https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType>`_.
 
 Policy Configuration
 --------------------
