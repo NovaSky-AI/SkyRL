@@ -24,7 +24,7 @@ Modifying the code
 - **Looking to modify the training loop for full control?** 
     - Follow the guide for :ref:`creating a custom trainer <custom-trainer>`. See :code_link:`examples/algorithms/dapo/main_dapo.py` for an example of how to modify the Trainer class for DAPO.
 
-- **Modifying the existing environment code (ex: adding a custom method for all ``Env`` classes, improving the ``SearchEnv`` implementation)?** 
+- **Modifying the existing environment code (ex: adding a custom method for all Env classes, improving the SearchEnv implementation)?** 
     - You would modify the code in `skyrl-gym <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/>`_. Note: you do **not** have to modify the ``skyrl-gym`` package for adding a new environment or task. 
 
 Contributing to SkyRL
