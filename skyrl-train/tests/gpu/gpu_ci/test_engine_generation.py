@@ -223,7 +223,7 @@ def test_inference_engines_generation(backend: str, tp_size: int):
     ],
     ids=["vllm", "sglang"],
 )
-def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int):
+def test_token_based_generation(backend: str, tp_size: int):
     """Test generation using prompt_token_ids for the specified backend."""
 
     try:
