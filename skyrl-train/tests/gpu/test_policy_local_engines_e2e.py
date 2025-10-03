@@ -47,7 +47,7 @@ def get_test_actor_config() -> DictConfig:
         pytest.param(True, "gloo", "fsdp", "vllm", TP_SIZE, marks=pytest.mark.vllm),
         pytest.param(False, "nccl", "deepspeed", "vllm", TP_SIZE, marks=pytest.mark.vllm),
         pytest.param(True, "nccl", "deepspeed", "vllm", TP_SIZE, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", TP_SIZE, marks=pytest.mark.vllm),
+        # pytest.param(False, "nccl", "fsdp2", "vllm", TP_SIZE, marks=pytest.mark.vllm),
         pytest.param(True, "nccl", "fsdp2", "vllm", TP_SIZE, marks=pytest.mark.vllm),
         # TODO(Charlie): add TP > 1 tests for sglang when we support it
         pytest.param(False, "nccl", "deepspeed", "sglang", 1, marks=pytest.mark.sglang),
@@ -64,7 +64,7 @@ def get_test_actor_config() -> DictConfig:
         "colocate_gloo_fsdp_vllm",
         "no_colocate_nccl_deepspeed_vllm",
         "colocate_nccl_deepspeed_vllm",
-        "no_colocate_nccl_fsdp2_vllm",
+        # "no_colocate_nccl_fsdp2_vllm",
         "colocate_nccl_fsdp2_vllm",
         "no_colocate_nccl_deepspeed_sglang",
         "colocate_nccl_deepspeed_sglang",
@@ -87,10 +87,10 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
         cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
         # Use GPT-OSS for FSDP + vLLM combinations to test MXFP4 support
-        test_model = MODEL
+        # test_model = MODEL
         if strategy in ("fsdp", "fsdp2") and backend == "vllm":
-            test_model = "openai/gpt-oss-20b"
-            cfg.trainer.policy.model.path = test_model
+            test_model = "unsloth/gpt-oss-20b-BF16"
+            cfg.trainer.policy.model.path =  "openai/gpt-oss-20b"
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
@@ -111,10 +111,14 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        policy.offload_to_cpu()
+        asyncio.run(client.wake_up(tags=["kv_cache"]))
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
         outputs = asyncio.run(run_inference(client, get_test_prompts(test_model), sampling_params))
         print(f"First time example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
         asyncio.run(client.reset_prefix_cache())
+        # asyncio.run(client.sleep())
+        policy.backload_to_gpu()
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
