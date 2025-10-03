@@ -31,12 +31,12 @@ def test_capabilities(service_client):
     """Test the get_server_capabilities endpoint."""
     capabilities = service_client.get_server_capabilities()
     model_names = [item.model_name for item in capabilities.supported_models]
-    assert "Qwen/Qwen3-8B" in model_names
+    assert "Qwen/Qwen3-0.6B" in model_names
 
 
 def test_training_workflow(service_client):
     """Test a complete training workflow."""
-    base_model = "Qwen/Qwen3-8B"
+    base_model = "Qwen/Qwen3-0.6B"
     training_client = service_client.create_lora_training_client(
         base_model=base_model
     )
@@ -86,3 +86,7 @@ def test_training_workflow(service_client):
     assert optim_result is not None
     assert fwdbwd_result.loss_fn_output_type == "scalar"
     assert len(fwdbwd_result.loss_fn_outputs) > 0
+
+    # Get a checkpoint
+    sampling_path = training_client.save_weights_for_sampler(name="0000").result().path
+    assert sampling_path is not None

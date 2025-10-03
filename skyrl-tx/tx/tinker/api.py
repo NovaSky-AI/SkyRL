@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Literal, Any, AsyncGenerator
 from uuid import uuid4
-from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -104,6 +103,17 @@ class OptimStepRequest(BaseModel):
     type: str | None = None
 
 
+class SaveWeightsForSamplerRequest(BaseModel):
+    model_id: str
+    path: str | None = None
+    type: str | None = None
+
+
+class SaveWeightsForSamplerResponse(BaseModel):
+    path: str
+    type: str | None = None
+
+
 class FutureResponse(BaseModel):
     future_id: str
     status: str = "pending"
@@ -158,15 +168,8 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         request_type=RequestType.CREATE_MODEL,
         model_id=model_id,
         request_data=request.model_dump(),
-        result_data={
-            "model_id": model_id,
-            "base_model": request.base_model,
-            "lora_config": request.lora_config.model_dump() if request.lora_config else None,
-            "status": "created",
-            "request_id": request_id
-        },
-        status=RequestStatus.COMPLETED,
-        completed_at=datetime.now(timezone.utc)
+        result_data=None,  # Will be filled by background worker
+        status=RequestStatus.PENDING
     )
     session.add(future_db)
 
@@ -265,11 +268,37 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
     return FutureResponse(future_id=request_id, status="pending", request_id=request_id)
 
 
+@app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
+async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
+    """Saves weights in a format compatible with sampling/inference servers."""
+    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
+    result = await session.exec(statement)
+    model = result.first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    request_id = f"req_{uuid4().hex[:8]}"
+
+    future_db = FutureDB(
+        request_id=request_id,
+        request_type=RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+        model_id=request.model_id,
+        request_data=request.model_dump(),
+        result_data=None,  # Will be filled by background worker
+        status=RequestStatus.PENDING
+    )
+    session.add(future_db)
+    await session.commit()
+
+    return FutureResponse(future_id=request_id, status="pending", request_id=request_id)
+
+
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
 async def get_server_capabilities():
     """Retrieve information about supported models and server capabilities."""
     supported_models = [
-        SupportedModel(model_name="Qwen/Qwen3-8B"),
+        SupportedModel(model_name="Qwen/Qwen3-0.6B"),
     ]
     return GetServerCapabilitiesResponse(supported_models=supported_models)
 
