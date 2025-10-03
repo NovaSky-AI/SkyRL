@@ -7,6 +7,9 @@ def example_dummy_config():
     return OmegaConf.create(
         {
             "trainer": {
+                "placement": {
+                    "colocate_all": True,
+                },
                 "project_name": "unit-test",
                 "run_name": "test-run",
                 "logger": "tensorboard",
