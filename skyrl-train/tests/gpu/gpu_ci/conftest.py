@@ -3,6 +3,8 @@ import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl_train.utils.utils import peer_access_supported
+import torch
+import torch.distributed as dist
 
 
 @lru_cache(5)
@@ -25,20 +27,20 @@ def ray_init_fixture():
     yield
     ray.shutdown()
 
-    # try:
-    #     ray.kill(ray.get_actor("*", allow_unknown=True), no_restart=True)
-    # except Exception:
-    #     pass
+    try:
+        ray.kill(ray.get_actor("*", allow_unknown=True), no_restart=True)
+    except Exception:
+        pass
 
-    # ray.shutdown()
+    ray.shutdown()
 
-    # if torch.cuda.is_available():
-    #     torch.cuda.empty_cache()
-    #     torch.cuda.synchronize()
-    #     torch.cuda.reset_peak_memory_stats()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
 
-    # try:
-    #     if dist.is_initialized():
-    #         dist.destroy_process_group()
-    # except Exception:
-    #     pass
+    try:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    except Exception:
+        pass
