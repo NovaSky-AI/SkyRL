@@ -3,7 +3,7 @@ Implementing Custom Algorithms
 
 SkyRL-Train provides a registry system for easily implementing custom algorithms (advantage estimators, policy loss) without modifying the core codebase. 
 The API for the registry system can be found in the :doc:`registry API <../api/registry>`.
-Example scripts of using the registry can be found in at :code_link:`examples/algorithm/`.
+Example scripts of using the registry can be found at :code_link:`examples/algorithms/`.
 
 Additionally for more control, you can subclass the ``BasePPOExp`` class from :code_link:`skyrl_train/entrypoints/main_base.py` and override the ``BasePPOExp.get_trainer`` method to return a custom trainer class.
 This allows you to have full control over the training loop and implementing custom reward functions and output postprocessing.

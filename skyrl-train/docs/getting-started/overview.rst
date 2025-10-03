@@ -16,11 +16,11 @@ Trainer
 ~~~~~~~
 Performs the optimization steps based on configured RL algorithm. Updates model parameters based on generated trajectories and their assigned rewards.
 
-- `Trainer Worker interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/worker.py#L162>`_
+- `Base Training Worker interface <https://github.com/NovaSky-AI/SkyRL/blob/1c6ff519fe3b06cb8afd1ed6846348373d227bea/skyrl-train/skyrl_train/workers/worker.py#L180>`_
 
-  - `FSDP Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py>`_
-  - `DeepSpeed Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/deepspeed/deepspeed_worker.py>`_
-  - `Megatron Worker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/megatron/megatron_worker.py>`_
+  - `FSDPWorker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py>`_
+  - `DeepSpeedWorker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/deepspeed/deepspeed_worker.py>`_
+  - `MegatronWorker <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/workers/megatron/megatron_worker.py>`_
 
 - `PPORayActorGroup <https://github.com/NovaSky-AI/SkyRL/blob/5a82809e218b2e0c3dd431377fb672e35ecc4a84/skyrl-train/skyrl_train/workers/worker.py#L385>`_: Our abstraction for a group of training workers (as Ray actors) that jointly execute operations for a given model (e.g., policy model, critic model, etc.).
 
@@ -29,14 +29,14 @@ Generator
 Generates complete trajectories and computes their rewards. The Generator encompasses both the InferenceEngine (to get model completions) and Environment (to execute actions) as well as custom agentic or data generation logic build around model inference, such as context management, sampling methods, or tree search.
 
 - `Base Generator interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/base.py>`_
-- `Generator built for SkyRL-Gym <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/skyrl_gym_generator.py>`_
+- `SkyRLGymGenerator built for SkyRL-Gym <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/generators/skyrl_gym_generator.py>`_
 
 InferenceEngine
 ~~~~~~~~~~~~~~~
 Executes inference on the policy model to produce model outputs (i.e., the RL agent's actions). Typically, multiple InferenceEngines are deployed to process prompts in parallel.
 
 - `Base InferenceEngine interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/inference_engines/base.py>`_
-- `InferenceEngine client to manage multiple engines <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/inference_engines/inference_engine_client.py>`_
+- `InferenceEngineClient to manage multiple engines <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/inference_engines/inference_engine_client.py>`_
 - `vLLM backend <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/skyrl_train/inference_engines/vllm>`_
 - `SGLang backend <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/inference_engines/sglang/sglang_server.py>`_
 
@@ -55,5 +55,5 @@ Controller
 ~~~~~~~~~~
 Manages physical placement, initialization, and control flow of training execution for each of the above components.
 
-- The training control loop currently sits in `trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/5a82809e218b2e0c3dd431377fb672e35ecc4a84/skyrl-train/skyrl_train/trainer.py#L194>`_
+- The training control loop currently sits in `trainer.py <https://github.com/NovaSky-AI/SkyRL/blob/1c6ff519fe3b06cb8afd1ed6846348373d227bea/skyrl-train/skyrl_train/trainer.py#L128>`_
 - It is a WIP to move the control loop to a separate component for even greater flexibility.
