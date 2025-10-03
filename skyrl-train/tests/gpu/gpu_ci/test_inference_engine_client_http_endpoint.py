@@ -175,7 +175,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 
 
 @pytest.mark.vllm
-def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
+def test_http_endpoint_completions_routing_and_batching():
     """
     Since /completions endpoint supports both single and batched requests, and we support
     either using session_id or not, we test all combinations.
@@ -248,7 +248,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
 @pytest.mark.vllm
-def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
+def test_http_endpoint_openai_api_with_weight_sync():
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
 
@@ -431,7 +431,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     # ids=["vllm", "sglang"],
     ids=["vllm"],
 )
-def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
+def test_http_endpoint_with_remote_servers(backend, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
@@ -534,7 +534,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
 
 @pytest.mark.vllm
-def test_structured_generation(ray_init_fixture):
+def test_structured_generation():
     try:
         cfg = get_test_actor_config(num_inference_engines=1)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
@@ -601,7 +601,7 @@ def test_structured_generation(ray_init_fixture):
 
 # TODO(Charlie): sglang has slightly different error response format. We need to handle it.
 @pytest.mark.vllm
-def test_http_endpoint_error_handling(ray_init_fixture):
+def test_http_endpoint_error_handling():
     """
     Test error handling for various invalid requests.
     """

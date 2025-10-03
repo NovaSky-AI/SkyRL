@@ -121,7 +121,7 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
     ],
     ids=["vllm", "sglang"],
 )
-def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int):
+def test_inference_engines_generation(backend: str, tp_size: int):
     """
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
