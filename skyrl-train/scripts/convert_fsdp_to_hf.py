@@ -58,6 +58,7 @@ def get_model_shards(policy_dir: Path) -> List[Path]:
     return shards_paths
 
 
+# Not used at the moment
 def normalize_key(k: str) -> str:
     """
     Return a normalized key to ensure consistency across checkpointing frameworks
@@ -87,6 +88,76 @@ def load_single_shard(path: Path) -> Dict[str, torch.Tensor]:
         raise ValueError(f"Unexpected checkpoint format at {path} (type={type(obj)})")
     return {k: v for k, v in obj.items() if isinstance(v, torch.Tensor)}
 
+def is_vocab_key(k: str) -> bool:
+    """
+    Check for the keys in the state_dict that we want to merge shards for, in a MultiGPU setup
+
+    These keys are the keys in the state_dict that should be merged into a single tensor (from all the shards)
+    """
+    suffixes = (
+        "embed_tokens.weight",
+        "lm_head.weight",
+        "word_embeddings.weight",
+        "wte.weight",
+    )
+    return any(k.endswith(sfx) for sfx in suffixes)
+
+
+def merge_two_shards(existing:torch.Tensor, new_shard: torch.Tensor, key:str , merge_type: Optional[str]=None) -> torch.Tensor:
+    """
+    Merge two tensor shards into a single tensor, containing both the existing and new shards
+    Merge tensors with key in the vocabulary as the default case, always.
+    If key (tensor name) is not in the vocabulary then we merge based on the `merge_type` parameter
+        - (str=default) Default: On the first dimension of the tensor
+        - (str=vocab_parallel) Vocab-parallel (embeddings/lm_head): cat_dim = 0 (batch / words)
+        - (str=col_parallel) Column-parallel linear (weights split output features): cat_dim = 1 (output features)
+        - (str=row_parallel) Row-parallel linear ( weights split input features): cat_dim = 2 (input features)
+        - (str=other) Replicated Parameters (LayerNorm, RMSNorm, rotary, etc): sum existing and new_shard
+    
+    If the merge_type is equal to None, then we use heuristic fallback. 
+
+    Heuristic Fallback:
+      * If only dim0 differs -> cat dim=0
+      * If only dim1 differs -> cat dim=1
+      * If only dim2 differs -> cat dim=2
+      * If shapes equal -> add (sum)  (useful for row-parallel biases) 
+    """
+    if is_vocab_key(key) or merge_type=="default":
+        return torch.cat([existing, new_shard], dim=0)
+
+    if merge_type == "vocab_parallel":
+        return torch.cat([existing, new_shard], dim=0)
+    elif merge_type == "col_parallel":
+        if existing.ndim >=2 and new_shard.ndim >=2:
+            return torch.cat([existing, new_shard], dim=1)
+        else:
+            raise ValueError(f"existing.ndim={existing.ndim}, new_shard.ndim={new_shard.ndim}, cannot do col_parallel merging because at least 2 dimensions of both tensors are required")
+    elif merge_type == "row_parallel":
+        if existing.ndim >=3 and new_shard.ndim >=3:
+            return torch.cat([existing, new_shard], dim=2)
+        else:
+            raise ValueError(f"existing.ndim={existing.ndim}, new_shard.ndim={new_shard.ndim}, cannot do row_parallel merging because at least 3 dimensions of both tensors are required")
+        return torch.cat([existing, new_shard], dim=2)
+    elif merge_type == "other":
+        return existing
+    else:
+        ## merge_type = None or unknown, then we simply merge by heuristic
+        if existing.ndim >= 2 and existing.shape[0] != new.shape[0] and existing.shape[1] == new.shape[1]:
+            # Likely word-parallel linear weight (PyTorch Linear is [out, in])
+            return torch.cat((existing, new), dim=0)
+        if existing.ndim >= 2 and existing.shape[0] == new.shape[0] and existing.shape[1] != new.shape[1]:
+            # Likely col-parallel linear weight
+            return torch.cat((existing, new), dim=1)
+        if existing.ndim >= 3 and existing.shape[0] == new.shape[0] and existing.shape[1] == new.shape[1] and existing.shape[2] != new.shape[2]:
+            # Likely row-parallel linear weight
+            return torch.cat((existing, new), dim=2)
+        if existing.shape == new.shape:
+            # Could be row-parallel bias or replicated tensors.
+            # Try SUM
+            return existing + new
+        raise ValueError(f"Don't know how to merge key '{key}' with shapes {existing.shape} and {new.shape}")
+
+
 
 def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
     """
@@ -109,6 +180,9 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
                         f"Key collision with mismatch for '{nk}' between shards "
                         f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
                     )
+                else:
+                    ## Merged here
+                    merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous())
             else:
                 merged[nk] = v.detach().cpu().contiguous()
     if not merged:
