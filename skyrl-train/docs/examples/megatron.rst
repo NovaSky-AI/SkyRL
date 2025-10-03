@@ -82,7 +82,7 @@ Installation
 
 Setting up the Docker image
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``erictang000/skyrl-train-ray-2.48.0-py3.12-cu12.8-megatron`` image instead of the default image.
+To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8-megatron`` image instead of the default image.
 
 This ensures that the necessary dependencies needed for Megatron (i.e. ``TransformerEngine``) are installed and don't need to be built on each node for each run, which can be time consuming.
 
