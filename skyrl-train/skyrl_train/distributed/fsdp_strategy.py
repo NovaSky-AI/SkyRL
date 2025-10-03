@@ -19,7 +19,7 @@ from torch.distributed.fsdp import CPUOffload, MixedPrecision
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -391,61 +391,63 @@ class FSDPStrategy(DistributedStrategy):
         # Define paths for saving individual rank files
         rank = self.get_rank()
         world_size = self.world_size
-        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-        # Save using appropriate FSDP context
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                # Get and save model state dict
-                model_state_dict = save_model.state_dict()
-                self.print(f"[rank-{rank}]: Saving model to {model_path}")
-                with io.open_file(model_path, "wb") as f:
-                    torch.save(model_state_dict, f)
+        with io.local_work_dir(ckpt_dir) as work_dir:
+            model_path = os.path.join(work_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+            optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+            extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-                # Get and save optimizer state dict if optimizer is provided
-                optimizer_state_dict = {}
-                if optimizer is not None:
-                    optimizer_state_dict = optimizer.state_dict()
-                self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
-                with io.open_file(optim_path, "wb") as f:
-                    torch.save(optimizer_state_dict, f)
+            # Save using appropriate FSDP context
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+                    # Get and save model state dict
+                    model_state_dict = save_model.state_dict()
+                    self.print(f"[rank-{rank}]: Saving model to {model_path}")
+                    with io.open_file(model_path, "wb") as f:
+                        torch.save(model_state_dict, f)
 
-                # Get scheduler state dict if scheduler is provided
-                lr_scheduler_state_dict = {}
-                if scheduler is not None:
-                    lr_scheduler_state_dict = scheduler.state_dict()
+                    # Get and save optimizer state dict if optimizer is provided
+                    optimizer_state_dict = {}
+                    if optimizer is not None:
+                        optimizer_state_dict = optimizer.state_dict()
+                    self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
+                    with io.open_file(optim_path, "wb") as f:
+                        torch.save(optimizer_state_dict, f)
 
-                # Create extra state dict with client state and any additional info
-                extra_state_dict = {
-                    "lr_scheduler": lr_scheduler_state_dict,
-                    "client_state": client_state,
-                    "tag": tag,
-                    "fsdp_strategy": self.fsdp_strategy,
-                    "world_size": world_size,
-                    "rank": rank,
-                    "rng": self.get_rng_state(),  # Add RNG state for reproducibility
-                }
+                    # Get scheduler state dict if scheduler is provided
+                    lr_scheduler_state_dict = {}
+                    if scheduler is not None:
+                        lr_scheduler_state_dict = scheduler.state_dict()
 
-                # Save extra state
-                self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
-                with io.open_file(extra_path, "wb") as f:
-                    torch.save(extra_state_dict, f)
+                    # Create extra state dict with client state and any additional info
+                    extra_state_dict = {
+                        "lr_scheduler": lr_scheduler_state_dict,
+                        "client_state": client_state,
+                        "tag": tag,
+                        "fsdp_strategy": self.fsdp_strategy,
+                        "world_size": world_size,
+                        "rank": rank,
+                        "rng": self.get_rng_state(),  # Add RNG state for reproducibility
+                    }
 
-                # Garbage collect temporary buffers from materializing the state dicts
-                gc.collect()
+                    # Save extra state
+                    self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
+                    with io.open_file(extra_path, "wb") as f:
+                        torch.save(extra_state_dict, f)
 
-        if self.is_rank_0():
-            config_save_model = self._unwrap_model(model)
-            hf_dir = os.path.join(ckpt_dir, "huggingface")
-            self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
+                    # Garbage collect temporary buffers from materializing the state dicts
+                    gc.collect()
 
-            # Also save runtime FSDP config
-            fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
-            with io.open_file(fsdp_config_path, "w") as f:
-                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+            if self.is_rank_0():
+                config_save_model = self._unwrap_model(model)
+                hf_dir = os.path.join(work_dir, "huggingface")
+                self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
+
+                # Also save runtime FSDP config
+                fsdp_config_path = os.path.join(work_dir, "fsdp_config.json")
+                with io.open_file(fsdp_config_path, "w") as f:
+                    json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
@@ -480,34 +482,36 @@ class FSDPStrategy(DistributedStrategy):
         # Define paths for loading individual rank files
         rank = self.get_rank()
         world_size = self.world_size
-        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-        # Check if checkpoint files exist
-        if not io.exists(model_path):
-            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-        if not io.exists(extra_path):
-            raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        with io.local_read_dir(ckpt_dir) as read_dir:
+            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-        # Optimizer path is optional since we may not save optimizer states initially
-        optim_exists = io.exists(optim_path)
+            # Check if checkpoint files exist
+            if not io.exists(model_path):
+                raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+            if not io.exists(extra_path):
+                raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
 
-        self.print(f"[rank-{rank}]: Loading model from {model_path}")
-        self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
-        if optim_exists:
-            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
+            # Optimizer path is optional since we may not save optimizer states initially
+            optim_exists = io.exists(optim_path)
 
-        # Load state dictionaries from disk
-        with io.open_file(model_path, "rb") as f:
-            model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
-        with io.open_file(extra_path, "rb") as f:
-            extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            self.print(f"[rank-{rank}]: Loading model from {model_path}")
+            self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
+            if optim_exists:
+                self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
-        optimizer_state_dict = {}
-        if optim_exists and load_optimizer_states:
-            with io.open_file(optim_path, "rb") as f:
-                optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            # Load state dictionaries from disk
+            with io.open_file(model_path, "rb") as f:
+                model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            with io.open_file(extra_path, "rb") as f:
+                extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+
+            optimizer_state_dict = {}
+            if optim_exists and load_optimizer_states:
+                with io.open_file(optim_path, "rb") as f:
+                    optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})

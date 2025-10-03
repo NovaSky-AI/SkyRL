@@ -23,7 +23,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy

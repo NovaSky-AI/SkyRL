@@ -23,7 +23,7 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.models import Actor
 from skyrl_train.distributed.utils import get_optimizer_grouped_parameters, ModelOrModelOptimPair
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 
 from safetensors.torch import save_file
 

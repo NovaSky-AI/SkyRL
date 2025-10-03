@@ -39,6 +39,7 @@ dependencies = [
     "skyrl-gym",
     "flash-attn",
     "polars",
+    "s3fs",
 ]
 
 [tool.uv]

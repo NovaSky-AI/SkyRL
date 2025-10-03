@@ -14,7 +14,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, conc
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
