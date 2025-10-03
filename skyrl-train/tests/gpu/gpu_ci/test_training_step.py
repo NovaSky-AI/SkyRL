@@ -1,6 +1,7 @@
 """
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_training_step.py
+uv run --isolated --extra dev --extra deepspeed pytest tests/gpu/gpu_ci/test_training_step.py
+
 """
 
 import ray
@@ -21,6 +22,7 @@ def get_test_actor_config() -> DictConfig:
 
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.logger = "console"
 
     return cfg
 
@@ -43,7 +45,7 @@ def cfg() -> DictConfig:
         "unpacked-fsdp2",
     ],
 )
-async def test_policy_training_step(cfg, packed, strategy):
+async def test_policy_training_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
@@ -99,7 +101,7 @@ async def test_policy_training_step(cfg, packed, strategy):
         "unpacked-fsdp2",
     ],
 )
-async def test_critic_training_step(cfg, packed, strategy):
+async def test_critic_training_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize critic actor group, send dummy experience to training_step, validate output.
     """

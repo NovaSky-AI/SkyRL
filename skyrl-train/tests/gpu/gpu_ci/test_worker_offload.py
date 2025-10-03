@@ -1,5 +1,5 @@
 """
-uv run --extra dev --isolated pytest tests/gpu/test_worker_offload.py
+uv run --extra dev --extra deepspeed --isolated pytest tests/gpu/gpu_ci/test_worker_offload.py
 """
 
 import ray
@@ -13,6 +13,7 @@ from tests.gpu.utils import init_worker_with_type, make_dummy_experience, make_d
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.training_batch import TrainingOutputBatch
+
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -56,7 +57,7 @@ def cfg() -> DictConfig:
         "fsdp2_critic",
     ],
 )
-async def test_critic_policy_offload_memory_and_correctness(cfg, worker_type, strategy):
+async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that offloading model memory to cpu lowers memory usage and that correctness
     is maintained after backloading and running a training step.
@@ -159,7 +160,7 @@ async def test_critic_policy_offload_memory_and_correctness(cfg, worker_type, st
         "fsdp2_ref",
     ],
 )
-async def test_fsdp_ref_offload_memory_and_correctness(cfg, worker_type, strategy):
+async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that offloading model memory to cpu lowers memory usage and that correctness
     is maintained after backloading and running a forward pass. Note we don't test
@@ -251,7 +252,7 @@ async def test_fsdp_ref_offload_memory_and_correctness(cfg, worker_type, strateg
         "fsdp2_ref",
     ],
 )
-async def test_cpu_offload_correctness(cfg, worker_type, strategy):
+async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that the cpu_offload is working correctly for different backends.
 
@@ -297,7 +298,7 @@ async def test_cpu_offload_correctness(cfg, worker_type, strategy):
         "fsdp2",
     ],
 )
-def test_offload_after_ckpt(strategy):
+def test_offload_after_ckpt(ray_init_fixture, strategy):
     """
     Test ckpt+offload logic by:
     1. Creating model and doing one training step
@@ -350,10 +351,7 @@ def test_offload_after_ckpt(strategy):
         assert offload_delta > 2.5 * 1024**3, f"Offload memory is {offload_delta} bytes, should be > 2.5GB"
 
     finally:
-        # Clean up ray
-        ray.shutdown()
-
-        # Clean up checkpoint directory
         if checkpoint_dir and os.path.exists(checkpoint_dir):
             print(f"Removing checkpoint directory: {checkpoint_dir}")
             shutil.rmtree(checkpoint_dir)
+        ray.shutdown()

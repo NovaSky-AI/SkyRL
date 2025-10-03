@@ -17,7 +17,6 @@ from tests.gpu.utils import are_responses_similar, get_test_prompts, init_remote
 from transformers import AutoTokenizer
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -57,7 +56,7 @@ def init_ray_inference_engines(backend: str, tp_size: int, dp_size: int, config:
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
         async_engine=True,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=32768,
         max_num_seqs=1024,
         tokenizer=tokenizer,
         backend=backend,
@@ -131,7 +130,6 @@ def test_inference_engines_generation(backend: str, tp_size: int, dp_size: int):
     try:
         cfg = get_test_actor_config()
         cfg.generator.backend = backend
-        initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -233,7 +231,6 @@ def test_token_based_generation(backend: str, tp_size: int, dp_size: int):
     try:
         cfg = get_test_actor_config()
         cfg.generator.backend = backend
-        initialize_ray(cfg)
 
         prompts = get_test_prompts(MODEL, 3)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)

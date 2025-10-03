@@ -12,7 +12,6 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_infere
 
 import json
 import pytest
-import time
 import asyncio
 from http import HTTPStatus
 from typing import Any, Dict, List, Union
@@ -36,7 +35,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     shutdown_server,
 )
 from tests.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from tests.gpu.utils import init_inference_engines, initialize_ray
+from tests.gpu.utils import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
 
 from transformers import AutoTokenizer
@@ -192,10 +191,6 @@ def test_http_endpoint_completions_routing_and_batching():
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        # Ensure a clean Ray state before initializing engines in this fixture.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
         client, _ = init_inference_engines(
             cfg=cfg,
@@ -270,10 +265,6 @@ def test_http_endpoint_openai_api_with_weight_sync():
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        # Ensure a clean Ray state before initializing engines in this fixture.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
         client, pg = init_inference_engines(
             cfg=cfg,
             use_local=True,
@@ -459,10 +450,6 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1)
         cfg.generator.backend = backend
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
-        initialize_ray(cfg)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
@@ -549,10 +536,6 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
 @pytest.mark.vllm
 def test_structured_generation():
     try:
-        # Ensure no leftover Ray context from earlier fixtures or tests.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
         cfg = get_test_actor_config(num_inference_engines=1)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
@@ -623,10 +606,6 @@ def test_http_endpoint_error_handling():
     Test error handling for various invalid requests.
     """
     try:
-        # Ensure no leftover Ray context from earlier fixtures or tests.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
         cfg = get_test_actor_config(num_inference_engines=2)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
