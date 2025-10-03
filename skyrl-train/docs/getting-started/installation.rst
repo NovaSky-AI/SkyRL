@@ -80,7 +80,7 @@ The only packages required are `build-essential` and `libnuma <https://github.co
 
    .. code-block:: bash
 
-       AttributeError: ray::FSDPRefRayActorBase.offload_to_cpu: undefined symbol: numa_parse_nodestring. Did you mean: '_return_value'?
+       AttributeError: ray::FSDPRefWorkerBase.offload_to_cpu: undefined symbol: numa_parse_nodestring. Did you mean: '_return_value'?
 
 Installing SkyRL-Train
 ~~~~~~~~~~~~~~~~~~~~~~

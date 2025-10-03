@@ -13,7 +13,7 @@ from torch import distributed as dist
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
-from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
+from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 import megatron.core.parallel_state as mpu
 from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
@@ -129,7 +129,7 @@ class MegatronStrategy(DistributedStrategy):
 
     def save_checkpoint(
         self,
-        model: MegatronPPOPolicy,
+        model: MegatronModelWrapper,
         ckpt_dir: str,
         node_local_rank: int,
         optimizer: Optional[DistributedOptimizer] = None,
@@ -189,7 +189,7 @@ class MegatronStrategy(DistributedStrategy):
 
     def load_checkpoint(
         self,
-        model: MegatronPPOPolicy,
+        model: MegatronModelWrapper,
         ckpt_dir: str,
         optimizer: Optional[DistributedOptimizer] = None,
         scheduler: Optional[OptimizerParamScheduler] = None,
@@ -253,7 +253,7 @@ class MegatronStrategy(DistributedStrategy):
 
         return ckpt_dir, {}
 
-    def save_hf_model(self, bridge, model: MegatronPPOPolicy, output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)

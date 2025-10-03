@@ -17,7 +17,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl_train.models import Actor
+from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.utils.io import io
 from skyrl_train.distributed.fsdp_utils import (
@@ -114,7 +114,7 @@ class FSDPStrategy(DistributedStrategy):
 
         For all cases except fsdp2 with cpu_offload=True, we need to manually offload weights/optimizer to cpu.
         """
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         else:
             model = model
@@ -130,7 +130,7 @@ class FSDPStrategy(DistributedStrategy):
 
     def backload_to_gpu(self, model, optimizer, non_blocking=True):
         """Reload model weights back to GPU."""
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         else:
             model = model
@@ -157,7 +157,7 @@ class FSDPStrategy(DistributedStrategy):
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
         grad_norm = None
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
 
         if self.max_norm > 0:
@@ -199,7 +199,7 @@ class FSDPStrategy(DistributedStrategy):
 
         return ret[0] if len(ret) == 1 else ret
 
-    def _fsdp_init_model(self, model, is_train=True, is_actor=False):
+    def _fsdp_init_model(self, model, is_train=True, is_wrapped=False):
         # Initialize FSDP wrapping policy
         wrap_policy = get_fsdp_wrap_policy(module=model, config=self.fsdp_config.get("wrap_policy", None))
 
@@ -229,7 +229,7 @@ class FSDPStrategy(DistributedStrategy):
             if not is_train and self.fsdp_config.get("cpu_offload", False):
                 cpu_offload = CPUOffload(offload_params=True)
             fsdp_module = FSDP(
-                model.model if is_actor else model,
+                model.model if is_wrapped else model,
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
                 use_orig_params=False,
@@ -255,11 +255,11 @@ class FSDPStrategy(DistributedStrategy):
                 "offload_policy": cpu_offload,
                 "reshard_after_forward": self.fsdp_config.get("reshard_after_forward", True),
             }
-            actor_module = model.model if is_actor else model
-            full_state = actor_module.state_dict()
-            apply_fsdp2(actor_module, fsdp_kwargs, self.fsdp_config)
-            fsdp2_load_full_state_dict(actor_module, full_state, cpu_offload)
-            fsdp_module = actor_module
+            module = model.model if is_wrapped else model
+            full_state = module.state_dict()
+            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+            fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+            fsdp_module = module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
 
@@ -267,41 +267,41 @@ class FSDPStrategy(DistributedStrategy):
 
     def _fsdp_init_train_model(self, model, optimizer, scheduler):
         """Initialize a model for training with FSDP"""
-        is_actor = isinstance(model, Actor)
-        fsdp_module = self._fsdp_init_model(model, is_train=True, is_actor=is_actor)
+        is_wrapped = isinstance(model, HFModelWrapper)
+        fsdp_module = self._fsdp_init_model(model, is_train=True, is_wrapped=is_wrapped)
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            actor_optimizer = optim.AdamW(
+            new_optimizer = optim.AdamW(
                 fsdp_module.parameters(),
                 lr=optim_config.lr,
                 betas=optim_config.adam_betas,
                 weight_decay=optim_config.weight_decay,
             )
 
-            actor_lr_scheduler = get_scheduler(
+            lr_scheduler = get_scheduler(
                 optim_config.scheduler,
-                actor_optimizer,
+                new_optimizer,
                 num_warmup_steps=optim_config.num_warmup_steps,
                 num_training_steps=self.total_training_steps,
             )
         else:
-            actor_optimizer = None
-            actor_lr_scheduler = None
+            new_optimizer = None
+            lr_scheduler = None
 
-        if is_actor:
+        if is_wrapped:
             model.model = fsdp_module
         else:
             model = fsdp_module
 
-        return model, actor_optimizer, actor_lr_scheduler
+        return model, new_optimizer, lr_scheduler
 
     def _fsdp_init_eval_model(self, model):
         """Initialize a model for evaluation with FSDP"""
-        is_actor = isinstance(model, Actor)
-        fsdp_module = self._fsdp_init_model(model, is_train=False, is_actor=is_actor)
+        is_wrapped = isinstance(model, HFModelWrapper)
+        fsdp_module = self._fsdp_init_model(model, is_train=False, is_wrapped=is_wrapped)
 
-        if is_actor:
+        if is_wrapped:
             model.model = fsdp_module
         else:
             model = fsdp_module
@@ -309,9 +309,9 @@ class FSDPStrategy(DistributedStrategy):
         return model
 
     def _unwrap_model(self, model) -> nn.Module:
-        """Unwrap model from Actor or FSDP"""
-        # Handle Actor wrapper
-        if isinstance(model, Actor):
+        """Unwrap model from HFModelWrapper or FSDP"""
+        # Handle HFModelWrapper wrapper
+        if isinstance(model, HFModelWrapper):
             return self._unwrap_model(model.model)
 
         # For FSDP2 models, check if the FSDP model itself has the necessary attributes
@@ -376,7 +376,7 @@ class FSDPStrategy(DistributedStrategy):
         dist.barrier()
 
         # Extract the actual model for saving
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             save_model = model.model
         else:
             save_model = model
@@ -476,7 +476,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Extract the actual model for loading
         load_model = model
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             load_model = model.model
 
         # Define paths for loading individual rank files
@@ -560,7 +560,7 @@ class FSDPStrategy(DistributedStrategy):
         return ckpt_dir, states
 
     # TODO (erictang000): Test in multi-node setting
-    def save_hf_model(self, model: Union[Actor, nn.Module], output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(self, model: Union[HFModelWrapper, nn.Module], output_dir: str, tokenizer=None, **kwargs) -> None:
         """Save model in HuggingFace safetensors format using FSDP's full state dict gathering"""
 
         # Step 1: Create output directory (rank 0 only)
@@ -570,7 +570,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 2: Extract models - get both the model for saving metadata and the FSDP model for state dict
         model_to_save = self._unwrap_model(model)  # For saving config/metadata
-        fsdp_model = model.model if isinstance(model, Actor) else model  # For state dict collection
+        fsdp_model = model.model if isinstance(model, HFModelWrapper) else model  # For state dict collection
 
         # Validate that we have a proper HuggingFace model
         if not hasattr(model_to_save, "config") or not hasattr(model_to_save, "save_pretrained"):

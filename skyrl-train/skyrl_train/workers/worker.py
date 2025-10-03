@@ -642,7 +642,7 @@ class PolicyWorkerBase(Worker):
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
                 dataloader,
-                desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
+                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):

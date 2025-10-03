@@ -9,7 +9,7 @@ from loguru import logger
 from transformers.trainer import get_scheduler
 
 
-from skyrl_train.models import get_llm_for_sequence_regression, Actor
+from skyrl_train.model_wrapper import get_llm_for_sequence_regression, HFModelWrapper
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
 from skyrl_train.utils import get_physical_gpu_id
 from skyrl_train.utils.utils import str_to_torch_dtype
@@ -51,7 +51,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         self._normalize_mini_batch_size()
 
         ds_config = strategy.get_ds_train_config()
-        actor = Actor(
+        wrapped_model = HFModelWrapper(
             model_id_or_path,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
             bf16=self.cfg.trainer.bf16,
@@ -63,31 +63,31 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         )
 
         # configure optimizer
-        actor_optim = strategy.create_optimizer(
-            actor,
+        optimizer = strategy.create_optimizer(
+            wrapped_model,
             lr=self.cfg.trainer.policy.optimizer_config.lr,
             betas=self.cfg.trainer.policy.optimizer_config.adam_betas,
             weight_decay=self.cfg.trainer.policy.optimizer_config.weight_decay,
             offload_after_step=self.cfg.trainer.policy.optimizer_config.offload_after_step,
         )
 
-        actor_scheduler = get_scheduler(
+        lr_scheduler = get_scheduler(
             self.cfg.trainer.policy.optimizer_config.scheduler,
-            actor_optim,
+            optimizer,
             num_warmup_steps=self.cfg.trainer.policy.optimizer_config.num_warmup_steps,
             num_training_steps=num_training_steps,
         )
 
         if self.cfg.trainer.gradient_checkpointing:
-            actor.gradient_checkpointing_enable(
+            wrapped_model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant}
             )
 
-        self._seq_parallel_monkey_patch(model=actor.model)
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
         # prepare models/optimizers...
         self.model, self.optimizer, self.scheduler = strategy.prepare(
-            (actor, actor_optim, actor_scheduler),
+            (wrapped_model, optimizer, lr_scheduler),
         )
 
         self.use_cuda_ipc = False
@@ -100,7 +100,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         return self.model.process_sequences(sequences, input_len, eos_token_id, pad_token_id)
 
     def _set_pad_token_id(self, pad_token_id):
-        # NOTE (sumanthrh): self.model -> Actor; self.model -> DeepSpeedEngine, self.model.module -> AutoModelForCausalLM
+        # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model -> DeepSpeedEngine, self.model.module -> AutoModelForCausalLM
         self.model.model.module.config.pad_token_id = pad_token_id
 
     def _handle_termination(self):
@@ -339,7 +339,7 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
-        model = Actor(
+        wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
             bf16=self.cfg.trainer.bf16,
@@ -347,9 +347,9 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
         )
-        self._seq_parallel_monkey_patch(model=model.model)
+        self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
-        self.model = self.strategy.prepare(model)
+        self.model = self.strategy.prepare(wrapped_model)
         self.model.eval()
 
 
