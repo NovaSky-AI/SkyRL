@@ -5,7 +5,6 @@ import ray
 from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
 import os
-import asyncio
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
@@ -30,7 +29,6 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
-    RewardWorkerBase,
     CriticWorkerBase,
 )
 from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
@@ -38,9 +36,23 @@ from skyrl_train.utils.profiler import Profiler
 
 
 class MegatronWorker:
+    def check_te_import(self):
+        try:
+            import transformer_engine  # noqa: F401
+        except ImportError:
+            raise ValueError(
+                """
+                transformer_engine is required for using the megatron backend.
+                For single node training follow the instructions in the pyproject.toml file to install transformer_engine.
+                For multi node training, please install transformer_engine in the docker image, and set the PYTHONPATH
+                to `/home/ray/anaconda3/lib/python3.12/site-packages` or wherever your base installation of
+                transformer_engine lives.
+            """
+            )
+
     def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs, flash_attn=False):
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        hf_config = AutoConfig.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -60,6 +72,7 @@ class MegatronWorker:
         self.bridge = bridge
 
         self.hf_config = hf_config
+        self.strategy.hf_config = hf_config
         self.tf_config = tf_config
         self.tokenizer = tokenizer
 
@@ -124,10 +137,20 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
+    def save_hf_model(self, export_dir: str, tokenizer):
+        # Save model in HuggingFace safetensors format
+        self.strategy.save_hf_model(
+            self.bridge,
+            self.model,
+            export_dir,
+            tokenizer=tokenizer,
+        )
+
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.check_te_import()
         self.model: MegatronPPOPolicy = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -204,7 +227,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        optim_config = init_megatron_optim_config(self.cfg.trainer.policy.optimizer_config)
+        optim_config = init_megatron_optim_config(
+            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
+        )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
         self._normalize_mini_batch_size()
@@ -361,6 +386,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.cuda.empty_cache()
         per_tensor_param = self.bridge.export_weights(self.actor_module)
+        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+        current_size = 0
 
         for name, param in per_tensor_param:
             # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
@@ -374,7 +401,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ipc_handle = reduce_tensor(weight)
 
             ipc_handle = {get_physical_gpu_id(): ipc_handle}
-
             ipc_handle_list = [None] * torch.distributed.get_world_size()
             torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
@@ -383,25 +409,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 for d in ipc_handle_list:
                     ipc_handles.update(d)
 
-                shape = param.shape
-
-                await asyncio.create_task(
-                    inference_engine_client.update_named_weights(
-                        {
-                            "names": [name],
-                            "dtypes": [self.cfg.generator.model_dtype],
-                            "shapes": [shape],
-                            "extras": [
-                                {
-                                    "ipc_handles": ipc_handles,
-                                }
-                            ],
-                        }
-                    )
-                )
+                current_size += weight.nbytes
+                weights_update_request["names"].append(name)
+                weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                weights_update_request["shapes"].append(param.shape)
+                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+                if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                    await inference_engine_client.update_named_weights(weights_update_request)
+                    current_size = 0
+                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                    # force collect any sent tensors if possible to be memory efficient
+                    torch.cuda.ipc_collect()
 
             torch.distributed.barrier()
             torch.cuda.synchronize()
+
+        if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
+            await inference_engine_client.update_named_weights(weights_update_request)
+            torch.cuda.ipc_collect()
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -420,6 +447,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.check_te_import()
         self.model: MegatronPPOPolicy = None
         self.actor_module: List[nn.Module] = None
 
@@ -489,11 +517,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         pass
 
 
-class MegatronRewardWorkerBase(MegatronWorker, RewardWorkerBase):
-    def __init__(self, **kwargs):
-        raise NotImplementedError()
-
-
 class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
     def __init__(self, **kwargs):
         raise NotImplementedError()
@@ -502,4 +525,3 @@ class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
 PolicyWorker = ray.remote(num_gpus=1)(MegatronPolicyWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(MegatronRefWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(MegatronCriticWorkerBase)
-RewardWorker = ray.remote(num_gpus=1)(MegatronRewardWorkerBase)

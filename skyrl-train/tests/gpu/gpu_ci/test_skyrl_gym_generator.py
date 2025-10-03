@@ -96,7 +96,6 @@ async def run_generator_end_to_end(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        max_model_len=max_input_length + max_generate_length,
         shared_pg=None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=True,
@@ -104,6 +103,7 @@ async def run_generator_end_to_end(
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         tokenizer=tokenizer,
+        sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
     )
 
     # Create a mock generator config

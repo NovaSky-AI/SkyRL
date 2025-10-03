@@ -5,7 +5,9 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import os
 from loguru import logger
+from omegaconf import DictConfig
 import json
+import torch
 import numpy as np
 from collections import defaultdict
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
@@ -13,6 +15,8 @@ from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils import io
+from skyrl_train.dataset import PromptDataset
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -290,14 +294,14 @@ def dump_per_dataset_eval_results(
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        print(f"Dumped eval data for {data_source} to {filename}")
+        logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
     aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
     with open(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
-    print(f"Dumped aggregated eval metrics to {aggregated_filename}")
+    logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
 class DynamicSamplingState(TypedDict, total=False):
@@ -622,3 +626,43 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
         logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
+
+    # check that the rewards are either List[float-like] or List[List[float-like]]
+    rewards = generator_output["rewards"]
+    if isinstance(rewards[0], list):
+        assert all(
+            isinstance(reward, list) for reward in rewards
+        ), "rewards must be `List[float]` or `List[List[float]]`"
+    else:
+        assert all(
+            not isinstance(reward, list) for reward in rewards
+        ), "rewards must be `List[float]` or `List[List[float]]`"
+
+
+def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> StatefulDataLoader:
+    """
+    Build the dataloader for the training or evaluation dataset
+    """
+    # prepare dataloader
+    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
+
+    # Seed the dataloader for reproducibility.
+    seeded_generator = torch.Generator()
+    seeded_generator.manual_seed(cfg.trainer.seed)
+
+    dataloader = StatefulDataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True if is_train else False,
+        collate_fn=dataset.collate_fn,
+        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        drop_last=True if is_train else False,
+        generator=seeded_generator,
+    )
+    if is_train:
+        logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+    else:
+        logger.info(f"Validation set size: {len(dataloader)}")
+
+    return dataloader

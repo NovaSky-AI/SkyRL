@@ -14,9 +14,14 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.optim import Optimizer
 import torch.distributed
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import (
+    PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
+    placement_group_table,
+)
 
-from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
+from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils import io
 from skyrl_train.utils.ppo_utils import masked_mean
@@ -107,6 +112,9 @@ class DistributedTorchRayActor:
 
     def get_mesh_rank(self):
         return self.mesh_rank
+
+    def get_gpu_id(self):
+        return ray.get_gpu_ids()[0]
 
     @staticmethod
     def _get_current_node_ip():
@@ -250,11 +258,12 @@ class Worker(DistributedTorchRayActor):
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
 
-            num_inference_engines, tensor_parallel_size = (
+            num_inference_engines, tensor_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
                 self.cfg.generator.inference_engine_tensor_parallel_size,
+                self.cfg.generator.inference_engine_data_parallel_size,
             )
-            world_size = num_inference_engines * tensor_parallel_size + 1
+            world_size = num_inference_engines * tensor_parallel_size * data_parallel_size + 1
 
             backend = self.cfg.generator.weight_sync_backend
 
@@ -375,7 +384,22 @@ class PPORayActorGroup:
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
-        # Use placement group to lock resources for models of same type
+        if self.colocate_all:
+            assert (
+                pg is not None
+            ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
+            pg_data = placement_group_table(pg)
+            assert (
+                len(pg_data["bundles"]) == world_size
+            ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
+
+        reordered_bundle_indices = []
+        if pg is not None:
+            pg_data = placement_group_table(pg)
+            should_reorder_bundles = len(pg_data["bundles"]) == world_size
+            if should_reorder_bundles:
+                reordered_bundle_indices = get_reordered_bundle_indices(pg)
+
         if self._num_gpus_per_node > 1 and pg is None:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
@@ -391,7 +415,8 @@ class PPORayActorGroup:
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg, placement_group_bundle_index=0
+                    placement_group=pg,
+                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
                 ),
             ).remote(
                 cfg=self.cfg,
@@ -432,7 +457,11 @@ class PPORayActorGroup:
                         resources=self._resources,
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
-                            placement_group_bundle_index=rank if self.colocate_all else rank // self._num_gpus_per_node,
+                            placement_group_bundle_index=(
+                                reordered_bundle_indices[rank]
+                                if reordered_bundle_indices
+                                else rank // self._num_gpus_per_node
+                            ),
                         ),
                     ).remote(
                         cfg=self.cfg,
@@ -775,19 +804,20 @@ class PolicyWorkerBase(Worker):
         status["response_length"] = num_actions
         return status
 
-    def save_ckpt(self, global_step: int, ckpt_dir: Path, tokenizer=None):
-        self.strategy.save_ckpt(
+    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+        self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             ckpt_dir=ckpt_dir,
-            global_step=global_step,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
 
-    def load_ckpt(self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
-        _, states = self.strategy.load_ckpt(
+    def load_checkpoint(
+        self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
+    ):
+        _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
             scheduler=self.scheduler if load_lr_scheduler_states else None,
@@ -798,7 +828,7 @@ class PolicyWorkerBase(Worker):
         return states
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model to HuggingFace format
+        # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
             self.model,
             export_dir,
@@ -882,7 +912,7 @@ class CriticWorkerBase(Worker):
         return output
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model to HuggingFace format
+        # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
             self.model,
             export_dir,
@@ -983,19 +1013,18 @@ class CriticWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         return status
 
-    def save_ckpt(self, global_step: int, ckpt_dir: str, tokenizer=None):
-        self.strategy.save_ckpt(
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+        self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             ckpt_dir=ckpt_dir,
-            global_step=global_step,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
 
-    def load_ckpt(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
-        _, states = self.strategy.load_ckpt(
+    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
+        _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
             scheduler=self.scheduler if load_lr_scheduler_states else None,
@@ -1004,30 +1033,6 @@ class CriticWorkerBase(Worker):
             load_lr_scheduler_states=load_lr_scheduler_states,
         )
         return states
-
-
-class RewardWorkerBase(Worker):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model: nn.Module = None
-
-    def _forward_micro_batch(
-        self,
-        micro_batch: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        attention_mask = micro_batch["attention_mask"]
-        self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            reward = self.model(sequences, attention_mask)
-        reward = reward.to("cpu")
-        output = TrainingOutputBatch(
-            {"output": reward},
-        )
-        output.metadata = micro_batch.metadata
-        return output
 
 
 class RefWorkerBase(Worker):

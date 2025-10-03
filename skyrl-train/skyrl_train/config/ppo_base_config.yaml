@@ -15,15 +15,12 @@ trainer:
   placement:
     colocate_all: true
     colocate_policy_ref: true
-    colocate_critic_reward: false
     policy_num_nodes: 1
     policy_num_gpus_per_node: 4
     critic_num_nodes: 1
     critic_num_gpus_per_node: 4
     ref_num_nodes: 1
     ref_num_gpus_per_node: 4
-    reward_num_nodes: 1
-    reward_num_gpus_per_node: 4
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
@@ -51,7 +48,7 @@ trainer:
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
-      cpu_offload: true
+      cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
   critic:
@@ -68,15 +65,6 @@ trainer:
       scheduler: "constant_with_warmup"
     fsdp_config:
       cpu_offload: false
-      reshard_after_forward: true
-      fsdp_size: -1
-    sequence_parallel_size: 1
-  reward:
-    model:
-      path: null
-    deepspeed_config: ${deepspeed_config.eval}
-    fsdp_config:
-      cpu_offload: true
       reshard_after_forward: true
       fsdp_size: -1
     sequence_parallel_size: 1
@@ -113,7 +101,6 @@ trainer:
     
     # value loss parameters
     value_clip: 0.2
-    normalize_reward: true
     dynamic_sampling:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
@@ -157,7 +144,6 @@ trainer:
   flash_attn: true
   disable_fast_tokenizer: false
   target_modules: "all-linear"
-  use_orm_score: false
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -175,6 +161,8 @@ generator:
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
+  inference_engine_expert_parallel_size: 1
+  inference_engine_data_parallel_size: 1  # NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
@@ -192,6 +180,10 @@ generator:
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
   max_turns: 1
+
+  # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
+  # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
+  engine_init_kwargs: {}
 
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase

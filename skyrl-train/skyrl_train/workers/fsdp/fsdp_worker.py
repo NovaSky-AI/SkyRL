@@ -4,7 +4,7 @@ from typing import Dict, List
 import ray
 import torch
 import torch.distributed
-from transformers import AutoModel, AutoConfig
+from transformers import AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 
@@ -22,7 +22,6 @@ from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_con
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     CriticWorkerBase,
-    RewardWorkerBase,
     RefWorkerBase,
 )
 
@@ -200,8 +199,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
             # sync any remaining weights
             if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
                 await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
-                current_size = 0
-                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                torch.cuda.ipc_collect()
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
@@ -266,8 +264,6 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
             critic = get_llm_for_sequence_regression(
                 model_path,
                 "critic",
-                # only for reward model
-                normalize_reward=False,
                 use_flash_attention_2=self.cfg.trainer.flash_attn,
                 # NOTE (sumanthrh): Model initialization should always be in fp32
                 # during training
@@ -302,59 +298,6 @@ class FSDPCriticRayActorBase(CriticWorkerBase):
         Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
         """
         output = super().forward(data)
-        # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
-        if self._world_size > 1 and fsdp_version(self.model.model) == 1:
-            self.model.model._handle.reshard(True)
-        return output
-
-
-class FSDPRewardRayActorBase(RewardWorkerBase):
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
-        self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
-
-    def backload_to_gpu(self, non_blocking=True):
-        self.strategy.backload_to_gpu(self.model, None, non_blocking)
-
-    def init_model(self, model_path):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.reward.fsdp_config,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
-
-        with torch.device("meta"):
-            AutoModel.from_pretrained(model_path, trust_remote_code=True)
-        model = get_llm_for_sequence_regression(
-            model_path,
-            "reward",
-            normalize_reward=self.cfg.trainer.algorithm.normalize_reward,
-            use_flash_attention_2=self.cfg.trainer.flash_attn,
-            bf16=self.cfg.trainer.bf16,
-            value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
-            sequence_parallel_size=self.cfg.trainer.reward.sequence_parallel_size,
-            use_sample_packing=self.cfg.trainer.use_sample_packing,
-        )
-        self._seq_parallel_monkey_patch(model=model, use_parent_class=True)
-
-        self.model = strategy.prepare(model)
-        self.model.eval()
-
-    def forward(
-        self,
-        data: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        """Run forward pass on data in inference mode.
-
-        Reshard the model after forward pass to redistribute memory and allow for offloading to cpu.
-        """
-        output = super().forward(data)
-
         # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)
         if self._world_size > 1 and fsdp_version(self.model.model) == 1:
             self.model.model._handle.reshard(True)
@@ -417,5 +360,4 @@ class FSDPRefRayActorBase(RefWorkerBase):
 # Ray remote actors
 PolicyWorker = ray.remote(num_gpus=1)(FSDPPolicyRayActorBase)
 CriticWorker = ray.remote(num_gpus=1)(FSDPCriticRayActorBase)
-RewardWorker = ray.remote(num_gpus=1)(FSDPRewardRayActorBase)
 RefWorker = ray.remote(num_gpus=1)(FSDPRefRayActorBase)

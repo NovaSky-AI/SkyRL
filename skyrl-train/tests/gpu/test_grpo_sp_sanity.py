@@ -51,9 +51,9 @@ class RayPPOTestTrainer(RayPPOTrainer):
         self.all_metrics = {}
         self.all_timings = {}
 
-        # create rank0 policy model and inference_engines groups, then broadcast weights to inference_engines
-        with Timer("setup_policy_and_generator"):
-            self.setup_policy_and_generator()
+        # Initialize weight sync state
+        with Timer("init_weight_sync_state"):
+            self.init_weight_sync_state()
 
         # main training loop
         consumed_samples = 0
@@ -90,9 +90,7 @@ class RayPPOTestTrainer(RayPPOTrainer):
                     with Timer("compute_rewards", self.all_timings):
                         data = self.compute_rewards(data)
                         # keep only the keys needed later on
-                        data = data.pop(
-                            non_tensor_batch_keys=["response_ids", "prompt_ids", "loss_mask", "custom_rewards"]
-                        )
+                        data = data.pop(non_tensor_batch_keys=["response_ids", "prompt_ids", "loss_mask", "rewards"])
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(data.non_tensor_batch["response_ids"][0])
@@ -103,7 +101,7 @@ class RayPPOTestTrainer(RayPPOTrainer):
 
                     # sequences are the full input ids for the model.
                     data = data.select(
-                        batch_keys=["sequences", "attention_mask", "custom_rewards", "loss_mask", "response_mask"],
+                        batch_keys=["sequences", "attention_mask", "rewards", "loss_mask", "response_mask"],
                         non_tensor_batch_keys=["response_ids"],
                     )
 
@@ -120,7 +118,7 @@ class RayPPOTestTrainer(RayPPOTrainer):
                     with Timer("calc_advantages_and_returns", self.all_timings):
                         data = self.compute_advantages_and_returns(data)
                         # remove some unwanted keys
-                        data.pop(batch_keys=["custom_rewards", "rm_rewards"])
+                        data.pop(batch_keys=["rewards"])
 
                         if self.cfg.trainer.algorithm.advantage_batch_normalize:
                             data = normalize_advantages_dict(data)

@@ -143,6 +143,37 @@ The multi-turn version gives partial credit for formatting the answer correctly,
 
 The final implementation is available in `examples/multiply/env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py>`_.
 
+(Turn-level) Rewards And Metrics
+--------------------------------
+
+In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single reward for the entire trajectory.
+You can experiment with turn-level rewards by returning a non-zero reward in any turn. Otherwise, if you only want to use outcome rewards, you can simply return ``reward=0.0`` for all intermediate turns.
+
+SkyRL automatically computes the following metrics for logging purposes:
+
+- ``pass_at_n``: The ``n`` in ``pass_at_n`` is the number of trajectories we generate for each example. ``pass_at_n`` is 1 if any trajectory succeeded, and 0 otherwise. For each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and any positive value is considered a "pass".
+- ``mean_raw_reward``: for each trajectory, we sum over all the turns' rewards. We then take the average over all the trajectories.
+
+Whether you use turn-level rewards or outcome rewards, the rewards used to train the model will be translated to per-token rewards. For example, if there are 3 turns with 4 response tokens each and the turn-level rewards are ``[1.0, 2.0, 3.0]``, the resulting per-token rewards are:
+
+.. code-block:: python
+
+   [
+      0.0, 0.0, 0.0, 1.0,
+      0.0, 0.0, 0.0, 2.0,
+      0.0, 0.0, 0.0, 3.0,
+   ]
+
+If there is only an outcome reward of ``1.0`` (i.e. intermediate turns' rewards are all ``0.0``), the per-token rewards are:
+
+.. code-block:: python
+
+   [
+      0.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 1.0,
+   ]
+
 Registering Your New Environment
 --------------------------------
 

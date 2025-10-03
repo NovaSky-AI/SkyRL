@@ -5,7 +5,11 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py
+For FSDP and DeepSpeed, run:
+uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+
+For Megatron, run:
+uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
 import ray
@@ -25,7 +29,8 @@ from skyrl_train.trainer import RayPPOTrainer
 from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+NUM_GPUS = 2
 
 
 class DummyDataset(Dataset):
@@ -56,20 +61,30 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
         cfg.trainer.policy.fsdp_config.cpu_offload = fsdp2_cpu_offload
 
     # Use minimal settings for faster testing
-    cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.trainer.placement.critic_num_gpus_per_node = 2
+    cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
+    cfg.trainer.placement.critic_num_gpus_per_node = NUM_GPUS
     cfg.trainer.placement.policy_num_nodes = 1
     cfg.trainer.placement.critic_num_nodes = 1
-    cfg.trainer.algorithm.use_kl_loss = False  # disable ref model so we just have policy and critic (4 GPUs)
+    cfg.trainer.algorithm.use_kl_loss = (
+        False  # disable ref model so we just have policy and critic (NUM_GPUS total GPUs)
+    )
     cfg.trainer.placement.colocate_all = False  # Disable colocation for simpler testing
-    cfg.trainer.train_batch_size = 2
+    cfg.trainer.train_batch_size = NUM_GPUS
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.epochs = 1
     cfg.trainer.logger = "console"
     cfg.generator.n_samples_per_prompt = 1
-    cfg.generator.num_inference_engines = 1
+    cfg.generator.num_inference_engines = NUM_GPUS // 2
     cfg.generator.inference_engine_tensor_parallel_size = 2
+
+    # Megatron-specific
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+        # Disable critic for megatron
+        cfg.trainer.critic.model.path = ""
 
     # Use temporary directories
     cfg.trainer.export_path = tempfile.mkdtemp(prefix="trainer_ckpt_test_")
@@ -97,7 +112,7 @@ def create_minimal_trainer(cfg: DictConfig):
     tracker = Tracking(
         project_name=cfg.trainer.project_name,
         experiment_name=cfg.trainer.run_name,
-        default_backend=cfg.trainer.logger,
+        backends=cfg.trainer.logger,
         config=cfg,
     )
 
@@ -115,16 +130,6 @@ def create_minimal_trainer(cfg: DictConfig):
     return trainer
 
 
-def capture_training_state(trainer):
-    """Capture comprehensive training state for comparison"""
-    state = {}
-
-    # Capture trainer attributes
-    state["global_step"] = trainer.global_step
-
-    return state
-
-
 @pytest.mark.parametrize(
     ("strategy, fsdp2_cpu_offload"),
     [
@@ -132,6 +137,7 @@ def capture_training_state(trainer):
         ("fsdp", False),
         ("fsdp2", False),
         ("fsdp2", True),
+        pytest.param("megatron", False, marks=pytest.mark.megatron),
     ],
 )
 def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload):
@@ -159,28 +165,29 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         PolicyWorker = import_worker(strategy, "policy")
         CriticWorker = import_worker(strategy, "critic")
         RefWorker = import_worker(strategy, "ref")
-        RewardWorker = import_worker(strategy, "reward")
 
         # Build models
-        trainer1.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
 
-        # Set initial global step and simulate training state
-        trainer1.global_step = 2  # Simulate having done 2 steps
+        # Set initial global step as if 2 steps were completed
+        trainer1.global_step = 2
 
         # Save checkpoint
         trainer1.save_checkpoints()
 
         # Capture state before teardown
-        state_before = capture_training_state(trainer1)
+        saved_global_step = trainer1.global_step
         checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer1.global_step}")
 
         # Verify checkpoint structure was created
         expected_files = [
             os.path.join(checkpoint_dir, "policy"),
-            os.path.join(checkpoint_dir, "critic"),
             os.path.join(checkpoint_dir, "trainer_state.pt"),
             os.path.join(checkpoint_dir, "data.pt"),
         ]
+        # Only expect critic dir for non-megatron strategies
+        if strategy != "megatron":
+            expected_files.append(os.path.join(checkpoint_dir, "critic"))
         for expected_file in expected_files:
             assert os.path.exists(expected_file), f"Expected checkpoint file/dir not found: {expected_file}"
 
@@ -202,7 +209,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
             loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size
         ), "train_batch_size not preserved in checkpoint"
         assert loaded_trainer_state["config"]["trainer"]["strategy"] == strategy, "strategy not preserved in checkpoint"
-        assert loaded_trainer_state["global_step"] == trainer1.global_step, "global_step not preserved in checkpoint"
+        assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # Cleanup first trainer
         del trainer1
@@ -221,26 +228,16 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         trainer2 = create_minimal_trainer(cfg_resume)
 
         # Build models again
-        trainer2.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer2.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         # Load checkpoints
         loaded_global_step = trainer2.load_checkpoints()
-        assert loaded_global_step == 2, f"Expected global_step=2, got {loaded_global_step}"
+        assert (
+            loaded_global_step == saved_global_step
+        ), f"Expected global_step={saved_global_step}, got {loaded_global_step}"
 
-        # Capture state after loading
-        state_after = capture_training_state(trainer2)
-
-        # ============= PHASE 3: Verify State Matches =============
-        print("Phase 3: Verify state consistency")
-
-        # Compare captured states
-        for key in state_before:
-            assert (
-                state_after[key] == state_before[key]
-            ), f"State mismatch for {key}: before={state_before[key]}, after={state_after[key]}"
-
-        # ============= PHASE 4: Continue Training =============
-        print("Phase 4: Second checkpoint save")
+        # ============= PHASE 3: Continue Training =============
+        print("Phase 3: Second checkpoint save")
 
         # Try to save another checkpoint to test cleanup logic
         trainer2.global_step = 3

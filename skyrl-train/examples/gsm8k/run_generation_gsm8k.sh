@@ -17,6 +17,7 @@ uv run --isolated --extra $INFERENCE_BACKEND \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
   trainer.logger="$LOGGER" \
+  trainer.placement.colocate_all=false \
   generator.backend=$INFERENCE_BACKEND \
   generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \

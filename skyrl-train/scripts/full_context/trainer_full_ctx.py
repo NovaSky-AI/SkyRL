@@ -20,9 +20,9 @@ class FullCtxTrainer(RayPPOTrainer):
 
         self.global_step = 0
 
-        # Setup policy and generator
-        with Timer("setup_policy_and_generator", self.all_timings):
-            self.setup_policy_and_generator()
+        # Initialize weight sync state
+        with Timer("init_weight_sync_state", self.all_timings):
+            self.init_weight_sync_state()
 
         # Run a few training steps
         self.global_step += 1  # start from 1
@@ -73,7 +73,7 @@ class FullCtxTrainer(RayPPOTrainer):
                 with Timer("compute_advantages_and_returns", self.all_timings):
                     training_input = self.compute_advantages_and_returns(training_input)
                     # remove some unwanted keys
-                    for key in ["custom_rewards", "rm_rewards"]:
+                    for key in ["rewards"]:
                         training_input.pop(key)
                     training_input.metadata.pop("uids")
 

@@ -6,7 +6,6 @@ import ray
 import torch
 import torch.distributed
 from loguru import logger
-from transformers import AutoModel
 from transformers.trainer import get_scheduler
 
 
@@ -17,7 +16,6 @@ from skyrl_train.utils.utils import str_to_torch_dtype
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     CriticWorkerBase,
-    RewardWorkerBase,
     RefWorkerBase,
 )
 
@@ -220,8 +218,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             # sync any remaining weights
             if torch.distributed.get_rank() == 0 and len(weights_update_request["names"]) > 0:
                 await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
-                current_size = 0
-                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                torch.cuda.ipc_collect()
             torch.distributed.barrier()
 
         if cache_reset_task is not None:
@@ -279,7 +276,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         critic = get_llm_for_sequence_regression(
             model_id_or_path,
             "critic",
-            normalize_reward=False,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
             bf16=self.cfg.trainer.bf16,
             target_modules=self.cfg.trainer.target_modules,
@@ -317,50 +313,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
         self.model, self.optimizer, self.scheduler = strategy.prepare(
             (critic, critic_optim, critic_scheduler),
         )
-
-
-class DeepSpeedRewardWorkerBase(RewardWorkerBase):
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-        # deepspeed automatically offloads all model parameters to cpu
-        # after forward if param_offload is true, and the reward model has no optimizer state
-        # so we don't need to call offload_to_cpu here
-        pass
-
-    def backload_to_gpu(self, non_blocking=True):
-        pass
-
-    def init_model(self, model_id_or_path):
-        assert self.cfg.trainer.strategy in ("deepspeed")
-        self.zero_stage = self.cfg.trainer.reward.deepspeed_config.zero_optimization.stage
-        strategy = DeepspeedStrategy(
-            self.cfg.trainer.reward.deepspeed_config,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
-            zero_stage=self.zero_stage,
-            bf16=self.cfg.trainer.bf16,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
-
-        with torch.device("meta"):
-            AutoModel.from_pretrained(model_id_or_path, trust_remote_code=True)
-        model = get_llm_for_sequence_regression(
-            model_id_or_path,
-            "reward",
-            normalize_reward=self.cfg.trainer.algorithm.normalize_reward,
-            use_flash_attention_2=self.cfg.trainer.flash_attn,
-            bf16=self.cfg.trainer.bf16,
-            ds_config=strategy.get_ds_eval_config(),
-            value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
-            sequence_parallel_size=self.sequence_parallel_size,
-            use_sample_packing=self.cfg.trainer.use_sample_packing,
-        )
-
-        self._seq_parallel_monkey_patch(model=model, use_parent_class=True)
-
-        self.model = self.strategy.prepare(model)
-        self.model.eval()
 
 
 class DeepSpeedRefWorkerBase(RefWorkerBase):
@@ -403,5 +355,4 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
 
 PolicyWorker = ray.remote(num_gpus=1)(DeepSpeedPolicyWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(DeepSpeedCriticWorkerBase)
-RewardWorker = ray.remote(num_gpus=1)(DeepSpeedRewardWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(DeepSpeedRefWorkerBase)

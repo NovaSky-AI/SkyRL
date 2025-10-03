@@ -5,7 +5,7 @@ set -x
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/algorithm/custom_policy_loss/run_custom_policy_loss.sh
+# bash examples/algorithms/custom_policy_loss/run_custom_policy_loss.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4

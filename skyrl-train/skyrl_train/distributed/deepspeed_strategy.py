@@ -208,11 +208,10 @@ class DeepspeedStrategy(DistributedStrategy):
         else:
             return model
 
-    def save_ckpt(
+    def save_checkpoint(
         self,
         model,
         ckpt_dir,
-        global_step,
         node_local_rank,
         optimizer=None,
         scheduler=None,
@@ -233,7 +232,6 @@ class DeepspeedStrategy(DistributedStrategy):
         extra_state_dict = {
             "client_state": client_state,
             "deepspeed_config": OmegaConf.to_container(self.deepspeed_config),
-            "global_step": global_step,
             "rng": self.get_rng_state(),  # Add RNG state for reproducibility
         }
 
@@ -241,12 +239,13 @@ class DeepspeedStrategy(DistributedStrategy):
         with io.local_work_dir(ckpt_dir) as work_dir:
             model.save_checkpoint(work_dir, tag=tag, client_state=extra_state_dict)
 
-        # Save HuggingFace config and tokenizer
-        if self.is_rank_0():
-            config_save_model = self._unwrap_model(model)
-            self.save_hf_configs(config_save_model, ckpt_dir, tokenizer)
+            # Save HuggingFace config and tokenizer
+            if self.is_rank_0():
+                config_save_model = self._unwrap_model(model)
+                hf_dir = os.path.join(work_dir, "huggingface")
+                self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
 
-    def load_ckpt(
+    def load_checkpoint(
         self,
         model,
         ckpt_dir,
@@ -256,7 +255,6 @@ class DeepspeedStrategy(DistributedStrategy):
         load_module_strict=True,
         load_optimizer_states=True,
         load_lr_scheduler_states=True,
-        load_module_only=False,
     ):
         if isinstance(model, Actor):
             model = model.model
@@ -271,7 +269,6 @@ class DeepspeedStrategy(DistributedStrategy):
                 load_module_strict=load_module_strict,
                 load_optimizer_states=load_optimizer_states,
                 load_lr_scheduler_states=load_lr_scheduler_states,  # DeepSpeed handles this automatically
-                load_module_only=load_module_only,
             )
 
         if load_path is None:
