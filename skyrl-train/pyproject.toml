@@ -150,12 +150,19 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["skyrl_train*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "skyrl_train.__version__"}
 readme = {file = ["README.md"]}
+
+# Ship default config files in the wheel
+[tool.setuptools.package-data]
+"skyrl_train" = ["config/**"]
 
 [tool.pytest.ini_options]
 addopts = "-v -s"
