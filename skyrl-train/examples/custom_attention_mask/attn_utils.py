@@ -7,25 +7,25 @@ import torch.nn.functional as F
 import math
 
 
-# def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1, padding_side: Literal["left", "right"] = "right") -> torch.Tensor:
-#     if tensor.size(dim) >= length:
-#         return tensor
-#     else:
-#         pad_size = list(tensor.shape)
-#         pad_size[dim] = length - tensor.size(dim)
-#         return torch.cat(
-#             [
-#                 tensor,
-#                 pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device),
-#             ],
-#             dim=dim,
-#         ) if padding_side == "right" else torch.cat(
-#             [
-#                 pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device),
-#                 tensor,
-#             ],
-#             dim=dim,
-#         )
+def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1, padding_side: Literal["left", "right"] = "right") -> torch.Tensor:
+    if tensor.size(dim) >= length:
+        return tensor
+    else:
+        pad_size = list(tensor.shape)
+        pad_size[dim] = length - tensor.size(dim)
+        return torch.cat(
+            [
+                tensor,
+                pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device),
+            ],
+            dim=dim,
+        ) if padding_side == "right" else torch.cat(
+            [
+                pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device),
+                tensor,
+            ],
+            dim=dim,
+        )
 
 def flatten_trajectory(traj, pad_token_id, max_prompt_length, max_response_length):
     """

@@ -28,6 +28,30 @@ from skyrl_train.generators.utils import (
 )
 from .utils import get_think_and_answer_ids
 
+kind_code = {
+    "q": 0,
+    "t": 1,
+    "r": 2,
+    "o": 3,
+}
+
+def parse_final_trajectory(full_trajectory: dict):
+    kinds = []
+    steps = []
+    response_ids = []
+    loss_mask = []
+
+    # first, add q
+    prompt_ids = full_trajectory["q"]    
+
+    # add ti, ri and ioi for i = 0 to num_rounds - 1
+    for i in range(full_trajectory["num_rounds"]):
+        response_ids += full_trajectory[f"t{i}"] + full_trajectory[f"r{i}"] + full_trajectory[f"o{i}"]
+        loss_mask += [1]*(len(full_trajectory[f"t{i}"]) + len(full_trajectory[f"r{i}"])) + [0]*len(full_trajectory[f"o{i}"])
+        kinds += [kind_code["t"]]*len(full_trajectory[f"t{i}"])  + [kind_code["r"]]*len(full_trajectory[f"r{i}"]) + [kind_code["o"]]*len(full_trajectory[f"o{i}"])
+        steps += [i]*len(response_ids)
+
+    return prompt_ids, response_ids, loss_mask, kinds, steps
 
 @dataclass
 class AgentLoopOutput:
@@ -40,6 +64,8 @@ class AgentLoopOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     attention_mask: List[List[bool]]
+    kinds: List[List[int]]
+    steps: List[List[int]]
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -236,10 +262,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                 break
             step_id += 1
 
+        full_trajectory["num_rounds"] = step_id
+
+        propmt_ids, response_ids, loss_mask, kinds, steps = parse_final_trajectory(full_trajectory)
+
         await self._run_in_executor_if_available(env.close)
 
-        prompt_ids = input_ids[:initial_prompt_length]
-        response_ids = input_ids[initial_prompt_length:]
+        prompt_ids = propmt_ids[:initial_prompt_length]
         per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
@@ -264,8 +293,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
 
-        responses,
-
+        
         return AgentLoopOutput(
             response_ids=response_ids,
             reward=reward_out,
@@ -273,7 +301,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             rollout_logprobs=rollout_logprobs,
-            attention_mask=attention_mask,
+            kinds=kinds,
+            steps=steps,
         )
 
     async def generate_batched(
@@ -406,6 +435,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         stop_reasons = [output.stop_reason for output in all_outputs]
         loss_masks = [output.loss_mask for output in all_outputs]
         prompt_token_ids = [output.prompt_ids for output in all_outputs]
+        kinds = [output.kinds for output in all_outputs]
+        steps = [output.steps for output in all_outputs]
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -436,6 +467,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
+            "kinds": kinds,
+            "steps": steps,
         }
 
         return generator_output

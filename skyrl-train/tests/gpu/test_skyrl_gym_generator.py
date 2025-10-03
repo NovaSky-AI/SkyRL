@@ -23,7 +23,7 @@ async def test_generator_multi_turn_text2sql():
             n_samples_per_prompt=5,
             num_inference_engines=2,
             tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-Coder-7B-Instruct",
+            model="Qwen/Qwen2.5-1.5B-Instruct",
             max_prompt_length=6000,
             max_input_length=29048,
             max_generate_length=3000,
