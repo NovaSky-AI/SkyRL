@@ -54,8 +54,8 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_gptoss" \
   trainer.run_name="gsm8k_test_gptoss_low" \
-  trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
+  trainer.resume_mode=latest \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt_gptoss" \
   +generator.chat_template_kwargs={reasoning_effort:'low'} \
   trainer.dump_data_batch=true \
   $@
