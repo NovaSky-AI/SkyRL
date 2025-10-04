@@ -82,19 +82,8 @@ class Actor(nn.Module):
 
             # Quantization configuration
             quantization_config = None
-            
-            # Check if this is a GPT-OSS model that needs MXFP4 handling
-            if "gpt-oss" in pretrain_or_model.lower():
-                try:
-                    from transformers.utils.quantization_config import Mxfp4Config
-                    # For training, we dequantize MXFP4 weights to BF16 to enable gradient computation
-                    quantization_config = Mxfp4Config(dequantize=True)
-                    logger.info(f"Detected GPT-OSS model: {pretrain_or_model}. Using MXFP4 config with dequantization for training.")
-                except ImportError:
-                    logger.warning("MXFP4 quantization not available. Please ensure transformers>=4.46.0 and required kernels are installed.")
-                    logger.info("Falling back to standard BF16 loading for GPT-OSS model.")
-                    quantization_config = None
-            elif load_in_4bit:
+
+            if load_in_4bit:
                 assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
                 quantization_config = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -110,15 +99,8 @@ class Actor(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
-            # For GPT-OSS models with MXFP4, we need BF16 regardless of the bf16 parameter
-            # because we're dequantizing MXFP4 weights to BF16 for training
-            if "gpt-oss" in pretrain_or_model.lower() and quantization_config is not None:
-                model_dtype = torch.bfloat16
-                if not bf16:
-                    logger.info("GPT-OSS model detected: overriding torch_dtype to bfloat16 for MXFP4 dequantization")
-            else:
-                model_dtype = torch.bfloat16 if bf16 else torch.float32
-                
+            model_dtype = torch.float32
+
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
@@ -536,16 +518,21 @@ def get_llm_for_sequence_regression(
 
     # Quantization configuration
     quantization_config = None
-    
-    # Check if this is a GPT-OSS model that needs MXFP4 handling  
+
+    # Check if this is a GPT-OSS model that needs MXFP4 handling
     if "gpt-oss" in model_name_or_path.lower():
         try:
             from transformers.utils.quantization_config import Mxfp4Config
+
             # For training, we dequantize MXFP4 weights to BF16 to enable gradient computation
             quantization_config = Mxfp4Config(dequantize=True)
-            logger.info(f"Detected GPT-OSS model: {model_name_or_path}. Using MXFP4 config with dequantization for training.")
+            logger.info(
+                f"Detected GPT-OSS model: {model_name_or_path}. Using MXFP4 config with dequantization for training."
+            )
         except ImportError:
-            logger.warning("MXFP4 quantization not available. Please ensure transformers>=4.46.0 and required kernels are installed.")
+            logger.warning(
+                "MXFP4 quantization not available. Please ensure transformers>=4.46.0 and required kernels are installed."
+            )
             logger.info("Falling back to standard BF16 loading for GPT-OSS model.")
             quantization_config = None
     elif load_in_4bit:
@@ -565,7 +552,7 @@ def get_llm_for_sequence_regression(
             logger.info("GPT-OSS model detected: overriding torch_dtype to bfloat16 for MXFP4 dequantization")
     else:
         model_dtype = torch.bfloat16 if bf16 else torch.float32
-        
+
     model = cls_class.from_pretrained(
         model_name_or_path,
         config=config,
