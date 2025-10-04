@@ -64,13 +64,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
 
-        # Use different mock responses for thinking vs non-thinking templates
-        if is_custom_jinja_from_file:
-            mock_llm_output_text = "<think>Some random thought process</think>b" + tokenizer.eos_token
-            mock_response_text = "<think>Some random thought process</think>b"
-        else:
-            mock_llm_output_text = "b" + tokenizer.eos_token
-            mock_response_text = "b"
+        mock_llm_output_text = "b" + tokenizer.eos_token
+        mock_response_text = "b"
 
         return {
             # no tokenizer.eos_token for responses because `skip_special_tokens` is True in sampling params
@@ -87,7 +82,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     chat_template_config = None
     if is_custom_jinja_from_file:
-        template_path = Path(__file__).parent / "qwen3_acc_thinking.jinja2"
+        template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
         chat_template_config = {"source": "file", "name_or_path": str(template_path)}
     elif "Qwen3" in model_name:
         chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
@@ -129,37 +124,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         "env_extras": extras,
         "env_classes": [env_cfg.env_class],
     }
+
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
-    if is_custom_jinja_from_file:
-        assert len(generator_output["prompt_token_ids"]) == 1
-        assert len(generator_output["response_ids"]) == 1
-        assert len(generator_output["loss_masks"]) == 1
-        assert generator_output["stop_reasons"][0] == "stop"
-
-        custom_chat_template = get_custom_chat_template(chat_template_config)
-        assert custom_chat_template is not None
-
-        assert "<think>" in custom_chat_template
-        assert "</think>" in custom_chat_template
-        assert "reasoning_content" in custom_chat_template
-
-        prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
-        resp_str = tokenizer.decode(generator_output["response_ids"][0])
-
-        assert len(prompt_str) > 0
-        assert len(resp_str) > 0
-
-        print(f"  Custom jinja2 template test passed for {model_name}")
-        print(f"  Template file: {chat_template_config['name_or_path']}")
-        print(f"  Prompt length: {len(generator_output['prompt_token_ids'][0])} tokens")
-        print(f"  Response length: {len(generator_output['response_ids'][0])} tokens")
-
     # assume every actual message is 1 token for loss mask checking
-    if is_custom_jinja_from_file:
-        expected_assistant_content = "<think>Some random thought process</think>b"
-    else:
-        expected_assistant_content = "b"
+    expected_assistant_content = "b"
 
     expected_chat_history = [
         {"role": "user", "content": "a"},
@@ -218,25 +187,12 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
 
     if custom_chat_template is not None:
-        if is_custom_jinja_from_file:
-            actual_loss_masks = generator_output["loss_masks"][0]
-            actual_response_ids = generator_output["response_ids"][0]
-            resp_str = tokenizer.decode(actual_response_ids)
-
-            print(f"  Thinking template response string: {repr(resp_str)}")
-            print(f"  Thinking template loss mask: {actual_loss_masks}")
-
-            assert len(actual_loss_masks) == len(actual_response_ids)
-            assert 0 in actual_loss_masks, "Should have loss mask = 0 for thinking tokens"
-            assert 1 in actual_loss_masks, "Should have loss mask = 1 for actual response tokens"
-
-        else:
-            expected_loss_masks = (
-                expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
-                + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
-            ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
-            assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
-            assert generator_output["loss_masks"][0] == expected_loss_masks
+        expected_loss_masks = (
+            expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
+            + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
+        ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
+        assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
+        assert generator_output["loss_masks"][0] == expected_loss_masks
     else:
         # For non-custom_chat_template, `resp_str` directly starts with what the model generates
         expected_loss_masks = (
@@ -270,12 +226,21 @@ def test_qwen3_original_vs_without_thinking_chat_template():
         messages, chat_template=CUSTOM_CHAT_TEMPLATES["qwen3_without_thinking"], tokenize=False
     )
 
+    # Apply custom chat template from file
+    file_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
+    with open(file_path, "r", encoding="utf-8") as f:
+        qwen3_without_thinking_str_from_file = f.read()
+        
+    qwen3_without_thinking_str_from_file = tokenizer.apply_chat_template(
+        messages, chat_template=qwen3_without_thinking_str_from_file, tokenize=False
+    )
+
     # Apply default chat template
     default_template_str = tokenizer.apply_chat_template(messages, chat_template=None, tokenize=False)
 
     # The original_chat_template should match the tokenizer exactly
-    assert default_template_str == qwen3_without_thinking_str
-
+    assert default_template_str == qwen3_without_thinking_str 
+    assert qwen3_without_thinking_str == qwen3_without_thinking_str_from_file
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
