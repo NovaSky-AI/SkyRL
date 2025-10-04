@@ -186,8 +186,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # `<|im_start|>user\n1<|im_end|>\n`
     expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
 
-    # For custom_chat_template, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
     if custom_chat_template is not None:
+        # For custom_chat_template, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
         expected_loss_masks = (
             expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
             + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
