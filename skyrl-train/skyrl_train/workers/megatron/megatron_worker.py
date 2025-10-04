@@ -157,12 +157,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
 
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
-        self.strategy.offload_to_cpu(self.actor_module, self.optimizer, pin_memory, non_blocking)
+        self.strategy.offload_to_cpu(
+            self.actor_module, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
+        )
 
-    def backload_to_gpu(self, non_blocking=True):
-        self.strategy.backload_to_gpu(self.actor_module, self.optimizer, non_blocking)
+    def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
+        self.strategy.backload_to_gpu(
+            self.actor_module, self.optimizer, non_blocking, backload_optimizer, backload_model
+        )
 
     def init_worker_process_group(self):
         """
@@ -451,11 +455,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
 
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
 
-    def backload_to_gpu(self, non_blocking=True):
+    def backload_to_gpu(self, non_blocking=True, **kwargs):
         self.strategy.backload_to_gpu(self.actor_module, None, non_blocking)
 
     def init_worker_process_group(self):

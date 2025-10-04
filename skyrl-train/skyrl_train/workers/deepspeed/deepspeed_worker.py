@@ -21,12 +21,15 @@ from skyrl_train.workers.worker import (
 
 
 class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
+        # NOTE (erictang000): the Deepspeed backend only offloads optimizer states + fp32 params to GPU, so
+        # bf16 weights remain on GPU at all times. We thus absorb `offload_optimizer` and `offload_model` into `kwargs`
+        # and do not pass them down to the strategy.
         # TODO (erictang000): this is where this was getting called previously - do we need to do this every time?
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, pin_memory, non_blocking)
 
-    def backload_to_gpu(self, non_blocking=True):
+    def backload_to_gpu(self, non_blocking=True, **kwargs):
         self.strategy.backload_to_gpu(self.model, non_blocking)
 
     def init_model(self, model_id_or_path, num_training_steps: int = None):
@@ -246,11 +249,11 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
 
 
 class DeepSpeedCriticWorkerBase(CriticWorkerBase):
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.model, pin_memory, non_blocking)
 
-    def backload_to_gpu(self, non_blocking=True):
+    def backload_to_gpu(self, non_blocking=True, **kwargs):
         self.strategy.backload_to_gpu(self.model, non_blocking)
 
     def init_model(self, model_id_or_path, num_training_steps: int = None):
@@ -316,13 +319,13 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
 
 
 class DeepSpeedRefWorkerBase(RefWorkerBase):
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         # deepspeed automatically offloads all model parameters to cpu
         # after forward if param_offload is true, and the ref model has no optimizer state
         # so we don't need to call offload_to_cpu here
         pass
 
-    def backload_to_gpu(self, non_blocking=True):
+    def backload_to_gpu(self, non_blocking=True, **kwargs):
         pass
 
     def init_model(self, model_path):
