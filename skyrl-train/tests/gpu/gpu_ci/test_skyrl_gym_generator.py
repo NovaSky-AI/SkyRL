@@ -124,6 +124,7 @@ async def run_generator_end_to_end(
             "enable_http_endpoint": False,
             "http_endpoint_host": "127.0.0.1",
             "http_endpoint_port": 8000,
+            "chat_template_kwargs": {},
         }
     )
 

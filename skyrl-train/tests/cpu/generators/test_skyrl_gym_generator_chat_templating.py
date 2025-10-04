@@ -82,6 +82,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
             "append_eos_token_after_stop_str_in_multi_turn": True,
+            "chat_template_kwargs": {},
         }
     )
     env_cfg = DictConfig(
@@ -232,6 +233,7 @@ async def test_append_eos_after_stop_multi_turn(model_name):
                 "apply_overlong_filtering": False,
                 "use_conversation_multi_turn": True,
                 "append_eos_token_after_stop_str_in_multi_turn": append_flag,
+                "chat_template_kwargs": {},
             }
         )
         env_cfg = DictConfig({"max_env_workers": 0, "env_class": "cpu_test_env"})
