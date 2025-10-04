@@ -100,10 +100,6 @@ def create_ray_wrapped_inference_engines(
         pass
     else:
         raise ValueError(f"Unsupported backend: {backend}")
-    
-    if model_dtype == "bfloat16" and "gpt-oss-20b" in pretrain:
-        pretrain = "unsloth/gpt-oss-20b-BF16"
-        print(f"Detected GPT-OSS. Using bf16 weights from {pretrain} for gpt oss", flush=True)
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
