@@ -234,6 +234,9 @@ generator:
   # EOS token), this masks out every token in the loss mask.
   apply_overlong_filtering: false
 
+  # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
+  chat_template_kwargs: {}
+
 environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:

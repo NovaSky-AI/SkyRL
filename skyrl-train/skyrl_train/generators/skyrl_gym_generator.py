@@ -77,6 +77,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
+        if len(self.generator_cfg.chat_template_kwargs) and self.generator_cfg.batched:
+            raise ValueError(
+                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
+            )
+
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
         # correctly format and tokenize observations into `observation_ids`.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
@@ -89,6 +94,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.base_conversation,
             add_generation_prompt=False,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
         # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
@@ -169,6 +175,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             add_generation_prompt=not retokenize_chat_history,
             chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
 
         initial_prompt_length = len(input_ids)
@@ -262,6 +269,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 return_dict=True,
                 return_assistant_tokens_mask=True,
                 tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
             )
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
@@ -543,6 +551,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_template=self.custom_chat_template,
             add_generation_prompt=False,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
         return chat_history, chat_end_index, input_ids
 
@@ -610,6 +619,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,
                 tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
