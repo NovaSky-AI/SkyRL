@@ -186,13 +186,12 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # `<|im_start|>user\n1<|im_end|>\n`
     expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
 
+    # For custom_chat_template, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
     if custom_chat_template is not None:
         expected_loss_masks = (
             expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
             + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
         ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
-        assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
-        assert generator_output["loss_masks"][0] == expected_loss_masks
     else:
         # For non-custom_chat_template, `resp_str` directly starts with what the model generates
         expected_loss_masks = (
@@ -205,8 +204,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         )
         if "Qwen" in model_name:
             expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
-        assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
-        assert generator_output["loss_masks"][0] == expected_loss_masks
+    assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
+    assert generator_output["loss_masks"][0] == expected_loss_masks
 
 
 def test_qwen3_original_vs_without_thinking_chat_template():
