@@ -1,4 +1,4 @@
-set -x
+set -exo pipefail
 
 # Colocated GRPO training+generation for GPT-OSS-20B on GSM8K.
 # NOTE (sumanthrh): Currently, gpt-oss requires flash attention to be disabled since attention sinks are not supported: https://github.com/Dao-AILab/flash-attention/issues/1797
