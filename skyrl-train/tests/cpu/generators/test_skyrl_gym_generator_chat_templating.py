@@ -230,7 +230,7 @@ def test_qwen3_original_vs_without_thinking_chat_template():
     file_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
     with open(file_path, "r", encoding="utf-8") as f:
         qwen3_without_thinking_str_from_file = f.read()
-        
+
     qwen3_without_thinking_str_from_file = tokenizer.apply_chat_template(
         messages, chat_template=qwen3_without_thinking_str_from_file, tokenize=False
     )
@@ -239,8 +239,9 @@ def test_qwen3_original_vs_without_thinking_chat_template():
     default_template_str = tokenizer.apply_chat_template(messages, chat_template=None, tokenize=False)
 
     # The original_chat_template should match the tokenizer exactly
-    assert default_template_str == qwen3_without_thinking_str 
+    assert default_template_str == qwen3_without_thinking_str
     assert qwen3_without_thinking_str == qwen3_without_thinking_str_from_file
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
