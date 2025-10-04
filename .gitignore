@@ -28,7 +28,7 @@ docs/_spelling/
 # .env
 
 # .env files inside directories can be ignored
-# /skyrl-train/.env
+/skyrl-train/.env
 /skyrl-gym/.env 
 
 /skyrl_train/.venv
@@ -38,4 +38,4 @@ docs/_spelling/
 /skyrl-gym/build
 /skyrl-gym/dist
 
-# *.log
+*.log
