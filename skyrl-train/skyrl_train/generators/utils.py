@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Dict, Any, Optional
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
@@ -137,7 +137,7 @@ def apply_overlong_filtering(
     ]
 
 
-def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], List[List[float]]]):
+def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], List[List[float]]], env_metrics: Optional[List[Dict[str, Any]]] = None):
     num_tokens_arr = np.array([len(response) for response in responses])
     # Support both response-level and token-level rewards
     flat_rewards = []
@@ -156,7 +156,7 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
     # average tokens for zero rewards
     avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
 
-    return {
+    rollout_metrics = {
         "generate/min_num_tokens": np.min(num_tokens_arr).item(),
         "generate/max_num_tokens": np.max(num_tokens_arr).item(),
         "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
@@ -165,6 +165,13 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
 
+    if env_metrics:
+        for i, metrics in enumerate(env_metrics):
+            if metrics:
+                for key, value in metrics.items():
+                    rollout_metrics[f"environment/{key}_{i}"] = value
+
+    return rollout_metrics
 
 def prepare_generator_input(
     prompts: List[Any],
