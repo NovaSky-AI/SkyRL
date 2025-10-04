@@ -228,10 +228,10 @@ def test_qwen3_original_vs_without_thinking_chat_template():
     # Apply custom chat template from file
     file_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
     with open(file_path, "r", encoding="utf-8") as f:
-        qwen3_without_thinking_str_from_file = f.read()
+        template_from_file = f.read()
 
     qwen3_without_thinking_str_from_file = tokenizer.apply_chat_template(
-        messages, chat_template=qwen3_without_thinking_str_from_file, tokenize=False
+        messages, chat_template=template_from_file, tokenize=False
     )
 
     # Apply default chat template
