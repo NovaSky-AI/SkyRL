@@ -47,15 +47,15 @@ conflicts = [
         { extra = "vllm" },
         { extra = "sglang" },
     ],
-#    [
-#        { extra = "vllm" },
-#        { extra = "flashrl" },
-#        { extra = "sglang" },
-#    ],
-#    [
-#        { extra = "flashrl" },
-#        { extra = "miniswe" },
-#    ],
+    [
+        { extra = "vllm" },
+        { extra = "flashrl" },
+        { extra = "sglang" },
+    ],
+    [
+        { extra = "flashrl" },
+        { extra = "miniswe" },
+    ],
     [
         { extra = "mcore" },
         { extra = "sglang" },
@@ -67,8 +67,7 @@ conflicts = [
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
-# flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
 # NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
 # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime which is slow.
 # additionally, different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
@@ -76,7 +75,6 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
-# vllm = { path = "/home/ubuntu/sumanth-ct/vllm", editable = true }
 
 
 [project.optional-dependencies]
@@ -107,8 +105,8 @@ sandboxes = [
 ]
 vllm = [
     "vllm==0.10.1.1",
-    # "torch==2.7.1",
-    # "flashinfer-python",
+    "torch==2.7.1",
+    "flashinfer-python",
     "torchvision"
 ]
 sglang = [
@@ -131,15 +129,15 @@ mcore = [
   "mbridge==0.15.1",
   "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
 ]
-# flashrl = [
-#    # TODO (sumanthrh): Shift to install from git source
-#    # Currently, this is the wheel built for commit 4b04dfc at: https://github.com/SumanthRH/vllm/tree/flashrl
-#    # Install from git source is currently defaulting to cpu build for some reason
-#    "vllm @ https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl",
-#    "torch==2.7.0",
-#    "flashinfer-python",
-#    "torchvision",
-# ]
+flashrl = [
+    # TODO (sumanthrh): Shift to install from git source
+    # Currently, this is the wheel built for commit 4b04dfc at: https://github.com/SumanthRH/vllm/tree/flashrl
+    # Install from git source is currently defaulting to cpu build for some reason
+    "vllm @ https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl",
+    "torch==2.7.0",
+    "flashinfer-python",
+    "torchvision",
+]
 miniswe = [
     # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
     "mini-swe-agent>=1.12.0",

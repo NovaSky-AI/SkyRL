@@ -270,8 +270,6 @@ class FSDPStrategy(DistributedStrategy):
         is_actor = isinstance(model, Actor)
         fsdp_module = self._fsdp_init_model(model, is_train=True, is_actor=is_actor)
 
-        print(f"FSDP module: {fsdp_module}")
-
         optim_config = self.optimizer_config
         if optim_config is not None:
             actor_optimizer = optim.AdamW(

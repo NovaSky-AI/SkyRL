@@ -149,9 +149,6 @@ def init_worker_with_type(
     if cfg is None:
         cfg = get_test_actor_config()
 
-    if not ray.is_initialized():
-        initialize_ray(cfg)
-
     if shared_pg is not None:
         pg = shared_pg
         num_gpus_per_actor = 0.2
@@ -418,7 +415,7 @@ def init_inference_engines(
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:
-        asyncio.run(client.wake_up(tags=["weights"]))
+        asyncio.run(client.wake_up())
     return client, pg
 
 

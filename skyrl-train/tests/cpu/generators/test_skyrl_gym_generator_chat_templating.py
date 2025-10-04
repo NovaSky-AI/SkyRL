@@ -49,8 +49,7 @@ def _register_test_env_if_needed():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name",
-    ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B", "openai/gpt-oss-20b"],
+    "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
 )
 async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     _register_test_env_if_needed()  # Register only when needed
@@ -186,107 +185,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
     assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
     assert generator_output["loss_masks"][0] == expected_loss_masks
-
-
-@pytest.mark.asyncio
-async def test_skyrl_gym_generator_chat_templating_gpt_oss():
-    """Test GPT-OSS chat templating - prints outputs for validation without hardcoded expectations."""
-    _register_test_env_if_needed()
-
-    model_name = "openai/gpt-oss-20b"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    mock_llm = MagicMock()
-
-    # Mock the generate method - simulate GPT-OSS responding with channel format
-    def mock_generate(input_batch):
-        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        # GPT-OSS format: the model generates the channel info automatically
-        mock_llm_output_text = "<|channel|>final<|message|>b<|end|>"
-        return {
-            "responses": ["<|channel|>final<|message|>b"] * num_prompts,  # Response without end token
-            "stop_reasons": ["stop"] * num_prompts,
-            "response_logprobs": None,
-            "response_ids": [tokenizer.encode(mock_llm_output_text, add_special_tokens=False)] * num_prompts,
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=mock_generate)
-
-    generator_cfg = DictConfig(
-        {
-            "sampling_params": {"max_generate_length": 200, "logprobs": None},
-            "max_input_length": 200,
-            "batched": False,
-            "max_turns": 3,
-            "zero_reward_on_non_stop": False,
-            "apply_overlong_filtering": False,
-            "use_conversation_multi_turn": True,
-            "append_eos_token_after_stop_str_in_multi_turn": True,
-            "chat_template_kwargs": {},
-        }
-    )
-    env_cfg = DictConfig(
-        {
-            "max_env_workers": 0,
-            "env_class": "cpu_test_env",
-        }
-    )
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=tokenizer,
-        model_name=model_name,
-    )
-
-    prompt = [[{"role": "user", "content": "a"}]]
-    extras = [{"answer": "4"}]
-
-    input_batch = {
-        "prompts": prompt,
-        "env_extras": extras,
-        "env_classes": [env_cfg.env_class],
-    }
-
-    print("\n=== GPT-OSS Chat Templating Test ===")
-    print(f"Model: {model_name}")
-    print(f"Initial prompt: {prompt[0]}")
-
-    generator_output = await generator.generate(input_batch)
-
-    print("\n--- Generator Output ---")
-    print(f"Prompt token IDs length: {len(generator_output['prompt_token_ids'][0])}")
-    print(f"Response IDs length: {len(generator_output['response_ids'][0])}")
-    print(f"Loss masks length: {len(generator_output['loss_masks'][0])}")
-    print(f"Rewards: {generator_output['rewards']}")
-
-    # Decode the full conversation to see what it looks like
-    full_conversation = generator_output["prompt_token_ids"][0] + generator_output["response_ids"][0]
-    decoded_conversation = tokenizer.decode(full_conversation)
-    print("\n--- Full Decoded Conversation ---")
-    print(repr(decoded_conversation))
-
-    # Show the expected format by manually building the chat template
-    expected_chat_history = [
-        {"role": "user", "content": "a"},
-        {"role": "assistant", "content": "<|channel|>final<|message|>b"},
-        {"role": "user", "content": "1"},
-        {"role": "assistant", "content": "<|channel|>final<|message|>b"},
-        {"role": "user", "content": "2"},
-        {"role": "assistant", "content": "<|channel|>final<|message|>b"},
-    ]
-    expected_conversation = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
-    print("\n--- Expected Chat Template Format ---")
-    print(repr(expected_conversation))
-
-    # Basic validation that we got reasonable outputs
-    assert len(generator_output["prompt_token_ids"][0]) > 0
-    assert len(generator_output["response_ids"][0]) > 0
-    assert len(generator_output["loss_masks"][0]) > 0
-    assert len(generator_output["rewards"]) > 0
-
-    print("\n✅ GPT-OSS chat templating test completed successfully!")
-    print("Note: This test validates the basic structure works. Manual review of outputs above confirms correctness.")
 
 
 @pytest.mark.asyncio

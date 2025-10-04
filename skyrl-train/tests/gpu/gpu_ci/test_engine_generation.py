@@ -133,14 +133,11 @@ def test_inference_engines_generation(backend: str, tp_size: int, dp_size: int):
         cfg.generator.backend = backend
         initialize_ray(cfg)
 
-        # Use GPT-OSS for vLLM to test MXFP4 support
-        test_model = "openai/gpt-oss-20b" if backend == "vllm" else MODEL
-        
-        prompts = get_test_prompts(test_model)
-        tokenizer = AutoTokenizer.from_pretrained(test_model)
+        prompts = get_test_prompts(MODEL)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         try:
-            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, test_model)
+            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
             sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
             # Batched generation
@@ -238,11 +235,8 @@ def test_token_based_generation(backend: str, tp_size: int, dp_size: int):
         cfg.generator.backend = backend
         initialize_ray(cfg)
 
-        # Use GPT-OSS for vLLM to test MXFP4 support
-        test_model = "openai/gpt-oss-20b" if backend == "vllm" else MODEL
-        
-        prompts = get_test_prompts(test_model, 3)
-        tokenizer = AutoTokenizer.from_pretrained(test_model)
+        prompts = get_test_prompts(MODEL, 3)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts, add_generation_prompt=True, tokenize=True, return_dict=True
         )["input_ids"]

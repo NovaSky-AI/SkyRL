@@ -80,17 +80,16 @@ class Actor(nn.Module):
             else:
                 dschf = None  # noqa: F841
 
-            # Quantization configuration
-            quantization_config = None
-
             if load_in_4bit:
                 assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
-                quantization_config = BitsAndBytesConfig(
+                nf4_config = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_quant_type="nf4",
                     bnb_4bit_use_double_quant=True,
                     bnb_4bit_compute_dtype=torch.bfloat16,
                 )
+            else:
+                nf4_config = None
 
             if use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
@@ -99,14 +98,12 @@ class Actor(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
-            model_dtype = torch.float32
-
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
                 attn_implementation=attn_implementation,
-                quantization_config=quantization_config,
-                torch_dtype=model_dtype,
+                quantization_config=nf4_config,
+                torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
             )
 
@@ -124,7 +121,7 @@ class Actor(nn.Module):
                 )
                 self.model = get_peft_model(self.model, lora_config)
 
-                if load_in_4bit or ("gpt-oss" in pretrain_or_model.lower() and quantization_config is not None):
+                if load_in_4bit:
                     for name, module in self.model.named_modules():
                         if isinstance(module, LoraLayer):
                             module = module.to(torch.bfloat16)
@@ -516,49 +513,23 @@ def get_llm_for_sequence_regression(
     else:
         dschf = None
 
-    # Quantization configuration
-    quantization_config = None
-
-    # Check if this is a GPT-OSS model that needs MXFP4 handling
-    if "gpt-oss" in model_name_or_path.lower():
-        try:
-            from transformers.utils.quantization_config import Mxfp4Config
-
-            # For training, we dequantize MXFP4 weights to BF16 to enable gradient computation
-            quantization_config = Mxfp4Config(dequantize=True)
-            logger.info(
-                f"Detected GPT-OSS model: {model_name_or_path}. Using MXFP4 config with dequantization for training."
-            )
-        except ImportError:
-            logger.warning(
-                "MXFP4 quantization not available. Please ensure transformers>=4.46.0 and required kernels are installed."
-            )
-            logger.info("Falling back to standard BF16 loading for GPT-OSS model.")
-            quantization_config = None
-    elif load_in_4bit:
+    if load_in_4bit:
         assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
-        quantization_config = BitsAndBytesConfig(
+        nf4_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
-
-    # For GPT-OSS models with MXFP4, we need BF16 regardless of the bf16 parameter
-    # because we're dequantizing MXFP4 weights to BF16 for training
-    if "gpt-oss" in model_name_or_path.lower() and quantization_config is not None:
-        model_dtype = torch.bfloat16
-        if not bf16:
-            logger.info("GPT-OSS model detected: overriding torch_dtype to bfloat16 for MXFP4 dequantization")
     else:
-        model_dtype = torch.bfloat16 if bf16 else torch.float32
+        nf4_config = None
 
     model = cls_class.from_pretrained(
         model_name_or_path,
         config=config,
         trust_remote_code=True,
-        torch_dtype=model_dtype,
-        quantization_config=quantization_config,
+        torch_dtype=torch.bfloat16 if bf16 else torch.float32,
+        quantization_config=nf4_config,
         device_map=device_map,
         **kwargs,
     )
@@ -575,7 +546,7 @@ def get_llm_for_sequence_regression(
         )
         model = get_peft_model(model, lora_config)
 
-        if load_in_4bit or ("gpt-oss" in model_name_or_path.lower() and quantization_config is not None):
+        if load_in_4bit:
             for name, module in model.named_modules():
                 if isinstance(module, LoraLayer):
                     module = module.to(torch.bfloat16)
