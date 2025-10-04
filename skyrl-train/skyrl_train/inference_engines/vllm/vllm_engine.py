@@ -30,6 +30,8 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
+from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype
 
 
@@ -59,7 +61,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
     if bundle_indices is not None:
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
-        print(f"creating LLM with bundle_indices={bundle_indices}")
+        logger.info(f"creating LLM with bundle_indices={bundle_indices}")
 
 
 class WorkerWrap:
@@ -83,7 +85,7 @@ class WorkerWrap:
 
         if getattr(self, "_model_update_group", None):
             if override_existing:
-                print("Destroying existing model update group")
+                logger.info("Destroying existing model update group")
                 destroy_process_group(self._model_update_group)
                 self._model_update_group = None
             else:
@@ -92,7 +94,7 @@ class WorkerWrap:
                 )
 
         rank = torch.distributed.get_rank() + rank_offset
-        print(
+        logger.info(
             f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
         )
 
@@ -103,7 +105,7 @@ class WorkerWrap:
             rank=rank,
             group_name=group_name,
         )
-        print(
+        logger.info(
             f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
@@ -333,6 +335,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
 
     def _create_engine(self, *args, **kwargs):
+        openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
         engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
@@ -355,6 +358,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
+            **openai_kwargs,
         )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,

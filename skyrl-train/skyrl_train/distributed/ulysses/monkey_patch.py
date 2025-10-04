@@ -22,6 +22,7 @@ import sys
 from functools import lru_cache
 from typing import Optional
 
+from loguru import logger
 import torch
 from packaging import version
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -128,7 +129,7 @@ def apply_monkey_patch(
     """Replace _flash_attention_forward to _ulysses_flash_attention_forward"""
     if use_parent_class:
         parent_cls = type(model).__bases__[0]
-        print(f"Applying monkey patch to {parent_cls.__name__} in {parent_cls.__module__}")
+        logger.info(f"Applying monkey patch to {parent_cls.__name__} in {parent_cls.__module__}")
         module = sys.modules[parent_cls.__module__]
     else:
         module = sys.modules[model.__module__]
@@ -144,13 +145,13 @@ def apply_monkey_patch(
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):
             module._flash_attention_forward = _ulysses_flash_attention_forward
-            print(f"Monkey patch _flash_attention_forward in {model.__module__}")
+            logger.info(f"Monkey patch _flash_attention_forward in {model.__module__}")
         else:
             # transformers>=4.48.0
             from transformers.integrations import flash_attention
 
             flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
-            print(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
+            logger.info(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
 
 
 @lru_cache

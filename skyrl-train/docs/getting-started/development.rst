@@ -12,14 +12,20 @@ Follow the :doc:`installation guide <installation>`. Make sure that the installa
 Modifying the code
 ==================
 
-- Are you adding a new environment or task? Follow the :doc:`new task tutorial <../tutorials/new_env>`. Your custom code can be placed anywhere - building on top of ``skyrl_train`` as a package - but we recommend structuring it as a folder similar to `skyrl-train/examples/multiply <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply>`_. 
+- **Adding a new environment or task?**
+    - Follow the :doc:`new task tutorial <../tutorials/new_env>`.  Your custom code can be placed anywhere - building on top of ``skyrl_train`` as a package - but we recommend structuring it as a folder similar to :code_link:`examples/multiply`. 
 
-- Are you creating a custom ``Generator`` (ex: porting an agent harness, implementing custom trajectory generation logic, etc.)? Same as the above: your custom code can be placed anywhere and we typically use ``skyrl-train/examples/`` for this.
+- **Creating a custom Generator (ex: porting an agent harness, implementing custom trajectory generation logic, etc.)?** 
+    - Same as the above: your custom code can be placed anywhere and we typically use ``skyrl-train/examples/`` for this. See :code_link:`examples/mini_swe_agent` for an example of creating a custom ``Generator`` for `Mini-SWE-Agent <https://github.com/SWE-agent/mini-swe-agent>`_.
 
-- Are you modifying the training code (ex: adding a new algorithm, changing the training loop etc)? You would modify the code in :code_link:`skyrl_train`. 
+- **Looking to add a new algorithm by changing your advantage estimator or policy loss?** 
+    - Follow the guide for :doc:`implementing custom algorithms <../algorithms/custom_algorithms>`. See :code_link:`examples/algorithms` for examples of various custom algorithm implementations.
 
-- Are you modifying the existing environment code (ex: adding a custom method for all ``Env`` classes, improving the ``SearchEnv`` implementation)? You would modify the code in  `skyrl-gym <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/>`_. Note: you do **not** have to modify the ``skyrl-gym`` package for adding a new environment or task. 
+- **Looking to modify the training loop for full control?** 
+    - Follow the guide for :ref:`creating a custom trainer <custom-trainer>`. See :code_link:`examples/algorithms/dapo/main_dapo.py` for an example of how to modify the Trainer class for DAPO.
 
+- **Modifying the existing environment code (ex: adding a custom method for all Env classes, improving the SearchEnv implementation)?** 
+    - You would modify the code in `skyrl-gym <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/>`_. Note: you do **not** have to modify the ``skyrl-gym`` package for adding a new environment or task. 
 
 Contributing to SkyRL
 =====================

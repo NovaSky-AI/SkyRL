@@ -8,9 +8,14 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
+from ray.util.placement_group import (
+    placement_group,
+    PlacementGroupSchedulingStrategy,
+    PlacementGroup,
+    placement_group_table,
+)
 
-from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S
+from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
 
 
 class Timer:
@@ -154,12 +159,6 @@ def validate_megatron_cfg(cfg: DictConfig):
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
-        assert (
-            config.megatron_config.expert_model_parallel_size == 1
-        ), f"found {worker_type}.expert_model_parallel_size > 1, expert model parallel is not yet supported for megatron"
-        assert (
-            config.megatron_config.expert_tensor_parallel_size == 1
-        ), f"found {worker_type}.expert_tensor_parallel_size > 1, expert tensor parallel is not yet supported for megatron"
         # check that sequence parallel is not configured outside of megatron
         assert (
             config.sequence_parallel_size == 1
@@ -238,19 +237,6 @@ def validate_cfg(cfg: DictConfig):
         logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
-
-    # Validate inference engine parallelism.
-    ep_size = cfg.generator.inference_engine_expert_parallel_size
-    dp_size = cfg.generator.inference_engine_data_parallel_size
-    tp_size = cfg.generator.inference_engine_tensor_parallel_size
-    assert (
-        dp_size == 1
-    ), "Inference data parallelism is not yet supported, but is in active development and testing: https://github.com/NovaSky-AI/SkyRL/issues/202"
-    if ep_size > 1:
-        assert dp_size * tp_size == ep_size, (
-            f"If expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
-            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
-        )
 
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
@@ -386,6 +372,19 @@ def validate_generator_cfg(cfg: DictConfig):
         if not cfg.generator.async_engine:
             raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
+    # Validate inference engine parallelism.
+    ep_size = cfg.generator.inference_engine_expert_parallel_size
+    dp_size = cfg.generator.inference_engine_data_parallel_size
+    tp_size = cfg.generator.inference_engine_tensor_parallel_size
+    if cfg.generator.backend == "sglang":
+        assert dp_size == 1, "Inference data parallelism is not yet supported for SGLang backend."
+        assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
+    if ep_size > 1:
+        assert dp_size * tp_size == ep_size, (
+            f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
+            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
+        )
+
 
 @ray.remote
 def get_all_env_variables():
@@ -444,10 +443,14 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if cfg.generator.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
-    if cfg.trainer.strategy == "megatron" and cfg.trainer.flash_attn:
-        # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
-        # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
-        env_vars["NVTE_FUSED_ATTN"] = "0"
+    if cfg.trainer.strategy == "megatron":
+        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
+        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
+        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        if cfg.trainer.flash_attn:
+            # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
+            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
+            env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
@@ -478,7 +481,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
                 placement.policy_num_gpus_per_node,
                 placement.critic_num_gpus_per_node,
                 placement.ref_num_gpus_per_node,
-                placement.reward_num_gpus_per_node,
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
@@ -486,11 +488,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
-
-    if cfg.trainer.strategy == "megatron":
-        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
-        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
-        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
@@ -512,6 +509,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
 
+    if SKYRL_PYTHONPATH_EXPORT:
+        # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
+        # this is useful for dependencies that are baked into the docker image but that we don't want to ship + rebuild with UV (i.e. TransformerEngine)
+        # see https://github.com/ray-project/ray/issues/56697 for why this is needed
+        # note that this could potentially cause unexpected issues if there are overlapping installations between the base image
+        # and the pyproject.toml file - to resolve these, make sure to specify exact versions of dependencies in the pyproject.toml
+        logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
+        env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
+
     return env_vars
 
 
@@ -519,7 +525,7 @@ def configure_ray_worker_logging() -> None:
     """
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third‑party logs match formatting
+    through Loguru so third-party logs match formatting
     """
     # 1) Loguru formatting (force colors)
     logger.remove()
@@ -586,6 +592,44 @@ def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
         )
 
 
+@ray.remote(num_gpus=1)
+class InfoActor:
+    def get_gpu_id(self):
+        return ray.get_gpu_ids()[0]
+
+
+def get_reordered_bundle_indices(pg: PlacementGroup):
+    pg_data = placement_group_table(pg)
+    num_bundles = len(pg_data["bundles"])
+    bundle_to_node_ids = pg_data["bundles_to_node_id"]
+
+    # use info actor to get the GPU id
+    info_actors = []
+    for i in range(num_bundles):
+        info_actors.append(
+            InfoActor.options(
+                num_cpus=0.01,  # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
+                num_gpus=0.01,
+                resources=None,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=i,
+                ),
+            ).remote()
+        )
+
+    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
+    for actor in info_actors:
+        ray.kill(actor)
+
+    # original index, node_id, gpu_id
+    bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
+    pg_reordered_bundle_indices = [
+        bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
+    ]  # sort by node_id, then gpu_id
+    return pg_reordered_bundle_indices
+
+
 # NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
 # This is because we do not control the update weight implementation with SGLang backend.
 # With VLLM, we use a custom Worker extension to have a custom update weight implementation.
@@ -616,7 +660,7 @@ def format_gib(mem_bytes: int) -> str:
 
 
 def print_mem(tag: str, mem: dict):
-    print(
+    logger.info(
         f"{tag} - Allocated: {format_gib(mem['allocated'])}, "
         f"Reserved: {format_gib(mem['reserved'])}, "
         f"Free: {format_gib(mem['free'])}, "

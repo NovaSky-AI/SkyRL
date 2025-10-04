@@ -46,7 +46,6 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         vllm_v1_disable_multiproc=cfg.generator.vllm_v1_disable_multiproc,
         enable_prefix_caching=cfg.generator.enable_prefix_caching,
         enforce_eager=cfg.generator.enforce_eager,
-        max_model_len=cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
         data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         shared_pg=colocate_pg,
@@ -235,12 +234,11 @@ class BasePPOExp:
                 PolicyWorker,
                 CriticWorker,
                 RefWorker,
-                RewardWorker,
             )
         elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker, RewardWorker
+            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
         elif self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RewardWorker, RefWorker
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
@@ -270,7 +268,7 @@ class BasePPOExp:
         )
 
         # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):

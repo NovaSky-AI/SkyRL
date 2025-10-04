@@ -73,7 +73,7 @@ class FullCtxTrainer(RayPPOTrainer):
                 with Timer("compute_advantages_and_returns", self.all_timings):
                     training_input = self.compute_advantages_and_returns(training_input)
                     # remove some unwanted keys
-                    for key in ["custom_rewards", "rm_rewards"]:
+                    for key in ["rewards"]:
                         training_input.pop(key)
                     training_input.metadata.pop("uids")
 
