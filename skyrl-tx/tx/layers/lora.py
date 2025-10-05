@@ -2,9 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-
-def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
-    return nnx.Param(kernel_init(rngs.param(), shape, dtype))
+from tx.layers.util import Param
 
 
 class LoRAMixin:
