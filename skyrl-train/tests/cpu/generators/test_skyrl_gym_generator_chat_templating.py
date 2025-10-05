@@ -74,7 +74,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
     default_cfg = get_default_config()
-    generator_cfg = default_cfg["generator"]
+    generator_cfg = default_cfg.generator
     generator_cfg.update(
         {
             "sampling_params": {"max_generate_length": 200, "logprobs": None},
