@@ -91,7 +91,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     env_cfg.update(
         {
             "max_env_workers": 0,
-            "env_class": "cpu_test_env",
         }
     )
     generator = SkyRLGymGenerator(
@@ -108,7 +107,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     input_batch: GeneratorInput = {
         "prompts": prompt,
         "env_extras": extras,
-        "env_classes": [env_cfg.env_class],
+        "env_classes": ["cpu_test_env"],
     }
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
@@ -239,7 +238,7 @@ async def test_append_eos_after_stop_multi_turn(model_name):
             }
         )
         env_cfg = default_cfg.environment.skyrl_gym
-        env_cfg.update({"max_env_workers": 0, "env_class": "cpu_test_env"})
+        env_cfg.update({"max_env_workers": 0})
         gen = SkyRLGymGenerator(
             generator_cfg=generator_cfg,
             skyrl_gym_cfg=env_cfg,
