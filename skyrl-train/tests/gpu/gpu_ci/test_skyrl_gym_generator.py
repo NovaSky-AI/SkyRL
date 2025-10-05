@@ -20,6 +20,7 @@ from typing import Any, Dict
 import hydra
 from skyrl_train.entrypoints.main_base import config_dir
 from loguru import logger
+from skyrl_train.config.utils import get_default_config
 
 OBSERVATION_PROMPT = "give me another solution"
 
@@ -107,7 +108,9 @@ async def run_generator_end_to_end(
     )
 
     # Create a mock generator config
-    generator_cfg = DictConfig(
+    default_cfg = get_default_config()
+    generator_cfg = default_cfg.generator
+    generator_cfg.update(
         {
             "sampling_params": {
                 "max_generate_length": max_generate_length,
@@ -127,13 +130,12 @@ async def run_generator_end_to_end(
         }
     )
 
-    env_cfg = DictConfig(
+    env_cfg = default_cfg.environment.skyrl_gym
+    env_cfg.update(
         {
             "search": {
                 "log_requests": True,
                 "search_url": "http://127.0.0.1:8000/retrieve",
-                "topk": 3,
-                "timeout": 30,
             },
             "max_env_workers": max_env_workers,
         }
