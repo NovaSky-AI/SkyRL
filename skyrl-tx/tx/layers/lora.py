@@ -67,9 +67,8 @@ class LoRAMixin:
         B = self.lora_B.value[adapter_indices]
         scaling = self.lora_scaling.value[adapter_indices]
 
-        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A, B)
-        lora_output = lora_output.reshape(base_output.shape) * scaling[:, None, None]
-        return base_output + lora_output
+        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A, B) * scaling[:, None, None]
+        return base_output + lora_output.reshape(base_output.shape)
 
 
 class LoRALinear(LoRAMixin, nnx.Linear):
