@@ -41,6 +41,7 @@ class DummyGenerator(GeneratorInterface):
 @pytest.mark.asyncio
 async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     cfg = dummy_config
+    breakpoint()
     cfg.generator.backend = "vllm"
     cfg.generator.eval_sampling_params = OmegaConf.create(
         {
