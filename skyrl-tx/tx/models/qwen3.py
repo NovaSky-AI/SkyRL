@@ -87,7 +87,6 @@ class Qwen3MLP(nnx.Module):
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         max_lora_adapters = getattr(config, 'max_lora_adapters', 0)
         max_lora_rank = getattr(config, 'max_lora_rank', 8)
-        
         self.gate_proj = LoRALinear(
             config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
