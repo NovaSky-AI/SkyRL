@@ -63,7 +63,6 @@ class LoRAMixin:
 
         batch_size = x.shape[0]
         assert adapter_indices.shape[0] == batch_size
-        assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(batch_size, -1, self.in_features)
         A = self.lora_A.value[adapter_indices]
