@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
 from skyrl_train.generators.utils import get_custom_chat_template
+from skyrl_train.config.utils import get_default_config
 
 
 # Setup for formatting tests
@@ -72,7 +73,9 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
-    generator_cfg = DictConfig(
+    default_cfg = get_default_config()
+    generator_cfg = default_cfg["generator"]
+    generator_cfg.update(
         {
             "sampling_params": {"max_generate_length": 200, "logprobs": None},
             "max_input_length": 200,
@@ -84,7 +87,8 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "append_eos_token_after_stop_str_in_multi_turn": True,
         }
     )
-    env_cfg = DictConfig(
+    env_cfg = default_cfg.environment.skyrl_gym
+    env_cfg.update(
         {
             "max_env_workers": 0,
             "env_class": "cpu_test_env",
@@ -221,20 +225,21 @@ async def test_append_eos_after_stop_multi_turn(model_name):
             }
 
         mock_llm.generate = AsyncMock(side_effect=mock_generate)
-
-        generator_cfg = DictConfig(
+        default_cfg = get_default_config()
+        generator_cfg = default_cfg.generator
+        generator_cfg.update(
             {
                 "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
                 "max_input_length": 200,
                 "batched": False,
                 "max_turns": 3,
                 "zero_reward_on_non_stop": False,
-                "apply_overlong_filtering": False,
                 "use_conversation_multi_turn": True,
                 "append_eos_token_after_stop_str_in_multi_turn": append_flag,
             }
         )
-        env_cfg = DictConfig({"max_env_workers": 0, "env_class": "cpu_test_env"})
+        env_cfg = default_cfg.environment.skyrl_gym
+        env_cfg.update({"max_env_workers": 0, "env_class": "cpu_test_env"})
         gen = SkyRLGymGenerator(
             generator_cfg=generator_cfg,
             skyrl_gym_cfg=env_cfg,
