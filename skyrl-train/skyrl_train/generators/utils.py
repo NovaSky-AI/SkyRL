@@ -28,8 +28,8 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(model_name: str) -> str:
-    if "Qwen3" in model_name:
+def get_custom_chat_template(model_name: str, train_on_thinking_tokens: bool = False) -> Optional[str]:
+    if "Qwen3" in model_name and not train_on_thinking_tokens:
         return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
     else:
         return None
