@@ -1,10 +1,12 @@
 # utility functions used for CPU tests
 
-from omegaconf import OmegaConf
+from skyrl_train.config.utils import get_default_config
 
 
 def example_dummy_config():
-    return OmegaConf.create(
+    cfg = get_default_config()
+    # TODO (sumanthrh): Some of these overrides are no longer needed after reading from the config file
+    return cfg.update(
         {
             "trainer": {
                 "project_name": "unit-test",
