@@ -17,8 +17,6 @@ from skyrl_train.utils.utils import initialize_ray
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
-import hydra
-from skyrl_train.entrypoints.main_base import config_dir
 from loguru import logger
 from skyrl_train.config.utils import get_default_config
 
@@ -27,11 +25,9 @@ OBSERVATION_PROMPT = "give me another solution"
 
 def get_test_actor_config() -> DictConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-        cfg.generator.backend = "vllm"
-
-        return cfg
+    default_cfg = get_default_config()
+    default_cfg.generator.backend = "vllm"
+    return default_cfg
 
 
 # Setup for formatting tests
