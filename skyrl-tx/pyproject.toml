@@ -18,6 +18,7 @@ dependencies = [
     "transformers>=4.56.1",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
+    "peft",
 ]
 
 [project.optional-dependencies]

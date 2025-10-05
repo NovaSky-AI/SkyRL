@@ -3,9 +3,8 @@ import jax
 from jax import numpy as jnp
 from transformers import Qwen3Config
 
-
-def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
-    return nnx.Param(kernel_init(rngs.param(), shape, dtype))
+from tx.layers.lora import LoRALinear
+from tx.layers.util import Param
 
 
 class RMSNorm(nnx.Module):
@@ -86,21 +85,28 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.gate_proj = nnx.Linear(
+        max_lora_adapters = getattr(config, 'max_lora_adapters', 0)
+        max_lora_rank = getattr(config, 'max_lora_rank', 8)
+        self.gate_proj = LoRALinear(
             config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")), rngs=rngs
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            max_lora_adapters=max_lora_adapters, max_lora_rank=max_lora_rank, rngs=rngs
         )
-        self.up_proj = nnx.Linear(
+        self.up_proj = LoRALinear(
             config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")), rngs=rngs
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            max_lora_adapters=max_lora_adapters, max_lora_rank=max_lora_rank, rngs=rngs
         )
-        self.down_proj = nnx.Linear(
+        self.down_proj = LoRALinear(
             config.intermediate_size, config.hidden_size, use_bias=False, dtype=dtype, param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)), rngs=rngs
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
+            max_lora_adapters=max_lora_adapters, max_lora_rank=max_lora_rank, rngs=rngs
         )
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        return self.down_proj(nnx.silu(self.gate_proj(x)) * self.up_proj(x))
+    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+        gate_out = self.gate_proj(x, adapter_indices)
+        up_out = self.up_proj(x, adapter_indices)
+        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
 class Qwen3Experts(nnx.Module):
@@ -193,6 +199,7 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
+        adapter_indices: jax.Array | None = None,
     ) -> jax.Array:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -204,7 +211,10 @@ class Qwen3DecoderLayer(nnx.Module):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, Qwen3MLP):
+            hidden_states = self.mlp(hidden_states, adapter_indices)
+        else:
+            hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -231,6 +241,7 @@ class Qwen3Model(nnx.Module):
         *,
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
+        adapter_indices: jax.Array | None = None,
     ) -> dict[str, jax.Array | list[jax.Array]]:
         output_hidden_states = (
             output_hidden_states
@@ -249,6 +260,7 @@ class Qwen3Model(nnx.Module):
             hidden_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
+                adapter_indices=adapter_indices,
             )
 
         hidden_states = self.norm(hidden_states)
@@ -278,11 +290,13 @@ class Qwen3ForCausalLM(nnx.Module):
         *,
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
+        adapter_indices: jax.Array | None = None,
     ) -> dict[str, jax.Array | list[jax.Array]]:
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,
+            adapter_indices=adapter_indices,
         )
         hidden_states = outputs["last_hidden_state"]
         if self.config.tie_word_embeddings:
