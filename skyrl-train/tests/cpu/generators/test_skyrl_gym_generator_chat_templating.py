@@ -12,7 +12,8 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.generators.utils import get_custom_chat_template
+from skyrl_train.generators.utils import get_custom_chat_template, CUSTOM_CHAT_TEMPLATES
+from pathlib import Path
 
 
 # Setup for formatting tests
@@ -49,20 +50,26 @@ def _register_test_env_if_needed():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
+    "model_name",
+    ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FROM_PATH"],
 )
 async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     _register_test_env_if_needed()  # Register only when needed
+    is_custom_jinja_from_file = model_name.endswith("-FROM_PATH")
+    model_name = model_name.replace("-FROM_PATH", "")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     mock_llm = MagicMock()
 
     # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+
         mock_llm_output_text = "b" + tokenizer.eos_token
+        mock_response_text = "b"
+
         return {
             # no tokenizer.eos_token for responses because `skip_special_tokens` is True in sampling params
-            "responses": ["b"] * num_prompts,
+            "responses": [mock_response_text] * num_prompts,
             "stop_reasons": ["stop"] * num_prompts,
             "response_logprobs": None,
             # add_special_tokens needs to be False, otherwise for instance Llama will always
@@ -72,6 +79,16 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     # Create a mock generator config
+
+    chat_template_config = None
+    if is_custom_jinja_from_file:
+        template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
+        chat_template_config = {"source": "file", "name_or_path": str(template_path)}
+    elif "Qwen3" in model_name:
+        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+    else:
+        chat_template_config = {"source": "name", "name_or_path": None}
+
     generator_cfg = DictConfig(
         {
             "sampling_params": {"max_generate_length": 200, "logprobs": None},
@@ -81,6 +98,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "zero_reward_on_non_stop": False,
             "apply_overlong_filtering": False,
             "use_conversation_multi_turn": True,
+            "chat_template": chat_template_config,
             "append_eos_token_after_stop_str_in_multi_turn": True,
         }
     )
@@ -106,16 +124,19 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         "env_extras": extras,
         "env_classes": [env_cfg.env_class],
     }
+
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
     # assume every actual message is 1 token for loss mask checking
+    expected_assistant_content = "b"
+
     expected_chat_history = [
         {"role": "user", "content": "a"},
-        {"role": "assistant", "content": "b"},
+        {"role": "assistant", "content": expected_assistant_content},
         {"role": "user", "content": "1"},
-        {"role": "assistant", "content": "b"},
+        {"role": "assistant", "content": expected_assistant_content},
         {"role": "user", "content": "2"},
-        {"role": "assistant", "content": "b"},
+        {"role": "assistant", "content": expected_assistant_content},
     ]
 
     # For Qwen2.5 generator_output_str, we have (note the missing \n after the eos token):
@@ -127,7 +148,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     # check that the full response is exactly string matching with applying the chat template on history
     prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
     resp_str = tokenizer.decode(generator_output["response_ids"][0])
-    custom_chat_template = get_custom_chat_template(model_name)
+    custom_chat_template = get_custom_chat_template(chat_template_config)
     if custom_chat_template is not None:
         assert prompt_str + resp_str == tokenizer.apply_chat_template(
             expected_chat_history, chat_template=custom_chat_template, tokenize=False
@@ -187,6 +208,40 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     assert generator_output["loss_masks"][0] == expected_loss_masks
 
 
+def test_qwen3_original_vs_without_thinking_chat_template():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+
+    messages = [
+        {"content": "hi", "role": "system"},
+        {"content": "hi", "role": "user"},
+        {"content": "<think>thinking</think>hi", "role": "assistant"},
+        {"content": "hi", "role": "user"},
+        {"content": "<think>thinking</think>hi", "role": "assistant"},
+        {"content": "hi", "role": "user"},
+    ]
+
+    # Apply custom chat template
+    qwen3_without_thinking_str = tokenizer.apply_chat_template(
+        messages, chat_template=CUSTOM_CHAT_TEMPLATES["qwen3_without_thinking"], tokenize=False
+    )
+
+    # Apply custom chat template from file
+    file_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
+    with open(file_path, "r", encoding="utf-8") as f:
+        template_from_file = f.read()
+
+    qwen3_without_thinking_str_from_file = tokenizer.apply_chat_template(
+        messages, chat_template=template_from_file, tokenize=False
+    )
+
+    # Apply default chat template
+    default_template_str = tokenizer.apply_chat_template(messages, chat_template=None, tokenize=False)
+
+    # The original_chat_template should match the tokenizer exactly
+    assert default_template_str == qwen3_without_thinking_str
+    assert qwen3_without_thinking_str == qwen3_without_thinking_str_from_file
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
@@ -222,6 +277,11 @@ async def test_append_eos_after_stop_multi_turn(model_name):
 
         mock_llm.generate = AsyncMock(side_effect=mock_generate)
 
+        chat_template_config = None
+        if "Qwen3" in model_name:
+            chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+        else:
+            chat_template_config = {"source": "name", "name_or_path": None}
         generator_cfg = DictConfig(
             {
                 "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
@@ -231,6 +291,7 @@ async def test_append_eos_after_stop_multi_turn(model_name):
                 "zero_reward_on_non_stop": False,
                 "apply_overlong_filtering": False,
                 "use_conversation_multi_turn": True,
+                "chat_template": chat_template_config,
                 "append_eos_token_after_stop_str_in_multi_turn": append_flag,
             }
         )
