@@ -9,6 +9,7 @@ from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_train.config.utils import get_default_config
 
 
 # Mock constants, where 4 is the eos token id
@@ -87,8 +88,8 @@ def mock_env():
 
 
 @pytest.fixture
-def mock_generator_cfg():
-    cfg = MagicMock()
+def generator_cfg():
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 5
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
