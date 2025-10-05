@@ -6,7 +6,7 @@ from skyrl_train.config.utils import get_default_config
 def example_dummy_config():
     cfg = get_default_config()
     # TODO (sumanthrh): Some of these overrides are no longer needed after reading from the config file
-    return cfg.update(
+    cfg.update(
         {
             "trainer": {
                 "project_name": "unit-test",
@@ -54,3 +54,4 @@ def example_dummy_config():
             },
         }
     )
+    return cfg
