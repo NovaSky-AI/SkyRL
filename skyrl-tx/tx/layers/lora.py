@@ -58,11 +58,11 @@ class LoRAMixin:
         base_output: jax.Array,
         adapter_indices: jax.Array | None,
     ) -> jax.Array:
-        if self.max_lora_adapters == 0:
+        if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
         batch_size = x.shape[0]
-        assert adapter_indices is not None, "If max_lora_adapters > 0, adapter_indices need to be specified"
+        assert adapter_indices.shape[0] == batch_size
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(batch_size, -1, self.in_features)
