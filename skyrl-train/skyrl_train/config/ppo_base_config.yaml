@@ -15,15 +15,12 @@ trainer:
   placement:
     colocate_all: true
     colocate_policy_ref: true
-    colocate_critic_reward: false
     policy_num_nodes: 1
     policy_num_gpus_per_node: 4
     critic_num_nodes: 1
     critic_num_gpus_per_node: 4
     ref_num_nodes: 1
     ref_num_gpus_per_node: 4
-    reward_num_nodes: 1
-    reward_num_gpus_per_node: 4
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
@@ -80,15 +77,6 @@ trainer:
       reshard_after_forward: true
       fsdp_size: -1
     sequence_parallel_size: 1
-  reward:
-    model:
-      path: null
-    deepspeed_config: ${deepspeed_config.eval}
-    fsdp_config:
-      cpu_offload: true
-      reshard_after_forward: true
-      fsdp_size: -1
-    sequence_parallel_size: 1
   algorithm:
     advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
     kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
@@ -122,7 +110,6 @@ trainer:
     
     # value loss parameters
     value_clip: 0.2
-    normalize_reward: true
     dynamic_sampling:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
@@ -205,6 +192,10 @@ generator:
   http_endpoint_port: 8000
   max_turns: 1
 
+  # chat template configuration
+  chat_template:
+    source: "name"  # "name" or "file"
+    name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
   # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}

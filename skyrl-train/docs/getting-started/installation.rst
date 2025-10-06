@@ -17,7 +17,7 @@ If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-clus
 Docker (recommended)
 ---------------------
 
-We provide a docker image with the base dependencies ``erictang000/skyrl-train-ray-2.48.0-py3.12-cu12.8`` for quick setup. 
+We provide a docker image with the base dependencies ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8`` for quick setup. 
 
 1. Make sure to have `NVIDIA Container Runtime <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>`_ installed.
 
@@ -25,7 +25,7 @@ We provide a docker image with the base dependencies ``erictang000/skyrl-train-r
 
 .. code-block:: bash
 
-    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train erictang000/skyrl-train-ray-2.48.0-py3.12-cu12.8 /bin/bash
+    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8 /bin/bash
 
 3. Inside the launched container, setup the latest version of the project:
 
@@ -80,7 +80,7 @@ The only packages required are `build-essential` and `libnuma <https://github.co
 
    .. code-block:: bash
 
-       AttributeError: ray::FSDPRefRayActorBase.offload_to_cpu: undefined symbol: numa_parse_nodestring. Did you mean: '_return_value'?
+       AttributeError: ray::FSDPRefWorkerBase.offload_to_cpu: undefined symbol: numa_parse_nodestring. Did you mean: '_return_value'?
 
 Installing SkyRL-Train
 ~~~~~~~~~~~~~~~~~~~~~~

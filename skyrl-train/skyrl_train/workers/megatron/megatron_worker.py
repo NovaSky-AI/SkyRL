@@ -29,10 +29,9 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
-    RewardWorkerBase,
     CriticWorkerBase,
 )
-from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
+from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
 
 
@@ -97,7 +96,7 @@ class MegatronWorker:
 
     def forward(self, data):
         """
-        Override `Worker.forward` to support passing the full mini batch to the MegatronPPOPolicy.forward method.
+        Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
@@ -138,12 +137,21 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
+    def save_hf_model(self, export_dir: str, tokenizer):
+        # Save model in HuggingFace safetensors format
+        self.strategy.save_hf_model(
+            self.bridge,
+            self.model,
+            export_dir,
+            tokenizer=tokenizer,
+        )
+
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.check_te_import()
-        self.model: MegatronPPOPolicy = None
+        self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
@@ -219,7 +227,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        optim_config = init_megatron_optim_config(self.cfg.trainer.policy.optimizer_config)
+        optim_config = init_megatron_optim_config(
+            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
+        )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
         self._normalize_mini_batch_size()
@@ -232,7 +242,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         # create worker model
-        self.model = MegatronPPOPolicy(
+        self.model = MegatronModelWrapper(
             config=self.cfg,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
@@ -246,7 +256,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
 
         Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
-        worker MegatronPPOPolicy.forward_backward_mini_batch method.
+        worker MegatronModelWrapper.forward_backward_mini_batch method.
         """
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
@@ -267,7 +277,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer.zero_grad()
             pbar = tqdm(
                 dataloader,
-                desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
+                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
 
@@ -438,7 +448,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.check_te_import()
-        self.model: MegatronPPOPolicy = None
+        self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
@@ -494,7 +504,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronPPOPolicy(
+        self.model = MegatronModelWrapper(
             config=self.cfg, hf_config=self.hf_config, tf_config=self.tf_config, actor_module=self.actor_module
         )
 
@@ -507,11 +517,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         pass
 
 
-class MegatronRewardWorkerBase(MegatronWorker, RewardWorkerBase):
-    def __init__(self, **kwargs):
-        raise NotImplementedError()
-
-
 class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
     def __init__(self, **kwargs):
         raise NotImplementedError()
@@ -520,4 +525,3 @@ class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
 PolicyWorker = ray.remote(num_gpus=1)(MegatronPolicyWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(MegatronRefWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(MegatronCriticWorkerBase)
-RewardWorker = ray.remote(num_gpus=1)(MegatronRewardWorkerBase)

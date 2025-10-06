@@ -521,6 +521,8 @@ def init_remote_inference_servers(
         tokenizer=tokenizer,
         engine_backend=backend,
         tensor_parallel_size=tp_size,
+        data_parallel_size=1,
+        expert_parallel_size=1,
     )
 
     client = InferenceEngineClient(engines, tokenizer, config)

@@ -437,7 +437,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     AdvantageEstimatorRegistry.register() directly or by using the @register_advantage_estimator
     decorator.
 
-    See examples/algorithm/custom_advantage_estimator for a simple example of how to
+    See examples/algorithms/custom_advantage_estimator for a simple example of how to
     register and use custom advantage estimators.
     """
 
@@ -462,7 +462,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     PolicyLossRegistry.register() directly or by using the @register_policy_loss
     decorator.
 
-    See examples/algorithm/custom_policy_loss for a simple example of how to
+    See examples/algorithms/custom_policy_loss for a simple example of how to
     register and use custom policy loss functions.
     """
 

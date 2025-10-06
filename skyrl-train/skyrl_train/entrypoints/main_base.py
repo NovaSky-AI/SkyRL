@@ -243,12 +243,11 @@ class BasePPOExp:
                 PolicyWorker,
                 CriticWorker,
                 RefWorker,
-                RewardWorker,
             )
         elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker, RewardWorker
+            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
         elif self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RewardWorker, RefWorker
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
@@ -278,7 +277,7 @@ class BasePPOExp:
         )
 
         # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
