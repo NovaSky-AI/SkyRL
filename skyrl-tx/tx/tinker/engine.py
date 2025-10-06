@@ -130,7 +130,7 @@ class TinkerEngine:
         update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
 
         # Re-split to keep lora_params in sync after updating ranks
-        _, self.lora_params, _ = nnx.split(self.model, lambda path, _: any(name in path for name in ['lora_A', 'lora_B']), ...)
+        _, self.lora_params, _ = nnx.split(self.model, lambda path, _: path[-1] in {'lora_A', 'lora_B'}, ...)
 
         logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}")
 
