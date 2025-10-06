@@ -273,10 +273,8 @@ def prepare_generator_input(
 def encode_messages_subset(messages: ConversationType, tokenizer):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
-    This function tokenizes messages as if they are part of a larger conversation, ensuring:
-    1. No additional default system messages are prepended by the tokenizer's chat template
-    2. Tokens appearing after EOS tokens in assistant messages (e.g., trailing newlines) are
-       properly attributed to the following user/tool message in the next turn
+    This function tokenizes messages as if they are part of a larger conversation, ensuring
+    no additional default system messages are prepended by the tokenizer's chat template
 
     The "fixed base approach" works by:
     - Creating a dummy base conversation to establish context
@@ -285,7 +283,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
 
     For simple chat templates without complex token splitting behavior, this produces the same
     result as directly tokenizing the messages. For templates like Qwen's ChatML format where
-    tokens after <|im_end|> need special handling, this ensures correct token attribution.
+    a default system prompt can be appended, this ensures correct tokenization
 
     Reference: https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
 
@@ -312,14 +310,6 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         tokenize=True,
     )
 
-    # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-    # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
-    if messages[0]["role"] != "assistant" and tokenizer.eos_token_id in base_conversation_token_ids:
-        last_eos_token_index = (
-            len(base_conversation_token_ids) - 1 - base_conversation_token_ids[::-1].index(tokenizer.eos_token_id)
-        )
-        base_conversation_token_ids = base_conversation_token_ids[: last_eos_token_index + 1]
-
     full_conversation = base_conversation + messages
     full_conversation_token_ids = tokenizer.apply_chat_template(
         full_conversation,
@@ -327,10 +317,4 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         tokenize=True,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
-    # Remove tokens after the last EOS token if it's a assistant message, so that it is captured in a future user/tool turn
-    if messages[-1]["role"] == "assistant" and tokenizer.eos_token_id in conversation_token_ids:
-        last_eos_token_index = (
-            len(conversation_token_ids) - 1 - conversation_token_ids[::-1].index(tokenizer.eos_token_id)
-        )
-        conversation_token_ids = conversation_token_ids[: last_eos_token_index + 1]
     return conversation_token_ids
