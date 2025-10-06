@@ -1,12 +1,26 @@
 import torch
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from omegaconf import DictConfig
 
 CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
-    "qwen3_thinking": (
+    # chat template for qwen3 that preserves thinking tokens
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
@@ -28,11 +42,44 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(model_name: str) -> str:
-    if "Qwen3" in model_name:
-        return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
-    else:
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
+    """
+    Get custom chat template based on the new config structure.
+
+    Args:
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
+
+    Returns:
+        Chat template string or None
+    """
+    if chat_template_config is None:
         return None
+
+    source = chat_template_config.get("source")
+    if not source:
+        raise ValueError("'source' is required in chat_template_config")
+
+    name_or_path = chat_template_config.get("name_or_path")
+    if not name_or_path:
+        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
+
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
+        else:
+            raise ValueError(
+                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
+            )
+    elif source == "file":
+        try:
+            with open(name_or_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError as e:
+            raise ValueError(f"Template file '{name_or_path}' not found") from e
+        except OSError as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:

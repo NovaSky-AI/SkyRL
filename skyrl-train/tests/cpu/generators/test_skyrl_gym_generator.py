@@ -31,6 +31,13 @@ def mock_tokenizer():
         if not kwargs.get("tokenize", True):
             return "".join([str(i["content"]) for i in x])
         else:
+            # Check if return_dict is requested
+            if kwargs.get("return_dict", False):
+                # Return dictionary format for retokenization path
+                return {
+                    "input_ids": MOCK_LLM_OUTPUT_IDS.copy(),
+                    "assistant_masks": [1] * len(MOCK_LLM_OUTPUT_IDS),
+                }
             # Non-dict return
             if isinstance(x, list) and len(x) > 0 and isinstance(x[0], list):
                 # Multiple prompts
@@ -96,6 +103,7 @@ def generator_cfg():
     cfg.max_input_length = 512
     cfg.batched = True
     cfg.max_turns = 1
+    cfg.chat_template = {"source": "name", "name_or_path": None}
     return cfg
 
 
@@ -462,6 +470,7 @@ async def test_length_limit_exceeded_during_conversation(
     generator_cfg.batched = False  # Use agent_loop mode
     generator_cfg.max_turns = 5  # Allow multiple turns
     generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to never set done=True naturally (we want to hit length limit)
@@ -546,6 +555,7 @@ async def test_multi_turn_response_truncation(
     generator_cfg.max_turns = 3  # Ensure multi-turn logic is triggered
     generator_cfg.batched = False  # Test is for agent_loop
     generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to run for multiple turns to generate enough tokens for truncation
@@ -631,6 +641,8 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
     mock_make.return_value = mock_env
     generator_cfg.max_turns = 1  # Single turn
     generator_cfg.batched = False
+    # Override to avoid retokenization path for this test
+    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     postprocessed_response = "This is a clean response."
@@ -948,6 +960,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
+    cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -982,6 +995,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_tokenizer.eos_token_id = 4
 
     # Tokenizer: initial prompt -> 2 tokens; observation template -> 2 tokens each call
+
     def apply_chat_template_side_effect(messages, **kwargs):
         if kwargs.get("tokenize", True):
             # For observations path, generator passes [*base_conversation, *new_obs] with add_generation_prompt=True
@@ -1037,6 +1051,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
+    cfg.chat_template = {"source": "name", "name_or_path": None}
 
     mock_env_cfg.env_class = "mt_env"
 
@@ -1129,6 +1144,10 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
+    cfg.chat_template = {
+        "source": "name",
+        "name_or_path": "qwen3_without_thinking",  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
+    }
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -1206,6 +1225,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     cfg.max_turns = 1
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
+    cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
