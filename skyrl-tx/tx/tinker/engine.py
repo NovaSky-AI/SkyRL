@@ -14,6 +14,7 @@ from huggingface_hub import snapshot_download
 
 from tx.tinker.models import FutureDB, ModelDB, DB_PATH, RequestType, RequestStatus
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
+from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
 
 logger = logging.getLogger(__name__)
@@ -111,12 +112,27 @@ class TinkerEngine:
         if adapter_index >= self.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.max_lora_adapters}) reached")
 
+        # Extract LoRA rank and alpha from config
+        lora_rank = lora_config.get("r", self.max_lora_rank) if lora_config else self.max_lora_rank
+        lora_alpha = lora_config.get("lora_alpha", lora_rank) if lora_config else lora_rank
+
+        # Validate rank doesn't exceed max
+        if lora_rank > self.max_lora_rank:
+            raise ValueError(f"LoRA rank {lora_rank} exceeds max_lora_rank {self.max_lora_rank}")
+
         self.models[model_id] = {
             "adapter_index": adapter_index,
             "lora_config": lora_config
         }
         self.accumulated_grads[model_id] = None
-        logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}")
+
+        # Update the adapter's rank and scaling in all LoRA layers
+        update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
+
+        # Re-split to keep lora_params in sync after updating ranks
+        _, self.lora_params, _ = nnx.split(self.model, lambda path, _: any(name in path for name in ['lora_A', 'lora_B']), ...)
+
+        logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}")
 
     def process_forward_backward_batch(self, requests: list) -> dict:
         """Process multiple forward_backward requests in a single batch.

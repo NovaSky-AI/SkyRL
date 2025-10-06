@@ -69,9 +69,10 @@ class LoRAMixin:
         ranks = self.lora_ranks.value[adapter_indices]
 
         rank_mask = jnp.arange(self.max_lora_rank)[None, :] < ranks[:, None]
-        A_masked = A * rank_mask[:, None, :]  # only need to mask A because we sum over the rank in the einsum below
+        A_masked = A * rank_mask[:, None, :]
+        B_masked = B * rank_mask[:, :, None]
 
-        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A_masked, B) * scaling[:, None, None]
+        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A_masked, B_masked) * scaling[:, None, None]
         return base_output + lora_output.reshape(base_output.shape)
 
 
@@ -103,4 +104,27 @@ class LoRALinear(LoRAMixin, nnx.Linear):
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
         return self.apply_lora(x, base_out, adapter_indices)
+
+
+def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int, lora_alpha: float):
+    """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
+
+    Args:
+        model: The model containing LoRA layers
+        adapter_index: Index of the adapter to update
+        lora_rank: Rank to set for this adapter
+        lora_alpha: Alpha value to use for computing scaling (alpha / rank)
+    """
+    scaling = lora_alpha / lora_rank
+    state = nnx.state(model)
+
+    def update_lora_config(path, value):
+        if 'lora_ranks' in path:
+            return value.at[adapter_index].set(lora_rank)
+        if 'lora_scaling' in path:
+            return value.at[adapter_index].set(scaling)
+        return value
+
+    updated_state = jax.tree_util.tree_map_with_path(update_lora_config, state)
+    nnx.update(model, updated_state)
 
