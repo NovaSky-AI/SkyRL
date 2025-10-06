@@ -129,9 +129,6 @@ class TinkerEngine:
         # Update the adapter's rank and scaling in all LoRA layers
         update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
 
-        # Re-split to keep lora_params in sync after updating ranks
-        _, self.lora_params, _ = nnx.split(self.model, lambda path, _: path[-2].key in {"lora_A", "lora_B"}, ...)
-
         logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}")
 
     def process_forward_backward_batch(self, requests: list) -> dict:
@@ -320,14 +317,22 @@ class TinkerEngine:
         output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Extract only this adapter's LoRA parameters, sliced to rank
-        lora_rank = self.models[model_id]["lora_config"]["r"]
+        # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
+
+        layer_rank = {}
+
+        def collect_ranks(path, node):
+            if path[-2].key == "lora_ranks":
+                layer_rank[path[:-2]] = int(node[adapter_index])
+
+        jax.tree.map_with_path(collect_ranks, self.non_lora_params)
 
         def extract_adapter_params(path, p):
+            rank = layer_rank[path[:-2]]
             if path[-2].key == "lora_A":
-                return p[adapter_index, :, :lora_rank]
+                return p[adapter_index, :, :rank]
             elif path[-2].key == "lora_B":
-                return p[adapter_index, :lora_rank, :]
+                return p[adapter_index, :rank, :]
             else:
                 return p[adapter_index]
 
