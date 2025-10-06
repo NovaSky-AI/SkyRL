@@ -118,12 +118,11 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
     state = nnx.state(model)
 
     def update_lora_config(path, value):
-        keys = set(getattr(component, "key", None) for component in path)
-        if 'lora_ranks' in keys:
+        if path[-2].key == "lora_ranks":
             return value.at[adapter_index].set(lora_rank)
-        if 'lora_scaling' in keys:
+        if path[-2].key == "lora_scaling":
             return value.at[adapter_index].set(scaling)
-        if 'lora_A' in keys:
+        if path[-2].key == "lora_A":
             # Zero out columns beyond the rank for this adapter
             return value.at[adapter_index, :, lora_rank:].set(0.0)
         return value
