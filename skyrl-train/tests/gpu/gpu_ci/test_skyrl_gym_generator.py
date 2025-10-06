@@ -106,11 +106,9 @@ async def run_generator_end_to_end(
         sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
     )
 
-    chat_template_config = None
-    if "Qwen3" in model:
-        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
-    else:
-        chat_template_config = {"source": "name", "name_or_path": None}
+    chat_template_config = {"source": "name", 
+                            "name_or_path": "qwen3_without_thinking" if "Qwen3" in model else None
+    }
 
     generator_cfg = DictConfig(
         {
