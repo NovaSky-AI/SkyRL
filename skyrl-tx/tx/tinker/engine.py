@@ -207,6 +207,11 @@ class TinkerEngine:
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
         (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
 
+        # Compute logprobs for the target tokens
+        all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
+        target_logprobs = jnp.take_along_axis(all_logprobs, target_ids[..., None], axis=-1)  # [B, T, 1]
+        target_logprobs = target_logprobs.squeeze(-1)  # [B, T]
+
         # Extract and accumulate gradients for each model_id's specific adapter
         for request_id, model_id, start_idx, end_idx in request_batch_slices:
             adapter_index = self.models[model_id]["adapter_index"]
@@ -227,12 +232,18 @@ class TinkerEngine:
                 # Trim padding, and extract losses for this example's tokens
                 seq_len = len(all_input_ids[i])
                 token_losses = per_token_losses[i, :seq_len].astype(jnp.float32)
+                token_logprobs = target_logprobs[i, :seq_len].astype(jnp.float32)
                 loss_fn_outputs.append({
                     "elementwise_loss": {
                         "data": token_losses.tolist(),
                         "dtype": "float32",
                         "shape": [seq_len]
                     },
+                    "logprobs": {
+                        "data": token_logprobs.tolist(),
+                        "dtype": "float32",
+                        "shape": [seq_len]
+                    }
                 })
 
             results[request_id] = {
