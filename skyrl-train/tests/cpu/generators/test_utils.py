@@ -204,6 +204,6 @@ def qwen_tokenizer():
     ],
 )
 def test_encode_messages_qwen(messages, expected_str, qwen_tokenizer):
-    expected_token_ids = qwen_tokenizer.encode(expected_str)
+    expected_token_ids = qwen_tokenizer.encode(expected_str, add_special_tokens=False)
     actual_token_ids = encode_messages_subset(messages, qwen_tokenizer)
     assert expected_token_ids == actual_token_ids, f"Got actual tokens: {qwen_tokenizer.decode(actual_token_ids)}"
