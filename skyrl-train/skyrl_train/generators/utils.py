@@ -297,6 +297,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
+    assert len(messages), "messages list cannot be empty"
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
         {"role": "system", "content": "You are a helpful assistant."},
