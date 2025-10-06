@@ -1,7 +1,8 @@
 # SkyRL tx: Unified API for training and inference
 
 SkyRL tx is an open-source cross-platform library that allows users to
-set up their own service exposing a Tinker API like REST API for
+set up their own service exposing a
+[Tinker](https://tinker-docs.thinkingmachines.ai/) like REST API for
 neural network forward and backward passes. It unifies inference and
 training into a single, common API, abstracting away the
 infrastructure challenges of managing GPUs.
