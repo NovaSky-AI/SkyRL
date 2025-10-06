@@ -16,6 +16,9 @@ infrastructure challenges of managing GPUs.
 The `t` in `tx` stands for transformers, training, or tinker, and the `x`
 stands for "cross-platform".
 
+## Getting Started
+See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-project-to-implement-the-Tinker-API-2848f0016b9d80fe9873eea1e38815ca?source=copy_link#2848f0016b9d80bc8a4bebeedac69f6e) for a quickstart example. 
+
 ## Project Status
 
 This is a very early release of SkyRL tx. While the project is
