@@ -320,8 +320,18 @@ class TinkerEngine:
         output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Extract only this adapter's LoRA parameters
-        adapter_lora_params = jax.tree.map(lambda p: p[adapter_index], self.lora_params)
+        # Extract only this adapter's LoRA parameters, sliced to rank
+        lora_rank = self.models[model_id]["lora_config"]["r"]
+
+        def extract_adapter_params(path, p):
+            if path[-2].key == "lora_A":
+                return p[adapter_index, :, :lora_rank]
+            elif path[-2].key == "lora_B":
+                return p[adapter_index, :lora_rank, :]
+            else:
+                return p[adapter_index]
+
+        adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
 
         # Save only the LoRA adapter weights
         save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
