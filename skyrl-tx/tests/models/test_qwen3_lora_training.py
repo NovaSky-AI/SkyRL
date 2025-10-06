@@ -80,29 +80,27 @@ def test_lora_training():
 
             print(f"Step {step}: loss = {float(loss):.4f}")
 
+        def verify_params_unchanged(initial_params, final_params, error_msg_prefix):
+            for (path, initial), (_, final) in zip(
+                jax.tree.leaves_with_path(initial_params),
+                jax.tree.leaves_with_path(final_params)
+            ):
+                assert jnp.allclose(initial, final), f"{error_msg_prefix} for {path}"
+
         # Verify adapter 2 (unused) was not modified
         final_adapter_2_params = get_adapter_params(lora_params, 2)
-        for (path, initial), (_, final) in zip(
-            jax.tree.leaves_with_path(initial_adapter_2_params),
-            jax.tree.leaves_with_path(final_adapter_2_params)
-        ):
-            assert jnp.allclose(initial, final), \
-                f"Adapter 2 was modified for {path}"
+        verify_params_unchanged(
+            initial_adapter_2_params, final_adapter_2_params, "Adapter 2 was modified"
+        )
 
         # Verify out-of-rank params were not modified (within numerical precision)
         final_adapter_0_out_of_rank = get_out_of_rank_params(lora_params, 0, 16)
-        for (path, initial), (_, final) in zip(
-            jax.tree.leaves_with_path(initial_adapter_0_out_of_rank),
-            jax.tree.leaves_with_path(final_adapter_0_out_of_rank)
-        ):
-            assert jnp.allclose(initial, final), \
-                f"Adapter 0 out-of-rank params modified for {path}"
+        verify_params_unchanged(
+            initial_adapter_0_out_of_rank, final_adapter_0_out_of_rank, "Adapter 0 out-of-rank params modified"
+        )
 
         final_adapter_1_out_of_rank = get_out_of_rank_params(lora_params, 1, 8)
-        for (path, initial), (_, final) in zip(
-            jax.tree.leaves_with_path(initial_adapter_1_out_of_rank),
-            jax.tree.leaves_with_path(final_adapter_1_out_of_rank)
-        ):
-            assert jnp.allclose(initial, final), \
-                f"Adapter 1 out-of-rank params modified for {path}"
+        verify_params_unchanged(
+            initial_adapter_1_out_of_rank, final_adapter_1_out_of_rank, "Adapter 1 out-of-rank params modified"
+        )
 
