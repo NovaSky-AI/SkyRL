@@ -94,12 +94,11 @@ def test_lora_training():
             initial_adapter_2_params, final_adapter_2_params, "Adapter 2 was modified"
         )
 
-        # Verify out-of-rank params were not modified (within numerical precision)
+        # Verify out-of-rank params were not modified
         final_adapter_0_out_of_rank = get_out_of_rank_params(lora_params, 0, 16)
         verify_params_unchanged(
             initial_adapter_0_out_of_rank, final_adapter_0_out_of_rank, "Adapter 0 out-of-rank params modified"
         )
-
         final_adapter_1_out_of_rank = get_out_of_rank_params(lora_params, 1, 8)
         verify_params_unchanged(
             initial_adapter_1_out_of_rank, final_adapter_1_out_of_rank, "Adapter 1 out-of-rank params modified"
