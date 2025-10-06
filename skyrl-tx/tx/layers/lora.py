@@ -123,7 +123,7 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
         if path[-2].key == "lora_scaling":
             return value.at[adapter_index].set(scaling)
         if path[-2].key == "lora_A":
-            # Zero out columns beyond the rank for this adapter
+            # Zero out columns beyond the rank for this adapter; lora_B is already zero
             return value.at[adapter_index, :, lora_rank:].set(0.0)
         return value
 
