@@ -160,6 +160,8 @@ def tokenizer_w_dummy_template():
     ],
 )
 def test_encode_messages(messages, tokenizer_w_dummy_template):
+    # For a simple chat template, the fixed base approach is expected to behave the same
+    # as `apply_chat_template`
     expected_token_ids = tokenizer_w_dummy_template.apply_chat_template(messages)
     actual_token_ids = encode_messages_subset(messages, tokenizer_w_dummy_template)
     assert expected_token_ids == actual_token_ids

@@ -3,6 +3,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 
 CUSTOM_CHAT_TEMPLATES = {
@@ -269,10 +270,32 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages, tokenizer):
-    """Encodes a subset of messages from a conversation
+def encode_messages_subset(messages: ConversationType, tokenizer):
+    """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
-    Expects `messages` to be a subset of messages from a conversation with atleast one preceeding turn.
+    This function tokenizes messages as if they are part of a larger conversation, ensuring:
+    1. No additional default system messages are prepended by the tokenizer's chat template
+    2. Tokens appearing after EOS tokens in assistant messages (e.g., trailing newlines) are
+       properly attributed to the following user/tool message in the next turn
+
+    The "fixed base approach" works by:
+    - Creating a dummy base conversation to establish context
+    - Appending the target messages to this base
+    - Tokenizing the full conversation and extracting only the tokens for the target messages
+
+    For simple chat templates without complex token splitting behavior, this produces the same
+    result as directly tokenizing the messages. For templates like Qwen's ChatML format where
+    tokens after <|im_end|> need special handling, this ensures correct token attribution.
+
+    Reference: https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys. Must contain at least
+                 one message. These are assumed to be a subset from a larger conversation.
+        tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+
+    Returns:
+        List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
