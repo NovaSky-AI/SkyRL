@@ -266,6 +266,7 @@ def validate_cfg(cfg: DictConfig):
                 "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
             )
 
+    # Validate placement
     if cfg.trainer.placement.colocate_all:
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
         num_rollout_gpus = (
