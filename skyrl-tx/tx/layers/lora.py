@@ -13,6 +13,7 @@ class LoRAMixin:
     """
 
     lora_scaling: nnx.Param | None
+    lora_ranks: nnx.Variable | None
     lora_A: nnx.Param | None
     lora_B: nnx.Param | None
 
@@ -28,6 +29,7 @@ class LoRAMixin:
 
         if max_lora_adapters == 0:
             self.lora_scaling = None
+            self.lora_ranks = None
             self.lora_A = None
             self.lora_B = None
         else:
@@ -35,6 +37,7 @@ class LoRAMixin:
                 max_lora_adapters, dtype=dtype,
                 kernel_init=nnx.initializers.constant(1.0), rngs=rngs,
             )
+            self.lora_ranks = nnx.Variable(jnp.full((max_lora_adapters,), max_lora_rank, dtype=jnp.int32))
             self.lora_A = Param(
                 max_lora_adapters, in_features, max_lora_rank, dtype=dtype,
                 kernel_init=nnx.with_partitioning(
@@ -66,8 +69,13 @@ class LoRAMixin:
         A = self.lora_A.value[adapter_indices]
         B = self.lora_B.value[adapter_indices]
         scaling = self.lora_scaling.value[adapter_indices]
+        ranks = self.lora_ranks.value[adapter_indices]
 
-        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A, B) * scaling[:, None, None]
+        rank_mask = jnp.arange(self.max_lora_rank)[None, :] < ranks[:, None]
+        A_masked = A * rank_mask[:, None, :]
+        B_masked = B * rank_mask[:, :, None]
+
+        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A_masked, B_masked) * scaling[:, None, None]
         return base_output + lora_output.reshape(base_output.shape)
 
 

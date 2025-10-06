@@ -74,7 +74,7 @@ def test_qwen3_moe_layer():
 
 
 def load_lora_weights(jax_module: LoRAMixin, hf_module: torch.nn.Module,
-    adapter_idx: int, scaling: float, adapter_name: str = 'default') -> None:
+                      adapter_idx: int, scaling: float, rank: int, adapter_name: str = 'default') -> None:
     """Load LoRA weights from HF module to JAX module."""
     assert jax_module.lora_A is not None and jax_module.lora_B is not None and jax_module.lora_scaling is not None
     jax_module.lora_A.value = jax_module.lora_A.value.at[adapter_idx].set(
@@ -84,6 +84,7 @@ def load_lora_weights(jax_module: LoRAMixin, hf_module: torch.nn.Module,
         jnp.array(hf_module.lora_B[adapter_name].weight.detach().numpy().T)  # ty: ignore
     )
     jax_module.lora_scaling.value = jax_module.lora_scaling.value.at[adapter_idx].set(scaling)
+    jax_module.lora_ranks.value = jax_module.lora_ranks.value.at[adapter_idx].set(rank)
 
 
 def test_qwen3_lora():
@@ -146,7 +147,7 @@ def test_qwen3_lora():
                     for proj_name in ['gate_proj', 'up_proj', 'down_proj']:
                         load_lora_weights(
                             getattr(layer.mlp, proj_name), getattr(hf_layer, proj_name),
-                            adapter_idx=adapter_idx, scaling=lora_config.lora_alpha / lora_config.r
+                            adapter_idx=adapter_idx, scaling=lora_config.lora_alpha / lora_config.r, rank=lora_config.r
                         )
 
         # Use different adapter indices for each input
