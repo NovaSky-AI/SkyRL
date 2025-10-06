@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "skyrl-tx"
 dynamic = ["version"]
-description = "API for unifying training and inference"
+description = "Unified API for training and inference"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
