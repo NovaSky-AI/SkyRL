@@ -18,11 +18,11 @@ from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_
 from flash_attn.bert_padding import pad_input, unpad_input
 
 
-class Actor(nn.Module):
+class HFModelWrapper(nn.Module):
     """
-    Base class for Actor models in reinforcement learning.
+    Base class for wrapped HF models in reinforcement learning.
 
-    This class serves as a foundation for implementing various actor models, which are responsible for selecting actions based on the policy learned from the environment.
+    This class serves as a foundation for implementing various model roles.
 
     Args:
         pretrain_or_model (nn.Module): A pretrained model or a new model instance to be used as the actor.
@@ -62,8 +62,6 @@ class Actor(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        if self.sequence_parallel_size > 1:
-            logger.info(f"Actor model using sequence parallelism with size: {self.sequence_parallel_size}")
         self.use_flash_attention_2 = use_flash_attention_2
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2

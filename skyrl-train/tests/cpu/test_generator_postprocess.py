@@ -27,6 +27,9 @@ def create_config(batch_size):
     return OmegaConf.create(
         {
             "trainer": {
+                "placement": {
+                    "colocate_all": True,
+                },
                 "train_batch_size": batch_size,
                 "eval_batch_size": batch_size,
                 "resume_mode": "none",

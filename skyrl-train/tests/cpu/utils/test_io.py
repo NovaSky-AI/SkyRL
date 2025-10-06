@@ -9,7 +9,7 @@ from unittest.mock import patch, Mock
 import torch
 
 
-from skyrl_train.utils.io import (
+from skyrl_train.utils.io.io import (
     is_cloud_path,
     makedirs,
     exists,
@@ -213,7 +213,7 @@ class TestCheckpointUtilities:
 class TestCloudFileOperationsMocked:
     """Test cloud file operations with mocked fsspec."""
 
-    @patch("skyrl_train.utils.io._get_filesystem")
+    @patch("skyrl_train.utils.io.io._get_filesystem")
     def test_list_checkpoint_dirs_cloud(self, mock_get_filesystem):
         """Test list_checkpoint_dirs with cloud storage."""
         mock_fs = Mock()
@@ -234,7 +234,7 @@ class TestCloudFileOperationsMocked:
         expected = ["global_step_1000", "global_step_2000"]
         assert sorted(result) == sorted(expected)
 
-    @patch("skyrl_train.utils.io._get_filesystem")
+    @patch("skyrl_train.utils.io.io._get_filesystem")
     def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem):
         """Test cleanup_old_checkpoints with cloud storage."""
         mock_fs = Mock()
@@ -323,8 +323,8 @@ class TestContextManagers:
             with open(test_file, "r") as f:
                 assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.upload_directory")
-    @patch("skyrl_train.utils.io.is_cloud_path")
+    @patch("skyrl_train.utils.io.io.upload_directory")
+    @patch("skyrl_train.utils.io.io.is_cloud_path")
     def test_local_work_dir_cloud_path(self, mock_is_cloud_path, mock_upload_directory):
         """Test local_work_dir with a cloud path."""
         mock_is_cloud_path.return_value = True
@@ -369,8 +369,8 @@ class TestContextManagers:
                 with open(read_file, "r") as f:
                     assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.download_directory")
-    @patch("skyrl_train.utils.io.is_cloud_path")
+    @patch("skyrl_train.utils.io.io.download_directory")
+    @patch("skyrl_train.utils.io.io.is_cloud_path")
     def test_local_read_dir_cloud_path(self, mock_is_cloud_path, mock_download_directory):
         """Test local_read_dir with a cloud path."""
         mock_is_cloud_path.return_value = True

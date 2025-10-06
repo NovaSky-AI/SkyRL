@@ -17,9 +17,9 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl_train.models import Actor
+from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -114,7 +114,7 @@ class FSDPStrategy(DistributedStrategy):
 
         For all cases except fsdp2 with cpu_offload=True, we need to manually offload weights/optimizer to cpu.
         """
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         else:
             model = model
@@ -130,7 +130,7 @@ class FSDPStrategy(DistributedStrategy):
 
     def backload_to_gpu(self, model, optimizer, non_blocking=True):
         """Reload model weights back to GPU."""
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         else:
             model = model
@@ -157,7 +157,7 @@ class FSDPStrategy(DistributedStrategy):
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
         grad_norm = None
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
 
         if self.max_norm > 0:
@@ -199,7 +199,7 @@ class FSDPStrategy(DistributedStrategy):
 
         return ret[0] if len(ret) == 1 else ret
 
-    def _fsdp_init_model(self, model, is_train=True, is_actor=False):
+    def _fsdp_init_model(self, model, is_train=True, is_wrapped=False):
         # Initialize FSDP wrapping policy
         wrap_policy = get_fsdp_wrap_policy(module=model, config=self.fsdp_config.get("wrap_policy", None))
 
@@ -229,7 +229,7 @@ class FSDPStrategy(DistributedStrategy):
             if not is_train and self.fsdp_config.get("cpu_offload", False):
                 cpu_offload = CPUOffload(offload_params=True)
             fsdp_module = FSDP(
-                model.model if is_actor else model,
+                model.model if is_wrapped else model,
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
                 use_orig_params=False,
@@ -255,11 +255,11 @@ class FSDPStrategy(DistributedStrategy):
                 "offload_policy": cpu_offload,
                 "reshard_after_forward": self.fsdp_config.get("reshard_after_forward", True),
             }
-            actor_module = model.model if is_actor else model
-            full_state = actor_module.state_dict()
-            apply_fsdp2(actor_module, fsdp_kwargs, self.fsdp_config)
-            fsdp2_load_full_state_dict(actor_module, full_state, cpu_offload)
-            fsdp_module = actor_module
+            module = model.model if is_wrapped else model
+            full_state = module.state_dict()
+            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+            fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+            fsdp_module = module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
 
@@ -267,41 +267,41 @@ class FSDPStrategy(DistributedStrategy):
 
     def _fsdp_init_train_model(self, model, optimizer, scheduler):
         """Initialize a model for training with FSDP"""
-        is_actor = isinstance(model, Actor)
-        fsdp_module = self._fsdp_init_model(model, is_train=True, is_actor=is_actor)
+        is_wrapped = isinstance(model, HFModelWrapper)
+        fsdp_module = self._fsdp_init_model(model, is_train=True, is_wrapped=is_wrapped)
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            actor_optimizer = optim.AdamW(
+            new_optimizer = optim.AdamW(
                 fsdp_module.parameters(),
                 lr=optim_config.lr,
                 betas=optim_config.adam_betas,
                 weight_decay=optim_config.weight_decay,
             )
 
-            actor_lr_scheduler = get_scheduler(
+            lr_scheduler = get_scheduler(
                 optim_config.scheduler,
-                actor_optimizer,
+                new_optimizer,
                 num_warmup_steps=optim_config.num_warmup_steps,
                 num_training_steps=self.total_training_steps,
             )
         else:
-            actor_optimizer = None
-            actor_lr_scheduler = None
+            new_optimizer = None
+            lr_scheduler = None
 
-        if is_actor:
+        if is_wrapped:
             model.model = fsdp_module
         else:
             model = fsdp_module
 
-        return model, actor_optimizer, actor_lr_scheduler
+        return model, new_optimizer, lr_scheduler
 
     def _fsdp_init_eval_model(self, model):
         """Initialize a model for evaluation with FSDP"""
-        is_actor = isinstance(model, Actor)
-        fsdp_module = self._fsdp_init_model(model, is_train=False, is_actor=is_actor)
+        is_wrapped = isinstance(model, HFModelWrapper)
+        fsdp_module = self._fsdp_init_model(model, is_train=False, is_wrapped=is_wrapped)
 
-        if is_actor:
+        if is_wrapped:
             model.model = fsdp_module
         else:
             model = fsdp_module
@@ -309,9 +309,9 @@ class FSDPStrategy(DistributedStrategy):
         return model
 
     def _unwrap_model(self, model) -> nn.Module:
-        """Unwrap model from Actor or FSDP"""
-        # Handle Actor wrapper
-        if isinstance(model, Actor):
+        """Unwrap model from HFModelWrapper or FSDP"""
+        # Handle HFModelWrapper wrapper
+        if isinstance(model, HFModelWrapper):
             return self._unwrap_model(model.model)
 
         # For FSDP2 models, check if the FSDP model itself has the necessary attributes
@@ -376,7 +376,7 @@ class FSDPStrategy(DistributedStrategy):
         dist.barrier()
 
         # Extract the actual model for saving
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             save_model = model.model
         else:
             save_model = model
@@ -391,61 +391,63 @@ class FSDPStrategy(DistributedStrategy):
         # Define paths for saving individual rank files
         rank = self.get_rank()
         world_size = self.world_size
-        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-        # Save using appropriate FSDP context
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
-                # Get and save model state dict
-                model_state_dict = save_model.state_dict()
-                self.print(f"[rank-{rank}]: Saving model to {model_path}")
-                with io.open_file(model_path, "wb") as f:
-                    torch.save(model_state_dict, f)
+        with io.local_work_dir(ckpt_dir) as work_dir:
+            model_path = os.path.join(work_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+            optim_path = os.path.join(work_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+            extra_path = os.path.join(work_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-                # Get and save optimizer state dict if optimizer is provided
-                optimizer_state_dict = {}
-                if optimizer is not None:
-                    optimizer_state_dict = optimizer.state_dict()
-                self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
-                with io.open_file(optim_path, "wb") as f:
-                    torch.save(optimizer_state_dict, f)
+            # Save using appropriate FSDP context
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+                    # Get and save model state dict
+                    model_state_dict = save_model.state_dict()
+                    self.print(f"[rank-{rank}]: Saving model to {model_path}")
+                    with io.open_file(model_path, "wb") as f:
+                        torch.save(model_state_dict, f)
 
-                # Get scheduler state dict if scheduler is provided
-                lr_scheduler_state_dict = {}
-                if scheduler is not None:
-                    lr_scheduler_state_dict = scheduler.state_dict()
+                    # Get and save optimizer state dict if optimizer is provided
+                    optimizer_state_dict = {}
+                    if optimizer is not None:
+                        optimizer_state_dict = optimizer.state_dict()
+                    self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
+                    with io.open_file(optim_path, "wb") as f:
+                        torch.save(optimizer_state_dict, f)
 
-                # Create extra state dict with client state and any additional info
-                extra_state_dict = {
-                    "lr_scheduler": lr_scheduler_state_dict,
-                    "client_state": client_state,
-                    "tag": tag,
-                    "fsdp_strategy": self.fsdp_strategy,
-                    "world_size": world_size,
-                    "rank": rank,
-                    "rng": self.get_rng_state(),  # Add RNG state for reproducibility
-                }
+                    # Get scheduler state dict if scheduler is provided
+                    lr_scheduler_state_dict = {}
+                    if scheduler is not None:
+                        lr_scheduler_state_dict = scheduler.state_dict()
 
-                # Save extra state
-                self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
-                with io.open_file(extra_path, "wb") as f:
-                    torch.save(extra_state_dict, f)
+                    # Create extra state dict with client state and any additional info
+                    extra_state_dict = {
+                        "lr_scheduler": lr_scheduler_state_dict,
+                        "client_state": client_state,
+                        "tag": tag,
+                        "fsdp_strategy": self.fsdp_strategy,
+                        "world_size": world_size,
+                        "rank": rank,
+                        "rng": self.get_rng_state(),  # Add RNG state for reproducibility
+                    }
 
-                # Garbage collect temporary buffers from materializing the state dicts
-                gc.collect()
+                    # Save extra state
+                    self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
+                    with io.open_file(extra_path, "wb") as f:
+                        torch.save(extra_state_dict, f)
 
-        if self.is_rank_0():
-            config_save_model = self._unwrap_model(model)
-            hf_dir = os.path.join(ckpt_dir, "huggingface")
-            self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
+                    # Garbage collect temporary buffers from materializing the state dicts
+                    gc.collect()
 
-            # Also save runtime FSDP config
-            fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
-            with io.open_file(fsdp_config_path, "w") as f:
-                json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
+            if self.is_rank_0():
+                config_save_model = self._unwrap_model(model)
+                hf_dir = os.path.join(work_dir, "huggingface")
+                self.save_hf_configs(config_save_model.config, hf_dir, tokenizer)
+
+                # Also save runtime FSDP config
+                fsdp_config_path = os.path.join(work_dir, "fsdp_config.json")
+                with io.open_file(fsdp_config_path, "w") as f:
+                    json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Final barrier to ensure all operations complete
         dist.barrier()
@@ -474,40 +476,42 @@ class FSDPStrategy(DistributedStrategy):
 
         # Extract the actual model for loading
         load_model = model
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             load_model = model.model
 
         # Define paths for loading individual rank files
         rank = self.get_rank()
         world_size = self.world_size
-        model_path = os.path.join(ckpt_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-        optim_path = os.path.join(ckpt_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
-        extra_path = os.path.join(ckpt_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-        # Check if checkpoint files exist
-        if not io.exists(model_path):
-            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
-        if not io.exists(extra_path):
-            raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
+        with io.local_read_dir(ckpt_dir) as read_dir:
+            model_path = os.path.join(read_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+            optim_path = os.path.join(read_dir, f"optim_world_size_{world_size}_rank_{rank}.pt")
+            extra_path = os.path.join(read_dir, f"extra_state_world_size_{world_size}_rank_{rank}.pt")
 
-        # Optimizer path is optional since we may not save optimizer states initially
-        optim_exists = io.exists(optim_path)
+            # Check if checkpoint files exist
+            if not io.exists(model_path):
+                raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+            if not io.exists(extra_path):
+                raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
 
-        self.print(f"[rank-{rank}]: Loading model from {model_path}")
-        self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
-        if optim_exists:
-            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
+            # Optimizer path is optional since we may not save optimizer states initially
+            optim_exists = io.exists(optim_path)
 
-        # Load state dictionaries from disk
-        with io.open_file(model_path, "rb") as f:
-            model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
-        with io.open_file(extra_path, "rb") as f:
-            extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            self.print(f"[rank-{rank}]: Loading model from {model_path}")
+            self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
+            if optim_exists:
+                self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
 
-        optimizer_state_dict = {}
-        if optim_exists and load_optimizer_states:
-            with io.open_file(optim_path, "rb") as f:
-                optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            # Load state dictionaries from disk
+            with io.open_file(model_path, "rb") as f:
+                model_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+            with io.open_file(extra_path, "rb") as f:
+                extra_state_dict = torch.load(f, map_location="cpu", weights_only=False)
+
+            optimizer_state_dict = {}
+            if optim_exists and load_optimizer_states:
+                with io.open_file(optim_path, "rb") as f:
+                    optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
         lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
@@ -556,7 +560,7 @@ class FSDPStrategy(DistributedStrategy):
         return ckpt_dir, states
 
     # TODO (erictang000): Test in multi-node setting
-    def save_hf_model(self, model: Union[Actor, nn.Module], output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(self, model: Union[HFModelWrapper, nn.Module], output_dir: str, tokenizer=None, **kwargs) -> None:
         """Save model in HuggingFace safetensors format using FSDP's full state dict gathering"""
 
         # Step 1: Create output directory (rank 0 only)
@@ -566,7 +570,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 2: Extract models - get both the model for saving metadata and the FSDP model for state dict
         model_to_save = self._unwrap_model(model)  # For saving config/metadata
-        fsdp_model = model.model if isinstance(model, Actor) else model  # For state dict collection
+        fsdp_model = model.model if isinstance(model, HFModelWrapper) else model  # For state dict collection
 
         # Validate that we have a proper HuggingFace model
         if not hasattr(model_to_save, "config") or not hasattr(model_to_save, "save_pretrained"):

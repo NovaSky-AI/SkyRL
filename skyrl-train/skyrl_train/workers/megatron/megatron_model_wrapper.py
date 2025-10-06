@@ -20,7 +20,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
 )
 
 
-class MegatronPPOPolicy:
+class MegatronModelWrapper:
     def __init__(
         self,
         config,
