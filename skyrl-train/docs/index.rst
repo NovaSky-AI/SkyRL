@@ -33,6 +33,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :caption: Examples
 
    examples/ppo
+   examples/lora
    examples/llm_as_a_judge
    examples/remote_server
    examples/training_backends

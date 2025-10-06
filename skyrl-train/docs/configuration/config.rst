@@ -75,6 +75,17 @@ General Training Configuration
 .. tip::
   If you're facing issues with tuning the right values for ``micro_train_batch_size_per_gpu``, ``policy_mini_batch_size`` and ``micro_forward_batch_size_per_gpu``, see ``utils/utils.py::validate_batch_sizes`` for details on constraints.
 
+Global LoRA Configuration
+-------------------------
+
+.. code-block:: yaml
+
+    target_modules: "all-linear"
+    exclude_modules: null
+
+- ``target_modules``: Specifies which modules to apply LoRA to. Set to ``"all-linear"`` to apply LoRA to all linear layers, or provide a list of specific module names.
+- ``exclude_modules``: List of modules to exclude from LoRA application. Set to ``null`` to exclude none.
+
 Evaluation Configuration
 ------------------------------
 .. code-block:: yaml
@@ -195,13 +206,18 @@ For both the critic and policy model, we provide a common optimizer configuratio
 Policy Configuration
 --------------------
 
-This section configures the policy model used for training, including optimizer, FSDP, and sequence parallelism options.
+This section configures the policy model used for training, including optimizer, FSDP, sequence parallelism, and LoRA options.
 
 .. code-block:: yaml
 
    policy:
      model:
        path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
+       lora:
+         rank: 0                    # LoRA rank (0 = disabled)
+         alpha: 16                  # LoRA scaling parameter
+         dropout: 0                 # LoRA dropout rate
+         lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for LoRA adapter sync
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
      optimizer_config:
@@ -228,18 +244,31 @@ This section configures the policy model used for training, including optimizer,
 - ``policy.use_torch_compile``: Whether to enable torch compile for entropy calculation
 - ``policy.record_memory``: Whether to record memory usage. If ``True``, this will use PyTorch's `memory snapshotting utility <https://docs.pytorch.org/docs/stable/torch_cuda_memory.html>`_ to record memory usage and dump memory snapshots after each policy model training step.
 
+LoRA Configuration
+~~~~~~~~~~~~~~~~~~
+
+LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training only a small number of additional low-rank matrices instead of the full model weights:
+
+- ``policy.model.lora.rank``: LoRA rank for low-rank decomposition. Set to 0 to disable LoRA. Higher values increase model capacity but also memory usage. Common values include 8, 16, 32, or 64.
+- ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
+- ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
+- ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
 
 
 Critic Configuration
 --------------------
 
-We support similar configuration options as the policy model.
+We support similar configuration options as the policy model, including LoRA.
 
 .. code-block:: yaml
 
     critic:
       model:
         path: null
+        lora:
+          rank: 0                    # LoRA rank (0 = disabled)
+          alpha: 16                  # LoRA scaling parameter
+          dropout: 0                 # LoRA dropout rate
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6
