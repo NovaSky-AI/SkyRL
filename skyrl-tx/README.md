@@ -16,20 +16,6 @@ infrastructure challenges of managing GPUs.
 The `t` in `tx` stands for transformers, training, or tinker, and the `x`
 stands for "cross-platform".
 
-## Key Features
-
-**Unified Engine**: A single engine for both inference and training
-  eliminates numerical discrepancies and the need for expensive
-  checkpoint transfers.
-
-**Seamless Online Learning**: Models can be updated in real-time.
-
-**Reduced Operational Complexity**: Manage one API and one system for
-  both training and serving, simplifying deployment strategies.
-
-**Cost-Effective Multi-Tenancy**: Using techniques like LoRA, a single
-  base model can serve thousands of users with personalized adapters.
-
 ## Project Status
 
 This is a very early release of SkyRL tx. While the project is
