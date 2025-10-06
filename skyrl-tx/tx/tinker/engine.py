@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Base path for saving checkpoints
 CHECKPOINTS_BASE_PATH = Path("/tmp/tx_checkpoints")
+LEARNING_RATE = 1e-4
 
 
 class TinkerEngine:
@@ -56,7 +57,7 @@ class TinkerEngine:
             def is_lora_param(path, value):
                 return any(name in path for name in ['lora_A', 'lora_B'])
 
-            self.optimizer = nnx.Optimizer(self.model, optax.adamw(1e-4), wrt=is_lora_param)
+            self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
@@ -254,7 +255,9 @@ class TinkerEngine:
 
         full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
 
-        # Apply optimizer update
+        # Apply optimizer update -- going forward we need to figure out how to use different learning rates per adapter
+        adam_params = request_data.get("adam_params", {})
+        assert adam_params.get("lr", LEARNING_RATE) == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
         self.optimizer.update(self.lora_params, full_lora_grads)
 
         # Clear accumulated gradients
