@@ -49,7 +49,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.max_episodes = terminal_bench_cfg.max_episodes
 
         if self.generator_cfg.chat_template.name_or_path is not None:
-            raise NotImplementedError("MiniSWEAgentGenerator doesn't support custom chat template")
+            raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         # TODO(tgriggs): Plumb the sandboxes task list here instead of using (and ignoring) empty prompts
