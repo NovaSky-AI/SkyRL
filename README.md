@@ -23,9 +23,10 @@
 
 SkyRL is a full-stack RL library that provides the following components:
 
-- [`skyagent`](./skyagent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
-- (**NEW**) [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
-- (**NEW**) [`skyrl-gym`](./skyrl-gym): Our gynasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
+- [`skyrl-agent`](./skyrl-agent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
+- [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
+- [`skyrl-gym`](./skyrl-gym): Our gynasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
+- (EXPERIMENTAL) [`skyrl-tx`](./skyrl-tx): A cross-platform library to enable users to expose a local [Tinker](https://thinkingmachines.ai/tinker/)-like REST API for neural network forward and backward passes.
 
 # Getting Started
 
