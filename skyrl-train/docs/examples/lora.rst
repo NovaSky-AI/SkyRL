@@ -48,8 +48,8 @@ By default, LoRA is applied to all linear layers in the model. You can customize
 .. code-block:: yaml
 
     trainer:
-      target_modules: "all-linear"  # Apply to all linear layers
-      # OR specify specific modules:
+      target_modules: "all-linear"  # Apply to all linear layers OR
+      # specify specific modules as a list
       exclude_modules: null  # Modules to exclude from LoRA
 
 Running LoRA Training
