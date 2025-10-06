@@ -276,7 +276,7 @@ def validate_cfg(cfg: DictConfig):
         )
         assert (
             num_policy_gpus == num_rollout_gpus
-        ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
+        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
     else:
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
