@@ -30,7 +30,7 @@ def test_lora_training():
         def is_lora_param(path, value):
             return any(name in path for name in ['lora_A', 'lora_B'])
 
-        optimizer = nnx.Optimizer(model, optax.sgd(1e-4), wrt=is_lora_param)
+        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=is_lora_param)
 
         # Split after updating adapter configs
         graphdef, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
@@ -95,7 +95,7 @@ def test_lora_training():
             jax.tree.leaves_with_path(initial_adapter_0_out_of_rank),
             jax.tree.leaves_with_path(final_adapter_0_out_of_rank)
         ):
-            assert jnp.allclose(initial, final, atol=1e-3), \
+            assert jnp.allclose(initial, final), \
                 f"Adapter 0 out-of-rank params modified for {path}"
 
         final_adapter_1_out_of_rank = get_out_of_rank_params(lora_params, 1, 8)
@@ -103,6 +103,6 @@ def test_lora_training():
             jax.tree.leaves_with_path(initial_adapter_1_out_of_rank),
             jax.tree.leaves_with_path(final_adapter_1_out_of_rank)
         ):
-            assert jnp.allclose(initial, final, atol=1e-3), \
+            assert jnp.allclose(initial, final), \
                 f"Adapter 1 out-of-rank params modified for {path}"
 

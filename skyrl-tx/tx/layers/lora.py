@@ -118,10 +118,14 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
     state = nnx.state(model)
 
     def update_lora_config(path, value):
-        if 'lora_ranks' in path:
+        path_str = str(path)
+        if 'lora_ranks' in path_str:
             return value.at[adapter_index].set(lora_rank)
-        if 'lora_scaling' in path:
+        if 'lora_scaling' in path_str:
             return value.at[adapter_index].set(scaling)
+        if 'lora_A' in path_str:
+            # Zero out columns beyond the rank for this adapter
+            return value.at[adapter_index, :, lora_rank:].set(0.0)
         return value
 
     updated_state = jax.tree_util.tree_map_with_path(update_lora_config, state)
