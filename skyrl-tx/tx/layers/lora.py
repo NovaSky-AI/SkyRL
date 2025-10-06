@@ -12,7 +12,7 @@ class LoRAMixin:
     be used with layers like nnx.Linear.
     """
 
-    lora_scaling: nnx.Param | None
+    lora_scaling: nnx.Variable | None
     lora_ranks: nnx.Variable | None
     lora_A: nnx.Param | None
     lora_B: nnx.Param | None
@@ -33,10 +33,7 @@ class LoRAMixin:
             self.lora_A = None
             self.lora_B = None
         else:
-            self.lora_scaling = Param(
-                max_lora_adapters, dtype=dtype,
-                kernel_init=nnx.initializers.constant(1.0), rngs=rngs,
-            )
+            self.lora_scaling = nnx.Variable(jnp.full((max_lora_adapters,), 1.0, dtype=dtype))
             self.lora_ranks = nnx.Variable(jnp.full((max_lora_adapters,), max_lora_rank, dtype=jnp.int32))
             self.lora_A = Param(
                 max_lora_adapters, in_features, max_lora_rank, dtype=dtype,
