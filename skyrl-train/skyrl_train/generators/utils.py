@@ -302,4 +302,11 @@ def encode_messages_subset(messages, tokenizer):
         add_generation_prompt=False,
         tokenize=True,
     )
-    return full_conversation_token_ids[len(base_conversation_token_ids) :]
+    conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
+    # Remove tokens after the last EOS token if it's a assistant message, so that it is captured in a future user/tool turn
+    if messages[-1]["role"] == "assistant" and tokenizer.eos_token_id in conversation_token_ids:
+        last_eos_token_index = (
+            len(conversation_token_ids) - 1 - conversation_token_ids[::-1].index(tokenizer.eos_token_id)
+        )
+        conversation_token_ids = conversation_token_ids[: last_eos_token_index + 1]
+    return conversation_token_ids

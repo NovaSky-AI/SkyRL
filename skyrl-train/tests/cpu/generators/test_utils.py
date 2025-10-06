@@ -176,7 +176,7 @@ def qwen_tokenizer():
         # Test case 1: Single assistant message
         (
             [{"role": "assistant", "content": "Hello, I can help you."}],
-            "<|im_start|>assistant\nHello, I can help you.<|im_end|>\n",
+            "<|im_start|>assistant\nHello, I can help you.<|im_end|>",
         ),
         # Test case 2: Single user message - additional \n because the expectation is that there is a previous assistant turn
         (
@@ -186,8 +186,9 @@ def qwen_tokenizer():
         # Test case 3: Multiple messages (user-assistant exchange)
         (
             [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "The answer is 4."}],
-            # additional \n because the expectation is that there is a previous assistant turn
-            "\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n",
+            # NOTE: Additional \n because the expectation is that there is a previous assistant turn.
+            # All tokens after EOS in the previous turn get pushed into the next user/tool message.
+            "\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>",
         ),
         # Test case 4: Multiple messages starting with assistant
         (
@@ -196,7 +197,7 @@ def qwen_tokenizer():
                 {"role": "user", "content": "Can you explain Python?"},
                 {"role": "assistant", "content": "Python is a programming language."},
             ],
-            "<|im_start|>assistant\nI'm here to help.<|im_end|>\n<|im_start|>user\nCan you explain Python?<|im_end|>\n<|im_start|>assistant\nPython is a programming language.<|im_end|>\n",
+            "<|im_start|>assistant\nI'm here to help.<|im_end|>\n<|im_start|>user\nCan you explain Python?<|im_end|>\n<|im_start|>assistant\nPython is a programming language.<|im_end|>",
         ),
     ],
 )
