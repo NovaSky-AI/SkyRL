@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import List
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl_train.generators.utils import get_rollout_metrics
+from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -134,7 +134,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         for message in response_messages:
             # Apply chat template and tokenize each message
-            msg_encoding = self.tokenizer.apply_chat_template([message], add_generation_prompt=False, tokenize=True)
+            msg_encoding = encode_messages_subset([message], self.tokenizer)
 
             # Extend response_ids with the tokens
             response_ids.extend(msg_encoding)

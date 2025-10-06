@@ -267,3 +267,39 @@ def prepare_generator_input(
     }
 
     return generator_input, uids
+
+
+def encode_messages_subset(messages, tokenizer):
+    """Encodes a subset of messages from a conversation
+
+    Expects `messages` to be a subset of messages from a conversation with atleast one preceeding turn.
+    """
+    # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+    base_conversation = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "I am a user."},
+    ]
+    if messages[0]["role"] != "assistant":
+        # add an assistant message as well if the first role is user/tool
+        base_conversation.append({"role": "assistant", "content": "I am an assistant."})
+    base_conversation_token_ids = tokenizer.apply_chat_template(
+        base_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+
+    # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
+    # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
+    if messages[0]["role"] != "assistant" and tokenizer.eos_token_id in base_conversation_token_ids:
+        last_eos_token_index = (
+            len(base_conversation_token_ids) - 1 - base_conversation_token_ids[::-1].index(tokenizer.eos_token_id)
+        )
+        base_conversation_token_ids = base_conversation_token_ids[: last_eos_token_index + 1]
+
+    full_conversation = base_conversation + messages
+    full_conversation_token_ids = tokenizer.apply_chat_template(
+        full_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+    return full_conversation_token_ids[len(base_conversation_token_ids) :]
