@@ -19,6 +19,7 @@ dependencies = [
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
+    "hf_transfer",
 ]
 
 [project.optional-dependencies]
