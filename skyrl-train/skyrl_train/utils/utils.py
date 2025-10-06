@@ -282,8 +282,10 @@ def validate_cfg(cfg: DictConfig):
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert (
                 cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
-                and cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
-            ), "num_nodes and num_gpus_per_node must be the same when colocate policy and ref model."
+            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            assert (
+                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
+            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
 
 
 def validate_generator_cfg(cfg: DictConfig):
