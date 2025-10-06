@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
@@ -33,6 +34,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype
+import time
 
 
 @dataclass
@@ -276,8 +278,6 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_int_ids = list(self.llm.list_loras())
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
-                from vllm.lora.request import LoRARequest
-
                 batch_size = len(prompt_token_ids)
                 # dummy_lora_path for placeholder (actual loading done in add_lora())
                 lora_requests = [
@@ -320,9 +320,6 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
-        from vllm.lora.request import LoRARequest
-        import time
-
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
         result = self.llm.add_lora(lora_request)
@@ -414,9 +411,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
-        from vllm.lora.request import LoRARequest
-        import time
-
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
         result = await self.llm.add_lora(lora_request)
@@ -432,8 +426,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_int_ids = list(await self.llm.list_loras())
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
-                from vllm.lora.request import LoRARequest
-
                 # dummy_lora_path for placeholder (actual loading done in add_lora())
                 lora_request = LoRARequest(
                     lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"

@@ -31,6 +31,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from collections import OrderedDict
 
 from packaging import version
+from peft.utils.save_and_load import get_peft_model_state_dict
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -486,7 +487,6 @@ class PrecisionType:
 
 # Reference: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
 def layered_summon_lora_params(fsdp_module) -> OrderedDict:
-    from peft.utils.save_and_load import get_peft_model_state_dict
 
     def __prefix_submodules(module, prefix):
         for name, submodule in module.named_modules():
@@ -534,8 +534,6 @@ def collect_lora_params(module: FSDP) -> OrderedDict:
     collect lora params or full params if base model is not ready in vllm
     requires `module._fsdp_wrapped_module` to be a `PeftModel`
     """
-    from peft.utils.save_and_load import get_peft_model_state_dict
-
     lora_params = OrderedDict()
     peft_model = getattr(module, "_fsdp_wrapped_module", module)
     if fsdp_version(module) > 0:
