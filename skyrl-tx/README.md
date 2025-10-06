@@ -1,25 +1,24 @@
-# tx: Cross-Platform Transformer Training
+# SkyRL tx: Unified API for training and inference
 
-tx (**t**ransformers **x**-platform) is a JAX/OpenXLA-based library
-designed for training transformers and other neural networks. Since it
-is based on OpenXLA, tx enables you to run the same code across
-diverse hardware platforms like GPUs, TPUs, AWS Trainium, and
-Tenstorrent accelerators, without the complexity of adapting to
-platform-specific APIs or execution models like you would need if you
-switch from PyTorch to PyTorch/XLA.
+> ⚠️  The project is currently very early with lots of missing features
+> (e.g. currently LoRA is only supported for the MLP layer, pure inference
+> is not supported, model sharding is in a very early state). Many of
+> these are easy to implement and we welcome contributions! ⚠️
 
-We try to keep the code simple but powerful and write the library in a
-way that feels intuitive to developers in the PyTorch and HuggingFace
-ecosystems.
 
-Key Benefits:
-- **Write once, run anywhere**: Single codebase that works across all major AI accelerators
-- **Familiar conventions**: Designed with PyTorch and Hugging Face developers in mind
-- **Clean and maintainable**: Simple, powerful code that doesn't compromise on capability
+SkyRL tx is an open-source cross-platform library that allows users to
+set up their own service exposing a
+[Tinker](https://tinker-docs.thinkingmachines.ai/) like REST API for
+neural network forward and backward passes. It unifies inference and
+training into a single, common API, abstracting away the
+infrastructure challenges of managing GPUs.
 
-The code is very early, features we want to support going forward:
-- More flexible dataset support
-- More model architectures like MoE models
-- More optimizations
+The `t` in `tx` stands for transformers, training, or tinker, and the `x`
+stands for "cross-platform".
 
-Contributions are welcome! Please keep the code as simple as possible :)
+## Project Status
+
+This is a very early release of SkyRL tx. While the project is
+functional end-to-end, there is still a lot of work to be done. We are
+sharing it with the community to invite feedback, testing, and
+contributions.
