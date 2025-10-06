@@ -15,8 +15,7 @@ stands for "cross-platform".
   eliminates numerical discrepancies and the need for expensive
   checkpoint transfers.
 
-**Seamless Online Learning**: Models can be updated in real-time with
-  new data without service interruptions.
+**Seamless Online Learning**: Models can be updated in real-time.
 
 **Reduced Operational Complexity**: Manage one API and one system for
   both training and serving, simplifying deployment strategies.
@@ -26,6 +25,7 @@ stands for "cross-platform".
 
 ## Project Status
 
-This is an early release of SkyRL tx. While the project is functional
-end-to-end, there is still a lot of work to be done. We are sharing it
-with the community to invite feedback, testing, and contributions.
+This is a very early release of SkyRL tx. While the project is
+functional end-to-end, there is still a lot of work to be done. We are
+sharing it with the community to invite feedback, testing, and
+contributions.
