@@ -32,9 +32,6 @@ def test_lora_training():
 
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=is_lora_param)
 
-        # Split after updating adapter configs
-        graphdef, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
-
         batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
                            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
         target_ids = batch[:, 1:]
@@ -47,6 +44,10 @@ def test_lora_training():
             return optax.softmax_cross_entropy_with_integer_labels(
                 logits=logits, labels=target_ids
             ).mean()
+
+        # Compute gradients - we need to use nnx.split to separate parameters
+        # that we want to compute gradients for
+        graphdef, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
 
         # Helper to extract adapter params at specific index
         def get_adapter_params(params, adapter_idx):
