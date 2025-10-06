@@ -76,7 +76,7 @@ def test_qwen3_moe_layer():
 def load_lora_weights(jax_module: LoRAMixin, hf_module: torch.nn.Module,
                       adapter_idx: int, scaling: float, rank: int, adapter_name: str = 'default') -> None:
     """Load LoRA weights from HF module to JAX module."""
-    assert jax_module.lora_A is not None and jax_module.lora_B is not None and jax_module.lora_scaling is not None
+    assert jax_module.lora_A is not None and jax_module.lora_B is not None and jax_module.lora_scaling is not None and jax_module.lora_ranks is not None
     jax_module.lora_A.value = jax_module.lora_A.value.at[adapter_idx].set(
         jnp.array(hf_module.lora_A[adapter_name].weight.detach().numpy().T)  # ty: ignore
     )
