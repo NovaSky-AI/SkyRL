@@ -1,9 +1,10 @@
 # SkyRL tx: Unified API for training and inference
 
-⚠️  The project is currently very early with lots of missing features
-(e.g. currently LoRA is only supported for the MLP layer, pure inference
-is not supported, model sharding is in a very early state). Many of
-these are easy to implement and we welcome contributions!
+> ⚠️  The project is currently very early with lots of missing features
+> (e.g. currently LoRA is only supported for the MLP layer, pure inference
+> is not supported, model sharding is in a very early state). Many of
+> these are easy to implement and we welcome contributions! ⚠️
+
 
 SkyRL tx is an open-source cross-platform library that allows users to
 set up their own service exposing a
