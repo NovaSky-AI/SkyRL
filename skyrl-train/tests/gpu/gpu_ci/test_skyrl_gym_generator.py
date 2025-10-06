@@ -12,7 +12,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput
 from tests.gpu.utils import Timer, get_test_generator_input
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from skyrl_train.utils.utils import initialize_ray
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -105,8 +105,9 @@ async def run_generator_end_to_end(
 
     # Create a mock generator config
     default_cfg = get_default_config()
-    generator_cfg = default_cfg.generator
-    generator_cfg.update(
+    OmegaConf.update(
+        default_cfg,
+        "generator",
         {
             "sampling_params": {
                 "max_generate_length": max_generate_length,
@@ -123,19 +124,22 @@ async def run_generator_end_to_end(
             "enable_http_endpoint": False,
             "http_endpoint_host": "127.0.0.1",
             "http_endpoint_port": 8000,
-        }
+        },
     )
 
-    env_cfg = default_cfg.environment.skyrl_gym
-    env_cfg.update(
+    generator_cfg = default_cfg.generator
+    OmegaConf.update(
+        default_cfg,
+        "environment.skyrl_gym",
         {
             "search": {
                 "log_requests": True,
                 "search_url": "http://127.0.0.1:8000/retrieve",
             },
             "max_env_workers": max_env_workers,
-        }
+        },
     )
+    env_cfg = default_cfg.environment.skyrl_gym
 
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model
