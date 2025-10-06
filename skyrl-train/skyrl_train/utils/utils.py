@@ -70,12 +70,9 @@ def validate_batch_sizes(cfg: DictConfig):
         pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
         cp = cfg.trainer.policy.megatron_config.context_parallel_size
         tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        ep = cfg.trainer.policy.megatron_config.expert_model_parallel_size
-        etp = cfg.trainer.policy.megatron_config.expert_tensor_parallel_size
-        assert pp * cp * tp == pp * ep * etp, (
-            f"Invalid Megatron parallelism: (pp * cp * tp)={pp * cp * tp} != (pp * ep * etp)={pp * ep * etp}. "
-            "Please ensure that pipeline_model_parallel_size * context_parallel_size * tensor_model_parallel_size "
-            "equals pipeline_model_parallel_size * expert_model_parallel_size * expert_tensor_parallel_size."
+        assert policy_world_size % (pp * cp * tp) == 0, (
+            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
         )
         policy_dp_size = policy_world_size // (pp * cp * tp)
     else:
@@ -148,12 +145,9 @@ def validate_batch_sizes(cfg: DictConfig):
             pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
             cp = cfg.trainer.ref.megatron_config.context_parallel_size
             tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            ep = cfg.trainer.ref.megatron_config.expert_model_parallel_size
-            etp = cfg.trainer.ref.megatron_config.expert_tensor_parallel_size
-            assert pp * cp * tp == pp * ep * etp, (
-                f"Invalid Megatron parallelism: (pp * cp * tp)={pp * cp * tp} != (pp * ep * etp)={pp * ep * etp}. "
-                "Please ensure that pipeline_model_parallel_size * context_parallel_size * tensor_model_parallel_size "
-                "equals pipeline_model_parallel_size * expert_model_parallel_size * expert_tensor_parallel_size."
+            assert ref_world_size % (pp * cp * tp) == 0, (
+                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+                "This ensures that the data parallel size is an integer."
             )
             ref_dp_size = ref_world_size // (pp * cp * tp)
         else:
