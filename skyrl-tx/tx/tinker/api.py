@@ -121,13 +121,13 @@ class OptimStepRequest(BaseModel):
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-    path: str | None = None
+    path: str
 
 
 class FutureResponse(BaseModel):
     future_id: str
     status: str = "pending"
-    request_id: str | None = None
+    request_id: str
 
 
 class TelemetryEvent(BaseModel):
@@ -151,7 +151,7 @@ class TelemetryResponse(BaseModel):
 
 
 class SupportedModel(BaseModel):
-    model_name: str | None = None
+    model_name: str
 
 
 class GetServerCapabilitiesResponse(BaseModel):
