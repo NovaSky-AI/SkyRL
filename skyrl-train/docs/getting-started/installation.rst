@@ -47,6 +47,8 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 - `ray <https://docs.ray.io/en/latest/>`_ 2.48.0
 
 
+.. _system-dependencies:
+
 System Dependencies
 ~~~~~~~~~~~~~~~~~~~
 
@@ -187,6 +189,76 @@ We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <http
 .. warning::
     
     ⚠️ We do not recommend using uv versions 0.8.0, 0.8.1, or 0.8.2 due to a `bug <https://github.com/astral-sh/uv/issues/14860>`_ in the ``--with`` flag behaviour.
+
+Running SkyRL-Train on Runpod
+-----------------------------
+
+We go over the steps we recommend to take for running SkyRL-Train on Runpod. You
+can customize the steps below to your own needs. The following steps are tested E2E
+with a single A40 GPU from Runpod to train on the GSM8K dataset, giving your the
+quickest and most minimal SkyRL-Train start with Runpod.
+
+First install conda environment:
+
+.. code-block:: bash
+
+    mkdir -p ~/miniconda3
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+    bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
+    rm ~/miniconda3/miniconda.sh
+    source ~/miniconda3/bin/activate
+    conda init --all
+
+Close the terminal and re-open to activate the conda base environment. Then run the following
+snippet in a new terminal. The numa installation follows :ref:`system-dependencies`.
+
+.. code-block:: bash
+
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+    # Optionally, export your WANDB_API_KEY
+    echo "export WANDB_API_KEY=YOUR_WANDB_API_KEY" >> ~/.bashrc
+
+    # -------------------------------
+    # Point cache to `$HOME/.cache`
+    # -------------------------------
+    # Sometimes Runpod makes .cache to be under `/workspace` which makes things really slow.
+    # We set them to `~/` here.
+    mkdir -p "$HOME/.cache"
+    echo 'export UV_CACHE_DIR="$HOME/.cache/uv"' >> ~/.bashrc
+    echo 'export HF_HOME="$HOME/.cache/huggingface"' >> ~/.bashrc
+
+    # ---------------
+    # Install numa
+    # ---------------
+    # Get the source
+    cd $HOME
+    wget https://github.com/numactl/numactl/releases/download/v2.0.16/numactl-2.0.16.tar.gz
+    tar xzf numactl-2.0.16.tar.gz
+    cd numactl-2.0.16
+
+    # Build to a local prefix
+    ./configure --prefix=$HOME/.local
+    make
+    make install
+    cd $HOME
+
+    # Point compiler and linker to it
+    echo "export CPATH=$HOME/.local/include:$CPATH" >> ~/.bashrc
+    echo "export LIBRARY_PATH=$HOME/.local/lib:$LIBRARY_PATH" >> ~/.bashrc
+    echo "export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH" >> ~/.bashrc
+
+Close the terminal and re-open. Then you can launch a basic gsm8k training run:
+
+.. code-block:: bash
+
+    git clone https://github.com/NovaSky-AI/SkyRL
+    cd SkyRL/skyrl-train
+    pip install uv
+    uv run --isolated python examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+    NUM_GPUS=1 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
+
 
 Development 
 -----------

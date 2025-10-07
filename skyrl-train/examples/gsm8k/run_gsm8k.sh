@@ -8,12 +8,14 @@ set -x
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
-DATA_DIR="$HOME/data/gsm8k"
-NUM_GPUS=4
-LOGGER="wandb"  # change to "console" to print to stdout
+# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
 
-INFERENCE_BACKEND="vllm"
-# INFERENCE_BACKEND="sglang"
+: "${DATA_DIR:="$HOME/data/gsm8k"}"
+: "${NUM_GPUS:=4}"
+: "${LOGGER:=wandb}" # change to "console" to print to stdout
+
+: "${INFERENCE_BACKEND:=vllm}"
+# : "${INFERENCE_BACKEND:=sglang}"
 
 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
