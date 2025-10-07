@@ -13,6 +13,7 @@ from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
 from tx.tinker.db_models import FutureDB, ModelDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker import types
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
 from peft import LoraConfig
 
@@ -103,7 +104,7 @@ class TinkerEngine:
 
         return batchable
 
-    def create_model(self, model_id: str, lora_config: dict | None = None):
+    def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOuput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
         adapter_index = max((m["adapter_index"] for m in self.models.values()), default=-1) + 1
@@ -113,10 +114,16 @@ class TinkerEngine:
 
         self.models[model_id] = {
             "adapter_index": adapter_index,
-            "lora_config": lora_config
+            "lora_config": request_data.lora_config
         }
         self.accumulated_grads[model_id] = None
         logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}")
+
+        return types.CreateModelOuput(
+            model_id=model_id,
+            base_model=self.base_model_name,
+            lora_config=request_data.lora_config,
+        )
 
     def process_forward_backward_batch(self, requests: list) -> dict:
         """Process multiple forward_backward requests in a single batch.
@@ -254,7 +261,7 @@ class TinkerEngine:
 
         return results
 
-    def process_optim_step(self, request_id: str, model_id: str, request_data: dict) -> dict:
+    def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
@@ -265,7 +272,7 @@ class TinkerEngine:
         adapter_grads = self.accumulated_grads.get(model_id)
         if adapter_grads is None:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return {}
+            return types.OptimStepOutput()
 
         # Create full gradient structure with zeros for all adapters except this one
         def expand_adapter_grads(lora_param, adapter_grad):
@@ -277,30 +284,25 @@ class TinkerEngine:
         full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
 
         # Apply optimizer update -- going forward we need to figure out how to use different learning rates per adapter
-        adam_params = request_data.get("adam_params", {})
-        assert adam_params.get("lr", LEARNING_RATE) == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
+        adam_params = request_data.adam_params
+        assert adam_params.lr == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
         self.optimizer.update(self.lora_params, full_lora_grads)
 
         # Clear accumulated gradients
         self.accumulated_grads[model_id] = None
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
-        return {}
+        return types.OptimStepOutput()
 
-    def process_save_weights_for_sampler(self, request_id: str, model_id: str, request_data: dict) -> dict:
+    def process_save_weights_for_sampler(self, model_id: str, request_data: types.SaveWeightsForSamplerInput) -> types.SaveWeightsForSamplerOutput:
         """Process a save_weights_for_sampler request and save model weights."""
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
         adapter_index = self.models[model_id]["adapter_index"]
 
-        checkpoint_id = request_data.get("path")
-        if not checkpoint_id:
-            checkpoint_id = f"checkpoint_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-        else:
-            # Make sure the user cannot store checkpoints in places like ../../<important file>
-            checkpoint_id = Path(checkpoint_id).name
-
+        # Make sure the user cannot store checkpoints in places like ../../<important file>
+        checkpoint_id = Path(request_data.path).name
         output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -311,15 +313,28 @@ class TinkerEngine:
         save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
 
         # Save LoRA config
-        lora_config = LoraConfig(**self.models[model_id]["lora_config"])
+        lora_config = LoraConfig(r=self.models[model_id]["lora_config"].rank)
         lora_config.save_pretrained(output_dir)
 
         logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
 
-        return {
-            "path": f"tinker://{model_id}/{checkpoint_id}",
-            "type": "save_weights_for_sampler"
-        }
+        return types.SaveWeightsForSamplerOutput(
+            path=f"tinker://{model_id}/{checkpoint_id}",
+            type="save_weights_for_sampler",
+        )
+
+    def process_single_request(self, request_type: RequestType, model_id: str, request_data: dict) -> dict:
+        result = {}
+        match request_type:
+            case RequestType.CREATE_MODEL:
+                result = self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+            case RequestType.OPTIM_STEP:
+                result = self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+            case RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
+                result = self.process_save_weights_for_sampler(model_id, types.SaveWeightsForSamplerInput.model_validate(request_data))
+            case _:
+                raise ValueError(f"Unknown request type: {request_type}")
+        return result.model_dump()
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -372,39 +387,7 @@ class TinkerEngine:
                 # Process other request types individually (in the future we can also batch independent optim_steps)
                 for future in other_futures:
                     try:
-                        # Process based on request type
-                        if future.request_type == RequestType.CREATE_MODEL:
-                            # Get model from database and create it
-                            model_statement = select(ModelDB).where(ModelDB.model_id == future.model_id)
-                            model_db = session.exec(model_statement).first()
-                            if not model_db:
-                                raise ValueError(f"Model {future.model_id} not found in database")
-                            self.create_model(future.model_id, model_db.lora_config)
-                            result_data = {
-                                "model_id": future.model_id,
-                                "base_model": self.base_model_name,
-                                "lora_config": model_db.lora_config,
-                                "status": "created",
-                                "request_id": future.request_id
-                            }
-                        elif future.request_type == RequestType.OPTIM_STEP:
-                            result_data = self.process_optim_step(
-                                future.request_id,
-                                future.model_id,
-                                future.request_data
-                            )
-                        elif future.request_type == RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
-                            result_data = self.process_save_weights_for_sampler(
-                                future.request_id,
-                                future.model_id,
-                                future.request_data
-                            )
-                        else:
-                            logger.warning(f"Unknown request type: {future.request_type}")
-                            continue
-
-                        # Update the future with results
-                        future.result_data = result_data
+                        future.result_data = self.process_single_request(future.request_type, future.model_id, future.request_data)
                         future.status = RequestStatus.COMPLETED
                         future.completed_at = datetime.now(timezone.utc)
                         session.add(future)

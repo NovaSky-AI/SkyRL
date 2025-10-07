@@ -10,7 +10,9 @@ import asyncio
 import subprocess
 import logging
 
+from tx.tinker import types
 from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,16 +77,12 @@ async def create_future(
 
 
 class LoRAConfig(BaseModel):
-    r: int = 8
-    lora_alpha: int = 16
-    target_modules: list[str] | None = None
-    lora_dropout: float = 0.05
+    rank: int = 8
 
 
 class CreateModelRequest(BaseModel):
     base_model: str
-    lora_config: LoRAConfig | None = None
-    type: str | None = None
+    lora_config: LoRAConfig
 
 
 class CreateModelResponse(BaseModel):
@@ -114,26 +112,16 @@ class ForwardBackwardInput(BaseModel):
 
 class AdamParams(BaseModel):
     lr: float = 1e-4
-    betas: tuple[float, float] = (0.9, 0.999)
-    eps: float = 1e-8
-    weight_decay: float = 0.0
 
 
 class OptimStepRequest(BaseModel):
     model_id: str
     adam_params: AdamParams
-    type: str | None = None
 
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
     path: str | None = None
-    type: str | None = None
-
-
-class SaveWeightsForSamplerResponse(BaseModel):
-    path: str
-    type: str | None = None
 
 
 class FutureResponse(BaseModel):
@@ -175,11 +163,12 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     """Create a new model, optionally with a LoRA adapter."""
     model_id = f"model_{uuid4().hex[:8]}"
 
+    request_data = types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank))
     request_id = await create_future(
         session=session,
         request_type=RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=request.model_dump()
+        request_data=request_data.model_dump()
     )
 
     model_db = ModelDB(
