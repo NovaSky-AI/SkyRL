@@ -236,7 +236,7 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
         session=session,
         request_type=RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=request,
+        request_data=types.ForwardBackwardInput(forward_backward_input=request.forward_backward_input),
     )
 
     await session.commit()

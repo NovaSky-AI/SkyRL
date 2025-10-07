@@ -4,6 +4,7 @@
 # example, usually we try to avoid optional values in these types.
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -32,6 +33,10 @@ class CreateModelOutput(BaseModel):
     model_id: str
     base_model: str
     lora_config: LoraConfig
+
+
+class ForwardBackwardInput(BaseModel):
+    forward_backward_input: dict[str, Any]
 
 
 class OptimStepInput(BaseModel):

@@ -125,7 +125,7 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def process_forward_backward_batch(self, requests: list) -> dict:
+    def process_forward_backward_batch(self, requests: list[tuple[FutureDB, str, types.ForwardBackwardInput]]) -> dict:
         """Process multiple forward_backward requests in a single batch.
 
         Args:
@@ -163,7 +163,7 @@ class TinkerEngine:
         current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
             adapter_index = self.models[model_id]["adapter_index"]
-            forward_backward_input = request_data.get("forward_backward_input", {})
+            forward_backward_input = request_data.forward_backward_input
             data = forward_backward_input["data"]
 
             request_start = current_batch_idx
@@ -355,7 +355,7 @@ class TinkerEngine:
                 # Process forward_backward requests in batch
                 if forward_backward_futures:
                     try:
-                        batch_requests = [(f, f.model_id, f.request_data) for f in forward_backward_futures]
+                        batch_requests = [(f, f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in forward_backward_futures]
                         results = self.process_forward_backward_batch(batch_requests)
 
                         # Update each future with its result
