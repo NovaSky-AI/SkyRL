@@ -12,7 +12,7 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.models import FutureDB, ModelDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker.db_models import FutureDB, ModelDB, DB_PATH, RequestType, RequestStatus
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
 from peft import LoraConfig
 

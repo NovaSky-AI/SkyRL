@@ -10,7 +10,7 @@ import asyncio
 import subprocess
 import logging
 
-from tx.tinker.models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
