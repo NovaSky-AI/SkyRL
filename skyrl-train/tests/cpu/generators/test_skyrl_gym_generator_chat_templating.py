@@ -7,12 +7,15 @@ from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from omegaconf import OmegaConf
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
-from skyrl_train.generators.utils import get_custom_chat_template, CUSTOM_CHAT_TEMPLATES
+from skyrl_train.generators.utils import get_custom_chat_template
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
 
 
@@ -78,8 +81,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         }
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
-    # Create a mock generator config
-
     chat_template_config = None
     if is_custom_jinja_from_file:
         template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
@@ -88,8 +89,12 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
         chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
     else:
         chat_template_config = {"source": "name", "name_or_path": None}
-
-    generator_cfg = DictConfig(
+    # Create a mock generator config
+    default_cfg = get_default_config()
+    generator_cfg = default_cfg.generator
+    OmegaConf.update(
+        default_cfg,
+        "generator",
         {
             "sampling_params": {"max_generate_length": 200, "logprobs": None},
             "max_input_length": 200,
@@ -100,15 +105,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             "use_conversation_multi_turn": True,
             "chat_template": chat_template_config,
             "append_eos_token_after_stop_str_in_multi_turn": True,
-            "chat_template_kwargs": {},
-        }
+        },
     )
-    env_cfg = DictConfig(
-        {
-            "max_env_workers": 0,
-            "env_class": "cpu_test_env",
-        }
-    )
+    generator_cfg = default_cfg.generator
+    env_cfg = default_cfg.environment.skyrl_gym
+    env_cfg.max_env_workers = 0
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,
@@ -123,7 +124,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     input_batch: GeneratorInput = {
         "prompts": prompt,
         "env_extras": extras,
-        "env_classes": [env_cfg.env_class],
+        "env_classes": ["cpu_test_env"],
     }
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
@@ -277,27 +278,29 @@ async def test_append_eos_after_stop_multi_turn(model_name):
             }
 
         mock_llm.generate = AsyncMock(side_effect=mock_generate)
-
         chat_template_config = None
         if "Qwen3" in model_name:
             chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
         else:
             chat_template_config = {"source": "name", "name_or_path": None}
-        generator_cfg = DictConfig(
+        default_cfg = get_default_config()
+        OmegaConf.update(
+            default_cfg,
+            "generator",
             {
                 "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
                 "max_input_length": 200,
                 "batched": False,
                 "max_turns": 3,
                 "zero_reward_on_non_stop": False,
-                "apply_overlong_filtering": False,
                 "use_conversation_multi_turn": True,
                 "chat_template": chat_template_config,
                 "append_eos_token_after_stop_str_in_multi_turn": append_flag,
-                "chat_template_kwargs": {},
-            }
+            },
         )
-        env_cfg = DictConfig({"max_env_workers": 0, "env_class": "cpu_test_env"})
+        generator_cfg = default_cfg.generator
+        env_cfg = default_cfg.environment.skyrl_gym
+        env_cfg.max_env_workers = 0
         gen = SkyRLGymGenerator(
             generator_cfg=generator_cfg,
             skyrl_gym_cfg=env_cfg,

@@ -490,6 +490,15 @@ Generator Configuration
     max_num_seqs: 1024
     remote_inference_engine_urls: ["127.0.0.1:8001"]
     max_turns: 1
+
+    # Custom chat template configuration if needed
+    chat_template:
+      source: "name"  # "name" or "file"
+      name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
+    
+    # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
+    chat_template_kwargs: {}
+
     engine_init_kwargs: {}
 
     override_existing_update_group: "auto" # "auto", "enable", "disable"
@@ -553,7 +562,6 @@ Inference Engine Configuration
 - ``generator.max_num_seqs``: Continous batching parameter for vLLM. Maximum number of sequences to pack into a batch.
 - ``generator.max_num_batched_tokens``: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
 
-
 Generation Parameters
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -572,6 +580,10 @@ Generation Parameters
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
 - ``generator.use_conversation_multi_turn``: Whether to use conversation format for multi-turn generation. If set to ``true`` then observations are appended to the chat history as a new turn. If set to ``false`` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus ``false`` can be used for full control over the exact tokens added after environment interaction.
 - ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
+- ``generator.chat_template``: Custom chat template configuration if needed.
+    - ``generator.chat_template.source``: Source of the chat template. Can be either ``name`` or ``file``.
+    - ``generator.chat_template.name_or_path``: Name or path of the chat template. If the source is ``name``, then it should be one of the supported templates in :code_link:`skyrl_train/generators/utils.py`. If the source is ``file``, then this field should be a path to a Jinja2 template file.
+- ``generator.chat_template_kwargs``: Chat templating kwargs to pass to ``tokenizer.apply_chat_template``. Applicable only for non-batched generation with ``generator.batched=false``.
 
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~

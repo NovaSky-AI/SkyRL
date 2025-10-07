@@ -3,9 +3,9 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tx"
+name = "skyrl-tx"
 dynamic = ["version"]
-description = "Cross-platform neural network training"
+description = "Unified API for training and inference"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,7 @@ dependencies = [
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
+    "hf_transfer",
 ]
 
 [project.optional-dependencies]
