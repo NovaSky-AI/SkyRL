@@ -7,7 +7,7 @@ set -exo pipefail
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_gsm8k.sh
+# bash examples/gptoss/run_gsm8k_gptoss.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
@@ -59,6 +59,6 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.run_name="gsm8k_test_gptoss_low" \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt_gptoss" \
-  +generator.chat_template_kwargs={reasoning_effort:'low'} \
+  generator.chat_template_kwargs={reasoning_effort:'low'} \
   trainer.dump_data_batch=true \
   $@
