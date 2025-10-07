@@ -104,7 +104,7 @@ class TinkerEngine:
 
         return batchable
 
-    def create_model(self, model_id: str, lora_config: dict | None = None):
+    def create_model(self, model_id: str, lora_config: dict):
         """Create and initialize a model."""
         # Assign adapter index for this model_id
         adapter_index = max((m["adapter_index"] for m in self.models.values()), default=-1) + 1
@@ -322,7 +322,7 @@ class TinkerEngine:
         layer_rank = {
             path[:-2]: int(node[adapter_index])
             for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
-            if path[-2].key == "lora_ranks"
+            if path[-2].key == "lora_ranks"  # ty: ignore
         }
 
         def extract_adapter_params(path, p):

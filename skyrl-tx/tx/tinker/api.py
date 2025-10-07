@@ -217,13 +217,9 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    lora_config = None
-    if model.lora_config:
-        lora_config = LoRAConfig(**model.lora_config)
-
     model_data = ModelData(
         base_model=model.base_model,
-        lora_config=lora_config,
+        lora_config=LoRAConfig(**model.lora_config),  # ty: ignore
         model_name=model.base_model
     )
 
