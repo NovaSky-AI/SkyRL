@@ -2,7 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from tx.layers.util import Param
+from tx.layers.util import Param, prepare_routing
 
 
 class LoRAMixin:
@@ -62,16 +62,29 @@ class LoRAMixin:
         batch_size = x.shape[0]
         assert adapter_indices.shape[0] == batch_size
 
-        x_flat = x.reshape(batch_size, -1, self.in_features)
-        A = self.lora_A.value[adapter_indices]
-        B = self.lora_B.value[adapter_indices]
-        scaling = self.lora_scaling.value[adapter_indices]
-        ranks = self.lora_ranks.value[adapter_indices]
+        x_reshaped = x.reshape(-1, self.in_features)
+        seq_len = x_reshaped.shape[0] // batch_size
+        adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
-        rank_mask = jnp.arange(self.max_lora_rank)[None, :] < ranks[:, None]
-        A_masked = A * rank_mask[:, None, :]  # only need to mask A because we sum over the rank in the einsum below
+        # Prepare for ragged_dot
+        x_sorted, group_sizes, unsort_indices = prepare_routing(
+            x_reshaped, adapter_indices_expanded, self.max_lora_adapters
+        )
 
-        lora_output = jnp.einsum('bsi,bir,bro->bso', x_flat, A_masked, B) * scaling[:, None, None]
+        # Mask out unused rank dimensions
+        rank_mask = jnp.arange(self.max_lora_rank)[None, :] < self.lora_ranks.value[:, None]
+        A_masked = self.lora_A.value * rank_mask[:, None, :]
+
+        # Apply LoRA using ragged_dot: x @ A @ B
+        intermediate = jax.lax.ragged_dot(x_sorted, A_masked, group_sizes)
+        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
+
+        # Unsort and reshape
+        lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
+
+        # Apply scaling
+        lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
+
         return base_output + lora_output.reshape(base_output.shape)
 
 
