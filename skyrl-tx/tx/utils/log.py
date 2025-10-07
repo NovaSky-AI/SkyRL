@@ -7,9 +7,9 @@ from typing import Any
 from rich.logging import RichHandler
 
 try:
-    import wandb  # type: ignore[import-untyped]
+    import wandb  # type: ignore[import-not-found]
 except ImportError:
-    wandb = None
+    wandb = None  # type: ignore[assignment]
 
 
 def _setup_root_logger() -> None:
@@ -35,6 +35,7 @@ def add_file_handler(path: Path | str, level: int = logging.DEBUG, *, print_path
     if print_path:
         print(f"Logging to '{path}'")
 
+
 _setup_root_logger()
 logger = logging.getLogger("tx")
 
@@ -50,7 +51,11 @@ class Tracker:
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
         data = metrics if step is None else {"step": step, **metrics}
-        logger.info(", ".join(f"{key}: {value:.3e}" if isinstance(value, float) else f"{key}: {value}" for key, value in data.items()))
+        logger.info(
+            ", ".join(
+                f"{key}: {value:.3e}" if isinstance(value, float) else f"{key}: {value}" for key, value in data.items()
+            )
+        )
 
 
 class WandbTracker(Tracker):
@@ -61,16 +66,16 @@ class WandbTracker(Tracker):
             raise RuntimeError("wandb not installed")
         if not os.environ.get("WANDB_API_KEY"):
             raise ValueError("WANDB_API_KEY environment variable not set")
-        self.run = wandb.init(config=config, **kwargs)
+        self.run = wandb.init(config=config, **kwargs)  # type: ignore[union-attr]
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
         super().log(metrics, step)
         if wandb is not None:
-            wandb.log(metrics, step=step)
+            wandb.log(metrics, step=step)  # type: ignore[union-attr]
 
     def __del__(self):
         if wandb is not None:
-            wandb.finish()
+            wandb.finish()  # type: ignore[union-attr]
 
 
 def get_tracker(tracker: ExperimentTracker | None, config: dict[str, Any], **kwargs) -> Tracker:

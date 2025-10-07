@@ -1,4 +1,5 @@
 """Database models for the Tinker API."""
+
 from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
@@ -12,6 +13,7 @@ DB_PATH = Path(__file__).parent / "tinker.db"
 
 class RequestStatus(str, Enum):
     """Status of a request."""
+
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"

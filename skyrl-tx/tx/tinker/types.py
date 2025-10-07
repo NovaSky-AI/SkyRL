@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 class RequestType(str, Enum):
     """Types of requests that can be processed."""
+
     CREATE_MODEL = "create_model"
     FORWARD_BACKWARD = "forward_backward"
     OPTIM_STEP = "optim_step"
