@@ -11,7 +11,7 @@ provisioning, setting up, and tearing down clusters on any cloud.
 Setup Skypilot
 --------------
 
-To setup SkyPilot on AWS
+SkyPilot can be run on any cloud. Here we show how to run it on AWS.
 
 .. code-block:: bash
 
@@ -67,7 +67,7 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
     #  # /remote/dir1/file: /local/dir1/file
     #  data/gsm8k: ~/data/gsm8k
 
-    # --------------- Enviornment variables ---------------
+    # --------------- Environment variables ---------------
     envs:
       LOGGER: "wandb"  # change to "console" to print to stdout
 
