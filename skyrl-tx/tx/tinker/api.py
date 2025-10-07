@@ -77,7 +77,7 @@ async def create_future(
 
 
 class LoRAConfig(BaseModel):
-    rank: int = 8
+    rank: int
 
 
 class CreateModelRequest(BaseModel):
