@@ -117,8 +117,8 @@ class TinkerEngine:
         lora_alpha = lora_config["lora_alpha"]
 
         # Validate rank doesn't exceed max
-        if lora_rank > self.max_lora_rank:
-            raise ValueError(f"LoRA rank {lora_rank} exceeds max_lora_rank {self.max_lora_rank}")
+        if not (0 < lora_rank <= self.max_lora_rank):
+            raise ValueError(f"LoRA rank {lora_rank} must satisfy 0 < rank <= {self.max_lora_rank}")
 
         self.models[model_id] = {
             "adapter_index": adapter_index,
@@ -319,13 +319,11 @@ class TinkerEngine:
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
 
-        layer_rank = {}
-
-        def collect_ranks(path, node):
-            if path[-2].key == "lora_ranks":
-                layer_rank[path[:-2]] = int(node[adapter_index])
-
-        jax.tree.map_with_path(collect_ranks, self.non_lora_params)
+        layer_rank = {
+            path[:-2]: int(node[adapter_index])
+            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
+            if path[-2].key == "lora_ranks"
+        }
 
         def extract_adapter_params(path, p):
             rank = layer_rank[path[:-2]]
