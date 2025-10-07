@@ -8,8 +8,8 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/terminal_bench/run_tbench_megatron.sh
 
-# DATA_DIR="$HOME/ez_apex_100"
-DATA_DIR="$HOME/tmp"
+DATA_DIR="$HOME/ez_apex_100"
+# DATA_DIR="$HOME/sandboxes-tasks"
 NUM_NODES=1
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
@@ -22,15 +22,15 @@ INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in thi
 
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
 MEGATRON_TP=2
-MEGATRON_PP=2
-MEGATRON_CP=2
+MEGATRON_PP=1
+MEGATRON_CP=4
 
 MEGATRON_EP=4
-MEGATRON_ETP=1
+MEGATRON_ETP=2
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=1
-INFERENCE_ENGINE_TP=8
+NUM_INFERENCE_ENGINES=2
+INFERENCE_ENGINE_TP=4
 
 # Torch profiler (optional)
 ENABLE_TORCH_PROFILER=false
@@ -38,13 +38,24 @@ RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
 
 export SKYRL_PYTHONPATH_EXPORT=1
+export CUDNN_PATH="$(uv run python -c 'import inspect, os, nvidia.cudnn as c; print(os.path.dirname(inspect.getfile(c)))')"
+export CPATH="$CUDNN_PATH/include:${CPATH:-}"
+export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export CUDA_LAUNCH_BLOCKING=1
+export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+export CUDA_COREDUMP_SHOW_PROGRESS=1
+export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'
+export CUDA_COREDUMP_FILE="/persistent_dir/cuda_coredump_%h.%p.%t"
+
+
 # data.train_data="['$DATA_DIR/train.parquet']" \
 uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
   +terminal_bench_config.sandboxes_dir=$SANDBOXES_DIR \
-  terminal_bench_config.max_episodes=16 \
+  terminal_bench_config.max_episodes=64 \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.placement.colocate_all=true \
@@ -71,18 +82,21 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.ref.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.ref.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="full" \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
-  trainer.epochs=1 \
+  trainer.epochs=5 \
   trainer.eval_batch_size=32 \
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=8 \
-  trainer.policy_mini_batch_size=4 \
+  trainer.train_batch_size=4 \
+  trainer.policy_mini_batch_size=1 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=-1000000 \
+  trainer.ckpt_interval=-1 \
   trainer.max_prompt_length=16000 \
   generator.sampling_params.max_generate_length=16000 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
@@ -94,7 +108,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   generator.batched=true \
   environment.env_class=terminal_bench \
   generator.n_samples_per_prompt=4 \
-  generator.gpu_memory_utilization=0.85 \
+  generator.gpu_memory_utilization=0.5 \
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
   trainer.run_name="terminal_bench_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}" \

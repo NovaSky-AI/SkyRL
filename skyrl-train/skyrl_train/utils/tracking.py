@@ -66,7 +66,7 @@ class Tracking:
                 project=project_name,
                 name=experiment_name,
                 config=OmegaConf.to_container(config, resolve=True),
-                settings=wandb.Settings(_disable_stats=True, _disable_meta=True),
+                settings=wandb.Settings(_disable_stats=False, _disable_meta=True),
             )
             self.logger["wandb"] = wandb
 

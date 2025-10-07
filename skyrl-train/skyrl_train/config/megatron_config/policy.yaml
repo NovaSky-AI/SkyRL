@@ -23,10 +23,10 @@ torch_profiler_config:
 # kwargs to override the Megatron OptimizerConfig object
 # any overlapping arguments with those in trainer.policy.optimizer_config will be overridden by the values here
 optimizer_config_kwargs:
-  overlap_cpu_optimizer_d2h_h2d: false
-  use_precision_aware_optimizer: false
-  optimizer_cpu_offload: false
-  optimizer_offload_fraction: 0.0
+  overlap_cpu_optimizer_d2h_h2d: true
+  use_precision_aware_optimizer: true
+  optimizer_cpu_offload: true
+  optimizer_offload_fraction: 1
 
 # kwargs to override the Megatron TransformerConfig object
 transformer_config_kwargs:

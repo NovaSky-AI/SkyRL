@@ -158,6 +158,9 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!", len(response_ids))
+        # import pdb; pdb.set_trace()
+
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
