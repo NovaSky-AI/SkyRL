@@ -23,6 +23,7 @@ class AdamParams(BaseModel):
 
 class LoraConfig(BaseModel):
     rank: int
+    alpha: float
 
 
 class CreateModelInput(BaseModel):

@@ -167,7 +167,8 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         session=session,
         request_type=RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank))
+        # lora_alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
+        request_data=types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank, alpha=32.0))
     )
 
     model_db = ModelDB(

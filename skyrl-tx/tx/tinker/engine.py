@@ -115,7 +115,7 @@ class TinkerEngine:
 
         # Extract LoRA rank and alpha from config
         lora_rank = request_data.lora_config.rank
-        lora_alpha = 32  # This is the default that tinker seems to be using (see https://thinkingmachines.ai/blog/lora/)
+        lora_alpha = request_data.lora_config.alpha
 
         # Validate rank doesn't exceed max
         if not (0 < lora_rank <= self.max_lora_rank):
@@ -341,8 +341,8 @@ class TinkerEngine:
         # Save only the LoRA adapter weights
         save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
 
-        # Save LoRA config (TODO: After https://github.com/NovaSky-AI/SkyRL/pull/405 we can introduce the proper scaling and set alpha = 32)
-        lora_config = LoraConfig(r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.rank)
+        # Save LoRA config
+        lora_config = LoraConfig(r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha)
         lora_config.save_pretrained(output_dir)
 
         logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
