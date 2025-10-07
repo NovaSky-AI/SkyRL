@@ -61,13 +61,13 @@ async def create_future(
     session: AsyncSession,
     request_type: RequestType,
     model_id: str | None,
-    request_data: dict,
+    request_data: BaseModel,
 ) -> int:
     """Create a FutureDB entry and return its auto-generated request_id."""
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data,
+        request_data=request_data.model_dump(),
         status=RequestStatus.PENDING
     )
     session.add(future_db)
@@ -163,12 +163,11 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     """Create a new model, optionally with a LoRA adapter."""
     model_id = f"model_{uuid4().hex[:8]}"
 
-    request_data = types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank))
     request_id = await create_future(
         session=session,
         request_type=RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=request_data.model_dump()
+        request_data=types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank))
     )
 
     model_db = ModelDB(
@@ -237,7 +236,7 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
         session=session,
         request_type=RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=request.model_dump()
+        request_data=request,
     )
 
     await session.commit()
@@ -259,7 +258,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         session=session,
         request_type=RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=request.model_dump()
+        request_data=types.OptimStepInput(adam_params=types.AdamParams(lr=request.adam_params.lr)),
     )
 
     await session.commit()
@@ -281,7 +280,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         request_type=RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=request.model_dump()
+        request_data=types.SaveWeightsForSamplerInput(path=request.path),
     )
 
     await session.commit()

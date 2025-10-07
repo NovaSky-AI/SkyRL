@@ -28,7 +28,7 @@ class CreateModelInput(BaseModel):
     lora_config: LoraConfig
 
 
-class CreateModelOuput(BaseModel):
+class CreateModelOutput(BaseModel):
     model_id: str
     base_model: str
     lora_config: LoraConfig

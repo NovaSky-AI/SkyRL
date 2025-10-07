@@ -104,7 +104,7 @@ class TinkerEngine:
 
         return batchable
 
-    def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOuput:
+    def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
         adapter_index = max((m["adapter_index"] for m in self.models.values()), default=-1) + 1
@@ -119,7 +119,7 @@ class TinkerEngine:
         self.accumulated_grads[model_id] = None
         logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}")
 
-        return types.CreateModelOuput(
+        return types.CreateModelOutput(
             model_id=model_id,
             base_model=self.base_model_name,
             lora_config=request_data.lora_config,
