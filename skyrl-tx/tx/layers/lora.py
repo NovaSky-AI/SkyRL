@@ -163,7 +163,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 
         # Apply rank masking
         rank_mask = jnp.arange(self.max_lora_rank)[None, :] < ranks[:, None]
-        A_masked = A * rank_mask[:, None, :, None]
+        A_masked = A * rank_mask[:, None, None, :]
 
         # Use ragged_dot for LoRA: x @ A @ B
         intermediate = jax.lax.ragged_dot(x, A_masked, group_sizes)
