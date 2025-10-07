@@ -69,7 +69,7 @@ class HFModelWrapper(nn.Module):
             assert self.use_flash_attention_2, "Flash attention 2 should be used for `use_sample_packing`"
 
         if isinstance(pretrain_or_model, str):
-            attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+            attn_implementation = "flash_attention_2" if use_flash_attention_2 else "flex_attention"
 
             # Note: dschf is defined in function scope to avoid global effects
             # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
@@ -492,7 +492,7 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "flex_attention"
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__

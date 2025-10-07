@@ -5,6 +5,7 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 from omegaconf import DictConfig
 
+
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (

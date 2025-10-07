@@ -64,7 +64,7 @@ class BatchIterator:
             rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
-            info={},
+            info={"kinds": batch.get("kinds", None), "steps": batch.get("steps", None)},
             # propagate metadata as is
             metadata=batch.metadata,
         )

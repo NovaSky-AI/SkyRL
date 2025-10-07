@@ -10,6 +10,7 @@ TrainingPhase = Literal["train", "eval"]
 class TrajectoryID:
     instance_id: str  # Unique identifier for the instance in the dataset
     repetition_id: int  # Which sample/repetition for this UID (0, 1, 2... for GRPO)
+    step: Optional[int] = None
 
 
 @dataclass

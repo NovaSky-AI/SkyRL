@@ -11,18 +11,18 @@ DATA_DIR="$HOME/data/sql"
 DB_PATH="$HOME/data/sql/db_files/data"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt"
 
-NUM_GPUS=8
+NUM_GPUS=4
 NUM_INFERENCE_ENGINES=2
-TP_SIZE=4
-MAX_INPUT_LENGTH=29000
+TP_SIZE=2
+MAX_INPUT_LENGTH=16000
 MAX_GENERATE_LENGTH=3000
-TRAIN_BATCH_SIZE=256
+TRAIN_BATCH_SIZE=8
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm -m examples.gptoss.main_gptoss \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
   trainer.epochs=30 \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -41,7 +41,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.max_input_length=$MAX_INPUT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  trainer.policy_mini_batch_size=256 \
+  trainer.policy_mini_batch_size=8 \
   trainer.algorithm.use_kl_loss=false \
   trainer.ckpt_interval=60 \
   trainer.hf_save_interval=30 \
@@ -55,15 +55,15 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
-  generator.max_turns=6 \
+  generator.max_turns=4 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
-  trainer.project_name="skyrlsql" \
-  trainer.run_name="skyrlsql_repro" \
+  trainer.project_name="gptoss_multiturn" \
+  trainer.run_name="skyrlsql_multiturn_test" \
   trainer.resume_mode=latest \
   trainer.ckpt_path=$CKPT_PATH \
   trainer.eval_batch_size=1024 \
