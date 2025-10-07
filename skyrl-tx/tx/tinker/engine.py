@@ -119,7 +119,7 @@ class TinkerEngine:
 
         # Validate rank doesn't exceed max
         if not (0 < lora_rank <= self.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_rank} must satisfy 0 < rank <= {self.max_lora_rank}")
+            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.max_lora_rank}")
 
         self.models[model_id] = types.ModelMetadata(
             adapter_index=adapter_index,
