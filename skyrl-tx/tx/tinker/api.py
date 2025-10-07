@@ -11,7 +11,7 @@ import subprocess
 import logging
 
 from tx.tinker import types
-from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
 
 
 logging.basicConfig(level=logging.INFO)
@@ -59,7 +59,7 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
 
 async def create_future(
     session: AsyncSession,
-    request_type: RequestType,
+    request_type: types.RequestType,
     model_id: str | None,
     request_data: BaseModel,
 ) -> int:
@@ -167,7 +167,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0)
     request_id = await create_future(
         session=session,
-        request_type=RequestType.CREATE_MODEL,
+        request_type=types.RequestType.CREATE_MODEL,
         model_id=model_id,
         request_data=types.CreateModelInput(lora_config=lora_config)
     )
@@ -233,7 +233,7 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
 
     request_id = await create_future(
         session=session,
-        request_type=RequestType.FORWARD_BACKWARD,
+        request_type=types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
         request_data=types.ForwardBackwardInput(forward_backward_input=request.forward_backward_input),
     )
@@ -255,7 +255,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 
     request_id = await create_future(
         session=session,
-        request_type=RequestType.OPTIM_STEP,
+        request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
         request_data=types.OptimStepInput(adam_params=types.AdamParams(lr=request.adam_params.lr)),
     )
@@ -277,7 +277,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
     request_id = await create_future(
         session=session,
-        request_type=RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
+        request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
         request_data=types.SaveWeightsForSamplerInput(path=request.path),
     )

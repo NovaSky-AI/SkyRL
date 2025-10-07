@@ -12,7 +12,7 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
 from tx.layers.lora import update_adapter_config
@@ -81,7 +81,7 @@ class TinkerEngine:
         # Find the earliest pending optim_step per model (these act as barriers)
         optim_barriers_query = (
             select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
-            .where(FutureDB.request_type == RequestType.OPTIM_STEP)
+            .where(FutureDB.request_type == types.RequestType.OPTIM_STEP)
             .where(FutureDB.status == RequestStatus.PENDING)
             .group_by(FutureDB.model_id)
         )
@@ -91,7 +91,7 @@ class TinkerEngine:
         # Get all pending forward_backward operations ordered by request_id
         fwd_bwd_query = (
             select(FutureDB)
-            .where(FutureDB.request_type == RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
         )
@@ -352,13 +352,13 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def process_single_request(self, request_type: RequestType, model_id: str, request_data: dict) -> dict:
+    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
-            case RequestType.CREATE_MODEL:
+            case types.RequestType.CREATE_MODEL:
                 result = self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
-            case RequestType.OPTIM_STEP:
+            case types.RequestType.OPTIM_STEP:
                 result = self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
-            case RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
+            case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
                 result = self.process_save_weights_for_sampler(model_id, types.SaveWeightsForSamplerInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
@@ -375,7 +375,7 @@ class TinkerEngine:
                 statement = (
                     select(FutureDB)
                     .where(FutureDB.status == RequestStatus.PENDING)
-                    .where(FutureDB.request_type != RequestType.FORWARD_BACKWARD)
+                    .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
                     .order_by(FutureDB.request_id)
                 )
                 other_futures = session.exec(statement).all()
