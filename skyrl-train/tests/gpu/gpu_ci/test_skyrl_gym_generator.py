@@ -7,6 +7,7 @@ import pytest
 import ray
 from transformers import AutoTokenizer
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
@@ -22,6 +23,19 @@ from skyrl_train.entrypoints.main_base import config_dir
 from loguru import logger
 
 OBSERVATION_PROMPT = "give me another solution"
+
+
+def launch_remote_engines(remote_inference_engine_urls, model_name_or_path, backend, tokenizer, inference_engine_tensor_parallel_size, inference_engine_data_parallel_size, inference_engine_expert_parallel_size):
+    inference_engines = create_remote_inference_engines(
+        urls=remote_inference_engine_urls,
+        model_name=model_name_or_path,
+        engine_backend=backend,
+        tokenizer=tokenizer,
+        tensor_parallel_size=inference_engine_tensor_parallel_size,
+        data_parallel_size=inference_engine_data_parallel_size,
+        expert_parallel_size=inference_engine_expert_parallel_size,
+    )
+    return inference_engines
 
 
 def get_test_actor_config() -> DictConfig:

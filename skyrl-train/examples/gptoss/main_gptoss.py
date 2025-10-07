@@ -1,11 +1,81 @@
 import ray
 import hydra
+import torch 
+import numpy as np
+from collections import defaultdict
+
 from omegaconf import DictConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.generators.base import GeneratorInterface
 from examples.gptoss.gpt_oss_generator_step_wise import GPTOSSGenerator
 from examples.gptoss.gpt_oss_trainer import GPTOSSTrainer
+from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry
+
+
+# Example of custom advantage estimator: "simple_baseline"
+def compute_advantages_step_wise(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    index: np.ndarray, 
+    values: torch.Tensor,
+    grpo_norm_by_std,
+    gamma,
+    lambd,
+    config,
+    trajectory_ids,
+):
+    """
+    A custom advantage estimator where the inputs are represented as step level turns
+    """
+    scores = token_level_rewards.sum(dim=-1)
+    id2score = defaultdict(list) # str -> list
+    id2mean = {}
+    id2std = {}
+    traj_id_to_steps = defaultdict(list)
+
+    epsilon: float = 1e-6
+    
+    with torch.no_grad():
+        
+        response_rewards = (token_level_rewards * response_mask).sum(dim=-1, keepdim=True)
+
+        for i in range(len(token_level_rewards)):
+            trajectory_id = trajectory_ids[i]
+            traj_id_to_steps[f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"].append((response_rewards[i], i))
+        
+        for key, entries in traj_id_to_steps.items():
+            instance_id: str = key.split("_")[0]
+            # assume last entry is the last turn
+            id2score[instance_id].append(entries[-1][0])
+
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        
+        # grpo: id2score -> 
+        for i in range(len(scores)):
+            id_ = trajectory_ids[i].instance_id
+            if grpo_norm_by_std:
+                scores[i] = (scores[i] - id2mean[id_]) / (id2std[id_] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[id_]
+        scores = scores.unsqueeze(-1) * response_mask
+
+        advantages = scores
+        returns = advantages.clone()
+
+        return advantages, returns
+
+
+# Register the custom advantage estimator
+AdvantageEstimatorRegistry.register("step_wise", compute_advantages_step_wise)
 
 
 class GPTOSSExp(BasePPOExp):

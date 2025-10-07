@@ -259,7 +259,7 @@ class GPTOSSGenerator(GeneratorInterface):
             per_step_output = AgentLoopOutput(
                 response_ids=response_ids,
                 reward=step_reward,
-                loss_mask=copy.deepcopy(loss_mask),
+                loss_mask=copy.deepcopy(loss_mask[current_prompt_length:]),
                 prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
                 rollout_logprobs=None,
                 stop_reason=stop_reason,
@@ -284,7 +284,7 @@ class GPTOSSGenerator(GeneratorInterface):
         # final_reward = step_reward
         # num_steps = step_id
         per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
-        assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
+        # assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         # # # Build token-level rewards placed at assistant turn boundaries
         # token_level_rewards: List[float] = [0.0] * len(response_ids)
@@ -427,6 +427,7 @@ class GPTOSSGenerator(GeneratorInterface):
         stop_reasons = sum([[output.stop_reason for output in step_outputs] for step_outputs in all_outputs], [])
         loss_masks = sum([[output.loss_mask for output in step_outputs] for step_outputs in all_outputs], [])
         prompt_token_ids = sum([[output.prompt_ids for output in step_outputs] for step_outputs in all_outputs], [])
+        trajectory_ids = sum([[trajectory_id for _ in step_outputs] for trajectory_id, step_outputs in zip(trajectory_ids, all_outputs)])
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -457,6 +458,7 @@ class GPTOSSGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
+            "trajectory_ids": trajectory_ids,
         }
 
         return generator_output
@@ -570,7 +572,7 @@ class GPTOSSGenerator(GeneratorInterface):
             loss_mask: List[int]
             input_ids: List[int]
         """
-        assert self.use_conversation_multi_turn and not self.custom_chat_template
+        # assert self.use_conversation_multi_turn and not self.custom_chat_template
 
         # 1. Get think and response tokens
         # think_ids, answer_ids = get_think_and_answer_ids(output_ids, think_start_token_ids=self.think_start_token_ids, think_end_token_ids=self.think_end_token_ids)

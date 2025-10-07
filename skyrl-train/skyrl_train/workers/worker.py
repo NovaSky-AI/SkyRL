@@ -20,13 +20,10 @@ from ray.util.placement_group import (
     placement_group,
     placement_group_table,
 )
-from torch.nn.attention.flex_attention import create_block_mask
-import torch
-
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy
@@ -43,64 +40,8 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from omegaconf import DictConfig
 from pathlib import Path
-from transformers.masking_utils import and_masks
-
-
-torch._inductor.config.unroll_reductions_threshold = 65
 
 _SET_AFFINITY = False
-
-
-def get_padding_mask(attention_mask):
-    attention_mask = attention_mask.bool()
-
-    def padding_mask(b, h, q_idx, k_idx):
-        return attention_mask[b, k_idx]
-
-    return padding_mask
-
-
-def causal_mask(b, h, q_idx, k_idx):
-    return q_idx >= k_idx
-
-
-def get_mask_mod(kind: "B, S", step: "B, S") -> Callable:  # noqa: F821
-
-    def my_mask_mod(b, h, q_idx, k_idx) -> bool:
-        nonlocal kind, step
-
-        ki = kind[b, q_idx]
-        kj = kind[b, k_idx]
-
-        si = step[b, q_idx]
-        sj = step[b, k_idx]
-
-        # print(f"Types: ki={type(ki)}, kj={type(kj)}, si={type(si)}, sj={type(sj)}")
-
-        mask = (
-            ((ki == kj) & (si == sj))
-            | ((ki == 1) & (kj == 0))
-            | ((ki == 1) & (sj == si - 1) & ((kj == 2) | (kj == 3)))
-            | ((ki == 2) & (kj == 0))
-            | ((ki == 2) & (sj == si - 1) & ((kj == 2) | (kj == 3)))
-            | ((ki == 2) & (sj == si) & (kj == 1))
-            | ((ki == 3) & (kj == 3) & (si == sj))
-        )
-        # # t tokens at step j may attend to q and (r,i) tokens at step j-1
-        # mask =   # attend to q
-        # mask |=   # attend to r,i at previous step
-
-        # # r tokens at step j may attend to q, (r,i) tokens at step j-1, and t tokens at the same step
-        # mask |=   # attend to q
-        # mask |=   # attend to r,i at previous step
-        # mask |=   # attend to t at same step
-
-        # # i tokens (external info) attend to themselves
-        # mask |=
-
-        return mask
-
-    return my_mask_mod
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -317,11 +258,12 @@ class Worker(DistributedTorchRayActor):
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
 
-            num_inference_engines, tensor_parallel_size = (
+            num_inference_engines, tensor_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
                 self.cfg.generator.inference_engine_tensor_parallel_size,
+                self.cfg.generator.inference_engine_data_parallel_size,
             )
-            world_size = num_inference_engines * tensor_parallel_size + 1
+            world_size = num_inference_engines * tensor_parallel_size * data_parallel_size + 1
 
             backend = self.cfg.generator.weight_sync_backend
 
@@ -700,7 +642,7 @@ class PolicyWorkerBase(Worker):
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
                 dataloader,
-                desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
+                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
@@ -780,16 +722,6 @@ class PolicyWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
-
-        kinds = experience.info.pop("kinds")
-        steps = experience.info.pop("steps")
-        my_mask_fn = get_mask_mod(kinds, steps)
-        padding_mask_fn = get_padding_mask(attention_mask)
-        final_mask_fn = and_masks(causal_mask, my_mask_fn, padding_mask_fn)
-
-        attention_mask = create_block_mask(
-            final_mask_fn, B=sequences.size(0), H=None, Q_LEN=sequences.size(1), KV_LEN=sequences.size(1)
-        )
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -1101,30 +1033,6 @@ class CriticWorkerBase(Worker):
             load_lr_scheduler_states=load_lr_scheduler_states,
         )
         return states
-
-
-class RewardWorkerBase(Worker):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model: nn.Module = None
-
-    def _forward_micro_batch(
-        self,
-        micro_batch: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        attention_mask = micro_batch["attention_mask"]
-        self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            reward = self.model(sequences, attention_mask)
-        reward = reward.to("cpu")
-        output = TrainingOutputBatch(
-            {"output": reward},
-        )
-        output.metadata = micro_batch.metadata
-        return output
 
 
 class RefWorkerBase(Worker):

@@ -2,7 +2,7 @@ import pytest
 from omegaconf import DictConfig
 from unittest.mock import AsyncMock, MagicMock
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-
+from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from gpt_oss_generator_step_wise import GPTOSSGenerator
 
 from transformers import AutoTokenizer
@@ -22,6 +22,19 @@ The new selling price is **$253**.
 
 ####<|return|>"""
 MOCK_LLM_OUTPUT_IDS = tokenizer.encode(assistant_message)
+
+
+def create_remote_engines(remote_inference_engine_urls, model_name_or_path, backend, tokenizer, inference_engine_tensor_parallel_size, inference_engine_data_parallel_size, inference_engine_expert_parallel_size):
+    inference_engines = create_remote_inference_engines(
+        urls=remote_inference_engine_urls,
+        model_name=model_name_or_path,
+        engine_backend=backend,
+        tokenizer=tokenizer,
+        tensor_parallel_size=inference_engine_tensor_parallel_size,
+        data_parallel_size=inference_engine_data_parallel_size,
+        expert_parallel_size=inference_engine_expert_parallel_size,
+    )
+    return inference_engines
 
 
 @pytest.fixture
@@ -88,6 +101,7 @@ async def test_generate_single_turn(mock_generator_cfg, mock_llm):
         tokenizer=tokenizer,
         model_name="test_model",
     )
+    
     output = await generator.agent_loop(
         prompt=[{"role": "user", "content": "What is 2 + 2?"}],
         env_class="gsm8k",
