@@ -324,7 +324,7 @@ class TinkerEngine:
         layer_rank = {
             path[:-2]: int(node[adapter_index])
             for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
-            if path[-2].key == "lora_ranks"  # ty: ignore
+            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
         }
 
         def extract_adapter_params(path, p):
