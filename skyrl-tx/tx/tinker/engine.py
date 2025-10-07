@@ -125,7 +125,7 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def process_forward_backward_batch(self, requests: list[tuple[FutureDB, str, types.ForwardBackwardInput]]) -> dict:
+    def process_forward_backward_batch(self, requests: list[tuple[FutureDB, str, types.ForwardBackwardInput]]) -> dict[str, types.ForwardBackwardOutput | types.ForwardBackwardError]:
         """Process multiple forward_backward requests in a single batch.
 
         Args:
@@ -143,10 +143,10 @@ class TinkerEngine:
         # Filter out invalid requests and mark them as failed
         for future, model_id, request_data in requests:
             if model_id not in self.models:
-                results[future.request_id] = {
-                    "error": f"Model {model_id} not loaded",
-                    "status": "failed"
-                }
+                results[future.request_id] = types.ForwardBackwardError(
+                    error=f"Model {model_id} not loaded",
+                    status="failed",
+                )
             else:
                 valid_requests.append((future, model_id, request_data))
 
@@ -253,11 +253,11 @@ class TinkerEngine:
                     }
                 })
 
-            results[request_id] = {
-                "loss_fn_output_type": "scalar",
-                "loss_fn_outputs": loss_fn_outputs,
-                "metrics": {}
-            }
+            results[request_id] = types.ForwardBackwardOutput(
+                loss_fn_output_type="scalar",
+                loss_fn_outputs=loss_fn_outputs,
+                metrics={},
+            )
 
         return results
 
@@ -324,7 +324,6 @@ class TinkerEngine:
         )
 
     def process_single_request(self, request_type: RequestType, model_id: str, request_data: dict) -> dict:
-        result = {}
         match request_type:
             case RequestType.CREATE_MODEL:
                 result = self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
@@ -362,12 +361,11 @@ class TinkerEngine:
                         for future in forward_backward_futures:
                             if future.request_id in results:
                                 result_data = results[future.request_id]
-                                if "error" in result_data and result_data.get("status") == "failed":
-                                    future.result_data = result_data
+                                if isinstance(result_data, types.ForwardBackwardError):
                                     future.status = RequestStatus.FAILED
                                 else:
-                                    future.result_data = result_data
                                     future.status = RequestStatus.COMPLETED
+                                future.result_data = result_data.model_dump()
                                 future.completed_at = datetime.now(timezone.utc)
                                 session.add(future)
                                 logger.info(f"Completed {future.request_type} request {future.request_id}")

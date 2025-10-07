@@ -39,6 +39,17 @@ class ForwardBackwardInput(BaseModel):
     forward_backward_input: dict[str, Any]
 
 
+class ForwardBackwardOutput(BaseModel):
+    loss_fn_output_type: str
+    loss_fn_outputs: list[dict]
+    metrics: dict
+
+
+class ForwardBackwardError(BaseModel):
+    error: str
+    status: str
+
+
 class OptimStepInput(BaseModel):
     adam_params: AdamParams
 
