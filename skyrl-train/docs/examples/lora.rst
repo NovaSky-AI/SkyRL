@@ -95,32 +95,21 @@ Create a training script with LoRA configuration:
      trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
      generator.num_inference_engines=$NUM_GPUS \
      generator.inference_engine_tensor_parallel_size=1 \
-     trainer.epochs=20 \
-     trainer.eval_batch_size=1024 \
-     trainer.eval_before_train=false \
-     trainer.eval_interval=5 \
-     trainer.update_epochs_per_batch=1 \
-     trainer.train_batch_size=1024 \
-     trainer.policy_mini_batch_size=256 \
+     trainer.train_batch_size=128 \
+     trainer.policy_mini_batch_size=128 \
      trainer.micro_forward_batch_size_per_gpu=64 \
      trainer.micro_train_batch_size_per_gpu=64 \
      trainer.ckpt_interval=10 \
-     trainer.max_prompt_length=512 \
      generator.sampling_params.max_generate_length=1024 \
      trainer.policy.optimizer_config.lr=3.0e-5 \
      trainer.algorithm.use_kl_loss=true \
      generator.backend=$INFERENCE_BACKEND \
-     generator.run_engines_locally=true \
-     generator.weight_sync_backend=nccl \
-     generator.async_engine=true \
      generator.batched=true \
      environment.env_class=gsm8k \
-     generator.n_samples_per_prompt=5 \
-     generator.gpu_memory_utilization=0.8 \
+     generator.n_samples_per_prompt=4 \
      trainer.logger="$LOGGER" \
      trainer.project_name="gsm8k_0.5b_lora" \
      trainer.run_name="gsm8k_0.5b_lora_test" \
-     trainer.resume_mode=null \
      trainer.ckpt_path="$HOME/ckpts/gsm8k_0.5b_lora_ckpt"
 
 Launch Training 
@@ -155,12 +144,3 @@ SkyRL's LoRA implementation has the following current limitations:
 4. **Single adapter per model**: Currently, only one LoRA adapter can be active per model at a time.
 
 These limitations are being addressed in future releases, with plans for in-memory synchronization and improved adapter management.
-
-What's Next?
-------------
-
-Now that you understand LoRA training in SkyRL, you might want to explore:
-
-- :doc:`../configuration/config`: Complete configuration reference
-- :doc:`ppo`: Standard PPO training without LoRA
-- :doc:`../tutorials/async`: Asynchronous training patterns
