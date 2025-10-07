@@ -108,6 +108,11 @@ class LoRALinear(LoRAMixin, nnx.Linear):
 def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int, lora_alpha: float):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
+    Note: This method needs to be called BEFORE any training happens, you should not update
+    the config for the same adapter index multiple times throughout training (e.g. it will
+    invalidate your current training progress and also violate the assumption that lora_B
+    is zero).
+
     Args:
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to update
