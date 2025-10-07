@@ -154,7 +154,6 @@ trainer:
   disable_fast_tokenizer: false
   target_modules: "all-linear"
   exclude_modules: null
-  use_orm_score: false
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
