@@ -266,6 +266,12 @@ def validate_cfg(cfg: DictConfig):
                 "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
             )
 
+    if cfg.trainer.policy.model.lora.rank > 0:
+        # LoRA enabled
+        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
+        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
+        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+
 
 def validate_generator_cfg(cfg: DictConfig):
     """Validates the correctness of generator-related config.
@@ -453,6 +459,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
+        env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
+
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
