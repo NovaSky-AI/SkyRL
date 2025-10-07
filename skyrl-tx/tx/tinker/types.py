@@ -1,6 +1,6 @@
 # These are the types we use to represent the data internally.
 # They have some commonalities with the API request and response
-# types as well as the database models but are distinct. For
+# types as well as the database models, but are distinct. For
 # example, usually we try to avoid optional values in these types.
 
 from enum import Enum
