@@ -1,6 +1,6 @@
 import ray
 import hydra
-import torch 
+import torch
 import numpy as np
 from collections import defaultdict
 
@@ -15,9 +15,9 @@ from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry
 
 # Example of custom advantage estimator: "simple_baseline"
 def compute_advantages_step_wise(
-    token_level_rewards: torch.Tensor, 
-    response_mask: torch.Tensor, 
-    index: np.ndarray, 
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
     values: torch.Tensor,
     grpo_norm_by_std,
     gamma,
@@ -29,21 +29,23 @@ def compute_advantages_step_wise(
     A custom advantage estimator where the inputs are represented as step level turns
     """
     scores = token_level_rewards.sum(dim=-1)
-    id2score = defaultdict(list) # str -> list
+    id2score = defaultdict(list)  # str -> list
     id2mean = {}
     id2std = {}
     traj_id_to_steps = defaultdict(list)
 
     epsilon: float = 1e-6
-    
+
     with torch.no_grad():
-        
+
         response_rewards = (token_level_rewards * response_mask).sum(dim=-1, keepdim=True)
 
         for i in range(len(token_level_rewards)):
             trajectory_id = trajectory_ids[i]
-            traj_id_to_steps[f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"].append((response_rewards[i], i))
-        
+            traj_id_to_steps[f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"].append(
+                (response_rewards[i], i)
+            )
+
         for key, entries in traj_id_to_steps.items():
             instance_id: str = key.split("_")[0]
             # assume last entry is the last turn
@@ -58,8 +60,8 @@ def compute_advantages_step_wise(
                 id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
-        
-        # grpo: id2score -> 
+
+        # grpo: id2score ->
         for i in range(len(scores)):
             id_ = trajectory_ids[i].instance_id
             if grpo_norm_by_std:

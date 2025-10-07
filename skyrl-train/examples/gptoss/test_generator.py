@@ -24,7 +24,15 @@ The new selling price is **$253**.
 MOCK_LLM_OUTPUT_IDS = tokenizer.encode(assistant_message)
 
 
-def create_remote_engines(remote_inference_engine_urls, model_name_or_path, backend, tokenizer, inference_engine_tensor_parallel_size, inference_engine_data_parallel_size, inference_engine_expert_parallel_size):
+def create_remote_engines(
+    remote_inference_engine_urls,
+    model_name_or_path,
+    backend,
+    tokenizer,
+    inference_engine_tensor_parallel_size,
+    inference_engine_data_parallel_size,
+    inference_engine_expert_parallel_size,
+):
     inference_engines = create_remote_inference_engines(
         urls=remote_inference_engine_urls,
         model_name=model_name_or_path,
@@ -101,7 +109,7 @@ async def test_generate_single_turn(mock_generator_cfg, mock_llm):
         tokenizer=tokenizer,
         model_name="test_model",
     )
-    
+
     output = await generator.agent_loop(
         prompt=[{"role": "user", "content": "What is 2 + 2?"}],
         env_class="gsm8k",

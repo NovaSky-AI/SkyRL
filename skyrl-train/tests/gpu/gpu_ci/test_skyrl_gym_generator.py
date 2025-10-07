@@ -25,7 +25,15 @@ from loguru import logger
 OBSERVATION_PROMPT = "give me another solution"
 
 
-def launch_remote_engines(remote_inference_engine_urls, model_name_or_path, backend, tokenizer, inference_engine_tensor_parallel_size, inference_engine_data_parallel_size, inference_engine_expert_parallel_size):
+def launch_remote_engines(
+    remote_inference_engine_urls,
+    model_name_or_path,
+    backend,
+    tokenizer,
+    inference_engine_tensor_parallel_size,
+    inference_engine_data_parallel_size,
+    inference_engine_expert_parallel_size,
+):
     inference_engines = create_remote_inference_engines(
         urls=remote_inference_engine_urls,
         model_name=model_name_or_path,

@@ -1,11 +1,8 @@
 import asyncio
-from typing import List, Optional, Tuple
-from jaxtyping import Float
+from typing import List, Optional
 import ray
-import torch
 from loguru import logger
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import (
@@ -23,10 +20,9 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
 )
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.dataset.preprocess import _verify_inputs
 
-from examples.gptoss.attn_mask_utils import make_attention_mask
 from examples.gptoss.gpt_oss_generator import GPTOSSGeneratorOutput
+
 
 class GPTOSSTrainer(RayPPOTrainer):
     def train(self):
@@ -257,7 +253,7 @@ class GPTOSSTrainer(RayPPOTrainer):
                 "response_mask": response_masks_tensor,
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
-                "rollout_logprobs": rollout_logprobs_tensor,   
+                "rollout_logprobs": rollout_logprobs_tensor,
             },
         )
         training_input.metadata = {

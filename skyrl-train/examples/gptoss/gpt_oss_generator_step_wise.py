@@ -427,7 +427,9 @@ class GPTOSSGenerator(GeneratorInterface):
         stop_reasons = sum([[output.stop_reason for output in step_outputs] for step_outputs in all_outputs], [])
         loss_masks = sum([[output.loss_mask for output in step_outputs] for step_outputs in all_outputs], [])
         prompt_token_ids = sum([[output.prompt_ids for output in step_outputs] for step_outputs in all_outputs], [])
-        trajectory_ids = sum([[trajectory_id for _ in step_outputs] for trajectory_id, step_outputs in zip(trajectory_ids, all_outputs)])
+        trajectory_ids = sum(
+            [[trajectory_id for _ in step_outputs] for trajectory_id, step_outputs in zip(trajectory_ids, all_outputs)]
+        )
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
