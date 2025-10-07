@@ -104,7 +104,7 @@ class TinkerEngine:
 
         return batchable
 
-    def create_model(self, model_id: str, lora_config: dict):
+    def create_model(self, model_id: str, lora_config: dict | None = None):
         """Create and initialize a model."""
         # Assign adapter index for this model_id
         adapter_index = max((m["adapter_index"] for m in self.models.values()), default=-1) + 1
