@@ -47,6 +47,8 @@ def get_param_key(path: tuple) -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
         path = (*path[:-1], "weight")
+    elif path[-1] in {"lora_A", "lora_B"}:
+        path = (*path, "weight")
     return ".".join(map(str, path))
 
 

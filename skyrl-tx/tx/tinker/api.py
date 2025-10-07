@@ -25,10 +25,13 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+    # Start background engine with default base model
+    # TODO: Make this configurable via environment variable or API parameter
+    base_model = "Qwen/Qwen3-0.6B"
     background_engine = subprocess.Popen(
-        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
+        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine", "--base-model", base_model]
     )
-    logger.info(f"Started background engine with PID {background_engine.pid}")
+    logger.info(f"Started background engine with PID {background_engine.pid} for base model {base_model}")
 
     yield
 
@@ -50,6 +53,25 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """Dependency to get a database session."""
     async with AsyncSession(request.app.state.db_engine) as session:
         yield session
+
+
+async def create_future(
+    session: AsyncSession,
+    request_type: RequestType,
+    model_id: str | None,
+    request_data: dict,
+) -> int:
+    """Create a FutureDB entry and return its auto-generated request_id."""
+    future_db = FutureDB(
+        request_type=request_type,
+        model_id=model_id,
+        request_data=request_data,
+        status=RequestStatus.PENDING
+    )
+    session.add(future_db)
+    await session.flush()  # Flush to generate auto-increment request_id
+    assert future_db.request_id
+    return future_db.request_id
 
 
 class LoRAConfig(BaseModel):
@@ -152,7 +174,13 @@ class GetServerCapabilitiesResponse(BaseModel):
 async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
     """Create a new model, optionally with a LoRA adapter."""
     model_id = f"model_{uuid4().hex[:8]}"
-    request_id = f"req_{uuid4().hex[:8]}"
+
+    request_id = await create_future(
+        session=session,
+        request_type=RequestType.CREATE_MODEL,
+        model_id=model_id,
+        request_data=request.model_dump()
+    )
 
     model_db = ModelDB(
         model_id=model_id,
@@ -163,16 +191,6 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     )
     session.add(model_db)
 
-    future_db = FutureDB(
-        request_id=request_id,
-        request_type=RequestType.CREATE_MODEL,
-        model_id=model_id,
-        request_data=request.model_dump(),
-        result_data=None,  # Will be filled by background worker
-        status=RequestStatus.PENDING
-    )
-    session.add(future_db)
-
     await session.commit()
 
     return CreateModelResponse(
@@ -180,7 +198,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         base_model=request.base_model,
         lora_config=request.lora_config,
         status="created",
-        request_id=request_id
+        request_id=str(request_id)
     )
 
 
@@ -226,20 +244,16 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    request_id = f"req_{uuid4().hex[:8]}"
-
-    future_db = FutureDB(
-        request_id=request_id,
+    request_id = await create_future(
+        session=session,
         request_type=RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=request.model_dump(),
-        result_data=None,  # Will be filled by background worker
-        status=RequestStatus.PENDING
+        request_data=request.model_dump()
     )
-    session.add(future_db)
+
     await session.commit()
 
-    return FutureResponse(future_id=request_id, status="pending", request_id=request_id)
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.post("/api/v1/optim_step", response_model=FutureResponse)
@@ -252,20 +266,16 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    request_id = f"req_{uuid4().hex[:8]}"
-
-    future_db = FutureDB(
-        request_id=request_id,
+    request_id = await create_future(
+        session=session,
         request_type=RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=request.model_dump(),
-        result_data=None,  # Will be filled by background worker
-        status=RequestStatus.PENDING
+        request_data=request.model_dump()
     )
-    session.add(future_db)
+
     await session.commit()
 
-    return FutureResponse(future_id=request_id, status="pending", request_id=request_id)
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
@@ -278,20 +288,16 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    request_id = f"req_{uuid4().hex[:8]}"
-
-    future_db = FutureDB(
-        request_id=request_id,
+    request_id = await create_future(
+        session=session,
         request_type=RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=request.model_dump(),
-        result_data=None,  # Will be filled by background worker
-        status=RequestStatus.PENDING
+        request_data=request.model_dump()
     )
-    session.add(future_db)
+
     await session.commit()
 
-    return FutureResponse(future_id=request_id, status="pending", request_id=request_id)
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
@@ -313,9 +319,9 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     timeout = 300  # 5 minutes
     poll_interval = 0.1  # 100ms
 
-    for i in range(int(timeout / poll_interval)):
+    for _ in range(int(timeout / poll_interval)):
         async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == request.request_id)
+            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
             result = await session.exec(statement)
             future = result.first()
 
