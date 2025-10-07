@@ -75,7 +75,7 @@ async def create_future(
 
 
 class LoRAConfig(BaseModel):
-    r: int = 8
+    rank: int
     lora_alpha: int = 16
     target_modules: list[str] | None = None
     lora_dropout: float = 0.05
@@ -332,8 +332,11 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
                 return future.result_data
 
             if future.status == RequestStatus.FAILED:
-                error = future.result_data.get("error", "Unknown error") if future.result_data else "Unknown error"
-                raise HTTPException(status_code=500, detail=error)
+                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                if future.result_data and "error" in future.result_data:
+                    raise HTTPException(status_code=400, detail=future.result_data["error"])
+                else:
+                    raise HTTPException(status_code=500, detail="Unknown error")
 
         await asyncio.sleep(poll_interval)
 

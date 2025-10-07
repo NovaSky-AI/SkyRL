@@ -113,7 +113,7 @@ class TinkerEngine:
             raise ValueError(f"Maximum number of LoRA adapters ({self.max_lora_adapters}) reached")
 
         # Extract LoRA rank and alpha from config
-        lora_rank = lora_config["r"]
+        lora_rank = lora_config["rank"]
         lora_alpha = lora_config["lora_alpha"]
 
         # Validate rank doesn't exceed max
