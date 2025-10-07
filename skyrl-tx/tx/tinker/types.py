@@ -65,3 +65,8 @@ class SaveWeightsForSamplerInput(BaseModel):
 class SaveWeightsForSamplerOutput(BaseModel):
     path: str
     type: str
+
+
+class ModelMetadata(BaseModel):
+    adapter_index: int
+    lora_config: LoraConfig

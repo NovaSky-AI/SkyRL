@@ -32,7 +32,7 @@ class TinkerEngine:
         """Initialize the engine with a database connection and base model."""
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
         self.base_model_name = base_model_name  # Single base model for this engine
-        self.models = {}  # Store LoRA model metadata: model_id -> {"adapter_index": int}
+        self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
         self.max_lora_adapters = max_lora_adapters  # Maximum number of LoRA adapters
         self.max_lora_rank = max_lora_rank  # Maximum LoRA rank
@@ -108,23 +108,23 @@ class TinkerEngine:
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
-        adapter_index = max((m["adapter_index"] for m in self.models.values()), default=-1) + 1
+        adapter_index = max((m.adapter_index for m in self.models.values()), default=-1) + 1
 
         if adapter_index >= self.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.max_lora_adapters}) reached")
 
         # Extract LoRA rank and alpha from config
-        lora_rank = lora_config["rank"]
-        lora_alpha = lora_config["lora_alpha"]
+        lora_rank = request_data.lora_config.rank
+        lora_alpha = 32  # This is the default that tinker seems to be using (see https://thinkingmachines.ai/blog/lora/)
 
         # Validate rank doesn't exceed max
         if not (0 < lora_rank <= self.max_lora_rank):
             raise ValueError(f"LoRA rank {lora_rank} must satisfy 0 < rank <= {self.max_lora_rank}")
 
-        self.models[model_id] = {
-            "adapter_index": adapter_index,
-            "lora_config": request_data.lora_config
-        }
+        self.models[model_id] = types.ModelMetadata(
+            adapter_index=adapter_index,
+            lora_config=request_data.lora_config,
+        )
         self.accumulated_grads[model_id] = None
 
         # Update the adapter's rank and scaling in all LoRA layers
@@ -175,7 +175,7 @@ class TinkerEngine:
 
         current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
-            adapter_index = self.models[model_id]["adapter_index"]
+            adapter_index = self.models[model_id].adapter_index
             forward_backward_input = request_data.forward_backward_input
             data = forward_backward_input["data"]
 
@@ -234,7 +234,7 @@ class TinkerEngine:
 
         # Extract and accumulate gradients for each model_id's specific adapter
         for request_id, model_id, start_idx, end_idx in request_batch_slices:
-            adapter_index = self.models[model_id]["adapter_index"]
+            adapter_index = self.models[model_id].adapter_index
 
             # Extract gradients for this specific adapter index
             adapter_grads = jax.tree.map(lambda g: g[adapter_index], lora_grads)
@@ -279,7 +279,7 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id]["adapter_index"]
+        adapter_index = self.models[model_id].adapter_index
 
         # Get accumulated gradients for this adapter
         adapter_grads = self.accumulated_grads.get(model_id)
@@ -312,7 +312,7 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id]["adapter_index"]
+        adapter_index = self.models[model_id].adapter_index
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
@@ -342,7 +342,7 @@ class TinkerEngine:
         save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
 
         # Save LoRA config (TODO: After https://github.com/NovaSky-AI/SkyRL/pull/405 we can introduce the proper scaling and set alpha = 32)
-        lora_config = LoraConfig(r=self.models[model_id]["lora_config"].rank, lora_alpha=self.models[model_id]["lora_config"].rank)
+        lora_config = LoraConfig(r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.rank)
         lora_config.save_pretrained(output_dir)
 
         logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
