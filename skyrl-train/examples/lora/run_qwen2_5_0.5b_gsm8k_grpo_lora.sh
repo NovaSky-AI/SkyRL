@@ -6,7 +6,7 @@ set -x
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_gsm8k.sh
+# bash examples/lora/run_qwen2_5_0.5b_gsm8k_grpo_lora.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
@@ -17,7 +17,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 INFERENCE_BACKEND="vllm"
 
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
