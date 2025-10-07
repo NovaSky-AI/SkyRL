@@ -104,3 +104,34 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         base_out = super().__call__(x)
         return self.apply_lora(x, base_out, adapter_indices)
 
+
+def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int, lora_alpha: float):
+    """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
+
+    Note: This method needs to be called BEFORE any training happens, you should not update
+    the config for the same adapter index multiple times throughout training (e.g. it will
+    invalidate your current training progress and also violate the assumption that lora_B
+    is zero).
+
+    Args:
+        model: The model containing LoRA layers
+        adapter_index: Index of the adapter to update
+        lora_rank: Rank to set for this adapter
+        lora_alpha: Alpha value to use for computing scaling (alpha / rank)
+    """
+    scaling = lora_alpha / lora_rank
+    state = nnx.state(model)
+
+    def update_lora_config(path, value):
+        if path[-2].key == "lora_ranks":
+            return value.at[adapter_index].set(lora_rank)
+        if path[-2].key == "lora_scaling":
+            return value.at[adapter_index].set(scaling)
+        if path[-2].key == "lora_A":
+            # Zero out columns beyond the rank for this adapter; lora_B is already zero
+            return value.at[adapter_index, :, lora_rank:].set(0.0)
+        return value
+
+    updated_state = jax.tree.map_with_path(update_lora_config, state)
+    nnx.update(model, updated_state)
+
