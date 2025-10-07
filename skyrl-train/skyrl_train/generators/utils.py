@@ -3,6 +3,7 @@ from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 
 CUSTOM_CHAT_TEMPLATES = {
@@ -267,3 +268,53 @@ def prepare_generator_input(
     }
 
     return generator_input, uids
+
+
+def encode_messages_subset(messages: ConversationType, tokenizer):
+    """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
+
+    This function tokenizes messages as if they are part of a larger conversation, ensuring
+    no additional default system messages are prepended by the tokenizer's chat template
+
+    The "fixed base approach" works by:
+    - Creating a dummy base conversation to establish context
+    - Appending the target messages to this base
+    - Tokenizing the full conversation and extracting only the tokens for the target messages
+
+    For simple chat templates without complex token splitting behavior, this produces the same
+    result as directly tokenizing the messages. For templates like Qwen's ChatML format where
+    a default system prompt can be appended, this ensures correct tokenization
+
+    Reference: https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys. Must contain at least
+                 one message. These are assumed to be a subset from a larger conversation.
+        tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+
+    Returns:
+        List[int]: Token IDs for the given messages, with proper multi-turn context handling.
+    """
+    assert len(messages), "messages list cannot be empty"
+    # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+    base_conversation = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "I am a user."},
+    ]
+    if messages[0]["role"] != "assistant":
+        # add an assistant message as well if the first role is user/tool
+        base_conversation.append({"role": "assistant", "content": "I am an assistant."})
+    base_conversation_token_ids = tokenizer.apply_chat_template(
+        base_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+
+    full_conversation = base_conversation + messages
+    full_conversation_token_ids = tokenizer.apply_chat_template(
+        full_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+    conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
+    return conversation_token_ids

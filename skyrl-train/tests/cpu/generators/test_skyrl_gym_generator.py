@@ -9,6 +9,7 @@ from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_train.config.utils import get_default_config
 
 
 # Mock constants, where 4 is the eos token id
@@ -94,14 +95,15 @@ def mock_env():
 
 
 @pytest.fixture
-def mock_generator_cfg():
-    cfg = MagicMock()
+def generator_cfg():
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 5
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
     cfg.max_input_length = 512
     cfg.batched = True
     cfg.max_turns = 1
+    cfg.chat_template_kwargs = {}
     cfg.chat_template = {"source": "name", "name_or_path": None}
     return cfg
 
@@ -235,13 +237,13 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
 @patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
 async def test_agent_loop_single_turn(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, use_conversation_multi_turn, mock_env_cfg
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, use_conversation_multi_turn, mock_env_cfg
 ):
     """
     This test mocks when we call SkyRLGymGenerator.agent_loop() despite being a single-turn generation.
     This is when `batched=False`. Here the environment does nothing.
     """
-    mock_generator_cfg.use_conversation_multi_turn = use_conversation_multi_turn
+    generator_cfg.use_conversation_multi_turn = use_conversation_multi_turn
     mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
     mock_tokenizer.eos_token_id = 4  # bypass check for eos token id for this test
 
@@ -249,7 +251,7 @@ async def test_agent_loop_single_turn(
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -272,12 +274,12 @@ async def test_agent_loop_single_turn(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg):
+async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg):
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -378,7 +380,7 @@ def test_get_metrics_from_generator_output():
 @pytest.mark.parametrize("batched", [True, False])
 @patch("skyrl_gym.make")
 async def test_generate_interface_compliance(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, batched
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg, batched
 ):
     """Test that SkyRLGymGenerator.generate() strictly conforms to the TypedDict interface.
 
@@ -386,11 +388,11 @@ async def test_generate_interface_compliance(
     """
     mock_make.return_value = mock_env
     # Set the batched mode according to the parameter
-    mock_generator_cfg.batched = batched
+    generator_cfg.batched = batched
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -458,7 +460,7 @@ async def test_generate_interface_compliance(
 @pytest.mark.parametrize("turns_to_exceed", [1, 3])  # Test single-turn and multi-turn scenarios
 @patch("skyrl_gym.make")
 async def test_length_limit_exceeded_during_conversation(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, turns_to_exceed
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg, turns_to_exceed
 ):
     """Test that length limit is enforced during multi-turn conversations.
 
@@ -466,10 +468,10 @@ async def test_length_limit_exceeded_during_conversation(
     to verify length accumulation and limit enforcement.
     """
     mock_make.return_value = mock_env
-    mock_generator_cfg.batched = False  # Use agent_loop mode
-    mock_generator_cfg.max_turns = 5  # Allow multiple turns
-    mock_generator_cfg.use_conversation_multi_turn = True
-    mock_generator_cfg.chat_template = {"source": "name", "name_or_path": None}
+    generator_cfg.batched = False  # Use agent_loop mode
+    generator_cfg.max_turns = 5  # Allow multiple turns
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to never set done=True naturally (we want to hit length limit)
@@ -513,7 +515,7 @@ async def test_length_limit_exceeded_during_conversation(
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -544,17 +546,17 @@ async def test_length_limit_exceeded_during_conversation(
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_multi_turn_response_truncation(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
     """
     Tests that in a multi-turn conversation, if the final tokenized response exceeds the
     calculated maximum length, it is correctly truncated and the stop reason is set to 'length'.
     """
     mock_make.return_value = mock_env
-    mock_generator_cfg.max_turns = 3  # Ensure multi-turn logic is triggered
-    mock_generator_cfg.batched = False  # Test is for agent_loop
-    mock_generator_cfg.use_conversation_multi_turn = True
-    mock_generator_cfg.chat_template = {"source": "name", "name_or_path": None}
+    generator_cfg.max_turns = 3  # Ensure multi-turn logic is triggered
+    generator_cfg.batched = False  # Test is for agent_loop
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to run for multiple turns to generate enough tokens for truncation
@@ -602,7 +604,7 @@ async def test_multi_turn_response_truncation(
     expected_final_response_tokens = 51
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -632,18 +634,16 @@ async def test_multi_turn_response_truncation(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_postprocessed_action_used(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_env_cfg, mock_generator_cfg
-):
+async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mock_env, mock_env_cfg, generator_cfg):
     """
     Tests that if the environment returns a `postprocessed_action`, it is used
     in the chat history instead of the original LLM response.
     """
     mock_make.return_value = mock_env
-    mock_generator_cfg.max_turns = 1  # Single turn
-    mock_generator_cfg.batched = False
+    generator_cfg.max_turns = 1  # Single turn
+    generator_cfg.batched = False
     # Override to avoid retokenization path for this test
-    mock_generator_cfg.chat_template = {"source": "name", "name_or_path": None}
+    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     postprocessed_response = "This is a clean response."
@@ -686,7 +686,7 @@ async def test_postprocessed_action_used(
     mock_tokenizer.encode.side_effect = mock_encode
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -720,7 +720,7 @@ async def test_postprocessed_action_used(
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_apply_overlong_filtering_non_batched(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
     """
     Test that apply_overlong_filtering correctly zeroes out loss masks for truncated trajectories
@@ -731,10 +731,10 @@ async def test_apply_overlong_filtering_non_batched(
     - Trajectories with responses ending with eos token keep their original loss masks
     """
     mock_make.return_value = mock_env
-    mock_generator_cfg.apply_overlong_filtering = True  # Enable filtering
-    mock_generator_cfg.batched = False
-    mock_generator_cfg.max_turns = 1
-    mock_generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.apply_overlong_filtering = True  # Enable filtering
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 1
+    generator_cfg.use_conversation_multi_turn = False
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Mock out the environment and inference engine generation.
@@ -750,7 +750,7 @@ async def test_apply_overlong_filtering_non_batched(
     mock_tokenizer.eos_token_id = 4  # Set EOS token ID
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
@@ -823,7 +823,7 @@ async def test_apply_overlong_filtering_batched(
     mock_tokenizer,
     mock_llm,
     mock_env,
-    mock_generator_cfg,
+    generator_cfg,
     mock_env_cfg,
 ):
     """
@@ -833,9 +833,9 @@ async def test_apply_overlong_filtering_batched(
     Tests a response that doesn't end with eos token to verify that it gets filtered.
     """
     mock_make.return_value = mock_env
-    mock_generator_cfg.apply_overlong_filtering = True  # Enable filtering
-    mock_generator_cfg.batched = True
-    mock_generator_cfg.max_turns = 1
+    generator_cfg.apply_overlong_filtering = True  # Enable filtering
+    generator_cfg.batched = True
+    generator_cfg.max_turns = 1
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Mock out environment and inference engine generation.
@@ -862,7 +862,7 @@ async def test_apply_overlong_filtering_batched(
     mock_tokenizer.eos_token_id = 4  # Set EOS token ID
 
     generator = SkyRLGymGenerator(
-        generator_cfg=mock_generator_cfg,
+        generator_cfg=generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,

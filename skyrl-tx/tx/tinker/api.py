@@ -10,7 +10,9 @@ import asyncio
 import subprocess
 import logging
 
-from tx.tinker.models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker import types
+from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,13 +61,13 @@ async def create_future(
     session: AsyncSession,
     request_type: RequestType,
     model_id: str | None,
-    request_data: dict,
+    request_data: BaseModel,
 ) -> int:
     """Create a FutureDB entry and return its auto-generated request_id."""
     future_db = FutureDB(
         request_type=request_type,
         model_id=model_id,
-        request_data=request_data,
+        request_data=request_data.model_dump(),
         status=RequestStatus.PENDING
     )
     session.add(future_db)
@@ -75,16 +77,12 @@ async def create_future(
 
 
 class LoRAConfig(BaseModel):
-    rank: int
-    lora_alpha: int = 16
-    target_modules: list[str] | None = None
-    lora_dropout: float = 0.05
+    rank: int = 8
 
 
 class CreateModelRequest(BaseModel):
     base_model: str
-    lora_config: LoRAConfig | None = None
-    type: str | None = None
+    lora_config: LoRAConfig
 
 
 class CreateModelResponse(BaseModel):
@@ -114,32 +112,22 @@ class ForwardBackwardInput(BaseModel):
 
 class AdamParams(BaseModel):
     lr: float = 1e-4
-    betas: tuple[float, float] = (0.9, 0.999)
-    eps: float = 1e-8
-    weight_decay: float = 0.0
 
 
 class OptimStepRequest(BaseModel):
     model_id: str
     adam_params: AdamParams
-    type: str | None = None
 
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-    path: str | None = None
-    type: str | None = None
-
-
-class SaveWeightsForSamplerResponse(BaseModel):
     path: str
-    type: str | None = None
 
 
 class FutureResponse(BaseModel):
     future_id: str
     status: str = "pending"
-    request_id: str | None = None
+    request_id: str
 
 
 class TelemetryEvent(BaseModel):
@@ -163,7 +151,7 @@ class TelemetryResponse(BaseModel):
 
 
 class SupportedModel(BaseModel):
-    model_name: str | None = None
+    model_name: str
 
 
 class GetServerCapabilitiesResponse(BaseModel):
@@ -179,7 +167,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         session=session,
         request_type=RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=request.model_dump()
+        request_data=types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank))
     )
 
     model_db = ModelDB(
@@ -248,7 +236,7 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
         session=session,
         request_type=RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=request.model_dump()
+        request_data=types.ForwardBackwardInput(forward_backward_input=request.forward_backward_input),
     )
 
     await session.commit()
@@ -270,7 +258,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         session=session,
         request_type=RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=request.model_dump()
+        request_data=types.OptimStepInput(adam_params=types.AdamParams(lr=request.adam_params.lr)),
     )
 
     await session.commit()
@@ -292,7 +280,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         request_type=RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=request.model_dump()
+        request_data=types.SaveWeightsForSamplerInput(path=request.path),
     )
 
     await session.commit()

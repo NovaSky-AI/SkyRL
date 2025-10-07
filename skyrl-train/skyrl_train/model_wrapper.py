@@ -4,6 +4,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
 from typing import Optional, Tuple, Union
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -74,6 +75,13 @@ class HFModelWrapper(nn.Module):
             # Note: dschf is defined in function scope to avoid global effects
             # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
             if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
+                if bf16 and ds_config["torch_autocast"]["enabled"]:
+                    # The model’s dtype on initialization follows the config passed to `HfDeepSpeedConfig`,
+                    # regardless of the `torch_dtype` specified in `from_pretrained`.
+                    # To align with this behavior, we temporarily set `bf16` to True in a copied config.
+                    # Note: this does NOT affect the config passed to `deepspeed.initialize()`.
+                    ds_config = deepcopy(ds_config)
+                    ds_config["bf16"] = {"enabled": True}
                 dschf = HfDeepSpeedConfig(ds_config)
             else:
                 dschf = None  # noqa: F841

@@ -19,6 +19,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.utils import (
     get_rollout_metrics,
+    encode_messages_subset,
 )
 
 
@@ -128,6 +129,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         self.model_name = model_name
         self.litellm_model_name = "openai/" + self.model_name
 
+        if self.generator_cfg.chat_template.name_or_path is not None:
+            raise NotImplementedError("MiniSWEAgentGenerator doesn't support custom chat template")
+
     async def minisweagent_agent_loop(
         self,
         prompt: ConversationType,
@@ -182,7 +186,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
         for message in response_messages:
             # Apply chat template and tokenize each message
-            msg_encoding = self.tokenizer.apply_chat_template([message], add_generation_prompt=False, tokenize=True)
+            msg_encoding = encode_messages_subset([message], self.tokenizer)
 
             # Extend response_ids with the tokens
             response_ids.extend(msg_encoding)
