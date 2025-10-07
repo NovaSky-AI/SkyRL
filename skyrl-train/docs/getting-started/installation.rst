@@ -47,6 +47,8 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 - `ray <https://docs.ray.io/en/latest/>`_ 2.48.0
 
 
+.. _system-dependencies:
+
 System Dependencies
 ~~~~~~~~~~~~~~~~~~~
 

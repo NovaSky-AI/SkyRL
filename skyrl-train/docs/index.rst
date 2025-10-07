@@ -12,6 +12,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    getting-started/quickstart
    getting-started/overview
    getting-started/development
+   getting-started/runpod
 
 .. toctree::
    :maxdepth: 2
