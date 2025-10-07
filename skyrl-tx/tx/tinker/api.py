@@ -163,18 +163,19 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     """Create a new model, optionally with a LoRA adapter."""
     model_id = f"model_{uuid4().hex[:8]}"
 
+    # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
+    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0)
     request_id = await create_future(
         session=session,
         request_type=RequestType.CREATE_MODEL,
         model_id=model_id,
-        # lora_alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
-        request_data=types.CreateModelInput(lora_config=types.LoraConfig(rank=request.lora_config.rank, alpha=32.0))
+        request_data=types.CreateModelInput(lora_config=lora_config)
     )
 
     model_db = ModelDB(
         model_id=model_id,
         base_model=request.base_model,
-        lora_config=request.lora_config.model_dump() if request.lora_config else None,
+        lora_config=lora_config.model_dump(),
         status="created",
         request_id=request_id
     )
@@ -206,13 +207,10 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    lora_config = None
-    if model.lora_config:
-        lora_config = LoRAConfig(**model.lora_config)
-
+    lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
         base_model=model.base_model,
-        lora_config=lora_config,
+        lora_config=LoRAConfig(rank=lora_config.rank),
         model_name=model.base_model
     )
 
