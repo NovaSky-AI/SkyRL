@@ -193,15 +193,15 @@ We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <http
 Running SkyRL-Train on Runpod
 -----------------------------
 
-We go over the steps we recommend to take for running SkyRL-Train on Runpod. You
-can customize the steps below to your own needs. The following steps are tested E2E
-with a single A40 GPU from Runpod to train on the GSM8K dataset, giving your the
-quickest and most minimal SkyRL-Train start with Runpod.
+Use the following steps to run SkyRL-Train on Runpod. You can customize them to your needs.
+These instructions were tested end-to-end on a single A40 GPU on Runpod, training on the
+GSM8K dataset. It's a quick, minimal path to your first training run.
 
-First install conda environment:
+First, install Miniconda:
 
 .. code-block:: bash
 
+    cd $HOME
     mkdir -p ~/miniconda3
     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
     bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
@@ -209,28 +209,26 @@ First install conda environment:
     source ~/miniconda3/bin/activate
     conda init --all
 
-Close the terminal and re-open to activate the conda base environment. Then run the following
-snippet in a new terminal. The numa installation follows :ref:`system-dependencies`.
+Close the terminal and reopen it to activate the base conda environment. Then run the following
+snippet. The NUMA installation follows :ref:`system-dependencies`.
 
 .. code-block:: bash
 
+    cd $HOME
     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
     # Optionally, export your WANDB_API_KEY
     echo "export WANDB_API_KEY=YOUR_WANDB_API_KEY" >> ~/.bashrc
 
-    # -------------------------------
-    # Point cache to `$HOME/.cache`
-    # -------------------------------
-    # Sometimes Runpod makes .cache to be under `/workspace` which makes things really slow.
-    # We set them to `~/` here.
+    # Sometimes Runpod places `.cache` under `/workspace`, which can be slow.
+    # We set them under `~/` here.
     mkdir -p "$HOME/.cache"
     echo 'export UV_CACHE_DIR="$HOME/.cache/uv"' >> ~/.bashrc
     echo 'export HF_HOME="$HOME/.cache/huggingface"' >> ~/.bashrc
 
     # ---------------
-    # Install numa
+    # Install numactl (libnuma)
     # ---------------
     # Get the source
     cd $HOME
@@ -244,15 +242,17 @@ snippet in a new terminal. The numa installation follows :ref:`system-dependenci
     make install
     cd $HOME
 
-    # Point compiler and linker to it
+    # Point the compiler and linker to it
     echo "export CPATH=$HOME/.local/include:$CPATH" >> ~/.bashrc
     echo "export LIBRARY_PATH=$HOME/.local/lib:$LIBRARY_PATH" >> ~/.bashrc
     echo "export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH" >> ~/.bashrc
 
-Close the terminal and re-open. Then you can launch a basic gsm8k training run:
+Close the terminal and reopen it. Then launch a basic GSM8K training run with the following
+commands. For more, see :doc:`quickstart`.
 
 .. code-block:: bash
 
+    cd $HOME
     git clone https://github.com/NovaSky-AI/SkyRL
     cd SkyRL/skyrl-train
     pip install uv
