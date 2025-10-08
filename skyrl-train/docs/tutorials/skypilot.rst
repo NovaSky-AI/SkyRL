@@ -12,7 +12,7 @@ Setup Skypilot
 --------------
 
 SkyPilot works across AWS, GCP, Azure, OCI, Lambda, Nebius, and more. The
-commands below use AWS as a concrete example—swap ``infra`` and accelerator
+commands below use AWS as a concrete example. You can swap ``infra`` and accelerator
 names (for example ``infra: nebius`` with ``accelerators: L40:2``) to target a
 different cloud.
 
@@ -202,19 +202,19 @@ Launch Verification Views
 
 Use the following reference views to confirm the environment and job status:
 
-.. figure:: skypilot-dashboard.jpeg
+.. figure:: images/skypilot-dashboard.jpeg
    :alt: SkyPilot Dashboard showing the gsm8k cluster ready state
    :width: 80%
 
    SkyPilot Dashboard after ``sky launch`` reports the cluster as healthy.
 
-.. figure:: skypilot-ray-logs.png
+.. figure:: images/skypilot-ray-logs.png
    :alt: Terminal logs from ``sky logs skyrl`` showing GRPO training progress
    :width: 80%
 
    ``sky logs`` streaming Ray task updates confirms Ray and SkyRL workers are active.
 
-.. figure:: skypilot-wandb.jpeg
+.. figure:: images/skypilot-wandb.jpeg
    :alt: Weights & Biases dashboard capturing the gsm8k_test run metrics
    :width: 80%
 
