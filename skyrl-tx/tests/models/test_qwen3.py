@@ -79,23 +79,23 @@ def test_qwen3_moe_layer():
 
 def load_lora_weights(
     jax_module: LoRAMixin,
-    hf_module: torch.nn.Module,
     adapter_idx: int,
+    lora_A_weights: np.ndarray,
+    lora_B_weights: np.ndarray,
     scaling: float,
     rank: int,
-    adapter_name: str = "default",
 ) -> None:
-    """Load LoRA weights from HF module to JAX module."""
+    """Load LoRA weights from numpy arrays to JAX module."""
     assert (
         jax_module.lora_A is not None
         and jax_module.lora_B is not None
         and jax_module.lora_scaling is not None
         and jax_module.lora_ranks is not None
     )
-    jax_module.lora_A[adapter_idx, :, :] = hf_module.lora_A[adapter_name].weight.detach().numpy().T  # ty: ignore
-    jax_module.lora_B[adapter_idx, :, :] = hf_module.lora_B[adapter_name].weight.detach().numpy().T  # ty: ignore
-    jax_module.lora_scaling[adapter_idx] = scaling
-    jax_module.lora_ranks[adapter_idx] = rank
+    jax_module.lora_A.value = jax_module.lora_A.value.at[adapter_idx].set(jnp.array(lora_A_weights))
+    jax_module.lora_B.value = jax_module.lora_B.value.at[adapter_idx].set(jnp.array(lora_B_weights))
+    jax_module.lora_scaling.value = jax_module.lora_scaling.value.at[adapter_idx].set(scaling)
+    jax_module.lora_ranks.value = jax_module.lora_ranks.value.at[adapter_idx].set(rank)
 
 
 def test_qwen3_lora():
@@ -160,10 +160,12 @@ def test_qwen3_lora():
                 for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
                     hf_layer = hf_model.base_model.model.model.layers[i].mlp
                     for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                        hf_proj = getattr(hf_layer, proj_name)
                         load_lora_weights(
                             getattr(layer.mlp, proj_name),
-                            getattr(hf_layer, proj_name),
                             adapter_idx=adapter_idx,
+                            lora_A_weights=hf_proj.lora_A["default"].weight.detach().numpy().T,
+                            lora_B_weights=hf_proj.lora_B["default"].weight.detach().numpy().T,
                             scaling=lora_config.lora_alpha / lora_config.r,
                             rank=lora_config.r,
                         )
