@@ -339,36 +339,45 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-@app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive", response_model=FutureResponse)
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
-    unique_id: str,  # model_id
-    checkpoint_id: str,  # checkpoint name
-    session: AsyncSession = Depends(get_session)
-) -> FutureResponse:
-    """Download checkpoint archive - returns a future for the download data."""
-    
-    # Check if model exists
+    unique_id: str,
+    checkpoint_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return the checkpoint archive bytes"""
+
+    # Ensure model exists
     statement = select(ModelDB).where(ModelDB.model_id == unique_id)
     result = await session.exec(statement)
     model = result.first()
-    
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    
-    # Create the tinker path in the simple 2-part format
-    tinker_path = f"tinker://{unique_id}/{checkpoint_id}"
-    
-    # Create future for download operation
-    request_id = await create_future(
-        session=session,
-        request_type=RequestType.DOWNLOAD_CHECKPOINT,
-        model_id=unique_id,
-        request_data={"tinker_path": tinker_path}
-    )
-    
-    await session.commit()
-    
-    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+    # Files are saved at /tmp/tx_checkpoints/{model_id}/{checkpoint_id}/
+    checkpoint_dir = Path("/tmp/tx_checkpoints") / unique_id / checkpoint_id
+    if not checkpoint_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_dir}")
+
+    # Package directory into a tar.gz in-memory
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for p in checkpoint_dir.iterdir():
+            if p.is_file():
+                tar.add(p, arcname=p.name)
+
+    size = buf.tell()
+    if size == 0:
+        raise HTTPException(status_code=500, detail="Empty archive")
+
+    buf.seek(0)
+    filename = f"{unique_id}_{checkpoint_id}.tar.gz"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Length": str(size),
+    }
+
+    return StreamingResponse(buf, media_type="application/octet-stream", headers=headers)
 
 @app.get("/")
 async def root():
@@ -382,6 +391,7 @@ async def root():
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
             "telemetry": ["/api/v1/telemetry"],
+            "download": ["/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive"],
         },
     }
 

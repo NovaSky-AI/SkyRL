@@ -1,6 +1,5 @@
 """Background engine for processing training requests."""
 
-
 import time
 import logging
 from datetime import datetime, timezone
@@ -14,8 +13,6 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
-from tx.tinker import types
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
@@ -36,7 +33,6 @@ class TinkerEngine:
         """Initialize the engine with a database connection and base model."""
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
         self.base_model_name = base_model_name  # Single base model for this engine
-        self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
         self.max_lora_adapters = max_lora_adapters  # Maximum number of LoRA adapters
@@ -63,16 +59,12 @@ class TinkerEngine:
             # Create optimizer that only targets LoRA A and B parameters
             def is_lora_param(path, value):
                 return any(name in path for name in ["lora_A", "lora_B"])
-                return any(name in path for name in ["lora_A", "lora_B"])
 
             self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
 
-        logger.info(
-            f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
-        )
         logger.info(
             f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
         )
@@ -93,7 +85,6 @@ class TinkerEngine:
         optim_barriers_query = (
             select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
             .where(FutureDB.request_type == types.RequestType.OPTIM_STEP)
-            .where(FutureDB.request_type == types.RequestType.OPTIM_STEP)
             .where(FutureDB.status == RequestStatus.PENDING)
             .group_by(FutureDB.model_id)
         )
@@ -103,7 +94,6 @@ class TinkerEngine:
         # Get all pending forward_backward operations ordered by request_id
         fwd_bwd_query = (
             select(FutureDB)
-            .where(FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
@@ -119,23 +109,10 @@ class TinkerEngine:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
         adapter_index = max((m.adapter_index for m in self.models.values()), default=-1) + 1
-        adapter_index = max((m.adapter_index for m in self.models.values()), default=-1) + 1
 
         if adapter_index >= self.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.max_lora_adapters}) reached")
 
-        # Extract LoRA rank and alpha from config
-        lora_rank = request_data.lora_config.rank
-        lora_alpha = request_data.lora_config.alpha
-
-        # Validate rank doesn't exceed max
-        if not (0 < lora_rank <= self.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.max_lora_rank}")
-
-        self.models[model_id] = types.ModelMetadata(
-            adapter_index=adapter_index,
-            lora_config=request_data.lora_config,
-        )
         # Extract LoRA rank and alpha from config
         lora_rank = request_data.lora_config.rank
         lora_alpha = request_data.lora_config.alpha
@@ -300,13 +277,11 @@ class TinkerEngine:
             raise ValueError(f"Model {model_id} not loaded")
 
         adapter_index = self.models[model_id].adapter_index
-        adapter_index = self.models[model_id].adapter_index
 
         # Get accumulated gradients for this adapter
         adapter_grads = self.accumulated_grads.get(model_id)
         if adapter_grads is None:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return types.OptimStepOutput()
             return types.OptimStepOutput()
 
         # Create full gradient structure with zeros for all adapters except this one
@@ -321,15 +296,12 @@ class TinkerEngine:
         # Apply optimizer update -- going forward we need to figure out how to use different learning rates per adapter
         adam_params = request_data.adam_params
         assert adam_params.lr == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
-        adam_params = request_data.adam_params
-        assert adam_params.lr == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
         self.optimizer.update(self.lora_params, full_lora_grads)
 
         # Clear accumulated gradients
         self.accumulated_grads[model_id] = None
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
-        return types.OptimStepOutput()
         return types.OptimStepOutput()
 
     def process_save_weights_for_sampler(
@@ -340,33 +312,12 @@ class TinkerEngine:
             raise ValueError(f"Model {model_id} not loaded")
 
         adapter_index = self.models[model_id].adapter_index
-        adapter_index = self.models[model_id].adapter_index
 
-        # Make sure the user cannot store checkpoints in places like ../../<important file>
-        checkpoint_id = Path(request_data.path).name
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
         output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
-
-        layer_rank = {
-            path[:-2]: int(node[adapter_index])
-            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
-            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
-        }
-
-        def extract_adapter_params(path, p):
-            rank = layer_rank[path[:-2]]
-            if path[-2].key == "lora_A":
-                return p[adapter_index, :, :rank]
-            elif path[-2].key == "lora_B":
-                return p[adapter_index, :rank, :]
-            else:
-                return p[adapter_index]
-
-        adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
 
         layer_rank = {
@@ -393,9 +344,6 @@ class TinkerEngine:
         lora_config = LoraConfig(
             r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
         )
-        lora_config = LoraConfig(
-            r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
-        )
         lora_config.save_pretrained(output_dir)
 
         logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
@@ -404,69 +352,6 @@ class TinkerEngine:
             path=f"tinker://{model_id}/{checkpoint_id}",
             type="save_weights_for_sampler",
         )
-
-    def process_download_checkpoint(
-        self, model_id: str, request_data: types.DownloadCheckpointInput
-    ) -> types.DownloadCheckpointOutput:
-        """Process download checkpoint archive request and return base64 encoded tar.gz data."""
-        import tarfile
-        import io
-        import base64
-
-        try:
-            tinker_path = request_data.tinker_path
-            
-            # Parse tinker path: tinker://model_id/checkpoint_id (only 2-part format)
-            path_parts = tinker_path.replace("tinker://", "").split("/")
-            
-            if len(path_parts) != 2:
-                raise ValueError("Invalid tinker path format. Expected: tinker://model_id/checkpoint_id")
-            
-            parsed_model_id, checkpoint_id = path_parts
-            
-            # Validate the model_id matches
-            if parsed_model_id != model_id:
-                raise ValueError(f"Model ID mismatch: path has {parsed_model_id}, expected {model_id}")
-            
-            # Look in the save format location: /tmp/tx_checkpoints/{model_id}/{checkpoint_id}
-            checkpoint_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
-            
-            if not checkpoint_dir.exists():
-                raise FileNotFoundError(f"Checkpoint not found at {checkpoint_dir}")
-            
-            # Verify directory has files
-            files = list(checkpoint_dir.iterdir())
-            if not files:
-                raise FileNotFoundError(f"Checkpoint directory is empty: {checkpoint_dir}")
-            
-            # Create tar.gz archive in memory
-            tar_buffer = io.BytesIO()
-            
-            with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
-                for file_path in checkpoint_dir.iterdir():
-                    if file_path.is_file():
-                        logger.info(f"Adding {file_path.name} to archive")
-                        tar.add(file_path, arcname=file_path.name)
-            
-            tar_data = tar_buffer.getvalue()
-            
-            if len(tar_data) == 0:
-                raise ValueError("Generated archive is empty")
-            
-            encoded_data = base64.b64encode(tar_data).decode('utf-8')
-            
-            logger.info(f"Created archive for {tinker_path}, size: {len(tar_data)} bytes")
-            
-            return types.DownloadCheckpointOutput(
-                archive_data=encoded_data,
-                filename=f"{model_id}_{checkpoint_id}.tar.gz",
-                size=len(tar_data),
-                tinker_path=tinker_path
-            )
-        
-        except Exception as e:
-            logger.error(f"Download checkpoint failed for {tinker_path}: {e}")
-            raise Exception(f"Download failed: {str(e)}")
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
@@ -477,10 +362,6 @@ class TinkerEngine:
             case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
-                )
-            case types.RequestType.DOWNLOAD_CHECKPOINT:  # Add this missing case
-                result = self.process_download_checkpoint(
-                    model_id, types.DownloadCheckpointInput.model_validate(request_data)
                 )
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
@@ -498,7 +379,6 @@ class TinkerEngine:
                     select(FutureDB)
                     .where(FutureDB.status == RequestStatus.PENDING)
                     .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
-                    .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
                     .order_by(FutureDB.request_id)
                 )
                 other_futures = session.exec(statement).all()
@@ -506,10 +386,6 @@ class TinkerEngine:
                 # Process forward_backward requests in batch
                 if forward_backward_futures:
                     try:
-                        batch_requests = [
-                            (f, f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
-                            for f in forward_backward_futures
-                        ]
                         batch_requests = [
                             (f, f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
                             for f in forward_backward_futures
@@ -524,7 +400,6 @@ class TinkerEngine:
                                     future.status = RequestStatus.FAILED
                                 else:
                                     future.status = RequestStatus.COMPLETED
-                                future.result_data = result_data.model_dump()
                                 future.result_data = result_data.model_dump()
                                 future.completed_at = datetime.now(timezone.utc)
                                 session.add(future)
@@ -545,9 +420,6 @@ class TinkerEngine:
                 # Process other request types individually (in the future we can also batch independent optim_steps)
                 for future in other_futures:
                     try:
-                        future.result_data = self.process_single_request(
-                            future.request_type, future.model_id, future.request_data
-                        )
                         future.result_data = self.process_single_request(
                             future.request_type, future.model_id, future.request_data
                         )
@@ -601,25 +473,6 @@ def main():
         help="Maximum LoRA rank (default: 32)",
         metavar="RANK",
     )
-    parser.add_option(
-        "--base-model", dest="base_model", help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL"
-    )
-    parser.add_option(
-        "--max-lora-adapters",
-        dest="max_lora_adapters",
-        type="int",
-        default=32,
-        help="Maximum number of LoRA adapters (default: 32)",
-        metavar="NUM",
-    )
-    parser.add_option(
-        "--max-lora-rank",
-        dest="max_lora_rank",
-        type="int",
-        default=32,
-        help="Maximum LoRA rank (default: 32)",
-        metavar="RANK",
-    )
 
     (options, args) = parser.parse_args()
 
@@ -629,7 +482,6 @@ def main():
     TinkerEngine(
         base_model_name=options.base_model,
         max_lora_adapters=options.max_lora_adapters,
-        max_lora_rank=options.max_lora_rank,
         max_lora_rank=options.max_lora_rank,
     ).run()
 
