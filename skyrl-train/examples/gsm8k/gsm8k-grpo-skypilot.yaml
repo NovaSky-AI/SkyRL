@@ -41,9 +41,6 @@ envs:
 # --------------- Environment Setup (setup) ---------------
 # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
 setup: |
-  sudo apt-get update
-  sudo apt-get install libpython3.12-dev -y
-  sudo apt-get install python-dev python3-dev -y
   cd skyrl-train
   uv venv --python 3.12
   source .venv/bin/activate
