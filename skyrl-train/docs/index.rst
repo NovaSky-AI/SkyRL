@@ -28,6 +28,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    tutorials/async
    tutorials/tools_guide
    tutorials/skyrl_gym_generator
+   tutorials/skypilot
 
 .. toctree::
    :maxdepth: 2
