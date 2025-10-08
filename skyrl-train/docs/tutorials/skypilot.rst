@@ -78,11 +78,8 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
     # --------------- Environment Setup (setup) ---------------
     # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
     setup: |
-      sudo apt-get update
-      sudo apt-get install libpython3.12-dev -y
-      sudo apt-get install python-dev python3-dev -y
       cd skyrl-train
-      uv venv --python 3.12
+      uv venv --python 3.12 --seed  
       source .venv/bin/activate
       uv sync --extra vllm 
       uv pip install wandb
