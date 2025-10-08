@@ -10,6 +10,7 @@ from tx.tinker import types
 # SQLite database path
 DB_PATH = Path(__file__).parent / "tinker.db"
 
+
 class RequestStatus(str, Enum):
     """Status of a request."""
 
