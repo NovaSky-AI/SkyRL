@@ -74,12 +74,12 @@ class LoRAMixin:
         batch_size, seq_len = x.shape[0], x.shape[1]
         assert adapter_indices.shape[0] == batch_size
 
-        x_reshaped = x.reshape(-1, self.in_features)
+        x_flat = x.reshape(-1, self.in_features)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
-        # Prepare for ragged_dot
+        # Sort tokens to prepare for ragged_dot
         x_sorted, group_sizes, unsort_indices = prepare_routing(
-            x_reshaped, adapter_indices_expanded, self.max_lora_adapters
+            x_flat, adapter_indices_expanded, self.max_lora_adapters
         )
 
         # Apply LoRA using ragged_dot: x @ A @ B
