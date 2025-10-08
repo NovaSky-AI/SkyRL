@@ -14,6 +14,7 @@ class RequestType(str, Enum):
     FORWARD_BACKWARD = "forward_backward"
     OPTIM_STEP = "optim_step"
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
+    DOWNLOAD_CHECKPOINT = "download_checkpoint"
 
 
 class RequestStatus(str, Enum):

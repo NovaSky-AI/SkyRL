@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import asyncio
 import subprocess
 import logging
+from fastapi.responses import StreamingResponse
+import tarfile
+import io
+from pathlib import Path
 
 from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestType, RequestStatus
 
@@ -168,6 +172,10 @@ class SupportedModel(BaseModel):
 
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
+
+
+class DownloadCheckpointRequest(BaseModel):
+    tinker_path: str
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
@@ -346,6 +354,37 @@ async def send_telemetry(request: TelemetryRequest):
     # Just acknowledge receipt without doing anything
     return TelemetryResponse(status="accepted")
 
+
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive", response_model=FutureResponse)
+async def download_checkpoint_archive(
+    unique_id: str,  # model_id
+    checkpoint_id: str,  # checkpoint name
+    session: AsyncSession = Depends(get_session)
+) -> FutureResponse:
+    """Download checkpoint archive - returns a future for the download data."""
+    
+    # Check if model exists
+    statement = select(ModelDB).where(ModelDB.model_id == unique_id)
+    result = await session.exec(statement)
+    model = result.first()
+    
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    # Create the tinker path in the simple 2-part format
+    tinker_path = f"tinker://{unique_id}/{checkpoint_id}"
+    
+    # Create future for download operation
+    request_id = await create_future(
+        session=session,
+        request_type=RequestType.DOWNLOAD_CHECKPOINT,
+        model_id=unique_id,
+        request_data={"tinker_path": tinker_path}
+    )
+    
+    await session.commit()
+    
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 @app.get("/")
 async def root():
