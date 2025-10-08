@@ -4,6 +4,8 @@ from typing import Dict, List, Any
 from pathlib import Path
 from loguru import logger
 
+from collections import defaultdict
+
 from skyrl_train.utils import Timer
 
 from skyrl_train.generators.utils import (
@@ -66,11 +68,19 @@ async def evaluate(
             global_step,
         )
         generator_output: GeneratorOutput = await generator.generate(generator_input)
+        traj_id_to_input = {
+            traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
+            for traj_id, env_class, env_extra in zip(
+                generator_input["trajectory_ids"], generator_input["env_classes"], generator_input["env_extras"]
+            )
+        }
+        for traj_id in generator_output["trajectory_ids"]:
+            assert traj_id.instance_id in traj_id_to_input, f"Trajectory ID {traj_id.instance_id} not found in input"
+            concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
+            concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
+            concat_uids.append(traj_id.instance_id)
         # validate_generator_output(generator_input, generator_output)
         generator_outputs.append(generator_output)
-        concat_all_envs.extend(generator_input["env_classes"])
-        concat_env_extras.extend(generator_input["env_extras"])
-        concat_uids.extend(uids)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
     # Extract data_sources from env_extras
@@ -82,9 +92,22 @@ async def evaluate(
     eval_metrics = calculate_per_dataset_metrics(
         concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
     )
-
+    # 2.1 only use the final step metris
+    metrics_generator_output = defaultdict(list)
+    print("number of samples: ", len(concat_generator_outputs["response_ids"]))
+    for key in concat_generator_outputs:
+        if isinstance(concat_generator_outputs[key], list):
+            metrics_generator_output[key] = [
+                concat_generator_outputs[key][i]
+                for i in range(len(concat_generator_outputs[key]))
+                if concat_generator_outputs["is_last_step"][i]
+            ]
+    metrics_uids = [
+        uid for uid, is_last_step in zip(concat_uids, concat_generator_outputs["is_last_step"]) if is_last_step
+    ]
+    print("number of samples used for metrics: ", len(metrics_uids))
     # 3. Calculate overall metrics across all datasets
-    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(metrics_generator_output, metrics_uids)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_avg_score,

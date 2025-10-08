@@ -24,6 +24,8 @@ def compute_advantages_step_wise(
     lambd,
     config,
     trajectory_ids,
+    is_last_step,
+    **kwargs,
 ):
     """
     A custom advantage estimator where the inputs are represented as step level turns
@@ -34,22 +36,39 @@ def compute_advantages_step_wise(
     id2std = {}
     traj_id_to_steps = defaultdict(list)
 
-    epsilon: float = 1e-6
+    epsilon = 1e-6
+    # calculcate for the last steps only and then broadcast to all steps
 
+    # last_step_scores = scores[is_last_step]
+    # advantages, returns = compute_grpo_outcome_advantage(
+    #     last_step_scores,
+    #     response_mask[is_last_step],
+    #     index[is_last_step],
+    #     values[is_last_step],
+    #     epsilon=1e-6,
+    #     grpo_norm_by_std=grpo_norm_by_std,
+    # )
+
+    # new_advantages = torch.zeros_like(scores)
+    # new_advantages[is_last_step] = advantages
+    # traj_ids = torch.tensor([f"{trajectory_ids[i].instance_id}_{trajectory_ids[i].repetition_id}" for i in range(len(trajectory_ids))])
+
+    # new_advantages = new_advantages.=(0, )
+
+    # breakpoint()
     with torch.no_grad():
-
-        response_rewards = (token_level_rewards * response_mask).sum(dim=-1, keepdim=True)
 
         for i in range(len(token_level_rewards)):
             trajectory_id = trajectory_ids[i]
-            traj_id_to_steps[f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"].append(
-                (response_rewards[i], i)
-            )
+            traj_id_to_steps[f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"].append((scores[i], i))
 
         for key, entries in traj_id_to_steps.items():
             instance_id: str = key.split("_")[0]
             # assume last entry is the last turn
             id2score[instance_id].append(entries[-1][0])
+            if config.get("use_same_reward_all_steps", False):
+                for _, i in entries:
+                    scores[i] = scores[entries[-1][-1]]
 
         for idx in id2score:
             if len(id2score[idx]) == 1:

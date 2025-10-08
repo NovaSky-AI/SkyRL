@@ -7,11 +7,7 @@ set -exo pipefail
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-<<<<<<< HEAD
-# bash examples/gsm8k/run_gsm8k.sh
-=======
 # bash examples/gptoss/run_gsm8k_gptoss.sh
->>>>>>> upstream/main
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
@@ -22,24 +18,11 @@ LOGGER="wandb"  # change to "console" to print to stdout
 INFERENCE_BACKEND="vllm"
 # INFERENCE_BACKEND="sglang"
 
-<<<<<<< HEAD
-MODEL_NAME="unsloth/gpt-oss-20b-BF16"
-# MODEL_NAME=""
-# MODEL_NAME="tiny-random/gpt-oss"
-
-
-uv run --isolated --extra $INFERENCE_BACKEND -m examples.gptoss.main_gptoss \
-  data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path=$MODEL_NAME \
-=======
 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="unsloth/gpt-oss-20b-BF16" \
->>>>>>> upstream/main
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
@@ -50,21 +33,12 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   generator.inference_engine_tensor_parallel_size=4 \
   generator.enforce_eager=true \
   trainer.epochs=20 \
-<<<<<<< HEAD
-  trainer.eval_batch_size=8 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
-  trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=8 \
-  trainer.policy_mini_batch_size=8 \
-=======
   trainer.eval_batch_size=32 \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=32 \
   trainer.policy_mini_batch_size=32 \
->>>>>>> upstream/main
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=5 \
@@ -85,10 +59,6 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.run_name="gsm8k_test_gptoss_low" \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt_gptoss" \
-<<<<<<< HEAD
   +generator.chat_template_kwargs={reasoning_effort:'low'} \
-=======
-  generator.chat_template_kwargs={reasoning_effort:'low'} \
->>>>>>> upstream/main
   trainer.dump_data_batch=true \
   $@

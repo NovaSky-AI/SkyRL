@@ -26,42 +26,10 @@ from skyrl_train.generators.utils import (
     get_rollout_metrics,
 )
 
-kind_code = {
-    "q": 0,
-    "t": 1,
-    "r": 2,
-    "o": 3,
-}
-
 
 class GPTOSSGeneratorOutput(GeneratorOutput):
-    kinds: List[List[int]]
-    steps: List[List[int]]
-
-
-def parse_final_trajectory(full_trajectory: dict):
-    kinds = []
-    steps = []
-    response_ids = []
-    loss_mask = []
-
-    # first, add q
-    prompt_ids = full_trajectory["q"]
-
-    # add ti, ri and ioi for i = 0 to num_rounds - 1
-    for i in range(full_trajectory["num_rounds"]):
-        response_ids += full_trajectory[f"t{i}"] + full_trajectory[f"r{i}"] + full_trajectory.get(f"o{i}", [])
-        loss_mask += [1] * (len(full_trajectory[f"t{i}"]) + len(full_trajectory[f"r{i}"])) + [0] * len(
-            full_trajectory.get(f"o{i}", [])
-        )
-        kinds += (
-            [kind_code["t"]] * len(full_trajectory[f"t{i}"])
-            + [kind_code["r"]] * len(full_trajectory[f"r{i}"])
-            + [kind_code["o"]] * len(full_trajectory.get(f"o{i}", []))
-        )
-        steps += [i] * len(response_ids)
-
-    return prompt_ids, response_ids, loss_mask, kinds, steps
+    trajectory_ids: List[TrajectoryID]
+    is_last_step: List[bool]
 
 
 @dataclass
@@ -196,8 +164,8 @@ class GPTOSSGenerator(GeneratorInterface):
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
-        initial_chat_history_length = len(chat_history)
-        chat_end_index = len(chat_history)
+        # initial_chat_history_length = len(chat_history)
+        # chat_end_index = len(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             add_generation_prompt=True,
@@ -207,11 +175,11 @@ class GPTOSSGenerator(GeneratorInterface):
 
         initial_prompt_length = len(input_ids)
         loss_mask = []  # this excludes the prompt
-        rollout_logprobs = None
+        # rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         step_id = 0
-        full_trajectory = {"q": input_ids}
+        # full_trajectory = {"q": input_ids}
         per_step_outputs = []
         while not done:
             # 1. Generate output
@@ -259,11 +227,14 @@ class GPTOSSGenerator(GeneratorInterface):
             per_step_output = AgentLoopOutput(
                 response_ids=response_ids,
                 reward=step_reward,
-                loss_mask=copy.deepcopy(loss_mask[current_prompt_length:]),
+                loss_mask=copy.deepcopy(loss_mask[current_prompt_length - initial_prompt_length :]),
                 prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
                 rollout_logprobs=None,
                 stop_reason=stop_reason,
             )
+            assert len(per_step_output.loss_mask) == len(
+                per_step_output.response_ids
+            ), "loss_mask and response_ids should have the same length"
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
                 step_id += 1
@@ -274,26 +245,7 @@ class GPTOSSGenerator(GeneratorInterface):
             per_step_outputs.append(per_step_output)
             step_id += 1
 
-        # full_trajectory["num_rounds"] = step_id
-
-        # propmt_ids, response_ids, loss_mask, kinds, steps = parse_final_trajectory(full_trajectory)
-
         await self._run_in_executor_if_available(env.close)
-
-        # prompt_ids = input_ids[:initial_prompt_length]
-        # final_reward = step_reward
-        # num_steps = step_id
-        per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
-        # assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
-
-        # # # Build token-level rewards placed at assistant turn boundaries
-        # token_level_rewards: List[float] = [0.0] * len(response_ids)
-        # for i, (step_reward, idx) in enumerate(per_step_rewards):
-        #     assert step_reward is not None
-        #     if idx >= len(response_ids):
-        #         break
-        #     token_level_rewards[idx] += step_reward
-        # reward_out = token_level_rewards
 
         return per_step_outputs
 
@@ -427,9 +379,16 @@ class GPTOSSGenerator(GeneratorInterface):
         stop_reasons = sum([[output.stop_reason for output in step_outputs] for step_outputs in all_outputs], [])
         loss_masks = sum([[output.loss_mask for output in step_outputs] for step_outputs in all_outputs], [])
         prompt_token_ids = sum([[output.prompt_ids for output in step_outputs] for step_outputs in all_outputs], [])
-        trajectory_ids = sum(
-            [[trajectory_id for _ in step_outputs] for trajectory_id, step_outputs in zip(trajectory_ids, all_outputs)]
-        )
+
+        out_trajectory_ids = []
+        is_last_step = []
+        for i in range(len(all_outputs)):
+            step_outputs = all_outputs[i]
+            for step_id in range(len(step_outputs)):
+                out_trajectory_id = copy.deepcopy(trajectory_ids[i])
+                out_trajectory_id.step = step_id
+                out_trajectory_ids.append(out_trajectory_id)
+                is_last_step.append(step_id == len(step_outputs) - 1)
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -460,7 +419,8 @@ class GPTOSSGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
-            "trajectory_ids": trajectory_ids,
+            "trajectory_ids": out_trajectory_ids,
+            "is_last_step": is_last_step,
         }
 
         return generator_output
@@ -537,9 +497,6 @@ class GPTOSSGenerator(GeneratorInterface):
         Update the loss mask and input ids given a new model response and observation, following
         token-in-token-out.
 
-        This function is used if `use_conversation_multi_turn` is True. It assumes that the input to the LLM is formatted as a list of messages, with observations
-        stored in user messages.
-
         For example (using the Qwen 2.5 chat template), a trajectory for multi-turn generation would look like:
         <|im_start|>system
         ...
@@ -601,66 +558,3 @@ class GPTOSSGenerator(GeneratorInterface):
                 input_ids += self.generation_prompt_ids
                 loss_mask += [0] * len(self.generation_prompt_ids)
         return input_ids, response_end_idx, loss_mask
-
-    def _get_next_input_ids_with_single_turn_chat_template(
-        self,
-        output_ids: List[int],
-        new_obs: ConversationType,
-        loss_mask: List[int],
-        input_ids: List[int],
-        logprobs: Optional[List[float]],
-    ):
-        """
-        Update the loss mask and input ids given a new model response and observation, following
-        token-in-token-out.
-
-        This function is used if `use_conversation_multi_turn` is False. It assumes that the input to the LLM is a list of token ids
-        and that the multi-turn conversation happens in a single assistant message.
-
-        For example (using the Qwen 2.5 chat template), a trajectory for single-turn generation would look like:
-        <|im_start|>system
-        ...
-        <|im_end|>
-        <|im_start|>user
-                            question goes here
-        <|im_end|>
-        <|im_start|>assistant
-                            turn 1 model response goes here
-                            <think>... </think>
-                            ...
-
-                            turn 1 env observation goes here
-                            <observation>...</observation>
-
-                            turn 2 model response goes here:
-                            <think>... </think>
-                            ...
-        Args:
-            output_ids: List[int]
-            new_obs: ConversationType
-            loss_mask: List[int]
-            input_ids: List[int]
-        Returns:
-            loss_mask: List[int]
-            input_ids: List[int]
-            logprobs: Optional[List[float]]
-        """
-        # just update raw tokens and loss mask
-        new_resp_tokens = output_ids.copy()
-        if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
-            # remove the eos token since we are continuing the current assistant message
-            new_resp_tokens = new_resp_tokens[:-1]
-        loss_mask += [1] * len(new_resp_tokens)
-        input_ids += new_resp_tokens
-        response_end_idx = len(input_ids) - 1
-
-        if len(new_obs) > 0:
-            for obs in new_obs:
-                obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                loss_mask += [0] * len(obs_tokens)
-                # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-                if logprobs:
-                    logprobs += [1] * len(obs_tokens)
-                input_ids += obs_tokens
-
-        return loss_mask, input_ids, logprobs, response_end_idx

@@ -3,12 +3,11 @@
 set -x
 
 CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
-    --model Qwen/Qwen2.5-1.5B-Instruct \
-    --tensor-parallel-size 4 \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --tensor-parallel-size 2 \
     --host 127.0.0.1 \
     --port 8001 \
     --seed 42 \
-    --max-model-len 4096 \
     --enable-prefix-caching \
     --enable-chunked-prefill \
     --dtype bfloat16 \
