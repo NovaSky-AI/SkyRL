@@ -141,12 +141,13 @@ class RayPPOTrainer:
                 self.global_step = self.load_checkpoints()
 
         if self.colocate_all:
+            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
             asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
         with Timer("sync_weights"):
             ray.get(self.sync_policy_weights_to_inference_engines())
         if self.colocate_all:
             with Timer("offload_policy_model_to_cpu"):
-                self.policy_model.offload_to_cpu()
+                self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
             asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
         # Eval before training
@@ -258,12 +259,13 @@ class RayPPOTrainer:
 
                     # 7. sync weights to inference engines
                     if self.colocate_all:
+                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
                     with Timer("sync_weights", self.all_timings):
                         ray.get(self.sync_policy_weights_to_inference_engines())
                     if self.colocate_all:
                         with Timer("offload_policy_model_to_cpu"):
-                            self.policy_model.offload_to_cpu()
+                            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
                 # 8. set logs
@@ -711,14 +713,14 @@ class RayPPOTrainer:
 
         # calculate critic values
         if self.colocate_all and self.critic_model is not None:
-            self.critic_model.backload_to_gpu()
+            self.critic_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
         if self.critic_model is not None:
             value_refs = self.critic_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
             if self.colocate_all:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
-                self.critic_model.offload_to_cpu()
+                self.critic_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # calculate ref log probs
         if self.ref_model is not None:
@@ -739,13 +741,13 @@ class RayPPOTrainer:
 
         # calculate action log probs
         if self.colocate_all:
-            self.policy_model.backload_to_gpu()
+            self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
         action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
-            self.policy_model.offload_to_cpu()
+            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
         # if not colocate_policy_ref, then need to gather base_log_probs

@@ -38,9 +38,7 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
         if hasattr(models, architecture):
             return getattr(models, architecture)
 
-    raise ValueError(
-        f"None of the architectures {config.architectures} is currently supported."
-    )
+    raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
 
 def get_param_key(path: tuple) -> str:
@@ -91,7 +89,7 @@ def save_checkpoint(config: PretrainedConfig, model: nnx.Module, filename: str |
         key = get_param_key(path)
         if "experts" in path:
             for i in range(config.num_experts):
-                tensors[get_expert_key(path, i)] = param[i,:,:].T
+                tensors[get_expert_key(path, i)] = param[i, :, :].T
             continue
         if "q_proj" in path or "k_proj" in path or "v_proj" in path:
             param = param.reshape(param.shape[0], -1)
