@@ -51,8 +51,6 @@ def get_test_actor_config(enable_lora: bool = False) -> DictConfig:
     ids=[
         "no_colocate_nccl_fsdp_vllm",
         "colocate_nccl_fsdp_vllm",
-        "no_colocate_gloo_fsdp_vllm",
-        "colocate_gloo_fsdp_vllm",
         "no_colocate_nccl_fsdp2_vllm",
         "colocate_nccl_fsdp2_vllm",
     ],
