@@ -62,11 +62,10 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        batch_size, seq_len = x.shape[0], x.shape[1]
+        (batch_size, seq_len, in_features) = x.shape
+        assert len(self.lora_A.shape) == 3 and self.lora_A.value.shape[1] == in_features
         assert adapter_indices.shape[0] == batch_size
 
-        # Infer in_features from lora_A shape (assumes shape: [adapters, in_features, rank])
-        in_features = self.lora_A.value.shape[1]
         x_flat = x.reshape(-1, in_features)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
