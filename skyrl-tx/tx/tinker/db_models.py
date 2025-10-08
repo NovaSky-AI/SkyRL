@@ -10,16 +10,6 @@ from tx.tinker import types
 # SQLite database path
 DB_PATH = Path(__file__).parent / "tinker.db"
 
-
-class RequestType(str, Enum):
-    """Types of requests that can be processed."""
-    CREATE_MODEL = "create_model"
-    FORWARD_BACKWARD = "forward_backward"
-    OPTIM_STEP = "optim_step"
-    SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
-    DOWNLOAD_CHECKPOINT = "download_checkpoint"
-
-
 class RequestStatus(str, Enum):
     """Status of a request."""
 
