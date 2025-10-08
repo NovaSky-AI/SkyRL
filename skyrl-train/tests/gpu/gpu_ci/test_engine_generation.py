@@ -20,7 +20,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import config_dir
 
-MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 def get_test_actor_config() -> DictConfig:
