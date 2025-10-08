@@ -1,4 +1,5 @@
 """Tests for the Tinker API mock server using the real tinker client."""
+
 import pytest
 import subprocess
 import tinker
@@ -11,7 +12,7 @@ def api_server():
     process = subprocess.Popen(
         ["uv", "run", "--extra", "tinker", "uvicorn", "tx.tinker.api:app", "--host", "0.0.0.0", "--port", "8000"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stderr=subprocess.PIPE,
     )
 
     yield process
@@ -37,9 +38,7 @@ def test_capabilities(service_client):
 def test_training_workflow(service_client):
     """Test a complete training workflow."""
     base_model = "Qwen/Qwen3-0.6B"
-    training_client = service_client.create_lora_training_client(
-        base_model=base_model
-    )
+    training_client = service_client.create_lora_training_client(base_model=base_model)
 
     tokenizer = training_client.get_tokenizer()
 
@@ -51,15 +50,19 @@ def test_training_workflow(service_client):
 
     # Process examples into Datum objects
     processed_examples = []
-    for example in examples:
+    for i, example in enumerate(examples):
         prompt_tokens = tokenizer.encode(example["prompt"])
         completion_tokens = tokenizer.encode(example["completion"])
 
         # Combine tokens
         all_tokens = prompt_tokens + completion_tokens
 
-        # Create weights: 0 for prompt, 1 for completion
-        weights = [0.0] * len(prompt_tokens) + [1.0] * len(completion_tokens)
+        if i == 0:
+            # First example has all 0 weights
+            weights = [0.0] * len(all_tokens)
+        else:
+            # All other examples have weight of 0 for prompt, 1 for completion
+            weights = [0.0] * len(prompt_tokens) + [1.0] * len(completion_tokens)
 
         # Target tokens are shifted by 1
         target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
@@ -70,7 +73,7 @@ def test_training_workflow(service_client):
             loss_fn_inputs={
                 "weights": weights[:-1],
                 "target_tokens": target_tokens[:-1],
-            }
+            },
         )
         processed_examples.append(datum)
 
@@ -86,6 +89,9 @@ def test_training_workflow(service_client):
     assert optim_result is not None
     assert fwdbwd_result.loss_fn_output_type == "scalar"
     assert len(fwdbwd_result.loss_fn_outputs) > 0
+
+    # The first example has all 0 weights, so all losses should be 0
+    assert all(v == 0.0 for v in fwdbwd_result.loss_fn_outputs[0]["elementwise_loss"].data)
 
     # Get a checkpoint
     sampling_path = training_client.save_weights_for_sampler(name="0000").result().path

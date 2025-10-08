@@ -38,15 +38,15 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
         if hasattr(models, architecture):
             return getattr(models, architecture)
 
-    raise ValueError(
-        f"None of the architectures {config.architectures} is currently supported."
-    )
+    raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
 
 def get_param_key(path: tuple) -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
         path = (*path[:-1], "weight")
+    elif path[-1] in {"lora_A", "lora_B"}:
+        path = (*path, "weight")
     return ".".join(map(str, path))
 
 
@@ -64,6 +64,9 @@ def load_checkpoint(checkpoint_dir: str | os.PathLike, config: PretrainedConfig,
     updates = []
     for path, param in model_params:
         key = get_param_key(path)
+        # Skip LoRA parameters that are not in the checkpoint
+        if "lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path:
+            continue
         if "experts" in path:
             # In order to load the expert weights, we concatenate the relevant tensors
             expert_tensors = [tensors[get_expert_key(path, i)].T for i in range(config.num_experts)]
@@ -86,7 +89,7 @@ def save_checkpoint(config: PretrainedConfig, model: nnx.Module, filename: str |
         key = get_param_key(path)
         if "experts" in path:
             for i in range(config.num_experts):
-                tensors[get_expert_key(path, i)] = param[i,:,:].T
+                tensors[get_expert_key(path, i)] = param[i, :, :].T
             continue
         if "q_proj" in path or "k_proj" in path or "v_proj" in path:
             param = param.reshape(param.shape[0], -1)

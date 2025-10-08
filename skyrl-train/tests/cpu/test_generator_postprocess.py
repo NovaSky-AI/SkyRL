@@ -6,10 +6,11 @@ uv run --isolated --extra dev pytest tests/cpu/test_generator_postprocess.py
 """
 
 from unittest.mock import MagicMock
-from omegaconf import OmegaConf
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.config.utils import get_default_config
+from omegaconf import OmegaConf
 
 
 class DummyDataset:
@@ -24,26 +25,26 @@ class DummyDataset:
 
 
 def create_config(batch_size):
-    return OmegaConf.create(
+    default_config = get_default_config()
+    OmegaConf.update(
+        default_config,
+        "trainer",
         {
-            "trainer": {
-                "placement": {
-                    "colocate_all": True,
-                },
-                "train_batch_size": batch_size,
-                "eval_batch_size": batch_size,
-                "resume_mode": "none",
-                "seed": 42,
-                "epochs": 1,
-            },
-            "generator": {
-                "n_samples_per_prompt": 1,
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 8000,
-            },
-        }
+            "train_batch_size": batch_size,
+            "eval_batch_size": batch_size,
+            "resume_mode": "none",
+            "seed": 42,
+            "epochs": 1,
+        },
     )
+    OmegaConf.update(
+        default_config,
+        "generator",
+        {
+            "n_samples_per_prompt": 1,
+        },
+    )
+    return default_config
 
 
 def test_response_level_rewards():

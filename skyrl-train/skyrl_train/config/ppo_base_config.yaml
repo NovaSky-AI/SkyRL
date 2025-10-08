@@ -26,6 +26,11 @@ trainer:
   policy:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      lora:
+          rank: 0
+          alpha: 16
+          dropout: 0
+          lora_sync_path: "/tmp/skyrl_lora_sync"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
@@ -54,6 +59,10 @@ trainer:
   critic:
     model:
       path: null
+      lora:
+        rank: 0
+        alpha: 16
+        dropout: 0
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
@@ -144,6 +153,7 @@ trainer:
   flash_attn: true
   disable_fast_tokenizer: false
   target_modules: "all-linear"
+  exclude_modules: null
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -185,6 +195,10 @@ generator:
   chat_template:
     source: "name"  # "name" or "file"
     name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
+  
+  # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
+  chat_template_kwargs: {}
+
   # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}

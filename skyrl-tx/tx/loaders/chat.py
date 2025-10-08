@@ -14,10 +14,7 @@ def chat(tokenizer: PreTrainedTokenizer, dataset: Dataset, batch_size: int) -> L
         batch = tokenizer(batch, return_tensors="np", padding=True, pad_to_multiple_of=512)
         batch = {k: jnp.asarray(v) for k, v in batch.items()}
         yield {
-            "text": batch["input_ids"][:,:-1],
-            "attention_mask": batch["attention_mask"][:,:-1],
+            "text": batch["input_ids"][:, :-1],
+            "attention_mask": batch["attention_mask"][:, :-1],
             "target": batch["input_ids"][:, 1:],
-        }, {
-            "shape": batch["input_ids"].shape,
-            "tokens": batch["attention_mask"].sum()
-        }
+        }, {"shape": batch["input_ids"].shape, "tokens": batch["attention_mask"].sum()}

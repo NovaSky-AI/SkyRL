@@ -4,7 +4,7 @@ A library of RL environments for LLMs implemented with the Gymnasium API.
 
 ## Key Features
 
-- Simple `Environment` interface following the Gynasium API. 
+- Simple `Environment` interface following the Gymnasium API. 
 - Library of ready-built environments for math, code, search, and text-to-SQL.
 - A reusable `tool` interface. Developers can implement a tool once, and use it across any environment.
 - Supports multi-tool environments
