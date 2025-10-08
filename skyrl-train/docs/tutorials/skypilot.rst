@@ -11,21 +11,26 @@ provisioning, setting up, and tearing down clusters on any cloud.
 Setup Skypilot
 --------------
 
-SkyPilot can be run on any cloud. Here we show how to run it on AWS.
+SkyPilot works across AWS, GCP, Azure, OCI, Lambda, Nebius, and more. The
+commands below use AWS as a concrete example—swap ``infra`` and accelerator
+names (for example ``infra: nebius`` with ``accelerators: L40:2``) to target a
+different cloud.
 
 .. code-block:: bash
 
-    conda create -y -n sky python=3.10
-    conda activate sky
-    pip install "skypilot[all]" # for only AWS, replace "all" with "aws"
+    git clone https://github.com/NovaSky-AI/SkyRL.git
+    cd SkyRL
 
-    # Setup AWS credentials
-    aws configure
+    # Install uv if you have not already.
+    curl -LsSf https://astral.sh/uv/install.sh | sh
 
-    # Check if the AWS credential is correctly setup.
+    # Create a dedicated env for the SkyPilot CLI and install the stable build.
+    uv venv --python 3.12 --seed
+    source .venv/bin/activate
+    uv pip install "skypilot[aws]"  # replace aws with the clouds you plan to use
+
+    # Validate your configuration.
     sky check aws
-    # Alternatively run this to check all clouds
-    sky check
 
 Run SkyRL with SkyPilot
 -----------------------
@@ -33,12 +38,20 @@ Run SkyRL with SkyPilot
 To interact with SkyPilot we need to write a yaml defining the job. For the
 full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/latest/reference/yaml-spec.html>`_.
 
+.. note::
+
+   Docker image ``erictang000/skyrl-train-ray-2.48.0-py3.12-cu12.8`` depends on
+   features that have not been released in the stable SkyPilot builds as of
+   October 8, 2025. Until SkyPilot publishes v0.10.3 or later, rely on the
+   default base image resolved by SkyPilot and install extra dependencies inside
+   ``setup``. See `skypilot-org/skypilot#7181 <https://github.com/skypilot-org/skypilot/pull/7181>`_.
+
 .. code-block:: yaml
 
-    # Run this from skyrl-train directory.
+    # Run this from the repository root after cloning SkyRL.
     resources:
       infra: aws           # replace this with what cloud you want to launch on
-      accelerators: L4:2   # every node has 2 L4 GPU
+      accelerators: L40S:4 # 4x 48 GB GPUs; adjust to the SKU that matches your quota
       memory: 64+          # every node has at least 64 GB memory
       ports: 6479          # expose port for ray dashboard
     # check the skypilot documentation for what clouds network tier is supported.
@@ -49,7 +62,7 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
     # --------------- Work Directory Synchronization (workdir) ---------------
     # Defines the local working directory to be synchronized to the remote cluster.
     # Here, '.' means synchronizing the directory where the sky submit command is currently run.
-    # For this script, we are running the command from SkyRL
+    # For this script, run the command from the repository root after cloning SkyRL.
     workdir: .
 
     # --------------- (secrets) ---------------
@@ -74,14 +87,19 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
       INFERENCE_BACKEND: "vllm"
       # INFERENCE_BACKEND: "sglang"
 
+    # The quickstart configuration assumes 4x 48 GB GPUs (e.g., AWS g6.12xlarge with L40S).
+    # If you only have lower-memory accelerators available, follow the Quickstart guidance
+    # to switch to a smaller policy model (for example Qwen/Qwen2.5-0.5B-Instruct) and reduce
+    # the micro batch sizes accordingly.
+
 
     # --------------- Environment Setup (setup) ---------------
     # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
     setup: |
       cd skyrl-train
-      uv venv --python 3.12 --seed  
+      uv venv --python 3.12 --seed
       source .venv/bin/activate
-      uv sync --extra vllm 
+      uv sync --extra vllm
       uv pip install wandb
       uv run -- python examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
@@ -92,23 +110,39 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
     # This script will first start the Ray cluster (different ray start commands are executed on Head and Worker nodes).
     # Then, your training script will only be run on the Head node (SKYPILOT_NODE_RANK == 0).
     run: |
+      set -euo pipefail
+
       cd skyrl-train
       source .venv/bin/activate
 
-      sudo chmod 777 -R /var/tmp
+      TMP_DIR="$HOME/skyrl-tmp"
+      mkdir -p "$TMP_DIR"
+      export TMPDIR="$TMP_DIR"
 
-      head_ip="$(echo "$SKYPILOT_NODE_IPS" | head -n1 | awk '{print $1}')"
-      num_nodes="$(echo "$SKYPILOT_NODE_IPS" | wc -l | awk '{print $1}')"
+      read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
+      DATA_DIR="$HOME/data/gsm8k"
 
-      DATA_DIR=$HOME/data/gsm8k/
-
-      # login wandb
+      # Login to Weights & Biases once the secrets are available.
       uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
+      wait_for_ray() {
+        local address=$1
+        for _ in $(seq 1 24); do
+          if ray status --address "$address" >/dev/null 2>&1; then
+            return 0
+          fi
+          sleep 5
+        done
+        echo "Ray cluster at $address failed to become ready" >&2
+        return 1
+      }
+
       export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
-      if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
-        ps aux | grep ray | grep 6479 &> /dev/null || ray start --head  --disable-usage-stats --port 6479
-        sleep 15
+      if [ "$SKYPILOT_NODE_RANK" = "0" ]; then
+        if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+          ray start --head --disable-usage-stats --port 6479
+        fi
+        wait_for_ray 127.0.0.1:6479
         uv run --isolated --extra "$INFERENCE_BACKEND" -m skyrl_train.entrypoints.main_base \
           data.train_data="['${DATA_DIR}/train.parquet']" \
           data.val_data="['${DATA_DIR}/validation.parquet']" \
@@ -148,12 +182,12 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
           trainer.project_name="gsm8k" \
           trainer.run_name="gsm8k_test" \
           trainer.resume_mode=null \
-          trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" &
+          trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt"
       else
-        sleep 10
-        ps aux | grep ray | grep 6479 &> /dev/null || ray start --address $head_ip:6479 --disable-usage-stats
-        # Add sleep to after `ray start` to give ray enough time to daemonize 
-        sleep 15
+        if ! ray status --address "$head_ip:6479" >/dev/null 2>&1; then
+          ray start --address "$head_ip:6479" --disable-usage-stats
+        fi
+        wait_for_ray "$head_ip:6479"
       fi
 
       echo "Node setup and Ray start script finished for rank ${SKYPILOT_NODE_RANK}."
@@ -162,3 +196,26 @@ You can launch this yaml with
 ``sky launch -c skyrl skyrl_train/examples/gsm8k/gsm8k-skypilot.yaml --secret WANDB_API_KEY="1234"``.
 After it launches, you can easily access the cluster with ``ssh skyrl``. To
 terminate the cluster simply run ``sky down skyrl``.
+
+Launch Verification Views
+-------------------------
+
+Use the following reference views to confirm the environment and job status:
+
+.. figure:: skypilot-dashboard.jpeg
+   :alt: SkyPilot Dashboard showing the gsm8k cluster ready state
+   :width: 80%
+
+   SkyPilot Dashboard after ``sky launch`` reports the cluster as healthy.
+
+.. figure:: skypilot-ray-logs.png
+   :alt: Terminal logs from ``sky logs skyrl`` showing GRPO training progress
+   :width: 80%
+
+   ``sky logs`` streaming Ray task updates confirms Ray and SkyRL workers are active.
+
+.. figure:: skypilot-wandb.jpeg
+   :alt: Weights & Biases dashboard capturing the gsm8k_test run metrics
+   :width: 80%
+
+   Weights & Biases dashboard provides live metrics and checkpoints for the run.
