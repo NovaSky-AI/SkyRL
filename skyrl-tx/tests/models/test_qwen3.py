@@ -65,16 +65,21 @@ def test_qwen3_moe_layer():
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
         moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
-        for i, expert in enumerate(hf_moe_layer.experts):
-            moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-            moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-            moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
+        load_moe_base_weights(moe_layer, hf_moe_layer)
 
     final_hidden_states, router_logits = moe_layer(x.numpy(), return_router_logits=True)
 
     assert np.allclose(hf_router_logits, router_logits, rtol=1e-4)
     assert np.allclose(hf_final_hidden_states, final_hidden_states, rtol=1e-2, atol=1e-2)
+
+
+def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: torch.nn.Module) -> None:
+    """Load base weights from HF MoE layer to JAX MoE layer."""
+    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
+    for i, expert in enumerate(hf_moe_layer.experts):
+        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
+        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
+        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
 
 
 def load_lora_weights(
@@ -103,7 +108,7 @@ def load_lora_weights(
 
 
 def test_qwen3_moe_layer_lora():
-    """Basic smoke test for MoE LoRA functionality. TODO: Add proper test comparing with HF PEFT."""
+    """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     config = AutoConfig.from_pretrained(model_name)
@@ -113,34 +118,48 @@ def test_qwen3_moe_layer_lora():
     config.max_lora_rank = 4
 
     hf_moe_layer = hf_model.model.layers[0].mlp
-    x = torch.randn(2, 2, config.hidden_size)  # 2 samples to test different adapters
+    x = torch.randn(2, 2, config.hidden_size)
 
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
         moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        load_moe_base_weights(moe_layer, hf_moe_layer)
 
-        # Load base weights
-        moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
-        for i, expert in enumerate(hf_moe_layer.experts):
-            moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-            moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-            moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
-
-        # Test without LoRA (should match base)
-        output_no_lora, _ = moe_layer(x.numpy(), return_router_logits=True)
-
-        # Set some LoRA weights (small random values to create a detectable difference)
+        # Set LoRA weights for adapter 0
         rng = np.random.default_rng(42)
+        scaling = 2.0
         for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
             proj.lora_A.value = proj.lora_A.value.at[0].set(rng.normal(0, 0.01, proj.lora_A.value.shape[1:]))
             proj.lora_B.value = proj.lora_B.value.at[0].set(rng.normal(0, 0.01, proj.lora_B.value.shape[1:]))
+            proj.lora_scaling.value = proj.lora_scaling.value.at[0].set(scaling)
 
         # Test with LoRA adapter 0
         adapter_indices = jnp.array([0, 0])
         output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
 
-        # Outputs should be different when LoRA is applied
-        assert not np.allclose(output_no_lora, output_with_lora, rtol=1e-4)
+        # Create merged model by adding LoRA weights to base weights
+        # For each projection: merged_weight = base_weight + scaling * (lora_B @ lora_A)
+        moe_layer_merged = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(1))
+        moe_layer_merged.gate.kernel[:] = moe_layer.gate.kernel[:]
+
+        for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+            proj = getattr(moe_layer.experts, proj_name)
+            proj_merged = getattr(moe_layer_merged.experts, proj_name)
+
+            # For each expert, merge: base + scaling * (lora_B @ lora_A)
+            for expert_idx in range(config.num_experts):
+                lora_A = proj.lora_A.value[0, expert_idx, :, :]  # (in_features, rank)
+                lora_B = proj.lora_B.value[0, expert_idx, :, :]  # (rank, out_features)
+                lora_delta = scaling * (lora_A @ lora_B)  # (in_features, out_features)
+
+                merged_weight = proj.weight[expert_idx, :, :] + lora_delta
+                proj_merged.weight.value = proj_merged.weight.value.at[expert_idx, :, :].set(merged_weight)
+
+        # Run merged model without LoRA adapters
+        output_merged, _ = moe_layer_merged(x.numpy(), return_router_logits=True)
+
+        # Outputs should match since merged weights = base + lora
+        assert np.allclose(output_with_lora, output_merged, rtol=1e-4, atol=1e-5)
 
 
 def test_qwen3_lora():
