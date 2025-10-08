@@ -1,4 +1,5 @@
 """Background engine for processing training requests."""
+
 import time
 import logging
 from datetime import datetime, timezone
@@ -12,8 +13,10 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, ModelDB, DB_PATH, RequestType, RequestStatus
+from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
+from tx.tinker import types
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
+from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
 
 logger = logging.getLogger(__name__)
@@ -30,7 +33,7 @@ class TinkerEngine:
         """Initialize the engine with a database connection and base model."""
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
         self.base_model_name = base_model_name  # Single base model for this engine
-        self.models = {}  # Store LoRA model metadata: model_id -> {"adapter_index": int}
+        self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
         self.max_lora_adapters = max_lora_adapters  # Maximum number of LoRA adapters
         self.max_lora_rank = max_lora_rank  # Maximum LoRA rank
@@ -55,14 +58,16 @@ class TinkerEngine:
 
             # Create optimizer that only targets LoRA A and B parameters
             def is_lora_param(path, value):
-                return any(name in path for name in ['lora_A', 'lora_B'])
+                return any(name in path for name in ["lora_A", "lora_B"])
 
             self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
 
-        logger.info(f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}")
+        logger.info(
+            f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
+        )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -79,7 +84,7 @@ class TinkerEngine:
         # Find the earliest pending optim_step per model (these act as barriers)
         optim_barriers_query = (
             select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
-            .where(FutureDB.request_type == RequestType.OPTIM_STEP)
+            .where(FutureDB.request_type == types.RequestType.OPTIM_STEP)
             .where(FutureDB.status == RequestStatus.PENDING)
             .group_by(FutureDB.model_id)
         )
@@ -89,36 +94,55 @@ class TinkerEngine:
         # Get all pending forward_backward operations ordered by request_id
         fwd_bwd_query = (
             select(FutureDB)
-            .where(FutureDB.request_type == RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
         )
         fwd_bwd_ops = session.exec(fwd_bwd_query).all()
 
         # Filter: only include ops that come before their model's optim barrier
-        batchable = [
-            op for op in fwd_bwd_ops
-            if op.model_id not in barriers or op.request_id < barriers[op.model_id]
-        ]
+        batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return batchable
 
-    def create_model(self, model_id: str, lora_config: dict | None = None):
+    def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
-        adapter_index = max((m["adapter_index"] for m in self.models.values()), default=-1) + 1
+        adapter_index = max((m.adapter_index for m in self.models.values()), default=-1) + 1
 
         if adapter_index >= self.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.max_lora_adapters}) reached")
 
-        self.models[model_id] = {
-            "adapter_index": adapter_index,
-            "lora_config": lora_config
-        }
-        self.accumulated_grads[model_id] = None
-        logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}")
+        # Extract LoRA rank and alpha from config
+        lora_rank = request_data.lora_config.rank
+        lora_alpha = request_data.lora_config.alpha
 
-    def process_forward_backward_batch(self, requests: list) -> dict:
+        # Validate rank doesn't exceed max
+        if not (0 < lora_rank <= self.max_lora_rank):
+            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.max_lora_rank}")
+
+        self.models[model_id] = types.ModelMetadata(
+            adapter_index=adapter_index,
+            lora_config=request_data.lora_config,
+        )
+        self.accumulated_grads[model_id] = None
+
+        # Update the adapter's rank and scaling in all LoRA layers
+        update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
+
+        logger.info(
+            f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}"
+        )
+
+        return types.CreateModelOutput(
+            model_id=model_id,
+            base_model=self.base_model_name,
+            lora_config=request_data.lora_config,
+        )
+
+    def process_forward_backward_batch(
+        self, requests: list[tuple[FutureDB, str, types.ForwardBackwardInput]]
+    ) -> dict[str, types.ForwardBackwardOutput | types.ForwardBackwardError]:
         """Process multiple forward_backward requests in a single batch.
 
         Args:
@@ -136,10 +160,10 @@ class TinkerEngine:
         # Filter out invalid requests and mark them as failed
         for future, model_id, request_data in requests:
             if model_id not in self.models:
-                results[future.request_id] = {
-                    "error": f"Model {model_id} not loaded",
-                    "status": "failed"
-                }
+                results[future.request_id] = types.ForwardBackwardError(
+                    error=f"Model {model_id} not loaded",
+                    status="failed",
+                )
             else:
                 valid_requests.append((future, model_id, request_data))
 
@@ -155,8 +179,8 @@ class TinkerEngine:
 
         current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
-            adapter_index = self.models[model_id]["adapter_index"]
-            forward_backward_input = request_data.get("forward_backward_input", {})
+            adapter_index = self.models[model_id].adapter_index
+            forward_backward_input = request_data.forward_backward_input
             data = forward_backward_input["data"]
 
             request_start = current_batch_idx
@@ -183,12 +207,11 @@ class TinkerEngine:
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = jnp.array(
-            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_input_ids],
-            dtype=jnp.int32
+            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32
         )
         loss_mask = jnp.array(
-            [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))], 
-            dtype=jnp.int32
+            [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
+            dtype=jnp.int32,
         )
 
         # Compute per-example losses and gradients using nnx.split pattern
@@ -214,7 +237,7 @@ class TinkerEngine:
 
         # Extract and accumulate gradients for each model_id's specific adapter
         for request_id, model_id, start_idx, end_idx in request_batch_slices:
-            adapter_index = self.models[model_id]["adapter_index"]
+            adapter_index = self.models[model_id].adapter_index
 
             # Extract gradients for this specific adapter index
             adapter_grads = jax.tree.map(lambda g: g[adapter_index], lora_grads)
@@ -233,39 +256,33 @@ class TinkerEngine:
                 seq_len = len(all_input_ids[i])
                 token_losses = per_token_losses[i, :seq_len].astype(jnp.float32)
                 token_logprobs = target_logprobs[i, :seq_len].astype(jnp.float32)
-                loss_fn_outputs.append({
-                    "elementwise_loss": {
-                        "data": token_losses.tolist(),
-                        "dtype": "float32",
-                        "shape": [seq_len]
-                    },
-                    "logprobs": {
-                        "data": token_logprobs.tolist(),
-                        "dtype": "float32",
-                        "shape": [seq_len]
+                loss_fn_outputs.append(
+                    {
+                        "elementwise_loss": {"data": token_losses.tolist(), "dtype": "float32", "shape": [seq_len]},
+                        "logprobs": {"data": token_logprobs.tolist(), "dtype": "float32", "shape": [seq_len]},
                     }
-                })
+                )
 
-            results[request_id] = {
-                "loss_fn_output_type": "scalar",
-                "loss_fn_outputs": loss_fn_outputs,
-                "metrics": {}
-            }
+            results[request_id] = types.ForwardBackwardOutput(
+                loss_fn_output_type="scalar",
+                loss_fn_outputs=loss_fn_outputs,
+                metrics={},
+            )
 
         return results
 
-    def process_optim_step(self, request_id: str, model_id: str, request_data: dict) -> dict:
+    def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id]["adapter_index"]
+        adapter_index = self.models[model_id].adapter_index
 
         # Get accumulated gradients for this adapter
         adapter_grads = self.accumulated_grads.get(model_id)
         if adapter_grads is None:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return {}
+            return types.OptimStepOutput()
 
         # Create full gradient structure with zeros for all adapters except this one
         def expand_adapter_grads(lora_param, adapter_grad):
@@ -277,49 +294,78 @@ class TinkerEngine:
         full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
 
         # Apply optimizer update -- going forward we need to figure out how to use different learning rates per adapter
-        adam_params = request_data.get("adam_params", {})
-        assert adam_params.get("lr", LEARNING_RATE) == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
+        adam_params = request_data.adam_params
+        assert adam_params.lr == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
         self.optimizer.update(self.lora_params, full_lora_grads)
 
         # Clear accumulated gradients
         self.accumulated_grads[model_id] = None
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
-        return {}
+        return types.OptimStepOutput()
 
-    def process_save_weights_for_sampler(self, request_id: str, model_id: str, request_data: dict) -> dict:
+    def process_save_weights_for_sampler(
+        self, model_id: str, request_data: types.SaveWeightsForSamplerInput
+    ) -> types.SaveWeightsForSamplerOutput:
         """Process a save_weights_for_sampler request and save model weights."""
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id]["adapter_index"]
+        adapter_index = self.models[model_id].adapter_index
 
-        checkpoint_id = request_data.get("path")
-        if not checkpoint_id:
-            checkpoint_id = f"checkpoint_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-        else:
-            # Make sure the user cannot store checkpoints in places like ../../<important file>
-            checkpoint_id = Path(checkpoint_id).name
-
+        # Make sure the user cannot store checkpoints in places like ../../<important file>
+        checkpoint_id = Path(request_data.path).name
         output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Extract only this adapter's LoRA parameters
-        adapter_lora_params = jax.tree.map(lambda p: p[adapter_index], self.lora_params)
+        # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
+
+        layer_rank = {
+            path[:-2]: int(node[adapter_index])
+            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
+            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
+        }
+
+        def extract_adapter_params(path, p):
+            rank = layer_rank[path[:-2]]
+            if path[-2].key == "lora_A":
+                return p[adapter_index, :, :rank]
+            elif path[-2].key == "lora_B":
+                return p[adapter_index, :rank, :]
+            else:
+                return p[adapter_index]
+
+        adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
 
         # Save only the LoRA adapter weights
         save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
 
         # Save LoRA config
-        lora_config = LoraConfig(**self.models[model_id]["lora_config"])
+        lora_config = LoraConfig(
+            r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
+        )
         lora_config.save_pretrained(output_dir)
 
         logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
 
-        return {
-            "path": f"tinker://{model_id}/{checkpoint_id}",
-            "type": "save_weights_for_sampler"
-        }
+        return types.SaveWeightsForSamplerOutput(
+            path=f"tinker://{model_id}/{checkpoint_id}",
+            type="save_weights_for_sampler",
+        )
+
+    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
+        match request_type:
+            case types.RequestType.CREATE_MODEL:
+                result = self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+            case types.RequestType.OPTIM_STEP:
+                result = self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+            case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
+                result = self.process_save_weights_for_sampler(
+                    model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
+                )
+            case _:
+                raise ValueError(f"Unknown request type: {request_type}")
+        return result.model_dump()
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -332,7 +378,7 @@ class TinkerEngine:
                 statement = (
                     select(FutureDB)
                     .where(FutureDB.status == RequestStatus.PENDING)
-                    .where(FutureDB.request_type != RequestType.FORWARD_BACKWARD)
+                    .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
                     .order_by(FutureDB.request_id)
                 )
                 other_futures = session.exec(statement).all()
@@ -340,19 +386,21 @@ class TinkerEngine:
                 # Process forward_backward requests in batch
                 if forward_backward_futures:
                     try:
-                        batch_requests = [(f, f.model_id, f.request_data) for f in forward_backward_futures]
+                        batch_requests = [
+                            (f, f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
+                            for f in forward_backward_futures
+                        ]
                         results = self.process_forward_backward_batch(batch_requests)
 
                         # Update each future with its result
                         for future in forward_backward_futures:
                             if future.request_id in results:
                                 result_data = results[future.request_id]
-                                if "error" in result_data and result_data.get("status") == "failed":
-                                    future.result_data = result_data
+                                if isinstance(result_data, types.ForwardBackwardError):
                                     future.status = RequestStatus.FAILED
                                 else:
-                                    future.result_data = result_data
                                     future.status = RequestStatus.COMPLETED
+                                future.result_data = result_data.model_dump()
                                 future.completed_at = datetime.now(timezone.utc)
                                 session.add(future)
                                 logger.info(f"Completed {future.request_type} request {future.request_id}")
@@ -372,39 +420,9 @@ class TinkerEngine:
                 # Process other request types individually (in the future we can also batch independent optim_steps)
                 for future in other_futures:
                     try:
-                        # Process based on request type
-                        if future.request_type == RequestType.CREATE_MODEL:
-                            # Get model from database and create it
-                            model_statement = select(ModelDB).where(ModelDB.model_id == future.model_id)
-                            model_db = session.exec(model_statement).first()
-                            if not model_db:
-                                raise ValueError(f"Model {future.model_id} not found in database")
-                            self.create_model(future.model_id, model_db.lora_config)
-                            result_data = {
-                                "model_id": future.model_id,
-                                "base_model": self.base_model_name,
-                                "lora_config": model_db.lora_config,
-                                "status": "created",
-                                "request_id": future.request_id
-                            }
-                        elif future.request_type == RequestType.OPTIM_STEP:
-                            result_data = self.process_optim_step(
-                                future.request_id,
-                                future.model_id,
-                                future.request_data
-                            )
-                        elif future.request_type == RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
-                            result_data = self.process_save_weights_for_sampler(
-                                future.request_id,
-                                future.model_id,
-                                future.request_data
-                            )
-                        else:
-                            logger.warning(f"Unknown request type: {future.request_type}")
-                            continue
-
-                        # Update the future with results
-                        future.result_data = result_data
+                        future.result_data = self.process_single_request(
+                            future.request_type, future.model_id, future.request_data
+                        )
                         future.status = RequestStatus.COMPLETED
                         future.completed_at = datetime.now(timezone.utc)
                         session.add(future)
@@ -436,12 +454,25 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
 
     parser = OptionParser()
-    parser.add_option("--base-model", dest="base_model",
-                      help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL")
-    parser.add_option("--max-lora-adapters", dest="max_lora_adapters", type="int", default=32,
-                      help="Maximum number of LoRA adapters (default: 32)", metavar="NUM")
-    parser.add_option("--max-lora-rank", dest="max_lora_rank", type="int", default=32,
-                      help="Maximum LoRA rank (default: 32)", metavar="RANK")
+    parser.add_option(
+        "--base-model", dest="base_model", help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL"
+    )
+    parser.add_option(
+        "--max-lora-adapters",
+        dest="max_lora_adapters",
+        type="int",
+        default=32,
+        help="Maximum number of LoRA adapters (default: 32)",
+        metavar="NUM",
+    )
+    parser.add_option(
+        "--max-lora-rank",
+        dest="max_lora_rank",
+        type="int",
+        default=32,
+        help="Maximum LoRA rank (default: 32)",
+        metavar="RANK",
+    )
 
     (options, args) = parser.parse_args()
 
@@ -451,7 +482,7 @@ def main():
     TinkerEngine(
         base_model_name=options.base_model,
         max_lora_adapters=options.max_lora_adapters,
-        max_lora_rank=options.max_lora_rank
+        max_lora_rank=options.max_lora_rank,
     ).run()
 
 
