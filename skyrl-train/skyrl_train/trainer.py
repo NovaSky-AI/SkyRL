@@ -23,6 +23,9 @@ from skyrl_train.generators.base import (
     GeneratorInterface,
 )
 from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
+from skyrl_train.dataset.preprocess import (
+    convert_prompts_responses_to_batch_tensors,
+)
 from skyrl_train.utils import ppo_utils, trainer_utils
 from skyrl_train.utils.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
@@ -138,12 +141,13 @@ class RayPPOTrainer:
                 self.global_step = self.load_checkpoints()
 
         if self.colocate_all:
+            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
             asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
         with Timer("sync_weights"):
             ray.get(self.sync_policy_weights_to_inference_engines())
         if self.colocate_all:
             with Timer("offload_policy_model_to_cpu"):
-                self.policy_model.offload_to_cpu()
+                self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
             asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
         # Eval before training
@@ -255,12 +259,13 @@ class RayPPOTrainer:
 
                     # 7. sync weights to inference engines
                     if self.colocate_all:
+                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
                     with Timer("sync_weights", self.all_timings):
                         ray.get(self.sync_policy_weights_to_inference_engines())
                     if self.colocate_all:
                         with Timer("offload_policy_model_to_cpu"):
-                            self.policy_model.offload_to_cpu()
+                            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
                 # 8. set logs
@@ -492,6 +497,56 @@ class RayPPOTrainer:
         )
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
+    def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
+        """Converts lists to a padded batch of tensors for training"""
+        prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
+        response_ids: List[List[int]] = generator_output["response_ids"]
+        rewards: List[List[float]] = generator_output["rewards"]
+        loss_masks: List[List[int]] = generator_output["loss_masks"]
+
+        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+
+        (
+            sequences_tensor,
+            attention_masks_tensor,
+            response_masks_tensor,
+            rewards_tensor,
+            loss_masks_tensor,
+            rollout_logprobs_tensor,
+        ) = convert_prompts_responses_to_batch_tensors(
+            self.tokenizer,
+            prompt_ids,
+            response_ids,
+            rewards,
+            loss_masks,
+            logprobs,
+        )
+        # sanity check for tis
+        if self.cfg.trainer.algorithm.use_tis:
+            assert (
+                rollout_logprobs_tensor is not None
+            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        training_input = TrainingInputBatch(
+            {
+                "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
+                "attention_mask": attention_masks_tensor,
+                "response_mask": response_masks_tensor,
+                "rewards": rewards_tensor,
+                "loss_mask": loss_masks_tensor,
+                "rollout_logprobs": rollout_logprobs_tensor,
+            },
+        )
+        training_input.metadata = {
+            "uids": uids,
+        }
+        # padded response length
+        training_input.metadata["response_length"] = response_masks_tensor.shape[1]
+        training_input.metadata["avg_response_length"] = sum(
+            len(sample_response_ids) for sample_response_ids in response_ids
+        ) / len(response_ids)
+        return training_input
+
     @torch.no_grad()
     async def generate(
         self,
@@ -658,14 +713,14 @@ class RayPPOTrainer:
 
         # calculate critic values
         if self.colocate_all and self.critic_model is not None:
-            self.critic_model.backload_to_gpu()
+            self.critic_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
         if self.critic_model is not None:
             value_refs = self.critic_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
             if self.colocate_all:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
-                self.critic_model.offload_to_cpu()
+                self.critic_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # calculate ref log probs
         if self.ref_model is not None:
@@ -686,13 +741,13 @@ class RayPPOTrainer:
 
         # calculate action log probs
         if self.colocate_all:
-            self.policy_model.backload_to_gpu()
+            self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
         action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
-            self.policy_model.offload_to_cpu()
+            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
         # if not colocate_policy_ref, then need to gather base_log_probs

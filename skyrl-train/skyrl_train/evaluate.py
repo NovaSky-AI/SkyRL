@@ -18,6 +18,7 @@ from skyrl_train.generators.base import (
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    validate_generator_output,
 )
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
@@ -66,7 +67,7 @@ async def evaluate(
             global_step,
         )
         generator_output: GeneratorOutput = await generator.generate(generator_input)
-        # validate_generator_output(generator_input, generator_output)
+        validate_generator_output(generator_input, generator_output)
         generator_outputs.append(generator_output)
         concat_all_envs.extend(generator_input["env_classes"])
         concat_env_extras.extend(generator_input["env_extras"])

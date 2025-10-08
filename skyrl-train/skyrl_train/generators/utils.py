@@ -6,7 +6,6 @@ from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, Traject
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 
-
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (
