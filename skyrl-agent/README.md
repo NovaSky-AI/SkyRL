@@ -15,12 +15,12 @@ SkyRL-Agent is still under development. We are actively working on expanding ava
 ## Getting Started
 
 
-The first step is the clone the repository. `skyrl_agent` is it's own subpackage in the SkyRL repository.
+The first step is the clone the repository. `skyrl_agent` is its own subpackage in the SkyRL repository.
 
 ```bash
 git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL.git 
 # our working directory
-cd skyrl_agent
+cd skyrl-agent
 ```
 
 ### Installation

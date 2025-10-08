@@ -36,7 +36,7 @@ For model training, checkout [`skyrl-train`](./skyrl-train) to start using, modi
 
 For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your task in the simple gymnasium interface.
 
-For agentic pipelines, checkout [`skyagent`](./skyagent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.
+For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.
 
 
 # News
