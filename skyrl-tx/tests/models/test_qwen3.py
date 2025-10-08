@@ -125,41 +125,44 @@ def test_qwen3_moe_layer_lora():
         moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_moe_base_weights(moe_layer, hf_moe_layer)
 
-        # Set LoRA weights for adapter 0
+        # Set LoRA weights for all adapters
         rng = np.random.default_rng(42)
         scaling = 2.0
-        for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
-            proj.lora_A.value = proj.lora_A.value.at[0].set(rng.normal(0, 0.01, proj.lora_A.value.shape[1:]))
-            proj.lora_B.value = proj.lora_B.value.at[0].set(rng.normal(0, 0.01, proj.lora_B.value.shape[1:]))
-            proj.lora_scaling.value = proj.lora_scaling.value.at[0].set(scaling)
+        for adapter_idx in range(config.max_lora_adapters):
+            for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
+                proj.lora_A.value = proj.lora_A.value.at[adapter_idx].set(rng.normal(0, 0.01, proj.lora_A.value.shape[1:]))
+                proj.lora_B.value = proj.lora_B.value.at[adapter_idx].set(rng.normal(0, 0.01, proj.lora_B.value.shape[1:]))
+                proj.lora_scaling.value = proj.lora_scaling.value.at[adapter_idx].set(scaling)
 
-        # Test with LoRA adapter 0
-        adapter_indices = jnp.array([0, 0])
-        output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
+        # Test each adapter by comparing with merged weights
+        for adapter_idx in range(config.max_lora_adapters):
+            # Test with LoRA adapter
+            adapter_indices = jnp.array([adapter_idx, adapter_idx])
+            output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
 
-        # Create merged model by adding LoRA weights to base weights
-        # For each projection: merged_weight = base_weight + scaling * (lora_B @ lora_A)
-        moe_layer_merged = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(1))
-        moe_layer_merged.gate.kernel[:] = moe_layer.gate.kernel[:]
+            # Create merged model by adding LoRA weights to base weights
+            # For each projection: merged_weight = base_weight + scaling * (lora_B @ lora_A)
+            moe_layer_merged = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(1 + adapter_idx))
+            moe_layer_merged.gate.kernel[:] = moe_layer.gate.kernel[:]
 
-        for proj_name in ["gate_proj", "up_proj", "down_proj"]:
-            proj = getattr(moe_layer.experts, proj_name)
-            proj_merged = getattr(moe_layer_merged.experts, proj_name)
+            for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                proj = getattr(moe_layer.experts, proj_name)
+                proj_merged = getattr(moe_layer_merged.experts, proj_name)
 
-            # For each expert, merge: base + scaling * (lora_B @ lora_A)
-            for expert_idx in range(config.num_experts):
-                lora_A = proj.lora_A.value[0, expert_idx, :, :]  # (in_features, rank)
-                lora_B = proj.lora_B.value[0, expert_idx, :, :]  # (rank, out_features)
-                lora_delta = scaling * (lora_A @ lora_B)  # (in_features, out_features)
+                # For each expert, merge: base + scaling * (lora_B @ lora_A)
+                for expert_idx in range(config.num_experts):
+                    lora_A = proj.lora_A.value[adapter_idx, expert_idx, :, :]  # (in_features, rank)
+                    lora_B = proj.lora_B.value[adapter_idx, expert_idx, :, :]  # (rank, out_features)
+                    lora_delta = scaling * (lora_A @ lora_B)  # (in_features, out_features)
 
-                merged_weight = proj.weight[expert_idx, :, :] + lora_delta
-                proj_merged.weight.value = proj_merged.weight.value.at[expert_idx, :, :].set(merged_weight)
+                    merged_weight = proj.weight[expert_idx, :, :] + lora_delta
+                    proj_merged.weight.value = proj_merged.weight.value.at[expert_idx, :, :].set(merged_weight)
 
-        # Run merged model without LoRA adapters
-        output_merged, _ = moe_layer_merged(x.numpy(), return_router_logits=True)
+            # Run merged model without LoRA adapters
+            output_merged, _ = moe_layer_merged(x.numpy(), return_router_logits=True)
 
-        # Outputs should match since merged weights = base + lora
-        assert np.allclose(output_with_lora, output_merged, rtol=1e-4, atol=1e-5)
+            # Outputs should match since merged weights = base + lora
+            assert np.allclose(output_with_lora, output_merged, rtol=1e-4, atol=1e-5)
 
 
 def test_qwen3_lora():
