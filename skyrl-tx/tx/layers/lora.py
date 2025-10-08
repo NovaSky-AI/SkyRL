@@ -18,9 +18,15 @@ class LoRAMixin:
     lora_B: nnx.Param | None
 
     def init_lora(
-        self, *, max_lora_adapters: int, in_features: int, out_features: int,
-        max_lora_rank: int, sharding: jax.sharding.PartitionSpec,
-        dtype: jnp.dtype, rngs: nnx.Rngs,
+        self,
+        *,
+        max_lora_adapters: int,
+        in_features: int,
+        out_features: int,
+        max_lora_rank: int,
+        sharding: jax.sharding.PartitionSpec,
+        dtype: jnp.dtype,
+        rngs: nnx.Rngs,
     ) -> None:
         self.in_features = in_features
         self.out_features = out_features
@@ -36,18 +42,24 @@ class LoRAMixin:
             self.lora_scaling = nnx.Variable(jnp.full((max_lora_adapters,), 1.0, dtype=dtype))
             self.lora_ranks = nnx.Variable(jnp.full((max_lora_adapters,), max_lora_rank, dtype=jnp.int32))
             self.lora_A = Param(
-                max_lora_adapters, in_features, max_lora_rank, dtype=dtype,
+                max_lora_adapters,
+                in_features,
+                max_lora_rank,
+                dtype=dtype,
                 kernel_init=nnx.with_partitioning(
-                    nnx.initializers.he_uniform(),
-                    jax.sharding.PartitionSpec(None, sharding[0], None)
-                ), rngs=rngs,
+                    nnx.initializers.he_uniform(), jax.sharding.PartitionSpec(None, sharding[0], None)
+                ),
+                rngs=rngs,
             )
             self.lora_B = Param(
-                max_lora_adapters, max_lora_rank, out_features, dtype=dtype,
+                max_lora_adapters,
+                max_lora_rank,
+                out_features,
+                dtype=dtype,
                 kernel_init=nnx.with_partitioning(
-                    nnx.initializers.zeros_init(),
-                    jax.sharding.PartitionSpec(None, None, sharding[1])
-                ), rngs=rngs,
+                    nnx.initializers.zeros_init(), jax.sharding.PartitionSpec(None, None, sharding[1])
+                ),
+                rngs=rngs,
             )
 
     def apply_lora(
@@ -74,12 +86,9 @@ class LoRAMixin:
         intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
-        # Unsort and reshape
+        # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
-
-        # Apply scaling
         lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
-
         return base_output + lora_output.reshape(base_output.shape)
 
 
@@ -87,8 +96,12 @@ class LoRALinear(LoRAMixin, nnx.Linear):
     """An nnx.Linear layer with multi-adapter LoRA support."""
 
     def __init__(
-        self, in_features: int, out_features: int, *,
-        max_lora_adapters: int = 0, max_lora_rank: int = 8,
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        max_lora_adapters: int = 0,
+        max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
         use_bias: bool = True,
@@ -100,12 +113,27 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         if use_bias and bias_init is None:
             bias_init = nnx.initializers.zeros_init()
 
-        super().__init__(in_features, out_features, use_bias=use_bias, dtype=dtype, param_dtype=param_dtype,
-            kernel_init=kernel_init, bias_init=bias_init, rngs=rngs,
+        super().__init__(
+            in_features,
+            out_features,
+            use_bias=use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            kernel_init=kernel_init,
+            bias_init=bias_init,
+            rngs=rngs,
         )
-        assert self.kernel.value.sharding is not None, "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        self.init_lora(in_features=in_features, out_features=out_features, max_lora_adapters=max_lora_adapters, max_lora_rank=max_lora_rank,
-            sharding=self.kernel.value.sharding.spec, dtype=param_dtype, rngs=rngs,
+        assert (
+            self.kernel.value.sharding is not None
+        ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
+        self.init_lora(
+            in_features=in_features,
+            out_features=out_features,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
+            sharding=self.kernel.value.sharding.spec,
+            dtype=param_dtype,
+            rngs=rngs,
         )
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
@@ -142,4 +170,3 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
 
     updated_state = jax.tree.map_with_path(update_lora_config, state)
     nnx.update(model, updated_state)
-

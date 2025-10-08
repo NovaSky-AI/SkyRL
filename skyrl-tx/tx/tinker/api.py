@@ -68,7 +68,7 @@ async def create_future(
         request_type=request_type,
         model_id=model_id,
         request_data=request_data.model_dump(),
-        status=RequestStatus.PENDING
+        status=RequestStatus.PENDING,
     )
     session.add(future_db)
     await session.flush()  # Flush to generate auto-increment request_id
@@ -169,7 +169,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         session=session,
         request_type=types.RequestType.CREATE_MODEL,
         model_id=model_id,
-        request_data=types.CreateModelInput(lora_config=lora_config)
+        request_data=types.CreateModelInput(lora_config=lora_config),
     )
 
     model_db = ModelDB(
@@ -177,7 +177,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         base_model=request.base_model,
         lora_config=lora_config.model_dump(),
         status="created",
-        request_id=request_id
+        request_id=request_id,
     )
     session.add(model_db)
 
@@ -188,7 +188,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         base_model=request.base_model,
         lora_config=request.lora_config,
         status="created",
-        request_id=str(request_id)
+        request_id=str(request_id),
     )
 
 
@@ -209,16 +209,10 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
-        base_model=model.base_model,
-        lora_config=LoRAConfig(rank=lora_config.rank),
-        model_name=model.base_model
+        base_model=model.base_model, lora_config=LoRAConfig(rank=lora_config.rank), model_name=model.base_model
     )
 
-    return ModelInfoResponse(
-        model_id=model.model_id,
-        status=model.status,
-        model_data=model_data
-    )
+    return ModelInfoResponse(model_id=model.model_id, status=model.status, model_data=model_data)
 
 
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
@@ -348,11 +342,12 @@ async def root():
             "training": ["/api/v1/forward_backward", "/api/v1/optim_step"],
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
-            "telemetry": ["/api/v1/telemetry"]
-        }
+            "telemetry": ["/api/v1/telemetry"],
+        },
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

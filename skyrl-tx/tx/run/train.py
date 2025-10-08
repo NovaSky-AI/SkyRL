@@ -18,9 +18,7 @@ app = typer.Typer()
 
 def loss_fn(model, batch):
     logits = model(batch["text"], attention_mask=batch["attention_mask"])["logits"]
-    loss = optax.softmax_cross_entropy_with_integer_labels(
-        logits=logits, labels=batch["target"]
-    )
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=batch["target"])
     return loss.mean(), logits
 
 
@@ -38,19 +36,35 @@ def train(
     dataset: str = typer.Option(..., "--dataset", help="HuggingFace dataset to use for training"),
     loader_name: str = typer.Option("tx.loaders.text", "--loader", help="Loader used for loading the dataset"),
     split: str = typer.Option("train", "--split", help="The dataset split to use"),
-    output_dir: Path = typer.Option(..., "--output-dir", help="The output directory where the model predictions and checkpoints will be written"),
-    load_checkpoint_path: Path | None = typer.Option(None, "--load-checkpoint-path", help="If specified, resume training from this checkpoint"),
+    output_dir: Path = typer.Option(
+        ..., "--output-dir", help="The output directory where the model predictions and checkpoints will be written"
+    ),
+    load_checkpoint_path: Path | None = typer.Option(
+        None, "--load-checkpoint-path", help="If specified, resume training from this checkpoint"
+    ),
     save_steps: int = typer.Option(500, "--save-steps", help="Number of steps between checkpoints"),
     max_steps: int | None = typer.Option(None, "--max-steps", help="The maximum number of training steps"),
     batch_size: int = typer.Option(..., "--batch-size", help="Batch size of each training batch"),
     optimizer_name: OptimizerName = typer.Option("adamw", "--optimizer", help="Which optax optimizer to use"),
-    optimizer_args: dict = typer.Option('{"learning_rate": 1e-5, "weight_decay": 0.1}', "--optimizer-args", help="Arguments for the optax optimizer (in JSON format)", parser=json.loads),
+    optimizer_args: dict = typer.Option(
+        '{"learning_rate": 1e-5, "weight_decay": 0.1}',
+        "--optimizer-args",
+        help="Arguments for the optax optimizer (in JSON format)",
+        parser=json.loads,
+    ),
     tp_size: int = typer.Option(1, "--tp-size", help="Tensor parallelism degree to use for the model"),
-    tracker_name: ExperimentTracker | None = typer.Option(None, "--tracker", help="Experiment tracker to report results to"),
-    tracker_args: dict = typer.Option("{}", "--tracker-args", help="Arguments that will be passed to the experiment tracker (in JSON format)", parser=json.loads),
+    tracker_name: ExperimentTracker | None = typer.Option(
+        None, "--tracker", help="Experiment tracker to report results to"
+    ),
+    tracker_args: dict = typer.Option(
+        "{}",
+        "--tracker-args",
+        help="Arguments that will be passed to the experiment tracker (in JSON format)",
+        parser=json.loads,
+    ),
 ) -> None:
     if not jax._src.xla_bridge.backends_are_initialized():  # ty: ignore
-        jax.config.update('jax_num_cpu_devices', tp_size)
+        jax.config.update("jax_num_cpu_devices", tp_size)
         # If you want to debug NaNs, add the following:
         # jax.config.update("jax_debug_nans", True)
 
