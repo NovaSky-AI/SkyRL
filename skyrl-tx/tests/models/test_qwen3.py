@@ -102,6 +102,47 @@ def load_lora_weights(
     jax_module.lora_ranks.value = jax_module.lora_ranks.value.at[adapter_idx].set(rank)
 
 
+def test_qwen3_moe_layer_lora():
+    """Basic smoke test for MoE LoRA functionality. TODO: Add proper test comparing with HF PEFT."""
+    model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    config = AutoConfig.from_pretrained(model_name)
+
+    # Enable LoRA
+    config.max_lora_adapters = 2
+    config.max_lora_rank = 4
+
+    hf_moe_layer = hf_model.model.layers[0].mlp
+    x = torch.randn(2, 2, config.hidden_size)  # 2 samples to test different adapters
+
+    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+    with jax.set_mesh(mesh):
+        moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+
+        # Load base weights
+        moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
+        for i, expert in enumerate(hf_moe_layer.experts):
+            moe_layer.experts.gate_proj.weight.value = moe_layer.experts.gate_proj.weight.value.at[i,:,:].set(expert.gate_proj.weight.detach().numpy().T)
+            moe_layer.experts.up_proj.weight.value = moe_layer.experts.up_proj.weight.value.at[i,:,:].set(expert.up_proj.weight.detach().numpy().T)
+            moe_layer.experts.down_proj.weight.value = moe_layer.experts.down_proj.weight.value.at[i,:,:].set(expert.down_proj.weight.detach().numpy().T)
+
+        # Test without LoRA (should match base)
+        output_no_lora, _ = moe_layer(x.numpy(), return_router_logits=True)
+
+        # Set some LoRA weights (small random values to create a detectable difference)
+        rng = np.random.default_rng(42)
+        for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
+            proj.lora_A.value = proj.lora_A.value.at[0].set(rng.normal(0, 0.01, proj.lora_A.value.shape[1:]))
+            proj.lora_B.value = proj.lora_B.value.at[0].set(rng.normal(0, 0.01, proj.lora_B.value.shape[1:]))
+
+        # Test with LoRA adapter 0
+        adapter_indices = jnp.array([0, 0])
+        output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
+
+        # Outputs should be different when LoRA is applied
+        assert not np.allclose(output_no_lora, output_with_lora, rtol=1e-4)
+
+
 def test_qwen3_lora():
     """Test multi-LoRA implementation by comparing with HuggingFace PEFT model using two different adapters."""
     base_model_name = "Qwen/Qwen3-0.6B"
