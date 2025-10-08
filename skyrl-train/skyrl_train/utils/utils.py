@@ -66,7 +66,7 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate policy mini batch size
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
 
-    if cfg.trainer.strategy == "megatron":
+    if hasattr(cfg.trainer, "strategy") and cfg.trainer.strategy == "megatron":
         pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
         cp = cfg.trainer.policy.megatron_config.context_parallel_size
         tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
@@ -141,7 +141,7 @@ def validate_batch_sizes(cfg: DictConfig):
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
-        if cfg.trainer.strategy == "megatron":
+        if hasattr(cfg.trainer, "strategy") and cfg.trainer.strategy == "megatron":
             pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
             cp = cfg.trainer.ref.megatron_config.context_parallel_size
             tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
