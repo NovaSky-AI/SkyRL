@@ -67,9 +67,9 @@ def test_qwen3_moe_layer():
         moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
         for i, expert in enumerate(hf_moe_layer.experts):
-            moe_layer.experts.gate_proj[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-            moe_layer.experts.up_proj[i, :, :] = expert.up_proj.weight.detach().numpy().T
-            moe_layer.experts.down_proj[i, :, :] = expert.down_proj.weight.detach().numpy().T
+            moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
+            moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
+            moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
 
     final_hidden_states, router_logits = moe_layer(x.numpy(), return_router_logits=True)
 
@@ -122,9 +122,9 @@ def test_qwen3_moe_layer_lora():
         # Load base weights
         moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
         for i, expert in enumerate(hf_moe_layer.experts):
-            moe_layer.experts.gate_proj.weight.value = moe_layer.experts.gate_proj.weight.value.at[i,:,:].set(expert.gate_proj.weight.detach().numpy().T)
-            moe_layer.experts.up_proj.weight.value = moe_layer.experts.up_proj.weight.value.at[i,:,:].set(expert.up_proj.weight.detach().numpy().T)
-            moe_layer.experts.down_proj.weight.value = moe_layer.experts.down_proj.weight.value.at[i,:,:].set(expert.down_proj.weight.detach().numpy().T)
+            moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
+            moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
+            moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
 
         # Test without LoRA (should match base)
         output_no_lora, _ = moe_layer(x.numpy(), return_router_logits=True)

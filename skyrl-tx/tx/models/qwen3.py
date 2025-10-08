@@ -3,7 +3,7 @@ import jax
 from jax import numpy as jnp
 from transformers import Qwen3Config
 
-from tx.layers.lora import LoRALinear
+from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import Param, prepare_routing
 
 
@@ -169,32 +169,43 @@ class Qwen3Experts(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.gate_proj = Param(
+        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
+        max_lora_rank = getattr(config, "max_lora_rank", 8)
+
+        self.gate_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
         )
-        self.up_proj = Param(
+        self.up_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
         )
-        self.down_proj = Param(
+        self.down_proj = LoRAExpert(
             config.num_experts,
             config.moe_intermediate_size,
             config.hidden_size,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp", None)),
             rngs=rngs,
         )
 
-    def __call__(self, hidden_states: jax.Array, router_logits: jax.Array) -> jax.Array:
+    def __call__(
+        self, hidden_states: jax.Array, router_logits: jax.Array, adapter_indices: jax.Array | None = None
+    ) -> jax.Array:
         # Get top-k experts for each token and compute routing weights
         routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
         routing_weights = nnx.softmax(routing_weights, axis=-1)
@@ -206,10 +217,18 @@ class Qwen3Experts(nnx.Module):
             hidden_states_expanded, selected_experts_flat, self.config.num_experts
         )
 
-        # Apply expert layers using ragged_dot
-        gate_out = jax.lax.ragged_dot(hidden_states_sorted, self.gate_proj.value, group_sizes)
-        up_out = jax.lax.ragged_dot(hidden_states_sorted, self.up_proj.value, group_sizes)
-        down_out = jax.lax.ragged_dot(nnx.silu(gate_out) * up_out, self.down_proj.value, group_sizes)
+        # Prepare adapter indices for LoRA if needed
+        adapter_indices_sorted = None
+        if adapter_indices is not None:
+            adapter_indices_expanded = jnp.repeat(adapter_indices, self.config.num_experts_per_tok)
+            adapter_indices_sorted = adapter_indices_expanded[
+                jnp.argsort(selected_experts_flat)
+            ]
+
+        # Apply expert layers using LoRAExpert
+        gate_out = self.gate_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
+        up_out = self.up_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
+        down_out = self.down_proj(nnx.silu(gate_out) * up_out, group_sizes, adapter_indices_sorted)
 
         # Unsort and combine the expert outputs
         unsorted_out = down_out[unsort_indices]
@@ -233,12 +252,16 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
         self.experts = Qwen3Experts(config, dtype=dtype, rngs=rngs)
 
     def __call__(
-        self, hidden_states: jax.Array, *, return_router_logits: bool = False
+        self,
+        hidden_states: jax.Array,
+        *,
+        adapter_indices: jax.Array | None = None,
+        return_router_logits: bool = False,
     ) -> jax.Array | tuple[jax.Array, jax.Array]:
         original_shape = hidden_states.shape
         hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
         router_logits = self.gate(hidden_states)
-        hidden_states = self.experts(hidden_states, router_logits)
+        hidden_states = self.experts(hidden_states, router_logits, adapter_indices)
         hidden_states = hidden_states.reshape(original_shape)
 
         if return_router_logits:
@@ -274,10 +297,7 @@ class Qwen3DecoderLayer(nnx.Module):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        if isinstance(self.mlp, Qwen3MLP):
-            hidden_states = self.mlp(hidden_states, adapter_indices)
-        else:
-            hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, adapter_indices=adapter_indices)
         hidden_states = residual + hidden_states
 
         return hidden_states
