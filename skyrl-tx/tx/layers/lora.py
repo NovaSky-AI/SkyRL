@@ -78,12 +78,8 @@ class LoRAMixin:
         A = self.lora_A.value[adapter_indices]
         B = self.lora_B.value[adapter_indices]
         scaling = self.lora_scaling.value[adapter_indices]
-        ranks = self.lora_ranks.value[adapter_indices]
 
-        rank_mask = jnp.arange(self.max_lora_rank)[None, :] < ranks[:, None]
-        A_masked = A * rank_mask[:, None, :]  # only need to mask A because we sum over the rank in the einsum below
-
-        lora_output = jnp.einsum("bsi,bir,bro->bso", x_flat, A_masked, B) * scaling[:, None, None]
+        lora_output = jnp.einsum("bsi,bir,bro->bso", x_flat, A, B) * scaling[:, None, None]
         return base_output + lora_output.reshape(base_output.shape)
 
 
