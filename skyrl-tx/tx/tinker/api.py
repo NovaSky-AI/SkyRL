@@ -162,10 +162,6 @@ class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
 
 
-class DownloadCheckpointRequest(BaseModel):
-    tinker_path: str
-
-
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
 async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
     """Create a new model, optionally with a LoRA adapter."""
