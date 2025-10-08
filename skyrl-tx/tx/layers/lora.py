@@ -21,15 +21,14 @@ class LoRAMixin:
         self,
         *,
         max_lora_adapters: int,
-        in_features: int,
-        out_features: int,
         max_lora_rank: int,
-        sharding: jax.sharding.PartitionSpec,
+        shape_A: tuple[int, ...],
+        shape_B: tuple[int, ...],
+        sharding_A: jax.sharding.PartitionSpec,
+        sharding_B: jax.sharding.PartitionSpec,
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
-        self.in_features = in_features
-        self.out_features = out_features
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
 
@@ -42,23 +41,15 @@ class LoRAMixin:
             self.lora_scaling = nnx.Variable(jnp.full((max_lora_adapters,), 1.0, dtype=dtype))
             self.lora_ranks = nnx.Variable(jnp.full((max_lora_adapters,), max_lora_rank, dtype=jnp.int32))
             self.lora_A = Param(
-                max_lora_adapters,
-                in_features,
-                max_lora_rank,
+                *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(
-                    nnx.initializers.he_uniform(), jax.sharding.PartitionSpec(None, sharding[0], None)
-                ),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
                 rngs=rngs,
             )
             self.lora_B = Param(
-                max_lora_adapters,
-                max_lora_rank,
-                out_features,
+                *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(
-                    nnx.initializers.zeros_init(), jax.sharding.PartitionSpec(None, None, sharding[1])
-                ),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
                 rngs=rngs,
             )
 
@@ -71,10 +62,11 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        batch_size, seq_len = x.shape[0], x.shape[1]
+        (batch_size, seq_len, in_features) = x.shape
+        assert len(self.lora_A.shape) == 3 and self.lora_A.value.shape[1] == in_features
         assert adapter_indices.shape[0] == batch_size
 
-        x_flat = x.reshape(-1, self.in_features)
+        x_flat = x.reshape(-1, in_features)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Sort tokens to prepare for ragged_dot
@@ -126,12 +118,14 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         assert (
             self.kernel.value.sharding is not None
         ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
+        sharding = self.kernel.value.sharding.spec
         self.init_lora(
-            in_features=in_features,
-            out_features=out_features,
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
-            sharding=self.kernel.value.sharding.spec,
+            shape_A=(max_lora_adapters, in_features, max_lora_rank),
+            shape_B=(max_lora_adapters, max_lora_rank, out_features),
+            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], None),
+            sharding_B=jax.sharding.PartitionSpec(None, None, sharding[1]),
             dtype=param_dtype,
             rngs=rngs,
         )
