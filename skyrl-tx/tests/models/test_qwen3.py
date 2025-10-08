@@ -9,6 +9,7 @@ from peft import LoraConfig, get_peft_model
 import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock
 
 from tx.layers.lora import LoRAMixin
 from tx.models import Qwen3ForCausalLM
@@ -52,10 +53,10 @@ def test_qwen3(tp: int):
         assert np.allclose(hf_outputs.hidden_states[-1], outputs["hidden_states"][-1], rtol=1e-3, atol=1e-3)
 
 
-def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: torch.nn.Module) -> None:
+def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T  # ty: ignore
-    for i, expert in enumerate(hf_moe_layer.experts):  # ty: ignore
+    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
+    for i, expert in enumerate(hf_moe_layer.experts):
         jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T  # ty: ignore
         jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T  # ty: ignore
         jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T  # ty: ignore
