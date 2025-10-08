@@ -92,14 +92,10 @@ def load_lora_weights(
         and jax_module.lora_scaling is not None
         and jax_module.lora_ranks is not None
     )
-    jax_module.lora_A.value = jax_module.lora_A.value.at[adapter_idx].set(
-        jnp.array(hf_module.lora_A[adapter_name].weight.detach().numpy().T)  # ty: ignore
-    )
-    jax_module.lora_B.value = jax_module.lora_B.value.at[adapter_idx].set(
-        jnp.array(hf_module.lora_B[adapter_name].weight.detach().numpy().T)  # ty: ignore
-    )
-    jax_module.lora_scaling.value = jax_module.lora_scaling.value.at[adapter_idx].set(scaling)
-    jax_module.lora_ranks.value = jax_module.lora_ranks.value.at[adapter_idx].set(rank)
+    jax_module.lora_A[adapter_idx, :, :] = hf_module.lora_A[adapter_name].weight.detach().numpy().T  # ty: ignore
+    jax_module.lora_B[adapter_idx, :, :] = hf_module.lora_B[adapter_name].weight.detach().numpy().T  # ty: ignore
+    jax_module.lora_scaling[adapter_idx] = scaling
+    jax_module.lora_ranks[adapter_idx] = rank
 
 
 def test_qwen3_lora():
