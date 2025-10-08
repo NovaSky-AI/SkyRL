@@ -17,6 +17,7 @@ import numpy as np
 from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 
 
@@ -351,39 +352,23 @@ def test_validate_batch_sizes():
         critic_model_path=None,
     ):
         """Helper to create config for validation testing."""
-        return OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    "policy_mini_batch_size": policy_mini_batch_size,
-                    "critic_mini_batch_size": critic_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                    "micro_forward_batch_size_per_gpu": micro_forward_batch_size_per_gpu,
-                    "placement": {
-                        "policy_num_nodes": policy_num_nodes,
-                        "policy_num_gpus_per_node": policy_num_gpus_per_node,
-                        "critic_num_nodes": critic_num_nodes,
-                        "critic_num_gpus_per_node": critic_num_gpus_per_node,
-                    },
-                    "policy": {
-                        "sequence_parallel_size": policy_sequence_parallel_size,
-                    },
-                    "critic": {
-                        "model": {
-                            "path": critic_model_path,
-                        },
-                        "sequence_parallel_size": critic_sequence_parallel_size,
-                    },
-                    "algorithm": {
-                        "use_kl_loss": False,
-                        "use_kl_in_reward": False,
-                    },
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
+        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+        cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
+        cfg.trainer.placement.policy_num_nodes = policy_num_nodes
+        cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
+        cfg.trainer.placement.critic_num_nodes = critic_num_nodes
+        cfg.trainer.placement.critic_num_gpus_per_node = critic_num_gpus_per_node
+        cfg.trainer.policy.sequence_parallel_size = policy_sequence_parallel_size
+        cfg.trainer.critic.model.path = critic_model_path
+        cfg.trainer.critic.sequence_parallel_size = critic_sequence_parallel_size
+        cfg.trainer.algorithm.use_kl_loss = False
+        cfg.trainer.algorithm.use_kl_in_reward = False
+        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
+        return cfg
 
     # Test Case 1: Valid configuration
     cfg = create_test_config()
@@ -689,53 +674,26 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     """Ensure train_batch_size is >= lcm(policy_dp, ref_dp) when ref is used; else >= policy_dp."""
 
     def create_config(train_batch_size, policy_dp, ref_dp, include_ref=True):
-        return OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    # Make policy checks pass cleanly
-                    "policy_mini_batch_size": train_batch_size,
-                    "critic_mini_batch_size": 1,
-                    "micro_train_batch_size_per_gpu": 1,
-                    "micro_forward_batch_size_per_gpu": 1,
-                    "placement": {
-                        "policy_num_nodes": 1,
-                        "policy_num_gpus_per_node": policy_dp,
-                        "ref_num_nodes": 1,
-                        "ref_num_gpus_per_node": ref_dp if include_ref else 1,
-                        # Ensure critic fields exist but do not affect this test
-                        "critic_num_nodes": 1,
-                        "critic_num_gpus_per_node": 1,
-                    },
-                    "policy": {
-                        # Set SP=1 so DP equals gpus_per_node
-                        "sequence_parallel_size": 1,
-                    },
-                    "ref": {
-                        # Set SP=1 so DP equals gpus_per_node
-                        "sequence_parallel_size": 1,
-                    },
-                    "critic": {
-                        "model": {
-                            # Disable critic for this test
-                            "path": None,
-                        },
-                        # Keep present to satisfy schema
-                        "sequence_parallel_size": 1,
-                    },
-                    "algorithm": {
-                        # Control ref usage via KL flags
-                        "use_kl_loss": include_ref,
-                        "use_kl_in_reward": False,
-                        "policy_loss_type": "regular",
-                    },
-                },
-                "generator": {
-                    # Keep per-gpu mini/micro calculations straightforward
-                    "n_samples_per_prompt": 1,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.policy_mini_batch_size = train_batch_size
+        cfg.trainer.critic_mini_batch_size = 1
+        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.placement.policy_num_nodes = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = policy_dp
+        cfg.trainer.placement.ref_num_nodes = 1
+        cfg.trainer.placement.ref_num_gpus_per_node = ref_dp if include_ref else 1
+        cfg.trainer.placement.critic_num_nodes = 1
+        cfg.trainer.placement.critic_num_gpus_per_node = 1
+        cfg.trainer.policy.sequence_parallel_size = 1
+        cfg.trainer.ref.sequence_parallel_size = 1
+        cfg.trainer.critic.model.path = None
+        cfg.trainer.critic.sequence_parallel_size = 1
+        cfg.trainer.algorithm.use_kl_loss = include_ref
+        cfg.trainer.algorithm.use_kl_in_reward = False
+        cfg.trainer.algorithm.policy_loss_type = "regular"
+        return cfg
 
     # Fail: lcm(2, 3) = 6, but train_batch_size = 5 when ref is used
     cfg = create_config(train_batch_size=5, policy_dp=2, ref_dp=3, include_ref=True)
