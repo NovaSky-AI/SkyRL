@@ -121,7 +121,8 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
         sharding = self.kernel.value.sharding.spec
         self.init_lora(
-            max_lora_adapters=max_lora_adapters, max_lora_rank=max_lora_rank,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, in_features, max_lora_rank),
             shape_B=(max_lora_adapters, max_lora_rank, out_features),
             sharding_A=jax.sharding.PartitionSpec(None, sharding[0], None),
