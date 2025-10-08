@@ -19,8 +19,8 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 MAX_TURNS=6
 
-uv run --isolated --extra vllm -m examples.gptoss.main_gptoss \
-  trainer.algorithm.advantage_estimator="step_wise" \
+uv run --isolated --extra vllm -m examples.turn_by_turn.main_gptoss \
+  trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \

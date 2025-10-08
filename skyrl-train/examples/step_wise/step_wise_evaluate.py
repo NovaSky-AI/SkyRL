@@ -93,21 +93,19 @@ async def evaluate(
         concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
     )
     # 2.1 only use the final step metris
-    metrics_generator_output = defaultdict(list)
-    print("number of samples: ", len(concat_generator_outputs["response_ids"]))
+    generator_output_last_step = defaultdict(list)
     for key in concat_generator_outputs:
         if isinstance(concat_generator_outputs[key], list):
-            metrics_generator_output[key] = [
+            generator_output_last_step[key] = [
                 concat_generator_outputs[key][i]
                 for i in range(len(concat_generator_outputs[key]))
                 if concat_generator_outputs["is_last_step"][i]
             ]
-    metrics_uids = [
+    uids_last_step = [
         uid for uid, is_last_step in zip(concat_uids, concat_generator_outputs["is_last_step"]) if is_last_step
     ]
-    print("number of samples used for metrics: ", len(metrics_uids))
     # 3. Calculate overall metrics across all datasets
-    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(metrics_generator_output, metrics_uids)
+    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_avg_score,
