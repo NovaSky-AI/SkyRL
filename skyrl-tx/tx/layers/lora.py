@@ -59,11 +59,10 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        batch_size = x.shape[0]
+        batch_size, seq_len = x.shape[0], x.shape[1]
         assert adapter_indices.shape[0] == batch_size
 
         x_reshaped = x.reshape(-1, self.in_features)
-        seq_len = x_reshaped.shape[0] // batch_size
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Prepare for ragged_dot
@@ -71,12 +70,8 @@ class LoRAMixin:
             x_reshaped, adapter_indices_expanded, self.max_lora_adapters
         )
 
-        # Mask out unused rank dimensions
-        rank_mask = jnp.arange(self.max_lora_rank)[None, :] < self.lora_ranks.value[:, None]
-        A_masked = self.lora_A.value * rank_mask[:, None, :]
-
         # Apply LoRA using ragged_dot: x @ A @ B
-        intermediate = jax.lax.ragged_dot(x_sorted, A_masked, group_sizes)
+        intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
         # Unsort and reshape
