@@ -55,7 +55,7 @@ def compute_advantages_step_wise(
     return advantages, returns
 
 
-class GPTOSSTrainer(RayPPOTrainer):
+class StepWiseTrainer(RayPPOTrainer):
     def convert_to_training_input(
         self, generator_output: StepWiseGeneratorOutput, uids: List[str]
     ) -> TrainingInputBatch:

@@ -44,7 +44,7 @@ class AgentLoopOutput:
     rollout_logprobs: Optional[List[float]]
 
 
-class GPTOSSGenerator(GeneratorInterface):
+class StepWiseGenerator(GeneratorInterface):
     def __init__(
         self,
         generator_cfg: DictConfig,

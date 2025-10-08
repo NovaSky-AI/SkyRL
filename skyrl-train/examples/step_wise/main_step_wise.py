@@ -5,8 +5,8 @@ from omegaconf import DictConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.generators.base import GeneratorInterface
-from examples.gptoss.gpt_oss_generator_step_wise import GPTOSSGenerator
-from examples.gptoss.gpt_oss_trainer import GPTOSSTrainer
+from examples.step_wise.step_wise_generator import StepWiseGenerator
+from examples.step_wise.step_wise_trainer import StepWiseTrainer
 
 
 class GPTOSSExp(BasePPOExp):
@@ -17,7 +17,7 @@ class GPTOSSExp(BasePPOExp):
             GeneratorInterface: The generator.
         """
 
-        return GPTOSSGenerator(
+        return StepWiseGenerator(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
@@ -41,7 +41,7 @@ class GPTOSSExp(BasePPOExp):
         Returns:
             GPTOSSTrainer: The trainer.
         """
-        return GPTOSSTrainer(
+        return StepWiseTrainer(
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,
