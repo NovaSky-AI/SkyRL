@@ -2,7 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from tx.layers.util import Param
+from tx.layers.util import Param, prepare_routing
 
 
 class LoRAMixin:
@@ -71,15 +71,24 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        batch_size = x.shape[0]
+        batch_size, seq_len = x.shape[0], x.shape[1]
         assert adapter_indices.shape[0] == batch_size
 
-        x_flat = x.reshape(batch_size, -1, self.in_features)
-        A = self.lora_A.value[adapter_indices]
-        B = self.lora_B.value[adapter_indices]
-        scaling = self.lora_scaling.value[adapter_indices]
+        x_flat = x.reshape(-1, self.in_features)
+        adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
-        lora_output = jnp.einsum("bsi,bir,bro->bso", x_flat, A, B) * scaling[:, None, None]
+        # Sort tokens to prepare for ragged_dot
+        x_sorted, group_sizes, unsort_indices = prepare_routing(
+            x_flat, adapter_indices_expanded, self.max_lora_adapters
+        )
+
+        # Apply LoRA using ragged_dot: x @ A @ B
+        intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
+        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
+
+        # Unsort, reshape, scale
+        lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
+        lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
         return base_output + lora_output.reshape(base_output.shape)
 
 
