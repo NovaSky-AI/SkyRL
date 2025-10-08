@@ -54,11 +54,11 @@ def test_qwen3(tp: int):
 
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: torch.nn.Module) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
-    for i, expert in enumerate(hf_moe_layer.experts):
-        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
+    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T  # ty: ignore
+    for i, expert in enumerate(hf_moe_layer.experts):  # ty: ignore
+        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T  # ty: ignore
+        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T  # ty: ignore
+        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T  # ty: ignore
 
 
 def test_qwen3_moe_layer():
@@ -84,25 +84,21 @@ def test_qwen3_moe_layer():
 
 def load_lora_weights(
     jax_module: LoRAMixin,
-    hf_module: torch.nn.Module,
     adapter_idx: int,
+    lora_A_weights: np.ndarray,
+    lora_B_weights: np.ndarray,
     scaling: float,
     rank: int,
-    adapter_name: str = "default",
 ) -> None:
-    """Load LoRA weights from HF module to JAX module."""
+    """Load LoRA weights from numpy arrays to JAX module."""
     assert (
         jax_module.lora_A is not None
         and jax_module.lora_B is not None
         and jax_module.lora_scaling is not None
         and jax_module.lora_ranks is not None
     )
-    jax_module.lora_A.value = jax_module.lora_A.value.at[adapter_idx].set(
-        jnp.array(hf_module.lora_A[adapter_name].weight.detach().numpy().T)  # ty: ignore
-    )
-    jax_module.lora_B.value = jax_module.lora_B.value.at[adapter_idx].set(
-        jnp.array(hf_module.lora_B[adapter_name].weight.detach().numpy().T)  # ty: ignore
-    )
+    jax_module.lora_A.value = jax_module.lora_A.value.at[adapter_idx].set(jnp.array(lora_A_weights))
+    jax_module.lora_B.value = jax_module.lora_B.value.at[adapter_idx].set(jnp.array(lora_B_weights))
     jax_module.lora_scaling.value = jax_module.lora_scaling.value.at[adapter_idx].set(scaling)
     jax_module.lora_ranks.value = jax_module.lora_ranks.value.at[adapter_idx].set(rank)
 
@@ -128,11 +124,12 @@ def test_qwen3_moe_layer_lora():
         # Set LoRA weights for all adapters
         rng = np.random.default_rng(42)
         scaling = 2.0
+        rank = config.max_lora_rank
         for adapter_idx in range(config.max_lora_adapters):
             for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
-                proj.lora_A.value = proj.lora_A.value.at[adapter_idx].set(rng.normal(0, 0.01, proj.lora_A.value.shape[1:]))
-                proj.lora_B.value = proj.lora_B.value.at[adapter_idx].set(rng.normal(0, 0.01, proj.lora_B.value.shape[1:]))
-                proj.lora_scaling.value = proj.lora_scaling.value.at[adapter_idx].set(scaling)
+                lora_A = rng.normal(0, 0.01, proj.lora_A.value.shape[1:])  # ty: ignore
+                lora_B = rng.normal(0, 0.01, proj.lora_B.value.shape[1:])  # ty: ignore
+                load_lora_weights(proj, adapter_idx, lora_A, lora_B, scaling, rank)
 
         # Test with different adapters per sample
         adapter_indices = jnp.array([0, 1])
@@ -229,10 +226,12 @@ def test_qwen3_lora():
                 for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
                     hf_layer = hf_model.base_model.model.model.layers[i].mlp
                     for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                        hf_proj = getattr(hf_layer, proj_name)
                         load_lora_weights(
                             getattr(layer.mlp, proj_name),
-                            getattr(hf_layer, proj_name),
                             adapter_idx=adapter_idx,
+                            lora_A_weights=hf_proj.lora_A["default"].weight.detach().numpy().T,
+                            lora_B_weights=hf_proj.lora_B["default"].weight.detach().numpy().T,
                             scaling=lora_config.lora_alpha / lora_config.r,
                             rank=lora_config.r,
                         )
