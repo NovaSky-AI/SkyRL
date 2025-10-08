@@ -52,6 +52,15 @@ def test_qwen3(tp: int):
         assert np.allclose(hf_outputs.hidden_states[-1], outputs["hidden_states"][-1], rtol=1e-3, atol=1e-3)
 
 
+def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: torch.nn.Module) -> None:
+    """Load base weights from HF MoE layer to JAX MoE layer."""
+    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
+    for i, expert in enumerate(hf_moe_layer.experts):
+        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
+        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
+        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
+
+
 def test_qwen3_moe_layer():
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
@@ -71,15 +80,6 @@ def test_qwen3_moe_layer():
 
     assert np.allclose(hf_router_logits, router_logits, rtol=1e-4)
     assert np.allclose(hf_final_hidden_states, final_hidden_states, rtol=1e-2, atol=1e-2)
-
-
-def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: torch.nn.Module) -> None:
-    """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
-    for i, expert in enumerate(hf_moe_layer.experts):
-        jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
-        jax_moe_layer.experts.down_proj.weight[i, :, :] = expert.down_proj.weight.detach().numpy().T
 
 
 def load_lora_weights(
