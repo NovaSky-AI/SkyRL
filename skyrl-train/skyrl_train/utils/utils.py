@@ -65,7 +65,19 @@ def validate_batch_sizes(cfg: DictConfig):
 
     # Validate policy mini batch size
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
-    policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
+    if cfg.trainer.strategy == "megatron":
+        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
+        cp = cfg.trainer.policy.megatron_config.context_parallel_size
+        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
+        assert policy_world_size % (pp * cp * tp) == 0, (
+            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
+        )
+        policy_dp_size = policy_world_size // (pp * cp * tp)
+    else:
+        policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
     assert (
         cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0
     ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
@@ -129,7 +141,17 @@ def validate_batch_sizes(cfg: DictConfig):
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
-        ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
+        if cfg.trainer.strategy == "megatron":
+            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
+            cp = cfg.trainer.ref.megatron_config.context_parallel_size
+            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
+            assert ref_world_size % (pp * cp * tp) == 0, (
+                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+                "This ensures that the data parallel size is an integer."
+            )
+            ref_dp_size = ref_world_size // (pp * cp * tp)
+        else:
+            ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
     assert cfg.trainer.train_batch_size >= lcm_dp_size, (
@@ -265,6 +287,12 @@ def validate_cfg(cfg: DictConfig):
             raise ValueError(
                 "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
             )
+
+    if cfg.trainer.policy.model.lora.rank > 0:
+        # LoRA enabled
+        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
+        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
+        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -474,6 +502,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
+        env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
+
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"

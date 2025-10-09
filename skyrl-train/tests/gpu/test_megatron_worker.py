@@ -542,9 +542,19 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     after_training = get_rank_0_memory(actor_group, "After training")
 
     # Offload model to CPU
-    actor_group.offload_to_cpu()
+    actor_group.offload_to_cpu(offload_optimizer=True, offload_model=False)
+    after_offload_optimizer = get_rank_0_memory(actor_group, "After optimizer offload")
 
-    after_offload = get_rank_0_memory(actor_group, "After offload")
+    assert (
+        after_offload_optimizer < after_training
+    ), f"Memory after offload optimizer should be less than after training: {after_offload_optimizer} bytes, after training: {after_training} bytes"
+
+    actor_group.offload_to_cpu(offload_optimizer=False, offload_model=True)
+    after_offload = get_rank_0_memory(actor_group, "After model offload")
+
+    assert (
+        after_offload < after_offload_optimizer
+    ), f"Memory after offload model should be less than after offload optimizer: {after_offload} bytes, after offload optimizer: {after_offload_optimizer} bytes"
 
     # check that allocated memory is similar to initial offload memory
     delta = abs(initial_offload_mem - after_offload)
@@ -557,7 +567,17 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     assert delta_forward > 0, f"Memory after offloading should be less than after forward pass: {delta_forward} bytes"
 
     # Backload model to GPU
-    actor_group.backload_to_gpu()
+    actor_group.backload_to_gpu(backload_optimizer=True, backload_model=False)
+    after_backload_optimizer = get_rank_0_memory(actor_group, "After backload optimizer")
+    assert (
+        after_backload_optimizer > after_offload
+    ), f"Memory after backload optimizer should be greater than after offload: {after_backload_optimizer} bytes, after offload: {after_offload} bytes"
+
+    actor_group.backload_to_gpu(backload_optimizer=False, backload_model=True)
+    after_backload = get_rank_0_memory(actor_group, "After backload model")
+    assert (
+        after_backload > after_backload_optimizer
+    ), f"Memory after backload model should be greater than after backload optimizer: {after_backload} bytes, after backload optimizer: {after_backload_optimizer} bytes"
 
     get_rank_0_memory(actor_group, "After backload")
 
