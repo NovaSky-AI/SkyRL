@@ -213,9 +213,14 @@ class Qwen3Experts(nnx.Module):
         # Prepare for ragged_dot by sorting tokens based on their assigned expert
         selected_experts_flat = selected_experts.ravel()
         hidden_states_expanded = jnp.repeat(hidden_states, self.config.num_experts_per_tok, axis=0)
-        adapter_indices_expanded = jnp.repeat(adapter_indices, self.config.num_experts_per_tok) if adapter_indices is not None else None
+        adapter_indices_expanded = (
+            jnp.repeat(adapter_indices, self.config.num_experts_per_tok) if adapter_indices is not None else None
+        )
         hidden_states_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
-            hidden_states_expanded, selected_experts_flat, self.config.num_experts, adapter_indices=adapter_indices_expanded
+            hidden_states_expanded,
+            selected_experts_flat,
+            self.config.num_experts,
+            adapter_indices=adapter_indices_expanded,
         )
 
         # Apply expert layers using LoRAExpert

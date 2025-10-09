@@ -7,7 +7,9 @@ def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx
     return nnx.Param(kernel_init(rngs.param(), shape, dtype))
 
 
-def prepare_routing(tokens: jax.Array, indices: jax.Array, num_groups: int, adapter_indices: jax.Array | None = None) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None]:
+def prepare_routing(
+    tokens: jax.Array, indices: jax.Array, num_groups: int, adapter_indices: jax.Array | None = None
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None]:
     """Prepare inputs for ragged_dot operations by sorting tokens by group.
 
     Args:

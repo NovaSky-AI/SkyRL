@@ -134,7 +134,7 @@ def test_qwen3_moe_layer_lora():
                 load_lora_weights(proj, adapter_idx, lora_A, lora_B, scaling, rank)
 
         # Test with different adapters per sample
-        adapter_indices = jnp.array([0, 3, 2])
+        adapter_indices = jnp.array([0, 2, 1])
         output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
 
         # Test each adapter by comparing with merged weights
