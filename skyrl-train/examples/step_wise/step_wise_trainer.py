@@ -26,7 +26,6 @@ def compute_advantages_step_wise(
     gamma,
     lambd,
     grpo_norm_by_std,
-    trajectory_ids,
     is_last_step,
     **kwargs,
 ):
@@ -217,7 +216,6 @@ class StepWiseTrainer(RayPPOTrainer):
             gamma=self.cfg.trainer.algorithm.gamma,
             lambd=self.cfg.trainer.algorithm.lambd,
             grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
-            trajectory_ids=data.metadata["trajectory_ids"],
             is_last_step=data["is_last_step"],
         )
         data["returns"] = returns
