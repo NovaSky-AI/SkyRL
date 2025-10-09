@@ -14,7 +14,7 @@ class StepWiseExp(BasePPOExp):
         """Initializes the generator.
 
         Returns:
-            GeneratorInterface: The generator.
+            StepWiseGenerator: The generator.
         """
 
         return StepWiseGenerator(
@@ -39,7 +39,7 @@ class StepWiseExp(BasePPOExp):
         """Initializes the trainer.
 
         Returns:
-            GPTOSSTrainer: The trainer.
+            StepWiseTrainer: The trainer.
         """
         return StepWiseTrainer(
             cfg=cfg,

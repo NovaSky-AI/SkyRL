@@ -32,6 +32,8 @@ def compute_advantages_step_wise(
 ):
     """
     A custom advantage estimator where the inputs are represented as step level turns
+
+    Assumes outcome rewards assigned to the final step
     """
 
     with torch.no_grad():

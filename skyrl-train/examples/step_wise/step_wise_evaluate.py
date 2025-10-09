@@ -38,6 +38,8 @@ async def evaluate(
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
+    Customized for step level generations, assuming we only have outcome rewards for the final step.
+
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
         generator (GeneratorInterface): generator to use

@@ -1,27 +1,21 @@
 """
-This file implements ``SkyRLGymGenerator``, an implementation of the `GeneratorInterface` that
-uses SkyRL-Gym as the environment.
-
-For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html
+This file implements ``StepWiseGenerator`` for step-wise training
 """
 
-import asyncio
 import copy
 from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Union, Tuple
-from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
 from dataclasses import dataclass
 
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import (
-    get_custom_chat_template,
-    get_generation_prompt_ids,
     apply_overlong_filtering,
     get_rollout_metrics,
 )
@@ -44,7 +38,8 @@ class AgentLoopOutput:
     rollout_logprobs: Optional[List[float]]
 
 
-class StepWiseGenerator(GeneratorInterface):
+class StepWiseGenerator(SkyRLGymGenerator):
+
     def __init__(
         self,
         generator_cfg: DictConfig,
@@ -53,65 +48,10 @@ class StepWiseGenerator(GeneratorInterface):
         tokenizer,
         model_name: str,
     ):
-        """
-        Args:
-            generator_cfg: DictConfig object containing the generator configuration
-            inference_engine_client: InferenceEngineClient object for interacting with the inference engines
-            tokenizer: tokenizer object for encoding and decoding text
-        """
-        self.generator_cfg = generator_cfg
-        self.skyrl_gym_cfg = skyrl_gym_cfg
-        self.inference_engine_client = inference_engine_client
-        self.tokenizer = tokenizer
-        self.max_turns = generator_cfg.max_turns
-        self.batched = generator_cfg.batched
-        self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
-        # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
-        # get generation prompt ids for the tokenizer if needed
-        self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
-        if self.skyrl_gym_cfg.max_env_workers > 0:
-            self.env_executor = ThreadPoolExecutor(
-                max_workers=self.skyrl_gym_cfg.max_env_workers, thread_name_prefix="skyrl-gym-env-"
-            )
-        else:
-            self.env_executor = None
-
-        if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
-
-        # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
-        # correctly format and tokenize observations into `observation_ids`.
-        # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
-        self.base_conversation = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "I am a user."},
-            {"role": "assistant", "content": "I am an assistant."},
-        ]
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
-            self.base_conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-        )
-        # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
-        if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
-            last_eos_token_index = (
-                len(self.base_conversation_token_ids)
-                - 1
-                - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
-            )
-            self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
-        self.think_end_token_ids: List[int] = self.tokenizer.encode("<|end|>")
-        self.think_start_token_ids: List[int] = self.tokenizer.encode("<|channel|>analysis<message>")
-
-    async def _run_in_executor_if_available(self, func, *args, **kwargs):
-        if (executor := self.env_executor) is not None:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(executor, func, *args, **kwargs)
-        else:
-            return func(*args, **kwargs)
+        if self.batched:
+            raise ValueError("StepWiseGenerator doesn't support `batched=True`")
 
     async def agent_loop(
         self,
@@ -249,86 +189,6 @@ class StepWiseGenerator(GeneratorInterface):
 
         return per_step_outputs
 
-    async def generate_batched(
-        self,
-        prompts: List[ConversationType],
-        env_classes: List[str],
-        env_extras: List[Dict[str, Any]],
-        max_tokens: int,
-        max_input_length: int,
-        sampling_params: Optional[Dict[str, Any]] = None,
-    ) -> GeneratorOutput:
-        """
-        Single-turn batched generation (can use the synchronous offline engine)
-
-        Args:
-            prompts: List[ConversationType]
-            env_classes: List[str]
-            env_extras: List[Dict[str, Any]]
-            max_tokens: int
-            max_input_length: int --> Currently unused as we assume batched is used only for single-turn.
-            sampling_params: Optional[Dict[str, Any]]
-        Returns:
-            GeneratorOutput
-        """
-        envs = []
-        init_prompts = []
-        for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
-            env_extra["max_turns"] = self.max_turns
-            env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
-            env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
-            init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
-            init_prompts.append(init_prompt)
-            envs.append(env)
-
-        # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        engine_output = await self.inference_engine_client.generate(engine_input)
-        responses = engine_output["responses"]
-        all_response_ids = engine_output["response_ids"]
-        stop_reasons = engine_output["stop_reasons"]
-        logprobs = engine_output.get("response_logprobs", None)
-
-        truncated_responses = []
-        rewards = []
-        loss_masks = []
-        truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
-
-        for i, (response, response_ids, env) in enumerate(zip(responses, all_response_ids, envs)):
-            # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, response)
-            reward = env_step_output["reward"]
-            rewards.append(reward)
-
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
-            if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
-                truncated_logprobs.append(sample_logprobs)
-
-            await self._run_in_executor_if_available(env.close)
-
-        prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
-        responses = truncated_responses
-        rollout_metrics = get_rollout_metrics(responses, rewards)
-
-        if self.generator_cfg.apply_overlong_filtering:
-            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
-
-        generator_output: GeneratorOutput = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": truncated_logprobs,
-        }
-
-        return generator_output
-
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
@@ -346,11 +206,6 @@ class StepWiseGenerator(GeneratorInterface):
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
-
-        if self.batched:
-            return await self.generate_batched(
-                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
-            )
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []
@@ -424,66 +279,6 @@ class StepWiseGenerator(GeneratorInterface):
         }
 
         return generator_output
-
-    def _zero_reward_if_not_stop(self, rewards: List[float], stop_reasons: List[str]):
-        """Sets the reward to 0 if the stop reason is not "stop".
-
-        This can be useful in cases where the LLM generation was truncated or aborted, but the environment still assigns non-zero reward.
-        Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response,
-        we typically don't want to reward it. This is a general setting for all environments.
-        """
-        for i, stop_reason in enumerate(stop_reasons):
-            if stop_reason != "stop":
-                if isinstance(rewards[i], list):
-                    rewards[i] = [0.0] * len(rewards[i])
-                else:
-                    rewards[i] = 0.0
-        return rewards
-
-    # ----------------------------------------------------------------------------
-    # Three methods of managing chat history and input ids in `agent_loop()`
-    # ----------------------------------------------------------------------------
-    def _get_next_input_ids_by_retokenizing_chat_history(
-        self,
-        chat_history: ConversationType,
-        chat_end_index: int,
-        output: str,
-        new_obs: ConversationType,
-    ):
-        """
-        Update the chat history and input ids given a new model response and observation by retokenizing
-        the entire chat history. Hence token-in-token-out is not followed.
-
-        loss_mask is not maintained because we get it at the end of the trajectory with
-        `response_encodings["assistant_masks"]`.
-
-        Returns:
-            chat_history: The updated chat history.
-            chat_end_index: The updated chat end index.
-            input_ids: The new input IDs after tokenizing the chat history.
-        """
-        # assert self.use_conversation_multi_turn and self.custom_chat_template
-        # remove eos token from end of output if it exists, since it will be reapplied by the chat template
-        if output.endswith(self.tokenizer.eos_token):
-            output = output[: -len(self.tokenizer.eos_token)]
-
-        # Add assistant response to chat history
-        chat_history += [{"role": "assistant", "content": output}]
-        chat_end_index += 1
-
-        # Add observations to chat history
-        if len(new_obs) > 0:
-            chat_history += new_obs
-            chat_end_index += len(new_obs)
-
-        # re-apply whole chat template so length check is correct
-        input_ids = self.tokenizer.apply_chat_template(
-            chat_history[:chat_end_index],
-            chat_template=self.custom_chat_template,
-            add_generation_prompt=False,
-            tokenize=True,
-        )
-        return chat_history, chat_end_index, input_ids
 
     def _get_next_input_ids_with_multiturn_chat_template(
         self,
