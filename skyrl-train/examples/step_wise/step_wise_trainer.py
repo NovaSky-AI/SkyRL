@@ -4,7 +4,7 @@ from loguru import logger
 import torch
 
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID
+from skyrl_train.generators.base import GeneratorOutput, GeneratorInput
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.generators.utils import get_metrics_from_generator_output
 from skyrl_train.utils import ppo_utils
@@ -34,6 +34,7 @@ def compute_advantages_step_wise(
 
     Assumes outcome rewards assigned to the final step
     """
+    is_last_step = is_last_step.bool()
 
     with torch.no_grad():
         # calculate for the last step only and then broadcast to all steps
@@ -302,7 +303,7 @@ class StepWiseTrainer(RayPPOTrainer):
         new_training_input.metadata = training_input.metadata
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
         new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
-            TrajectoryID(instance_id=f"pad{i}", repetition_id=0) for i in range(pad_size)
+            f"pad{i}" for i in range(pad_size)
         ]
         return new_training_input
 
