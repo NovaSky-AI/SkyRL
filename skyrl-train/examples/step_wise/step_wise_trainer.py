@@ -43,7 +43,7 @@ def compute_advantages_step_wise(
         last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
             token_level_rewards=last_step_rewards,
             response_mask=response_mask[is_last_step],
-            index=index[is_last_step.numpy()],
+            index=index[is_last_step.cpu().numpy()],
             adv_estimator=adv_estimator,
             values=values[is_last_step] if values is not None else None,
             config=config,
@@ -53,10 +53,11 @@ def compute_advantages_step_wise(
             **kwargs,
         )
 
-        is_last_step = is_last_step.to(int)
-        traj_ids = (
-            torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1] == 1]).int().cumsum(dim=0)
-        )
+        traj_ids = torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
+        num_groups = traj_ids[-1].item() + 1
+        assert num_groups == len(
+            last_step_advantages
+        ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
         advantages = last_step_advantages[traj_ids]
         returns = last_step_returns[traj_ids]
 
