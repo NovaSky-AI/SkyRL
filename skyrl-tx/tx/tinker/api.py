@@ -376,8 +376,8 @@ async def download_checkpoint_archive(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Files are saved at /tmp/tx_checkpoints/{model_id}/{checkpoint_id}/
-    checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
+    # Files are saved at CHECKPOINTS_BASE_PATH/{model_id}/{checkpoint_id}/
+    checkpoint_dir = CHECKPOINTS_BASE_PATH / Path(unique_id).name / Path(checkpoint_id).name
     if not checkpoint_dir.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_dir}")
 
