@@ -50,7 +50,7 @@ differently. The codepaths are determined by:
 
 The three codepaths are:
 
-1) Multi-turn conversation, strictly appending tokens
+1) (Default) Multi-turn conversation, strictly appending tokens
 
    - Enabled when ``use_conversation_multi_turn == True`` and ``generator.chat_template`` is not defined.
    - These are the default values for these configs, so this is the default codepath.
