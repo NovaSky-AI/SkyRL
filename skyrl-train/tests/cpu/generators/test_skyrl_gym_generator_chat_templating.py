@@ -51,6 +51,49 @@ def _register_test_env_if_needed():
         pass
 
 
+def _build_generator(tokenizer, model_name: str, chat_template_config, extra_overrides: Dict[str, Any] | None = None):
+    """Helper to create a SkyRLGymGenerator with common config/env settings."""
+    # Create default config and apply common generator overrides used across tests
+    default_cfg = get_default_config()
+    overrides = {
+        "sampling_params": {"max_generate_length": 200, "logprobs": None},
+        "max_input_length": 200,
+        "batched": False,
+        "max_turns": 3,
+        "zero_reward_on_non_stop": False,
+        "apply_overlong_filtering": False,
+        "use_conversation_multi_turn": True,
+        "chat_template": chat_template_config,
+        "append_eos_token_after_stop_str_in_multi_turn": True,
+    }
+    if extra_overrides:
+        overrides.update(extra_overrides)
+    OmegaConf.update(default_cfg, "generator", overrides)
+
+    # Create skryl gym generator
+    generator_cfg = default_cfg.generator
+    env_cfg = default_cfg.environment.skyrl_gym
+    env_cfg.max_env_workers = 0
+    return SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=env_cfg,
+        inference_engine_client=None,  # to be replaced per-test
+        tokenizer=tokenizer,
+        model_name=model_name,
+    )
+
+
+def _default_prompt_and_extras():
+    """Standard single-trajectory prompt and extras used throughout tests."""
+    prompt = [[{"role": "user", "content": "a"}]]
+    extras = [{"answer": "4"}]
+    return prompt, extras
+
+
+def _make_input_batch(prompt, extras):
+    return {"prompts": prompt, "env_extras": extras, "env_classes": ["cpu_test_env"]}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
@@ -103,42 +146,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     else:
         chat_template_config = {"source": "name", "name_or_path": None}
     # Create a mock generator config
-    default_cfg = get_default_config()
-    generator_cfg = default_cfg.generator
-    OmegaConf.update(
-        default_cfg,
-        "generator",
-        {
-            "sampling_params": {"max_generate_length": 200, "logprobs": None},
-            "max_input_length": 200,
-            "batched": False,
-            "max_turns": 3,
-            "zero_reward_on_non_stop": False,
-            "apply_overlong_filtering": False,
-            "use_conversation_multi_turn": True,
-            "chat_template": chat_template_config,
-            "append_eos_token_after_stop_str_in_multi_turn": True,
-        },
-    )
-    generator_cfg = default_cfg.generator
-    env_cfg = default_cfg.environment.skyrl_gym
-    env_cfg.max_env_workers = 0
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=tokenizer,
-        model_name=model_name,
-    )
+    generator = _build_generator(tokenizer, model_name, chat_template_config)
+    generator.inference_engine_client = mock_llm
 
-    prompt = [[{"role": "user", "content": "a"}]]
-    extras = [{"answer": "4"}]
-
-    input_batch: GeneratorInput = {
-        "prompts": prompt,
-        "env_extras": extras,
-        "env_classes": ["cpu_test_env"],
-    }
+    prompt, extras = _default_prompt_and_extras()
+    input_batch: GeneratorInput = _make_input_batch(prompt, extras)
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
@@ -272,42 +284,11 @@ async def test_skyrl_gym_generator_chat_templating_qwen3_thinking(mode):
         chat_template_config = {"source": "name", "name_or_path": None}
 
     # Create a mock generator config
-    default_cfg = get_default_config()
-    generator_cfg = default_cfg.generator
-    OmegaConf.update(
-        default_cfg,
-        "generator",
-        {
-            "sampling_params": {"max_generate_length": 200, "logprobs": None},
-            "max_input_length": 200,
-            "batched": False,
-            "max_turns": 3,
-            "zero_reward_on_non_stop": False,
-            "apply_overlong_filtering": False,
-            "use_conversation_multi_turn": True,
-            "chat_template": chat_template_config,
-            "append_eos_token_after_stop_str_in_multi_turn": True,
-        },
-    )
-    generator_cfg = default_cfg.generator
-    env_cfg = default_cfg.environment.skyrl_gym
-    env_cfg.max_env_workers = 0
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=tokenizer,
-        model_name=model_name,
-    )
+    generator = _build_generator(tokenizer, model_name, chat_template_config)
+    generator.inference_engine_client = mock_llm
 
-    prompt = [[{"role": "user", "content": "a"}]]
-    extras = [{"answer": "4"}]
-
-    input_batch: GeneratorInput = {
-        "prompts": prompt,
-        "env_extras": extras,
-        "env_classes": ["cpu_test_env"],
-    }
+    prompt, extras = _default_prompt_and_extras()
+    input_batch: GeneratorInput = _make_input_batch(prompt, extras)
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
@@ -459,35 +440,15 @@ async def test_append_eos_after_stop_multi_turn(model_name):
             chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
         else:
             chat_template_config = {"source": "name", "name_or_path": None}
-        default_cfg = get_default_config()
-        OmegaConf.update(
-            default_cfg,
-            "generator",
-            {
-                "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
-                "max_input_length": 200,
-                "batched": False,
-                "max_turns": 3,
-                "zero_reward_on_non_stop": False,
-                "use_conversation_multi_turn": True,
-                "chat_template": chat_template_config,
-                "append_eos_token_after_stop_str_in_multi_turn": append_flag,
-            },
-        )
-        generator_cfg = default_cfg.generator
-        env_cfg = default_cfg.environment.skyrl_gym
-        env_cfg.max_env_workers = 0
-        gen = SkyRLGymGenerator(
-            generator_cfg=generator_cfg,
-            skyrl_gym_cfg=env_cfg,
-            inference_engine_client=mock_llm,
-            tokenizer=tokenizer,
-            model_name=model_name,
-        )
+        extra_overrides = {
+            "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
+            "append_eos_token_after_stop_str_in_multi_turn": append_flag,
+        }
+        gen = _build_generator(tokenizer, model_name, chat_template_config, extra_overrides)
+        gen.inference_engine_client = mock_llm
         return gen
 
-    prompt = [[{"role": "user", "content": "a"}]]
-    extras = [{"answer": "4"}]
+    prompt, extras = _default_prompt_and_extras()
     sp = {"stop": [stop_tag]}
 
     # Case 1: append flag = True
