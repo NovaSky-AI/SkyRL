@@ -314,7 +314,7 @@ class StepWiseTrainer(RayPPOTrainer):
         new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
             f"pad{i}" for i in range(pad_size)
         ]
-        for key, value in training_input.metadata:
+        for key, value in training_input.metadata.items():
             if key not in ["uids", "trajectory_ids"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
