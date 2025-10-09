@@ -221,9 +221,7 @@ class Qwen3Experts(nnx.Module):
         adapter_indices_sorted = None
         if adapter_indices is not None:
             adapter_indices_expanded = jnp.repeat(adapter_indices, self.config.num_experts_per_tok)
-            adapter_indices_sorted = adapter_indices_expanded[
-                jnp.argsort(selected_experts_flat)
-            ]
+            adapter_indices_sorted = adapter_indices_expanded[jnp.argsort(selected_experts_flat)]
 
         # Apply expert layers using LoRAExpert
         gate_out = self.gate_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
