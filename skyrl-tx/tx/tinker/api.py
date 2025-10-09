@@ -1,4 +1,6 @@
+import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal, Any, AsyncGenerator
 from uuid import uuid4
@@ -9,7 +11,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import asyncio
 import subprocess
 import logging
-from fastapi.responses import StreamingResponse
 import tarfile
 import io
 from pathlib import Path
@@ -363,8 +364,8 @@ def create_tar_archive(checkpoint_dir: Path) -> io.BytesIO:
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
-    unique_id: str,
-    checkpoint_id: str,
+    unique_id: str = fastapi.Path(..., regex=r'^[a-zA-Z0-9_-]+$', max_length=255),
+    checkpoint_id: str = fastapi.Path(..., regex=r'^[a-zA-Z0-9_-]+$', max_length=255),
     session: AsyncSession = Depends(get_session),
 ):
     """Return the checkpoint archive bytes"""
@@ -377,7 +378,7 @@ async def download_checkpoint_archive(
         raise HTTPException(status_code=404, detail="Model not found")
 
     # Files are saved at CHECKPOINTS_BASE_PATH/{model_id}/{checkpoint_id}/
-    checkpoint_dir = CHECKPOINTS_BASE_PATH / Path(unique_id).name / Path(checkpoint_id).name
+    checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
     if not checkpoint_dir.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_dir}")
 
