@@ -364,8 +364,8 @@ def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
-    unique_id: str = fastapi.Path(..., regex=r'^[a-zA-Z0-9_-]+$', max_length=255),
-    checkpoint_id: str = fastapi.Path(..., regex=r'^[a-zA-Z0-9_-]+$', max_length=255),
+    unique_id: str = fastapi.Path(..., regex=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    checkpoint_id: str = fastapi.Path(..., regex=r"^[a-zA-Z0-9_-]+$", max_length=255),
     session: AsyncSession = Depends(get_session),
 ):
     """Return the checkpoint archive bytes"""

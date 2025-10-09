@@ -102,6 +102,6 @@ def test_training_workflow(service_client):
     # Download the checkpoint
     rest_client = service_client.create_rest_client()
     parsed_url = urlparse(sampling_path)
-    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip('/')
+    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
     future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
     assert len(future.result()) > 0
