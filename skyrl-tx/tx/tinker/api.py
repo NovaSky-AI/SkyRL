@@ -349,6 +349,18 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
+# This function is synchronous and should not be run directly in an async endpoint
+def create_tar_archive(checkpoint_dir: Path) -> io.BytesIO:
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
+        for p in checkpoint_dir.iterdir():
+            if p.is_file():
+                tar.add(p, arcname=p.name)
+    tar_size = tar_buffer.tell()
+    tar_buffer.seek(0)
+    return tar_buffer, tar_size
+
+
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
     unique_id: str,
@@ -365,29 +377,19 @@ async def download_checkpoint_archive(
         raise HTTPException(status_code=404, detail="Model not found")
 
     # Files are saved at /tmp/tx_checkpoints/{model_id}/{checkpoint_id}/
-    checkpoint_dir = Path("/tmp/tx_checkpoints") / unique_id / checkpoint_id
+    checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
     if not checkpoint_dir.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_dir}")
 
     # Package directory into a tar.gz in-memory
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for p in checkpoint_dir.iterdir():
-            if p.is_file():
-                tar.add(p, arcname=p.name)
-
-    size = buf.tell()
-    if size == 0:
-        raise HTTPException(status_code=500, detail="Empty archive")
-
-    buf.seek(0)
+    tar_buffer, tar_size = await asyncio.to_thread(create_tar_archive, checkpoint_dir)
     filename = f"{unique_id}_{checkpoint_id}.tar.gz"
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Length": str(size),
+        "Content-Length": str(tar_size),
     }
 
-    return StreamingResponse(buf, media_type="application/octet-stream", headers=headers)
+    return StreamingResponse(tar_buffer, media_type="application/octet-stream", headers=headers)
 
 
 @app.get("/")
