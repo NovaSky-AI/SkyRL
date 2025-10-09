@@ -94,18 +94,16 @@ async def evaluate(
     eval_metrics = calculate_per_dataset_metrics(
         concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
     )
-    # 2.1 only use the final step metris
+    # 2.1 only use the final step metrics
     generator_output_last_step = defaultdict(list)
+    is_last_step_mask = concat_generator_outputs["is_last_step"]
     for key in concat_generator_outputs:
         if isinstance(concat_generator_outputs[key], list):
+            assert len(concat_generator_outputs[key]) == len(is_last_step_mask)
             generator_output_last_step[key] = [
-                concat_generator_outputs[key][i]
-                for i in range(len(concat_generator_outputs[key]))
-                if concat_generator_outputs["is_last_step"][i]
+                val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
             ]
-    uids_last_step = [
-        uid for uid, is_last_step in zip(concat_uids, concat_generator_outputs["is_last_step"]) if is_last_step
-    ]
+    uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
     # 3. Calculate overall metrics across all datasets
     overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
     eval_metrics.update(
