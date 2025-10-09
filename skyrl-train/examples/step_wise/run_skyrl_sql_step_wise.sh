@@ -19,7 +19,7 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 MAX_TURNS=6
 
-uv run --isolated --extra vllm -m examples.turn_by_turn.main_gptoss \
+uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
