@@ -380,7 +380,7 @@ async def download_checkpoint_archive(
     # Files are saved at CHECKPOINTS_BASE_PATH/{model_id}/{checkpoint_id}/
     checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
     if not checkpoint_dir.exists():
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_dir}")
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
     # Package directory into a tar.gz in-memory
     tar_buffer, tar_size = await asyncio.to_thread(create_tar_archive, checkpoint_dir)
