@@ -2,6 +2,7 @@ from typing import List, Optional, Union, Dict
 from collections import defaultdict
 from loguru import logger
 import torch
+import copy
 
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput
@@ -295,21 +296,26 @@ class StepWiseTrainer(RayPPOTrainer):
         for key, tensor in training_input.items():
             if tensor is not None:
                 additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-                if key in ["is_last_step"]:
+
+                if key == "is_last_step":
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                else:
+                elif key == "loss_mask":
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                    # HACK: for some models like qwen 2, having a row with all zero attention mask will trigger failures
-                    if key == "attention_mask":
-                        padding_tensor[..., -1] = 1
+                else:
+                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
+                    # `pad_size` is guaranteed to be smaller than batch_size
+                    padding_tensor = tensor[:pad_size].clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)
-        new_training_input.metadata = training_input.metadata
+        new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
         new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
             f"pad{i}" for i in range(pad_size)
         ]
+        for key, value in training_input.metadata:
+            if key not in ["uids", "trajectory_ids"]:
+                new_training_input.metadata[key] = copy.deepcopy(training_input.metadata[key])
         return new_training_input
 
     @torch.no_grad()
