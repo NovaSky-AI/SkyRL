@@ -151,7 +151,7 @@ def test_qwen3_moe_layer_lora():
                 for expert_idx in range(config.num_experts):
                     lora_A = proj.lora_A.value[adapter_idx, expert_idx, :, :]
                     lora_B = proj.lora_B.value[adapter_idx, expert_idx, :, :]
-                    lora_delta = scaling * (lora_A @ lora_B)
+                    lora_delta = scaling * (lora_B @ lora_A.T)
 
                     merged_weight = proj.weight[expert_idx, :, :] + lora_delta
                     proj_merged.weight.value = proj_merged.weight.value.at[expert_idx, :, :].set(merged_weight)

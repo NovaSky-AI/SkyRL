@@ -256,11 +256,15 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
         adapter_indices: jax.Array | None = None,
         return_router_logits: bool = False,
     ) -> jax.Array | tuple[jax.Array, jax.Array]:
-        original_shape = hidden_states.shape
-        hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
+        (batch_size, seq_len, hidden_size) = hidden_states.shape
+        hidden_states = hidden_states.reshape(-1, hidden_size)
+        # Expand adapter_indices to match flattened hidden_states
+        if adapter_indices is not None:
+            adapter_indices = jnp.repeat(adapter_indices, seq_len)
         router_logits = self.gate(hidden_states)
+
         hidden_states = self.experts(hidden_states, router_logits, adapter_indices)
-        hidden_states = hidden_states.reshape(original_shape)
+        hidden_states = hidden_states.reshape(batch_size, seq_len, hidden_size)
 
         if return_router_logits:
             return hidden_states, router_logits
