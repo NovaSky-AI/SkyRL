@@ -70,7 +70,7 @@ class LoRAMixin:
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Sort tokens to prepare for ragged_dot
-        x_sorted, group_sizes, unsort_indices = prepare_routing(
+        x_sorted, group_sizes, unsort_indices, _ = prepare_routing(
             x_flat, adapter_indices_expanded, self.max_lora_adapters
         )
 
@@ -180,26 +180,24 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
 
-        # Reconstruct expert indices from group_sizes
+        # Reconstruct expert indices from group_sizes, this array will be sorted
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
 
-        # Combine (adapter, expert) into a single routing dimension
+        # Combine (adapter, expert) into a single routing dimension.
+        # Since the tokens are already sorted according to adapters and experts, we do not need to sort them again.
         combined_indices = adapter_indices_sorted * self.num_experts + expert_indices
         max_combined = self.max_lora_adapters * self.num_experts
+        combined_group_sizes = jnp.bincount(combined_indices, length=max_combined)
 
         # Reshape lora_A and lora_B to merge (max_lora_adapters, num_experts) dimensions
         lora_A_reshaped = self.lora_A.value.reshape(max_combined, self.in_features, self.max_lora_rank)
         lora_B_reshaped = self.lora_B.value.reshape(max_combined, self.max_lora_rank, self.out_features)
 
-        # Sort tokens by combined index
-        x_sorted, combined_group_sizes, unsort_indices = prepare_routing(x, combined_indices, max_combined)
-
         # Apply LoRA using ragged_dot: x @ A @ B
-        intermediate = jax.lax.ragged_dot(x_sorted, lora_A_reshaped, combined_group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, lora_B_reshaped, combined_group_sizes)
+        intermediate = jax.lax.ragged_dot(x, lora_A_reshaped, combined_group_sizes)
+        lora_output = jax.lax.ragged_dot(intermediate, lora_B_reshaped, combined_group_sizes)
 
-        # Unsort and apply scaling
-        lora_output = lora_output_sorted[unsort_indices]
+        # Apply scaling
         lora_output = lora_output * self.lora_scaling.value[adapter_indices_sorted, None]
 
         return base_out + lora_output

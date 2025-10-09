@@ -111,11 +111,11 @@ def test_qwen3_moe_layer_lora():
     config = AutoConfig.from_pretrained(model_name)
 
     # Enable LoRA
-    config.max_lora_adapters = 2
+    config.max_lora_adapters = 3
     config.max_lora_rank = 4
 
     hf_moe_layer = hf_model.model.layers[0].mlp
-    x = torch.randn(2, 2, config.hidden_size)
+    x = torch.randn(3, 4, config.hidden_size)
 
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
@@ -134,7 +134,7 @@ def test_qwen3_moe_layer_lora():
                 load_lora_weights(proj, adapter_idx, lora_A, lora_B, scaling, rank)
 
         # Test with different adapters per sample
-        adapter_indices = jnp.array([0, 1])
+        adapter_indices = jnp.array([0, 3, 2])
         output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
 
         # Test each adapter by comparing with merged weights
