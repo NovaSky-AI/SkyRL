@@ -350,7 +350,7 @@ async def send_telemetry(request: TelemetryRequest):
 
 
 # This function is synchronous and should not be run directly in an async endpoint
-def create_tar_archive(checkpoint_dir: Path) -> io.BytesIO:
+def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
         for p in checkpoint_dir.iterdir():
