@@ -25,8 +25,7 @@ def prepare_routing(
     """
     sort_indices = jnp.argsort(indices)
     sorted_tokens = tokens[sort_indices]
+    sorted_adapter_indices = None if adapter_indices is None else adapter_indices[sort_indices]
     group_sizes = jnp.bincount(indices, length=num_groups)
     unsort_indices = jnp.argsort(sort_indices)
-    if adapter_indices is None:
-        return sorted_tokens, group_sizes, unsort_indices, None
-    return sorted_tokens, group_sizes, unsort_indices, adapter_indices[sort_indices]
+    return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
