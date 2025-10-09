@@ -1,4 +1,6 @@
+import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal, Any, AsyncGenerator
 from uuid import uuid4
@@ -9,6 +11,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import asyncio
 import subprocess
 import logging
+import tarfile
+import io
+from pathlib import Path
 
 from tx.tinker import types
 from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
@@ -16,6 +21,9 @@ from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Base path for saving checkpoints
+CHECKPOINTS_BASE_PATH = Path("/tmp/tx_checkpoints")
 
 
 @asynccontextmanager
@@ -31,7 +39,18 @@ async def lifespan(app: FastAPI):
     # TODO: Make this configurable via environment variable or API parameter
     base_model = "Qwen/Qwen3-0.6B"
     background_engine = subprocess.Popen(
-        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine", "--base-model", base_model]
+        [
+            "uv",
+            "run",
+            "--extra",
+            "tinker",
+            "-m",
+            "tx.tinker.engine",
+            "--base-model",
+            base_model,
+            "--checkpoints-base-path",
+            CHECKPOINTS_BASE_PATH,
+        ]
     )
     logger.info(f"Started background engine with PID {background_engine.pid} for base model {base_model}")
 
@@ -331,6 +350,49 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
+# This function is synchronous and should not be run directly in an async endpoint
+def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
+        for p in checkpoint_dir.iterdir():
+            if p.is_file():
+                tar.add(p, arcname=p.name)
+    tar_size = tar_buffer.tell()
+    tar_buffer.seek(0)
+    return tar_buffer, tar_size
+
+
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
+async def download_checkpoint_archive(
+    unique_id: str = fastapi.Path(..., regex=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    checkpoint_id: str = fastapi.Path(..., regex=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return the checkpoint archive bytes"""
+
+    # Ensure model exists
+    statement = select(ModelDB).where(ModelDB.model_id == unique_id)
+    result = await session.exec(statement)
+    model = result.first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # Files are saved at CHECKPOINTS_BASE_PATH/{model_id}/{checkpoint_id}/
+    checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
+    if not checkpoint_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+
+    # Package directory into a tar.gz in-memory
+    tar_buffer, tar_size = await asyncio.to_thread(create_tar_archive, checkpoint_dir)
+    filename = f"{unique_id}_{checkpoint_id}.tar.gz"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Length": str(tar_size),
+    }
+
+    return StreamingResponse(tar_buffer, media_type="application/octet-stream", headers=headers)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -343,6 +405,7 @@ async def root():
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
             "telemetry": ["/api/v1/telemetry"],
+            "download": ["/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive"],
         },
     }
 
