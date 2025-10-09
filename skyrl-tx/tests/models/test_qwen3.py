@@ -55,7 +55,7 @@ def test_qwen3(tp: int):
 
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
     """Load base weights from HF MoE layer to JAX MoE layer."""
-    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight[:].detach().numpy().T
+    jax_moe_layer.gate.kernel[:] = hf_moe_layer.gate.weight.detach().numpy().T
     for i, expert in enumerate(hf_moe_layer.experts):
         jax_moe_layer.experts.gate_proj.weight[i, :, :] = expert.gate_proj.weight.detach().numpy().T
         jax_moe_layer.experts.up_proj.weight[i, :, :] = expert.up_proj.weight.detach().numpy().T
