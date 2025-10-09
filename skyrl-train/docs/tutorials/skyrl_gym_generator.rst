@@ -77,7 +77,7 @@ The three codepaths are:
   Observation2<|im_end|>
   ...
 
-1) Single assistant message for all turns, strictly appending tokens
+2) Single assistant message for all turns, strictly appending tokens
 
    - Enabled when ``use_conversation_multi_turn == False``.
    - Keep an entire multi-step interaction inside a single assistant message, appending
