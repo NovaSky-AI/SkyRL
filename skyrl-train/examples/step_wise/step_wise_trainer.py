@@ -290,13 +290,18 @@ class StepWiseTrainer(RayPPOTrainer):
 
         pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
         new_tensors = {}
+        if pad_size == 0:
+            return training_input
         for key, tensor in training_input.items():
             if tensor is not None:
                 additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-                if key in ["attention_mask", "is_last_step"]:
+                if key in ["is_last_step"]:
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    # HACK: for some models like qwen 2, having a row with all zero attention mask will trigger failures
+                    if key == "attention_mask":
+                        padding_tensor[..., -1] = 1
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)
