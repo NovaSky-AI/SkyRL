@@ -172,7 +172,7 @@ class DistributedTorchRayActor:
             LIBNUMA.numa_set_membind(bitmask)
 
         numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        if not numa_nodes or numa_nodes <= 0:
+        if numa_nodes <= 0:
             numa_nodes = 1
         num_gpu_pre_numa_node = 8 // numa_nodes
         numa_bind(self._local_rank // num_gpu_pre_numa_node)
