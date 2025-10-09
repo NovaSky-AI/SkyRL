@@ -300,6 +300,7 @@ class StepWiseTrainer(RayPPOTrainer):
                 if key == "is_last_step":
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 elif key == "loss_mask":
+                    # ensures that padding tensors don't count towards the loss
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
                     # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
@@ -315,7 +316,7 @@ class StepWiseTrainer(RayPPOTrainer):
         ]
         for key, value in training_input.metadata:
             if key not in ["uids", "trajectory_ids"]:
-                new_training_input.metadata[key] = copy.deepcopy(training_input.metadata[key])
+                new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 
     @torch.no_grad()
