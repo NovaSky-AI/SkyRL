@@ -2,6 +2,8 @@
 
 import pytest
 import subprocess
+from urllib.parse import urlparse
+
 import tinker
 from tinker import types
 
@@ -96,3 +98,10 @@ def test_training_workflow(service_client):
     # Get a checkpoint
     sampling_path = training_client.save_weights_for_sampler(name="0000").result().path
     assert sampling_path is not None
+
+    # Download the checkpoint
+    rest_client = service_client.create_rest_client()
+    parsed_url = urlparse(sampling_path)
+    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip('/')
+    future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
+    assert len(future.result()) > 0
