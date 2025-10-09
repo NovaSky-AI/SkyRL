@@ -27,7 +27,14 @@ LEARNING_RATE = 1e-4
 class TinkerEngine:
     """Background engine for processing training requests."""
 
-    def __init__(self, base_model_name: str, checkpoints_base_path: str, max_lora_adapters: int, max_lora_rank: int, db_path=DB_PATH):
+    def __init__(
+        self,
+        base_model_name: str,
+        checkpoints_base_path: str,
+        max_lora_adapters: int,
+        max_lora_rank: int,
+        db_path=DB_PATH,
+    ):
         """Initialize the engine with a database connection and base model."""
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
         self.base_model_name = base_model_name  # Single base model for this engine
@@ -457,7 +464,10 @@ def main():
         "--base-model", dest="base_model", help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL"
     )
     parser.add_option(
-        "--checkpoints-base-path", dest="checkpoints_base_path", help="Base path where checkpoints will be stored", metavar="PATH"
+        "--checkpoints-base-path",
+        dest="checkpoints_base_path",
+        help="Base path where checkpoints will be stored",
+        metavar="PATH",
     )
     parser.add_option(
         "--max-lora-adapters",

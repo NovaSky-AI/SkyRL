@@ -38,7 +38,18 @@ async def lifespan(app: FastAPI):
     # TODO: Make this configurable via environment variable or API parameter
     base_model = "Qwen/Qwen3-0.6B"
     background_engine = subprocess.Popen(
-        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine", "--base-model", base_model, "--checkpoints-base-path", CHECKPOINTS_BASE_PATH]
+        [
+            "uv",
+            "run",
+            "--extra",
+            "tinker",
+            "-m",
+            "tx.tinker.engine",
+            "--base-model",
+            base_model,
+            "--checkpoints-base-path",
+            CHECKPOINTS_BASE_PATH,
+        ]
     )
     logger.info(f"Started background engine with PID {background_engine.pid} for base model {base_model}")
 
@@ -377,6 +388,7 @@ async def download_checkpoint_archive(
     }
 
     return StreamingResponse(buf, media_type="application/octet-stream", headers=headers)
+
 
 @app.get("/")
 async def root():
