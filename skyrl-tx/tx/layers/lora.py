@@ -183,16 +183,16 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         # Reconstruct expert indices from group_sizes
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
 
-        # Combine (adapter, expert) into a single routing dimension.
-        combined_indices = adapter_indices_sorted * self.num_experts + expert_indices
-        max_combined = self.max_lora_adapters * self.num_experts
+        # Flatten (adapter, expert) into a single routing dimension.
+        flattened_indices = adapter_indices_sorted * self.num_experts + expert_indices
+        num_flattened_groups = self.max_lora_adapters * self.num_experts
 
         # Reshape lora_A and lora_B to merge (max_lora_adapters, num_experts) dimensions
-        lora_A_reshaped = self.lora_A.value.reshape(max_combined, self.in_features, self.max_lora_rank)
-        lora_B_reshaped = self.lora_B.value.reshape(max_combined, self.max_lora_rank, self.out_features)
+        lora_A_reshaped = self.lora_A.value.reshape(num_flattened_groups, self.in_features, self.max_lora_rank)
+        lora_B_reshaped = self.lora_B.value.reshape(num_flattened_groups, self.max_lora_rank, self.out_features)
 
         # Sort tokens by combined index
-        x_sorted, combined_group_sizes, unsort_indices, _ = prepare_routing(x, combined_indices, max_combined)
+        x_sorted, combined_group_sizes, unsort_indices, _ = prepare_routing(x, flattened_indices, num_flattened_groups)
 
         # Apply LoRA using ragged_dot: x @ A @ B
         intermediate = jax.lax.ragged_dot(x_sorted, lora_A_reshaped, combined_group_sizes)
