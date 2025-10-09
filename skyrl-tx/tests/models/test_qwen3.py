@@ -140,7 +140,6 @@ def test_qwen3_moe_layer_lora():
         # Test each adapter by comparing with merged weights
         for adapter_idx in range(config.max_lora_adapters):
             # Create merged model by adding LoRA weights to base weights
-            # For each projection: merged_weight = base_weight + scaling * (lora_B @ lora_A)
             moe_layer_merged = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(1 + adapter_idx))
             moe_layer_merged.gate.kernel[:] = moe_layer.gate.kernel[:]
 
@@ -150,9 +149,9 @@ def test_qwen3_moe_layer_lora():
 
                 # For each expert, merge: base + scaling * (lora_B @ lora_A)
                 for expert_idx in range(config.num_experts):
-                    lora_A = proj.lora_A.value[adapter_idx, expert_idx, :, :]  # (in_features, rank)
-                    lora_B = proj.lora_B.value[adapter_idx, expert_idx, :, :]  # (rank, out_features)
-                    lora_delta = scaling * (lora_A @ lora_B)  # (in_features, out_features)
+                    lora_A = proj.lora_A.value[adapter_idx, expert_idx, :, :]
+                    lora_B = proj.lora_B.value[adapter_idx, expert_idx, :, :]
+                    lora_delta = scaling * (lora_A @ lora_B)
 
                     merged_weight = proj.weight[expert_idx, :, :] + lora_delta
                     proj_merged.weight.value = proj_merged.weight.value.at[expert_idx, :, :].set(merged_weight)
@@ -161,8 +160,6 @@ def test_qwen3_moe_layer_lora():
             x_sample = x[adapter_idx : adapter_idx + 1].numpy()
             output_merged, _ = moe_layer_merged(x_sample, return_router_logits=True)
 
-            # Outputs should match since merged weights = base + lora
-            # Using slightly relaxed tolerance due to numerical differences in matrix multiplication order
             assert np.allclose(output_with_lora[adapter_idx : adapter_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
 
 
