@@ -20,11 +20,12 @@ def compute_advantages_step_wise(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
+    adv_estimator: str,
     values: torch.Tensor,
-    grpo_norm_by_std,
+    config,
     gamma,
     lambd,
-    config,
+    grpo_norm_by_std,
     trajectory_ids,
     is_last_step,
     **kwargs,
@@ -32,23 +33,28 @@ def compute_advantages_step_wise(
     """
     A custom advantage estimator where the inputs are represented as step level turns
     """
-    scores = token_level_rewards.sum(dim=-1)
 
     with torch.no_grad():
         # calculate for the last step only and then broadcast to all steps
-        last_step_scores = scores[is_last_step]
+        last_step_rewards = token_level_rewards[is_last_step]
         # compatible with any advantage estimator
         last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
-            last_step_scores,
-            response_mask[is_last_step],
-            index[is_last_step.numpy()],
-            values[is_last_step],
-            epsilon=1e-6,
+            token_level_rewards=last_step_rewards,
+            response_mask=response_mask[is_last_step],
+            index=index[is_last_step.numpy()],
+            adv_estimator=adv_estimator,
+            values=values[is_last_step] if values is not None else None,
+            config=config,
+            gamma=gamma,
+            lambd=lambd,
             grpo_norm_by_std=grpo_norm_by_std,
+            **kwargs,
         )
 
         is_last_step = is_last_step.to(int)
-        _, traj_ids = torch.unique_consecutive(trajectory_ids, return_inverse=True)
+        traj_ids = (
+            torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1] == 1]).int().cumsum(dim=0)
+        )
         advantages = last_step_advantages[traj_ids]
         returns = last_step_returns[traj_ids]
 
@@ -104,7 +110,10 @@ class StepWiseTrainer(RayPPOTrainer):
         )
         training_input.metadata = {
             "uids": uids,
-            "trajectory_ids": generator_output["trajectory_ids"],
+            "trajectory_ids": [
+                f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"
+                for trajectory_id in generator_output["trajectory_ids"]
+            ],
         }
         # padded response length
         num_trajectories = training_input["is_last_step"].sum().item()
@@ -198,7 +207,7 @@ class StepWiseTrainer(RayPPOTrainer):
         advantages, returns = compute_advantages_step_wise(
             token_level_rewards=token_level_rewards,
             response_mask=data["response_mask"],
-            index=data.metadata["uids"],
+            index=np.array(data.metadata["uids"]),
             adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
             config=self.cfg.trainer.algorithm,
             values=data["values"],
@@ -282,7 +291,7 @@ class StepWiseTrainer(RayPPOTrainer):
         for key, tensor in training_input.items():
             if tensor is not None:
                 additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-                if key == "attention_mask":
+                if key in ["attention_mask", "is_last_step"]:
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)

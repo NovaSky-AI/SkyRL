@@ -27,7 +27,7 @@ from skyrl_train.generators.utils import (
 )
 
 
-class GPTOSSGeneratorOutput(GeneratorOutput):
+class StepWiseGeneratorOutput(GeneratorOutput):
     trajectory_ids: List[TrajectoryID]
     is_last_step: List[bool]
 

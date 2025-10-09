@@ -9,7 +9,7 @@ from examples.step_wise.step_wise_generator import StepWiseGenerator
 from examples.step_wise.step_wise_trainer import StepWiseTrainer
 
 
-class GPTOSSExp(BasePPOExp):
+class StepWiseExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """Initializes the generator.
 
@@ -57,7 +57,7 @@ class GPTOSSExp(BasePPOExp):
 def skyrl_entrypoint(cfg: DictConfig):
 
     # make sure that the training loop is not run on the head node.
-    exp = GPTOSSExp(cfg)
+    exp = StepWiseExp(cfg)
     exp.run()
 
 

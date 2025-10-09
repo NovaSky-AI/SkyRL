@@ -9,7 +9,6 @@ from collections import defaultdict
 from skyrl_train.utils import Timer
 
 from skyrl_train.generators.utils import (
-    concatenate_generator_outputs,
     get_metrics_from_generator_output,
     prepare_generator_input,
 )
@@ -20,6 +19,7 @@ from skyrl_train.generators.base import (
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    concatenate_generator_outputs,
 )
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
