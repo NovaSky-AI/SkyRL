@@ -21,6 +21,9 @@ from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Base path for saving checkpoints
+CHECKPOINTS_BASE_PATH = Path("/tmp/tx_checkpoints")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,7 +38,7 @@ async def lifespan(app: FastAPI):
     # TODO: Make this configurable via environment variable or API parameter
     base_model = "Qwen/Qwen3-0.6B"
     background_engine = subprocess.Popen(
-        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine", "--base-model", base_model]
+        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine", "--base-model", base_model, "--checkpoints-base-path", CHECKPOINTS_BASE_PATH]
     )
     logger.info(f"Started background engine with PID {background_engine.pid} for base model {base_model}")
 
