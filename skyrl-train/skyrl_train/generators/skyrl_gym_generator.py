@@ -87,7 +87,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "I am a user."},
-            {"role": "assistant", "content": "I am an assistant."},
         ]
         self.base_conversation_token_ids = tokenizer.apply_chat_template(
             self.base_conversation,
@@ -614,6 +613,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         if len(new_obs) > 0:
             # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
+            with_observations_templated = self.tokenizer.apply_chat_template(
+                [*self.base_conversation, *new_obs],
+                add_generation_prompt=True,
+                tokenize=False,
+                **self.generator_cfg.chat_template_kwargs,
+            )
+            print(f"CHARLIE with_observations_templated: {with_observations_templated}")
+            
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,

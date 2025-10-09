@@ -301,9 +301,6 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "I am a user."},
     ]
-    if messages[0]["role"] != "assistant":
-        # add an assistant message as well if the first role is user/tool
-        base_conversation.append({"role": "assistant", "content": "I am an assistant."})
     base_conversation_token_ids = tokenizer.apply_chat_template(
         base_conversation,
         add_generation_prompt=False,
