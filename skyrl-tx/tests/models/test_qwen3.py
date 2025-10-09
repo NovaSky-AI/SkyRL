@@ -129,8 +129,8 @@ def test_qwen3_moe_layer_lora():
         for adapter_idx in range(config.max_lora_adapters):
             for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
                 assert proj.lora_A is not None and proj.lora_B is not None
-                lora_A = rng.normal(0, 0.05, proj.lora_A.value.shape[1:])
-                lora_B = rng.normal(0, 0.05, proj.lora_B.value.shape[1:])
+                lora_A = rng.normal(0, 0.5, proj.lora_A.value.shape[1:])
+                lora_B = rng.normal(0, 0.5, proj.lora_B.value.shape[1:])
                 load_lora_weights(proj, adapter_idx, lora_A, lora_B, scaling, rank)
 
         # Test with different adapters per sample
