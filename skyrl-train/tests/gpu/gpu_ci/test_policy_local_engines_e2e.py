@@ -111,6 +111,4 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
-        AdvantageEstimatorRegistry.reset()
-        PolicyLossRegistry.reset()
         ray.shutdown()

@@ -23,3 +23,21 @@ def ray_init_fixture():
     yield
     # call ray shutdown after a test regardless
     ray.shutdown()
+    try:
+        ray.kill(ray.get_actor("*", allow_unknown=True), no_restart=True)
+    except Exception:
+        pass
+
+    ray.shutdown()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+    try:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    except Exception:
+        pass
+
