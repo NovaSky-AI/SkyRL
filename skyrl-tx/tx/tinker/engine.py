@@ -57,7 +57,7 @@ class TinkerEngine:
         checkpoint_path = snapshot_download(self.base_model_name, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((1, 8), ("dp", "tp"))
         with jax.set_mesh(mesh):
             self.model = model_class(self.config, dtype=get_dtype(self.config.dtype), rngs=nnx.Rngs(0))
             load_checkpoint(checkpoint_path, self.config, self.model)
@@ -70,6 +70,7 @@ class TinkerEngine:
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
+            self.merged_model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
         logger.info(
             f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
@@ -221,8 +222,8 @@ class TinkerEngine:
         )
 
         # Compute per-example losses and gradients using nnx.split pattern
-        def loss_for_lora(lora_params):
-            merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
+        @nnx.jit
+        def loss_for_lora(merged_model, input_ids, target_ids, adapter_indices, attention_mask, loss_mask):
             logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
             # Compute per-example losses (don't average yet)
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
@@ -234,7 +235,9 @@ class TinkerEngine:
             return per_example_losses.mean(), (logits, per_token_losses)
 
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
+        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
+            self.merged_model, input_ids, target_ids, adapter_indices, attention_mask, loss_mask
+        )
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
@@ -473,7 +476,7 @@ def main():
         "--max-lora-adapters",
         dest="max_lora_adapters",
         type="int",
-        default=32,
+        default=1,
         help="Maximum number of LoRA adapters (default: 32)",
         metavar="NUM",
     )
@@ -481,7 +484,7 @@ def main():
         "--max-lora-rank",
         dest="max_lora_rank",
         type="int",
-        default=32,
+        default=1,
         help="Maximum LoRA rank (default: 32)",
         metavar="RANK",
     )

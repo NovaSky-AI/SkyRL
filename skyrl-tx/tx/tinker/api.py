@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
 
     # Start background engine with default base model
     # TODO: Make this configurable via environment variable or API parameter
-    base_model = "Qwen/Qwen3-0.6B"
+    base_model = "Qwen/Qwen3-4B"
     background_engine = subprocess.Popen(
         [
             "uv",
@@ -304,7 +304,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 async def get_server_capabilities():
     """Retrieve information about supported models and server capabilities."""
     supported_models = [
-        SupportedModel(model_name="Qwen/Qwen3-0.6B"),
+        SupportedModel(model_name="Qwen/Qwen3-4B"),
     ]
     return GetServerCapabilitiesResponse(supported_models=supported_models)
 
@@ -364,8 +364,8 @@ def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
-    unique_id: str = fastapi.Path(..., regex=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    checkpoint_id: str = fastapi.Path(..., regex=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
     session: AsyncSession = Depends(get_session),
 ):
     """Return the checkpoint archive bytes"""
@@ -413,4 +413,4 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8003)
