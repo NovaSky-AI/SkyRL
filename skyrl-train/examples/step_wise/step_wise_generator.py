@@ -117,10 +117,10 @@ class StepWiseGenerator(SkyRLGymGenerator):
         loss_mask = []  # this excludes the prompt
         # rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[float, Optional[int]]] = []
+        per_step_rewards: List[Tuple[float, int]] = []
         step_id = 0
         # full_trajectory = {"q": input_ids}
-        per_step_outputs = []
+        per_step_outputs: List[AgentLoopOutput] = []
         while not done:
             # 1. Generate output
             # Token-in-token-out.
@@ -162,8 +162,10 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 loss_mask,
                 done,
             )
-            per_step_rewards.append((step_reward, response_end_idx))
             response_ids = copy.deepcopy(input_ids[current_prompt_length:])
+            # response_end_idx in response_ids needs to be shifted
+            response_end_idx = response_end_idx - current_prompt_length
+            per_step_rewards.append((step_reward, response_end_idx))
             per_step_output = AgentLoopOutput(
                 response_ids=response_ids,
                 reward=step_reward,
@@ -184,6 +186,12 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
             per_step_outputs.append(per_step_output)
             step_id += 1
+
+        for per_step_output, (reward, resp_end_idx) in zip(per_step_outputs, per_step_rewards):
+            per_token_reward = [0.0] * len(per_step_output.response_ids)
+            per_token_reward[resp_end_idx] = float(reward)
+            # in-place update to per-token reward
+            per_step_output.reward = per_token_reward
 
         await self._run_in_executor_if_available(env.close)
 
