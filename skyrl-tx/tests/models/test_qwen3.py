@@ -121,7 +121,7 @@ def test_qwen3_lora():
         lora_configs = []
         for adapter_name in lora_adapters:
             lora_config = LoraConfig.from_pretrained(adapter_name)
-            lora_config.target_modules = ["gate_proj", "up_proj", "down_proj"]
+            lora_config.target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             lora_configs.append(lora_config)
 
             hf_model = get_peft_model(
@@ -156,13 +156,16 @@ def test_qwen3_lora():
 
         # Load LoRA adapter weights from all adapters
         for i, layer in enumerate(model.model.layers):
-            if hasattr(layer.mlp, "gate_proj") and hasattr(layer.mlp.gate_proj, "lora_A"):
-                for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
-                    hf_layer = hf_model.base_model.model.model.layers[i].mlp
-                    for proj_name in ["gate_proj", "up_proj", "down_proj"]:
-                        hf_proj = getattr(hf_layer, proj_name)
+            for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
+                hf_layer = hf_model.base_model.model.model.layers[i]
+                for module, projections in [
+                    ("mlp", ["gate_proj", "up_proj", "down_proj"]),
+                    ("self_attn", ["q_proj", "k_proj", "v_proj", "o_proj"]),
+                ]:
+                    for proj_name in projections:
+                        hf_proj = getattr(getattr(hf_layer, module), proj_name)
                         load_lora_weights(
-                            getattr(layer.mlp, proj_name),
+                            getattr(getattr(layer, module), proj_name),
                             adapter_idx=adapter_idx,
                             lora_A_weights=hf_proj.lora_A["default"].weight.detach().numpy().T,
                             lora_B_weights=hf_proj.lora_B["default"].weight.detach().numpy().T,
