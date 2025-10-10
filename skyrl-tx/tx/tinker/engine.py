@@ -2,7 +2,6 @@
 
 import time
 import logging
-import math
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import create_engine, Session, select, func
@@ -79,6 +78,32 @@ class TinkerEngine:
         logger.info(
             f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
         )
+
+        self._compile_loss_function()
+
+    def _compile_loss_function(self):
+        """Compile and cache the loss function to avoid re-jitting on every call.
+
+        The function captures graphdef and non_lora_params in a closure, which is fine
+        because these don't change. We compile it once and reuse it.
+        """
+        graphdef = self.graphdef
+        non_lora_params = self.non_lora_params
+
+        def _loss_fn(lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            merged_model = nnx.merge(graphdef, lora_params, non_lora_params)
+            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
+            # Compute per-example losses (don't average yet)
+            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
+                logits=logits, labels=target_ids, where=loss_mask
+            )
+            # Average over sequence length for each example
+            per_example_losses = per_token_losses.mean(axis=-1)
+            # Return mean loss for gradient computation, but also return per-token losses
+            return per_example_losses.mean(), (logits, per_token_losses)
+
+        # Compile once and store
+        self._compiled_loss_fn = nnx.jit(_loss_fn)
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -223,22 +248,12 @@ class TinkerEngine:
             dtype=jnp.int32,
         )
 
-        # Compute per-example losses and gradients using nnx.split pattern
-        @nnx.jit
-        def loss_for_lora(lora_params):
-            merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
-            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
-            # Compute per-example losses (don't average yet)
-            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
-                logits=logits, labels=target_ids, where=loss_mask
-            )
-            # Average over sequence length for each example
-            per_example_losses = per_token_losses.mean(axis=-1)
-            # Return mean loss for gradient computation, but also return per-token losses
-            return per_example_losses.mean(), (logits, per_token_losses)
-
-        loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
+        # Compute per-example losses and gradients using the cached compiled function
+        # This avoids re-jitting on every call
+        loss_and_grad_fn = nnx.value_and_grad(self._compiled_loss_fn, has_aux=True)
+        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
+            self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+        )
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
