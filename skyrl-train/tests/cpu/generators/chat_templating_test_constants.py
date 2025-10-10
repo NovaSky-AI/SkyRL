@@ -3,6 +3,7 @@ Expected templated strings used for
 skyrl-train/tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py::test_skyrl_gym_generator_chat_templating_exact
 """
 
+
 # Produced by expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
 # where expected_chat_history is:
 def get_expected_chat_history(mock_response_text: str):
@@ -14,6 +15,7 @@ def get_expected_chat_history(mock_response_text: str):
         {"role": "user", "content": "2"},
         {"role": "assistant", "content": mock_response_text},
     ]
+
 
 QWEN2_5_EXPECTED_STR = """<|im_start|>system
 You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
