@@ -17,6 +17,13 @@ from skyrl_train.generators.utils import get_custom_chat_template
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
+from tests.cpu.generators.chat_templating_test_constants import (
+    QWEN2_5_EXPECTED_STR,
+    LLAMA3_2_EXPECTED_STR,
+    QWEN3_TITO_EXPECTED_STR,
+    QWEN3_WITHOUT_THINKING_EXPECTED_STR,
+    get_expected_chat_history,
+)
 
 
 # Setup for formatting tests
@@ -96,23 +103,34 @@ def _make_input_batch(prompt, extras):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,tokenization_codepath",
+    "model_name,tokenization_codepath,expected_str",
     [
-        ("Qwen/Qwen2.5-0.5B-Instruct", "tito"),
-        ("unsloth/Llama-3.2-1B-Instruct", "tito"),
+        ("Qwen/Qwen2.5-0.5B-Instruct", "tito", QWEN2_5_EXPECTED_STR),
+        ("unsloth/Llama-3.2-1B-Instruct", "tito", LLAMA3_2_EXPECTED_STR),
         # Qwen3: test all three tokenization paths
-        ("Qwen/Qwen3-0.6B", "tito"),
-        ("Qwen/Qwen3-0.6B", "custom_chat_template_from_path"),
-        ("Qwen/Qwen3-0.6B", "custom_chat_template_builtin"),
+        ("Qwen/Qwen3-0.6B", "tito", QWEN3_TITO_EXPECTED_STR),
+        ("Qwen/Qwen3-0.6B", "custom_chat_template_from_path", QWEN3_WITHOUT_THINKING_EXPECTED_STR),
+        ("Qwen/Qwen3-0.6B", "custom_chat_template_builtin", QWEN3_WITHOUT_THINKING_EXPECTED_STR),
+    ],
+    ids=[
+        "qwen2_5-tito",
+        "llama3_2-tito",
+        "qwen3-tito",
+        "qwen3-custom_chat_template_from_path",
+        "qwen3-custom_chat_template_builtin",
     ],
 )
-async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenization_codepath):
+async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenization_codepath, expected_str):
     """
     Tests the behavior of chat templating for various models in multi-turn conversation.
 
     `tokenization_codepath` being `tito` means token-in-token-out, which is codepath 1 described in
     `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
+
+    We hardcode the expected string in the constants file, so it is easier to check. But we also double
+    check that those expected strings are correct by applying the chat template on the expected chat history.
     """
+    # 1. Preparations to mock the generation.
     _register_test_env_if_needed()  # Register only when needed
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     mock_llm = MagicMock()
@@ -122,7 +140,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     if "Qwen3" in model_name:
         mock_response_text = "<think>\nmock thinking\n</think>\n\n" + mock_response_text
 
-    # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
 
@@ -156,51 +173,32 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
-    expected_chat_history = [
-        {"role": "user", "content": "a"},
-        {"role": "assistant", "content": mock_response_text},
-        {"role": "user", "content": "1"},
-        {"role": "assistant", "content": mock_response_text},
-        {"role": "user", "content": "2"},
-        {"role": "assistant", "content": mock_response_text},
-    ]
-
-    # For Qwen2.5 generator_output_str, we have (note the missing \n after the eos token):
-    # <|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n
-    # <|im_start|>user\na<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n
-    # <|im_start|>user\n1<|im_end|>\n<|im_start|>assistant\nb<|im_end|>\n
-    # <|im_start|>user\n2<|im_end|>\n<|im_start|>assistant\nb<|im_end|>
-
-    # check that the full response is exactly string matching with applying the chat template on history
-    prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
-    resp_str = tokenizer.decode(generator_output["response_ids"][0])
-    custom_chat_template = get_custom_chat_template(chat_template_config)
-    if custom_chat_template is not None:
-        assert prompt_str + resp_str == tokenizer.apply_chat_template(
-            expected_chat_history, chat_template=custom_chat_template, tokenize=False
+    # 2. Double check that the hardcoded expected string is correct by recreating them.
+    expected_chat_history = get_expected_chat_history(mock_response_text)
+    if "Qwen3" in model_name and tokenization_codepath == "tito":
+        keep_thinking_chat_template = get_custom_chat_template(
+            {"source": "name", "name_or_path": "qwen3_with_thinking"}
+        )
+        assert expected_str == tokenizer.apply_chat_template(
+            expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template
         )
     else:
-        generator_output_str = prompt_str + resp_str
-        if "Qwen3" in model_name and tokenization_codepath == "tito":
-            # For Qwen3 default TiTo, use a chat template that preserves thinking tokens
-            keep_thinking_chat_template = get_custom_chat_template(
-                {"source": "name", "name_or_path": "qwen3_with_thinking"}
-            )
-            expected_str = tokenizer.apply_chat_template(
-                expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template
-            )
-        else:
-            expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
-        if "Qwen" in model_name:
-            # For Qwen models, there is an `\n` after the eos token. Our generator follows token-in-token-out,
-            # so it will not generate anything after the eos token, and hence will not have the `\n`.
-            # e.g. `<|assistant|>\Some content<|im_end|>\n` for expected_str, but
-            # `<|assistant|>\Some content<|im_end|>` for generator_output_str.
-            if expected_str.endswith("\n"):
-                expected_str = expected_str[:-1]
-        assert generator_output_str == expected_str
+        assert expected_str == tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
 
-    # check loss mask exact matches
+    # 3. Check that the full response is exactly string matching with applying the chat template on history
+    prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
+    resp_str = tokenizer.decode(generator_output["response_ids"][0])
+    generator_output_str = prompt_str + resp_str
+    if tokenization_codepath == "tito" and "Qwen" in model_name:
+        # For Qwen models, there is an `\n` after the eos token. Our generator follows token-in-token-out,
+        # so it will not generate anything after the eos token, and hence will not have the `\n`.
+        # e.g. `<|assistant|>\Some content<|im_end|>\n` for expected_str, but
+        # `<|assistant|>\Some content<|im_end|>` for generator_output_str.
+        if expected_str.endswith("\n"):
+            expected_str = expected_str[:-1]
+    assert generator_output_str == expected_str
+
+    # 4. Check loss mask exact matches
     system_prompt = tokenizer.apply_chat_template(
         [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], tokenize=True
     )
@@ -260,7 +258,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
         # `<|im_start|>user\n1<|im_end|>\n`
         expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
 
-        assert custom_chat_template is None  # we only test custom chat template for Qwen3 models
+        assert tokenization_codepath == "tito"  # we only test custom chat template for Qwen3 models
         expected_loss_masks = (
             expected_assistant_no_generation_prompt_loss_mask  # b<|im_end|>\n
             + (
