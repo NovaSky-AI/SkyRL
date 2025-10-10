@@ -328,7 +328,6 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
     `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
     """
     _register_test_env_if_needed()
-    model_name = model_name.replace("-TITO", "")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     stop_tag = "</solution>"
