@@ -117,12 +117,16 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     mock_llm = MagicMock()
 
+    # Parameterize mock response: Qwen3 uses thinking tokens, others use simple 'b'
+    mock_response_text = "b"
+    if "Qwen3" in model_name:
+        mock_response_text = "<think>\nmock thinking\n</think>\n\n" + mock_response_text
+
     # Mock the new generate method
     def mock_generate(input_batch):
         num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
 
-        mock_llm_output_text = "b" + tokenizer.eos_token
-        mock_response_text = "b"
+        mock_llm_output_text = mock_response_text + tokenizer.eos_token
 
         return {
             # no tokenizer.eos_token for responses because `skip_special_tokens` is True in sampling params
@@ -152,16 +156,13 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
-    # assume every actual message is 1 token for loss mask checking
-    expected_assistant_content = "b"
-
     expected_chat_history = [
         {"role": "user", "content": "a"},
-        {"role": "assistant", "content": expected_assistant_content},
+        {"role": "assistant", "content": mock_response_text},
         {"role": "user", "content": "1"},
-        {"role": "assistant", "content": expected_assistant_content},
+        {"role": "assistant", "content": mock_response_text},
         {"role": "user", "content": "2"},
-        {"role": "assistant", "content": expected_assistant_content},
+        {"role": "assistant", "content": mock_response_text},
     ]
 
     # For Qwen2.5 generator_output_str, we have (note the missing \n after the eos token):
@@ -180,12 +181,16 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
         )
     else:
         generator_output_str = prompt_str + resp_str
-        expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
         if "Qwen3" in model_name and tokenization_codepath == "tito":
-            # For Qwen3-TITO, since we do not have the thinking tokens in our mocked response (it is just a `b`),
-            # the official chat template will add empty thinking tokens for last turn.
-            # We test with thinking tokens in test_skyrl_gym_generator_chat_templating_qwen3.
-            expected_str = expected_str.replace("<think>\n\n</think>\n\n", "")
+            # For Qwen3 default TiTo, use a chat template that preserves thinking tokens
+            keep_thinking_chat_template = get_custom_chat_template(
+                {"source": "name", "name_or_path": "qwen3_with_thinking"}
+            )
+            expected_str = tokenizer.apply_chat_template(
+                expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template
+            )
+        else:
+            expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
         if "Qwen" in model_name:
             # For Qwen models, there is an `\n` after the eos token. Our generator follows token-in-token-out,
             # so it will not generate anything after the eos token, and hence will not have the `\n`.
@@ -207,23 +212,55 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`
     empty_user = empty_user[len(system_prompt) :]  # `<|im_start|>user\n<|im_end|>\n`
 
-    # `<|im_start|>assistant\nb<|im_end|>\n`
-    expected_assistant_loss_mask = [0] * len(generation_prompt_ids) + [1, 1]  # 1 for single response token, 1 for eos
-    expected_assistant_no_generation_prompt_loss_mask = [1, 1]  # 1 for single response token, 1 for eos
-    if "Qwen" in model_name:
-        expected_assistant_loss_mask += [0]  # extra 0 for \n for qwen templates
-        expected_assistant_no_generation_prompt_loss_mask += [0]
-    # `<|im_start|>user\n1<|im_end|>\n`
-    expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
+    # Build expected_loss_masks
+    if "Qwen3" in model_name:
+        # last [1, 0] -- 1 is for eos, 0 is for `\n`
+        # Qwen3 with thinking content
+        num_tokens_with_thinking = len(tokenizer.encode(mock_response_text))
+        num_tokens_without_thinking = 1
+        expected_user_loss_mask = [0] * len(empty_user) + [0]
+        # `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
+        expected_assistant_loss_mask_with_thinking = (
+            [0] * len(generation_prompt_ids) + [1] * num_tokens_with_thinking + [1, 0]
+        )
+        # `<|im_start|>assistant\nb<|im_end|>\n`
+        expected_assistant_loss_mask_without_thinking = (
+            [0] * len(generation_prompt_ids) + [1] * num_tokens_without_thinking + [1, 0]
+        )
+        # `<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
+        expected_assistant_no_generation_prompt_loss_mask_with_thinking = [1] * num_tokens_with_thinking + [1, 0]
 
-    if custom_chat_template is not None:
-        # For custom_chat_template, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
-        expected_loss_masks = (
-            expected_assistant_loss_mask  # <|im_start|>assistant\nb<|im_end|>\n
-            + expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
-        ) * 2 + expected_assistant_loss_mask  # last <|im_start|>assistant\nb<|im_end|>\n
+        if tokenization_codepath == "tito":
+            # For non-custom_chat_template, `resp_str` directly starts with what the model generates
+            expected_loss_masks = (
+                expected_assistant_no_generation_prompt_loss_mask_with_thinking  # <think>\nmock thinking\n</think>\n\nb<|im_end|>\n
+                + (
+                    expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
+                    + expected_assistant_loss_mask_with_thinking  # `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
+                )
+                * 2
+            )
+            expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
+        else:
+            # For chat templating, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
+            expected_loss_masks = (
+                expected_assistant_loss_mask_without_thinking  # `<|im_start|>assistant\nb<|im_end|>\n`
+                + expected_user_loss_mask  # `<|im_start|>user\n1<|im_end|>\n`
+            ) * 2 + expected_assistant_loss_mask_with_thinking  # last `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
     else:
-        # For non-custom_chat_template, `resp_str` directly starts with what the model generates
+        # `<|im_start|>assistant\nb<|im_end|>\n`
+        expected_assistant_loss_mask = [0] * len(generation_prompt_ids) + [
+            1,
+            1,
+        ]  # 1 for single response token, 1 for eos
+        expected_assistant_no_generation_prompt_loss_mask = [1, 1]  # 1 for single response token, 1 for eos
+        if "Qwen" in model_name:
+            expected_assistant_loss_mask += [0]  # extra 0 for \n for qwen templates
+            expected_assistant_no_generation_prompt_loss_mask += [0]
+        # `<|im_start|>user\n1<|im_end|>\n`
+        expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
+
+        assert custom_chat_template is None  # we only test custom chat template for Qwen3 models
         expected_loss_masks = (
             expected_assistant_no_generation_prompt_loss_mask  # b<|im_end|>\n
             + (
@@ -234,128 +271,6 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
         )
         if "Qwen" in model_name:
             expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
-    assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
-    assert generator_output["loss_masks"][0] == expected_loss_masks
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "mode",
-    ["retokenize_without_thinking", "default_tito"],
-)
-async def test_skyrl_gym_generator_chat_templating_qwen3_thinking(mode):
-    """
-    While test_skyrl_gym_generator_chat_templating_exact tests Qwen3, it does not include the
-    thinking tokens in mock response, making the test not as realistic. We test with thinking tokens
-    in this test. The setup of the two tests are largely the same.
-    `retokenize_without_thinking` is the 3rd codepath described in `skyrl_gym_generator.rst` for Qwen3, and
-    `default_tito` is the 1st (default) codepath.
-    """
-    _register_test_env_if_needed()  # Register only when needed
-    model_name = "Qwen/Qwen3-0.6B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    # A qwen3 chat template that keeps thinking tokens, used for checking default_tito
-    keep_thinking_chat_template = get_custom_chat_template({"source": "name", "name_or_path": "qwen3_with_thinking"})
-    mock_llm = MagicMock()
-
-    mock_response_text = "<think>\nmock thinking\n</think>\n\nb"
-
-    # Mock the new generate method
-    def mock_generate(input_batch):
-        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-
-        mock_llm_output_text = mock_response_text + tokenizer.eos_token
-
-        return {
-            # no tokenizer.eos_token for responses because `skip_special_tokens` is True in sampling params
-            "responses": [mock_response_text] * num_prompts,
-            "stop_reasons": ["stop"] * num_prompts,
-            "response_logprobs": None,
-            "response_ids": [tokenizer.encode(mock_llm_output_text, add_special_tokens=False)] * num_prompts,
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=mock_generate)
-    if mode == "retokenize_without_thinking":
-        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
-    else:
-        chat_template_config = {"source": "name", "name_or_path": None}
-
-    # Create a mock generator config
-    generator = _build_generator(tokenizer, model_name, chat_template_config)
-    generator.inference_engine_client = mock_llm
-
-    prompt, extras = _default_prompt_and_extras()
-    input_batch: GeneratorInput = _make_input_batch(prompt, extras)
-
-    generator_output: GeneratorOutput = await generator.generate(input_batch)
-
-    expected_chat_history = [
-        {"role": "user", "content": "a"},
-        {"role": "assistant", "content": mock_response_text},
-        {"role": "user", "content": "1"},
-        {"role": "assistant", "content": mock_response_text},
-        {"role": "user", "content": "2"},
-        {"role": "assistant", "content": mock_response_text},
-    ]
-
-    prompt_str = tokenizer.decode(generator_output["prompt_token_ids"][0])
-    resp_str = tokenizer.decode(generator_output["response_ids"][0])
-    generator_output_str = prompt_str + resp_str
-
-    if mode == "retokenize_without_thinking":
-        expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
-    else:
-        expected_str = tokenizer.apply_chat_template(
-            expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template
-        )
-        if expected_str.endswith("\n"):
-            expected_str = expected_str[:-1]
-    assert generator_output_str == expected_str
-
-    system_prompt = tokenizer.apply_chat_template([{}], tokenize=True)
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
-    empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
-    )
-    num_tokens_with_thinking = len(tokenizer.encode(mock_response_text))
-    num_tokens_without_thinking = 1
-    # TODO (erictang000): consider hard coding the full loss mask for each model to avoid copying logic in code
-    generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`
-    empty_user = empty_user[len(system_prompt) :]  # `<|im_start|>user\n<|im_end|>\n`
-
-    # `<|im_start|>user\n1<|im_end|>\n`
-    expected_user_loss_mask = [0] * len(empty_user) + [0]  # extra 0 for single observation token
-
-    # last [1, 0] -- 1 is for eos, 0 is for `\n`
-    # `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
-    expected_assistant_loss_mask_with_thinking = (
-        [0] * len(generation_prompt_ids) + [1] * num_tokens_with_thinking + [1, 0]
-    )
-    # `<|im_start|>assistant\nb<|im_end|>\n`
-    expected_assistant_loss_mask_without_thinking = (
-        [0] * len(generation_prompt_ids) + [1] * num_tokens_without_thinking + [1, 0]
-    )
-    # `<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
-    expected_assistant_no_generation_prompt_loss_mask_with_thinking = [1] * num_tokens_with_thinking + [1, 0]
-
-    if mode == "retokenize_without_thinking":
-        # For chat templating, the first generation prompt IDs are part of `resp_str`, hence has corresponding mask
-        expected_loss_masks = (
-            expected_assistant_loss_mask_without_thinking  # `<|im_start|>assistant\nb<|im_end|>\n`
-            + expected_user_loss_mask  # `<|im_start|>user\n1<|im_end|>\n`
-        ) * 2 + expected_assistant_loss_mask_with_thinking  # last `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
-    else:
-        # For non-custom_chat_template, `resp_str` directly starts with what the model generates
-        expected_loss_masks = (
-            expected_assistant_no_generation_prompt_loss_mask_with_thinking  # <think>\nmock thinking\n</think>\n\nb<|im_end|>\n
-            + (
-                expected_user_loss_mask  # <|im_start|>user\n1<|im_end|>\n
-                + expected_assistant_loss_mask_with_thinking  # `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
-            )
-            * 2
-        )
-        expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
     assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
     assert generator_output["loss_masks"][0] == expected_loss_masks
 
