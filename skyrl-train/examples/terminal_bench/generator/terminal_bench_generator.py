@@ -168,8 +168,13 @@ class TerminalBenchGenerator(GeneratorInterface):
                 loss_mask.extend([1] * len(msg_encoding))
                 if assistant_logprobs:
                     if assistant_msg_idx >= len(assistant_logprobs):
-                        raise ValueError(f"Assistant logprobs length {len(assistant_logprobs)} is less than num of assistant messages")
+                        raise ValueError(f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists.")
                     msg_logprobs = assistant_logprobs[assistant_msg_idx]
+                    if len(msg_logprobs) != len(msg_encoding):
+                        raise ValueError(
+                            f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(msg_encoding)}) "
+                            f"for assistant message #{assistant_msg_idx + 1}."
+                        )
                     rollout_logprobs.extend(msg_logprobs)
                     assistant_msg_idx += 1
 
@@ -195,5 +200,5 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             # in case sandboxes doesn't return logprobs, use None
-            rollout_logprobs=rollout_logprobs if assistant_logprobs else None,
+            rollout_logprobs=rollout_logprobs if assistant_logprobs is not None else None,
         )
