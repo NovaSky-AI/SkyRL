@@ -221,6 +221,7 @@ class TinkerEngine:
         )
 
         # Compute per-example losses and gradients using nnx.split pattern
+        @nnx.jit
         def loss_for_lora(lora_params):
             merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
             logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
