@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from typing import List
+from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -20,6 +21,7 @@ class TerminalBenchAgentOutput:
     stop_reason: str
     loss_mask: List[int]
     prompt_ids: List[int]
+    rollout_logprobs: List[float]
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -75,7 +77,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
+            "rollout_logprobs": [output.rollout_logprobs for output in all_outputs],
         }
 
         return generator_output
@@ -87,6 +89,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
+        # Generate session_id for prefix cache routing
+        # All LLM requests in this trial will share the same session_id
+        session_id = uuid4().hex
+
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
                 task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
@@ -94,7 +100,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
                     model_name=f"{self.model_name}",
-                    kwargs={"api_base": f"{self.base_url}/v1", "key": "fake_key", "max_episodes": self.max_episodes},
+                    kwargs={
+                        "api_base": f"{self.base_url}/v1",
+                        "key": "fake_key",
+                        "session_id": session_id,
+                        "max_episodes": self.max_episodes
+                    },
                 ),
             )
         elif self.agent_name == "oracle":
@@ -134,6 +145,12 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         response_ids = []
         loss_mask = []
+        rollout_logprobs = []
+
+        # Get logprobs for assistant messages from trial results
+        # Format: [[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]
+        assistant_logprobs = getattr(results.agent_result, 'output_logprobs', None)
+        assistant_msg_idx = 0
 
         for message in response_messages:
             # Apply chat template and tokenize each message
@@ -145,8 +162,18 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Extend loss_mask: 0s for user, 1s for assistant
             if message["role"] == "user":
                 loss_mask.extend([0] * len(msg_encoding))
+                rollout_logprobs.extend([0.0] * len(msg_encoding))
             else:  # assistant
                 loss_mask.extend([1] * len(msg_encoding))
+                if assistant_logprobs:
+                    if assistant_msg_idx >= len(assistant_logprobs):
+                        raise ValueError(f"Assistant logprobs length {len(assistant_logprobs)} is less than num of assistant messages")
+                    msg_logprobs = assistant_logprobs[assistant_msg_idx]
+                    rollout_logprobs.extend(msg_logprobs)
+                    assistant_msg_idx += 1
+                else:
+                    # Fallback: if Sandboxes doesn't return logprobs, use dummy values
+                    rollout_logprobs.extend([0.0] * len(msg_encoding))
 
         # Determine stop reason
         max_response_tokens = (
@@ -161,10 +188,14 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
+        rollout_logprobs = rollout_logprobs[:max_response_tokens]
+        
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
+            # in case sandboxes doesn't return logprobs, use None
+            rollout_logprobs=rollout_logprobs if assistant_logprobs else None,
         )
