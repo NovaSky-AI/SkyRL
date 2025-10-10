@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
@@ -21,7 +21,7 @@ class TerminalBenchAgentOutput:
     stop_reason: str
     loss_mask: List[int]
     prompt_ids: List[int]
-    rollout_logprobs: List[float]
+    rollout_logprobs: Optional[List[float]]
 
 
 class TerminalBenchGenerator(GeneratorInterface):
