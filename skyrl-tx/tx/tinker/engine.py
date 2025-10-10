@@ -2,6 +2,7 @@
 
 import time
 import logging
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import create_engine, Session, select, func
@@ -22,6 +23,10 @@ from peft import LoraConfig
 logger = logging.getLogger(__name__)
 
 LEARNING_RATE = 1e-4
+
+
+def round_up_to_multiple(num: int, multiple: int) -> int:
+    return ((num + multiple - 1) // multiple) * multiple
 
 
 class TinkerEngine:
@@ -57,7 +62,7 @@ class TinkerEngine:
         checkpoint_path = snapshot_download(self.base_model_name, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((1, 2), ("dp", "tp"))
         with jax.set_mesh(mesh):
             self.model = model_class(self.config, dtype=get_dtype(self.config.dtype), rngs=nnx.Rngs(0))
             load_checkpoint(checkpoint_path, self.config, self.model)
@@ -202,13 +207,11 @@ class TinkerEngine:
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
 
-        # Pad sequences to same length
-        max_len = max(len(seq) for seq in all_input_ids)
-        padded_inputs = [seq + [0] * (max_len - len(seq)) for seq in all_input_ids]
-        padded_targets = [seq + [0] * (max_len - len(seq)) for seq in all_targets]
+        # Pad sequences to same length and bin it so the JIT has to compile fewer kernels
+        max_len = round_up_to_multiple(max(len(seq) for seq in all_input_ids), 512)
 
-        input_ids = jnp.array(padded_inputs, dtype=jnp.int32)
-        target_ids = jnp.array(padded_targets, dtype=jnp.int32)
+        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
+        target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
@@ -474,7 +477,7 @@ def main():
         "--max-lora-adapters",
         dest="max_lora_adapters",
         type="int",
-        default=32,
+        default=1,
         help="Maximum number of LoRA adapters (default: 32)",
         metavar="NUM",
     )
@@ -482,7 +485,7 @@ def main():
         "--max-lora-rank",
         dest="max_lora_rank",
         type="int",
-        default=32,
+        default=4,
         help="Maximum LoRA rank (default: 32)",
         metavar="RANK",
     )
