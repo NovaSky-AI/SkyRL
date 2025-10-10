@@ -162,7 +162,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Extend loss_mask: 0s for user, 1s for assistant
             if message["role"] == "user":
                 loss_mask.extend([0] * len(msg_encoding))
-                rollout_logprobs.extend([0.0] * len(msg_encoding))
+                if assistant_logprobs:
+                    rollout_logprobs.extend([0.0] * len(msg_encoding))
             else:  # assistant
                 loss_mask.extend([1] * len(msg_encoding))
                 if assistant_logprobs:
@@ -171,9 +172,6 @@ class TerminalBenchGenerator(GeneratorInterface):
                     msg_logprobs = assistant_logprobs[assistant_msg_idx]
                     rollout_logprobs.extend(msg_logprobs)
                     assistant_msg_idx += 1
-                else:
-                    # Fallback: if Sandboxes doesn't return logprobs, use dummy values
-                    rollout_logprobs.extend([0.0] * len(msg_encoding))
 
         # Determine stop reason
         max_response_tokens = (
