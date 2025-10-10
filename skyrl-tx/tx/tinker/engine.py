@@ -82,16 +82,10 @@ class TinkerEngine:
         self._compile_loss_function()
 
     def _compile_loss_function(self):
-        """Compile and cache the loss function to avoid re-jitting on every call.
+        """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        The function captures graphdef and non_lora_params in a closure, which is fine
-        because these don't change. We compile it once and reuse it.
-        """
-        graphdef = self.graphdef
-        non_lora_params = self.non_lora_params
-
-        def _loss_fn(lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
-            merged_model = nnx.merge(graphdef, lora_params, non_lora_params)
+        def loss_for_lora(lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
             logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
             # Compute per-example losses (don't average yet)
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
@@ -103,7 +97,7 @@ class TinkerEngine:
             return per_example_losses.mean(), (logits, per_token_losses)
 
         # Compile once and store
-        self._compiled_loss_fn = nnx.jit(_loss_fn)
+        self._compiled_loss_fn = nnx.jit(loss_for_lora)
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
