@@ -96,26 +96,24 @@ def _make_input_batch(prompt, extras):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name",
+    "model_name,tokenization_codepath",
     [
-        "Qwen/Qwen2.5-0.5B-Instruct",
-        "unsloth/Llama-3.2-1B-Instruct",
-        "Qwen/Qwen3-0.6B",
-        "Qwen/Qwen3-0.6B-FROM_PATH",  # tests custom chat template from file
-        "Qwen/Qwen3-0.6B-TITO",  # tests default qwen3 codepath with ti/to
+        ("Qwen/Qwen2.5-0.5B-Instruct", "tito"),
+        ("unsloth/Llama-3.2-1B-Instruct", "tito"),
+        # Qwen3: test all three tokenization paths
+        ("Qwen/Qwen3-0.6B", "tito"),
+        ("Qwen/Qwen3-0.6B", "custom_chat_template_from_path"),
+        ("Qwen/Qwen3-0.6B", "custom_chat_template_builtin"),
     ],
 )
-async def test_skyrl_gym_generator_chat_templating_exact(model_name):
+async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenization_codepath):
     """
     Tests the behavior of chat templating for various models in multi-turn conversation.
 
-    `-TITO` means token-in-token-out, so we can also test the behavior of codepath 1 described in `skyrl_gym_generator.rst` for Qwen3,
-    where we accumulate thinking tokens.
+    `tokenization_codepath` being `tito` means token-in-token-out, which is codepath 1 described in
+    `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
     """
     _register_test_env_if_needed()  # Register only when needed
-    is_custom_jinja_from_file = model_name.endswith("-FROM_PATH")
-    is_tito = model_name.endswith("-TITO")
-    model_name = model_name.replace("-FROM_PATH", "").replace("-TITO", "")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     mock_llm = MagicMock()
 
@@ -138,10 +136,10 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
 
     mock_llm.generate = AsyncMock(side_effect=mock_generate)
     chat_template_config = None
-    if is_custom_jinja_from_file:
+    if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_from_path":
         template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
         chat_template_config = {"source": "file", "name_or_path": str(template_path)}
-    elif "Qwen3" in model_name and not is_tito:
+    elif "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_builtin":
         chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
     else:
         chat_template_config = {"source": "name", "name_or_path": None}
@@ -183,7 +181,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
     else:
         generator_output_str = prompt_str + resp_str
         expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
-        if "Qwen3" in model_name and is_tito:
+        if "Qwen3" in model_name and tokenization_codepath == "tito":
             # For Qwen3-TITO, since we do not have the thinking tokens in our mocked response (it is just a `b`),
             # the official chat template will add empty thinking tokens for last turn.
             # We test with thinking tokens in test_skyrl_gym_generator_chat_templating_qwen3.
@@ -398,21 +396,25 @@ def test_qwen3_original_vs_without_thinking_chat_template():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name",
-    ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-TITO"],
+    "model_name,tokenization_codepath",
+    [
+        ("Qwen/Qwen2.5-0.5B-Instruct", "tito"),
+        ("unsloth/Llama-3.2-1B-Instruct", "tito"),
+        ("Qwen/Qwen3-0.6B", "tito"),
+        ("Qwen/Qwen3-0.6B", "custom_chat_template_builtin"),
+    ],
 )
-async def test_append_eos_after_stop_multi_turn(model_name):
+async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepath):
     """
     Test the behavior of `append_eos_token_after_stop_str_in_multi_turn`, which is applicable
     when `sampling_params.stop` is not `null` and `use_conversation_multi_turn` is `true` in
     the ``agent_loop()`` function.
     It is used in scripts `examples/search/run_search_conversation_format.sh` and
     `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
-    `-TITO` means token-in-token-out, so we can also test the behavior of codepath 1 described in `skyrl_gym_generator.rst` for Qwen3,
-    where we accumulate thinking tokens.
+    `tokenization_codepath` being `tito` means token-in-token-out, which is codepath 1 described in
+    `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
     """
     _register_test_env_if_needed()
-    is_tito = model_name.endswith("-TITO")
     model_name = model_name.replace("-TITO", "")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -436,7 +438,7 @@ async def test_append_eos_after_stop_multi_turn(model_name):
 
         mock_llm.generate = AsyncMock(side_effect=mock_generate)
         chat_template_config = None
-        if "Qwen3" in model_name and not is_tito:
+        if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_builtin":
             chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
         else:
             chat_template_config = {"source": "name", "name_or_path": None}
@@ -469,7 +471,7 @@ async def test_append_eos_after_stop_multi_turn(model_name):
     assert len(out_true["response_ids"][0]) == len(out_true["loss_masks"][0])
     assert len(out_false["response_ids"][0]) == len(out_false["loss_masks"][0])
 
-    if "Qwen3" in model_name and not is_tito:
+    if "Qwen3" in model_name and not tokenization_codepath == "tito":
         # Retokenize path is not affected by append_eos_token_after_stop_str_in_multi_turn
         # The chat template does things like '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n'
         # So regardless of append_eos_token_after_stop_str_in_multi_turn, the last tokens are:
