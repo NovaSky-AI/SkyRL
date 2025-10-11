@@ -28,6 +28,9 @@ def round_up_to_multiple(num: int, multiple: int) -> int:
     return ((num + multiple - 1) // multiple) * multiple
 
 
+# jax.config.update("jax_use_shardy_partitioner", False)
+
+
 class TinkerEngine:
     """Background engine for processing training requests."""
 
@@ -61,8 +64,8 @@ class TinkerEngine:
         checkpoint_path = snapshot_download(self.base_model_name, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
-        with jax.set_mesh(mesh):
+        self.mesh = jax.make_mesh((1, 4), ("dp", "tp"))
+        with jax.set_mesh(self.mesh):
             self.model = model_class(self.config, dtype=get_dtype(self.config.dtype), rngs=nnx.Rngs(0))
             load_checkpoint(checkpoint_path, self.config, self.model)
 
@@ -96,8 +99,10 @@ class TinkerEngine:
             # Return mean loss for gradient computation, but also return per-token losses
             return per_example_losses.mean(), (logits, per_token_losses)
 
-        # Compile once and store
-        self._compiled_loss_fn = nnx.jit(loss_for_lora)
+        # Compile once and store, for now the inputs are going to be replicated
+        state_spec = nnx.get_partition_spec(self.lora_params)
+        replicated = jax.NamedSharding(self.mesh, jax.P(None))
+        self._compiled_loss_fn = nnx.jit(loss_for_lora, in_shardings=(state_spec, replicated, replicated, replicated, replicated, replicated))
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -245,9 +250,10 @@ class TinkerEngine:
         # Compute per-example losses and gradients using the cached compiled function
         # This avoids re-jitting on every call
         loss_and_grad_fn = nnx.value_and_grad(self._compiled_loss_fn, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
-            self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
-        )
+        with jax.set_mesh(self.mesh):
+            (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
+                self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+            )
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
@@ -494,7 +500,7 @@ def main():
         "--max-lora-rank",
         dest="max_lora_rank",
         type="int",
-        default=4,
+        default=1,
         help="Maximum LoRA rank (default: 32)",
         metavar="RANK",
     )

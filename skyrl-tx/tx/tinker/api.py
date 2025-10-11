@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
 
     # Start background engine with default base model
     # TODO: Make this configurable via environment variable or API parameter
-    base_model = "Qwen/Qwen3-0.6B"
+    base_model = "Qwen/Qwen3-1.7B"
     background_engine = subprocess.Popen(
         [
             "uv",
@@ -304,7 +304,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 async def get_server_capabilities():
     """Retrieve information about supported models and server capabilities."""
     supported_models = [
-        SupportedModel(model_name="Qwen/Qwen3-0.6B"),
+        SupportedModel(model_name="Qwen/Qwen3-1.7B"),
     ]
     return GetServerCapabilitiesResponse(supported_models=supported_models)
 
