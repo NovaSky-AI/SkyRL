@@ -174,8 +174,9 @@ class DistributedTorchRayActor:
         numa_nodes = LIBNUMA.numa_num_configured_nodes()
         if numa_nodes <= 0:
             numa_nodes = 1
-        num_gpu_pre_numa_node = 8 // numa_nodes
-        numa_bind(self._local_rank // num_gpu_pre_numa_node)
+        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
+        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
+        numa_bind(target_nid)
         _SET_AFFINITY = True
 
 
