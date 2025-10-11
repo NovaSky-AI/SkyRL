@@ -89,8 +89,7 @@ class TinkerEngine:
 
         def loss_for_lora_pure(lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
             # Merge state back into NNX structure
-            lora_params = nnx.State.from_flat_path(lora_state)
-            merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
+            merged_model = nnx.merge(self.graphdef, lora_state, self.non_lora_params)
             logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
             # Compute per-example losses (don't average yet)
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
@@ -104,12 +103,11 @@ class TinkerEngine:
         # Compile using plain jax.jit with manual state handling
         # Extract state once to get the pytree structure
         state = nnx.state(self.lora_params)
-        state_flat = state.flat_state()
 
-        # Get partition specs from the flat state structure (not the State wrapper)
-        state_flat_partition_spec = nnx.get_partition_spec(state_flat)
+        # Get partition specs from the state structure
+        state_partition_spec = nnx.get_partition_spec(state)
         # Convert partition specs to NamedSharding objects
-        state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_flat_partition_spec)
+        state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
 
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora_pure, has_aux=True)
@@ -119,7 +117,7 @@ class TinkerEngine:
         # Replicate all outputs except gradients which should match state sharding
         self._compiled_loss_and_grad_fn = jax.jit(
             loss_and_grad_fn,
-            in_shardings=(state_shardings, replicated, replicated, replicated, replicated, replicated),
+            in_shardings=(state_shardings,) + (replicated,) * 5,
             out_shardings=((scalar_replicated, (replicated, replicated)), state_shardings)
         )
 
@@ -269,14 +267,11 @@ class TinkerEngine:
         # Compute per-example losses and gradients using the cached compiled function
         # This avoids re-jitting on every call
         # Extract state to pass to pure jitted function
-        lora_state = nnx.state(self.lora_params).flat_state()
+        lora_state = nnx.state(self.lora_params)
         with jax.set_mesh(self.mesh):
-            (avg_loss, (logits, per_token_losses)), lora_grads_state = self._compiled_loss_and_grad_fn(
+            (avg_loss, (logits, per_token_losses)), lora_grads = self._compiled_loss_and_grad_fn(
                 lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
             )
-
-        # Convert gradients back to NNX State structure
-        lora_grads = nnx.State.from_flat_path(lora_grads_state)
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
