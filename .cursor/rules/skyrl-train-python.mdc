@@ -1,0 +1,6 @@
+---
+globs: /skyrl-train/*
+alwaysApply: false
+---
+
+Use Python 3.12 conventions. Include typing for all function params and returns. 

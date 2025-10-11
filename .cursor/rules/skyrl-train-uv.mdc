@@ -1,0 +1,8 @@
+---
+globs: /skyrl-train/*
+alwaysApply: false
+---
+
+This repo uses uv to manage dependencies.
+ - Use the .sh scripts to run entry points
+ - Use `uv run` to run tests and include `--isolated --extra dev -- pytest`` flags. 
