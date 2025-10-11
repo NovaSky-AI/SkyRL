@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 LEARNING_RATE = 1e-4
 
 
+def round_up_to_multiple(num: int, multiple: int) -> int:
+    return ((num + multiple - 1) // multiple) * multiple
+
+
 class TinkerEngine:
     """Background engine for processing training requests."""
 
@@ -74,6 +78,26 @@ class TinkerEngine:
         logger.info(
             f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
         )
+
+        self._compile_loss_function()
+
+    def _compile_loss_function(self):
+        """Compile and cache the loss function to avoid re-jitting on every call."""
+
+        def loss_for_lora(lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
+            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
+            # Compute per-example losses (don't average yet)
+            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
+                logits=logits, labels=target_ids, where=loss_mask
+            )
+            # Average over sequence length for each example
+            per_example_losses = per_token_losses.mean(axis=-1)
+            # Return mean loss for gradient computation, but also return per-token losses
+            return per_example_losses.mean(), (logits, per_token_losses)
+
+        # Compile once and store
+        self._compiled_loss_fn = nnx.jit(loss_for_lora)
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -202,13 +226,11 @@ class TinkerEngine:
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
 
-        # Pad sequences to same length
-        max_len = max(len(seq) for seq in all_input_ids)
-        padded_inputs = [seq + [0] * (max_len - len(seq)) for seq in all_input_ids]
-        padded_targets = [seq + [0] * (max_len - len(seq)) for seq in all_targets]
+        # Pad sequences to same length and bin it so the JIT has to compile fewer kernels
+        max_len = round_up_to_multiple(max(len(seq) for seq in all_input_ids), 512)
 
-        input_ids = jnp.array(padded_inputs, dtype=jnp.int32)
-        target_ids = jnp.array(padded_targets, dtype=jnp.int32)
+        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
+        target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
@@ -220,21 +242,12 @@ class TinkerEngine:
             dtype=jnp.int32,
         )
 
-        # Compute per-example losses and gradients using nnx.split pattern
-        def loss_for_lora(lora_params):
-            merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
-            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
-            # Compute per-example losses (don't average yet)
-            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
-                logits=logits, labels=target_ids, where=loss_mask
-            )
-            # Average over sequence length for each example
-            per_example_losses = per_token_losses.mean(axis=-1)
-            # Return mean loss for gradient computation, but also return per-token losses
-            return per_example_losses.mean(), (logits, per_token_losses)
-
-        loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
+        # Compute per-example losses and gradients using the cached compiled function
+        # This avoids re-jitting on every call
+        loss_and_grad_fn = nnx.value_and_grad(self._compiled_loss_fn, has_aux=True)
+        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
+            self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+        )
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
@@ -481,7 +494,7 @@ def main():
         "--max-lora-adapters",
         dest="max_lora_adapters",
         type="int",
-        default=32,
+        default=1,
         help="Maximum number of LoRA adapters (default: 32)",
         metavar="NUM",
     )
@@ -489,7 +502,7 @@ def main():
         "--max-lora-rank",
         dest="max_lora_rank",
         type="int",
-        default=32,
+        default=4,
         help="Maximum LoRA rank (default: 32)",
         metavar="RANK",
     )
