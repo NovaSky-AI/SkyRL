@@ -463,49 +463,18 @@ class TinkerEngine:
 
 def main():
     """Entry point for the background engine."""
-    from optparse import OptionParser
+    from tx.tinker.util import create_engine_option_parser
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
 
-    parser = OptionParser()
-    parser.add_option(
-        "--base-model", dest="base_model", help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL"
-    )
-    parser.add_option(
-        "--checkpoints-base-path",
-        dest="checkpoints_base_path",
-        help="Base path where checkpoints will be stored",
-        metavar="PATH",
-    )
-    parser.add_option(
-        "--max-lora-adapters",
-        dest="max_lora_adapters",
-        type="int",
-        default=32,
-        help="Maximum number of LoRA adapters (default: 32)",
-        metavar="NUM",
-    )
-    parser.add_option(
-        "--max-lora-rank",
-        dest="max_lora_rank",
-        type="int",
-        default=32,
-        help="Maximum LoRA rank (default: 32)",
-        metavar="RANK",
-    )
-
-    (options, args) = parser.parse_args()
-
-    if not options.base_model:
-        parser.error("--base-model is required")
-    if not options.checkpoints_base_path:
-        parser.error("--checkpoints-base-path is required")
+    parser = create_engine_option_parser()
+    args = parser.parse_args()
 
     TinkerEngine(
-        base_model_name=options.base_model,
-        checkpoints_base_path=options.checkpoints_base_path,
-        max_lora_adapters=options.max_lora_adapters,
-        max_lora_rank=options.max_lora_rank,
+        base_model_name=args.base_model,
+        checkpoints_base_path=args.checkpoints_base_path,
+        max_lora_adapters=args.max_lora_adapters,
+        max_lora_rank=args.max_lora_rank,
     ).run()
 
 

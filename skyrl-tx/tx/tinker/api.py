@@ -22,9 +22,6 @@ from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Base path for saving checkpoints
-CHECKPOINTS_BASE_PATH = Path("/tmp/tx_checkpoints")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,9 +32,8 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    # Start background engine with default base model
-    # TODO: Make this configurable via environment variable or API parameter
-    base_model = "Qwen/Qwen3-0.6B"
+    # Start background engine, passing through the same command line arguments
+    engine_args = getattr(app.state, "engine_args", [])
     background_engine = subprocess.Popen(
         [
             "uv",
@@ -46,13 +42,10 @@ async def lifespan(app: FastAPI):
             "tinker",
             "-m",
             "tx.tinker.engine",
-            "--base-model",
-            base_model,
-            "--checkpoints-base-path",
-            CHECKPOINTS_BASE_PATH,
         ]
+        + engine_args
     )
-    logger.info(f"Started background engine with PID {background_engine.pid} for base model {base_model}")
+    logger.info(f"Started background engine with PID {background_engine.pid}")
 
     yield
 
@@ -377,8 +370,9 @@ async def download_checkpoint_archive(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Files are saved at CHECKPOINTS_BASE_PATH/{model_id}/{checkpoint_id}/
-    checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
+    # Files are saved at checkpoints_base_path/{model_id}/{checkpoint_id}/
+    checkpoints_base_path = Path(app.state.checkpoints_base_path)
+    checkpoint_dir = checkpoints_base_path / unique_id / checkpoint_id
     if not checkpoint_dir.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
@@ -412,5 +406,15 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
+    from tx.tinker.util import create_api_option_parser, get_engine_args_from_group
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    parser, engine_group = create_api_option_parser()
+    args = parser.parse_args()
+
+    # Store parsed options in app.state for use by lifespan
+    app.state.checkpoints_base_path = args.checkpoints_base_path
+
+    # Extract engine arguments from the engine group
+    app.state.engine_args = get_engine_args_from_group(engine_group, args)
+
+    uvicorn.run(app, host=args.host, port=args.port)
