@@ -28,6 +28,9 @@ def round_up_to_multiple(num: int, multiple: int) -> int:
     return ((num + multiple - 1) // multiple) * multiple
 
 
+# jax.config.update("jax_use_shardy_partitioner", False)
+
+
 class TinkerEngine:
     """Background engine for processing training requests."""
 
@@ -61,8 +64,8 @@ class TinkerEngine:
         checkpoint_path = snapshot_download(self.base_model_name, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
-        with jax.set_mesh(mesh):
+        self.mesh = jax.make_mesh((1, 4), ("dp", "tp"))
+        with jax.set_mesh(self.mesh):
             self.model = model_class(self.config, dtype=get_dtype(self.config.dtype), rngs=nnx.Rngs(0))
             load_checkpoint(checkpoint_path, self.config, self.model)
 
@@ -96,9 +99,11 @@ class TinkerEngine:
             # Return mean loss for gradient computation, but also return per-token losses
             return per_example_losses.mean(), (logits, per_token_losses)
 
-        # Compile the value_and_grad version, not the loss function itself
+        # Compile once and store, for now the inputs are going to be replicated
+        state_spec = nnx.get_partition_spec(self.lora_params)
+        replicated = jax.NamedSharding(self.mesh, jax.P(None))
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        self._compiled_loss_and_grad_fn = nnx.jit(loss_and_grad_fn)
+        self._compiled_loss_fn = nnx.jit(loss_and_grad_fn, in_shardings=(state_spec, replicated, replicated, replicated, replicated, replicated))
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -494,7 +499,7 @@ def main():
         "--max-lora-rank",
         dest="max_lora_rank",
         type="int",
-        default=4,
+        default=1,
         help="Maximum LoRA rank (default: 32)",
         metavar="RANK",
     )
