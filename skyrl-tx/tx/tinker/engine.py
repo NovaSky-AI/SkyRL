@@ -113,9 +113,12 @@ class TinkerEngine:
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
 
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora_pure, has_aux=True)
+        # Output: ((loss, (logits, per_token_losses)), grads)
+        # Replicate all outputs except gradients which should match state sharding
         self._compiled_loss_and_grad_fn = jax.jit(
             loss_and_grad_fn,
-            in_shardings=(state_shardings, replicated, replicated, replicated, replicated, replicated)
+            in_shardings=(state_shardings, replicated, replicated, replicated, replicated, replicated),
+            out_shardings=((replicated, (replicated, replicated)), state_shardings)
         )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
