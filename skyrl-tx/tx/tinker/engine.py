@@ -96,8 +96,9 @@ class TinkerEngine:
             # Return mean loss for gradient computation, but also return per-token losses
             return per_example_losses.mean(), (logits, per_token_losses)
 
-        # Compile once and store
-        self._compiled_loss_fn = nnx.jit(loss_for_lora)
+        # Compile the value_and_grad version, not the loss function itself
+        loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
+        self._compiled_loss_and_grad_fn = nnx.jit(loss_and_grad_fn)
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -244,8 +245,7 @@ class TinkerEngine:
 
         # Compute per-example losses and gradients using the cached compiled function
         # This avoids re-jitting on every call
-        loss_and_grad_fn = nnx.value_and_grad(self._compiled_loss_fn, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
+        (avg_loss, (logits, per_token_losses)), lora_grads = self._compiled_loss_and_grad_fn(
             self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
         )
 
