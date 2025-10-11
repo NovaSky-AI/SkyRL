@@ -143,6 +143,16 @@ class SaveWeightsForSamplerRequest(BaseModel):
     path: str
 
 
+class SaveWeightsRequest(BaseModel):
+    model_id: str
+    path: str
+
+
+class LoadWeightsRequest(BaseModel):
+    model_id: str
+    path: str
+
+
 class FutureResponse(BaseModel):
     future_id: str
     status: str = "pending"
@@ -271,6 +281,49 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
         request_data=types.OptimStepInput(adam_params=types.AdamParams(lr=request.adam_params.lr)),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+@app.post("/api/v1/load_weights", response_model=FutureResponse)
+async def load_weights(request: LoadWeightsRequest, session: AsyncSession = Depends(get_session)):
+    """Loads weights and training state."""
+    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
+    result = await session.exec(statement)
+    model = result.first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.LOAD_WEIGHTS,
+        model_id=request.model_id,
+        request_data=types.LoadWeightsInput(path=request.path),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
+@app.post("/api/v1/save_weights", response_model=FutureResponse)
+async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depends(get_session)):
+    """Saves weights and training state."""
+    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
+    result = await session.exec(statement)
+    model = result.first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.SAVE_WEIGHTS,
+        model_id=request.model_id,
+        request_data=types.SaveWeightsInput(path=request.path),
     )
 
     await session.commit()

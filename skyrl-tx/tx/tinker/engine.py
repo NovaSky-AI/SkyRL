@@ -9,6 +9,7 @@ from sqlmodel import create_engine, Session, select, func
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.training import checkpoints
 import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
@@ -310,6 +311,144 @@ class TinkerEngine:
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
 
+    def process_load_weights(
+        self, model_id: str, request_data: types.LoadWeightsInput
+    ) -> types.LoadWeightsOutput:
+        """Loads a training checkpoint to resume training for a specific adapter."""
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not loaded. Create the model before loading a checkpoint.")
+
+        adapter_index = self.models[model_id].adapter_index
+
+        # Construct the path to the checkpoint directory
+        checkpoint_id = Path(request_data.path).name
+        checkpoint_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
+
+        # Restore the checkpoint dictionary from the file
+        restored_data = checkpoints.restore_checkpoint(
+            ckpt_dir=checkpoint_dir,
+            target=None,  # Pass None to load the raw structure from the file
+            prefix="checkpoint_" # Must match the prefix used for saving
+        )
+
+        if restored_data is None:
+            raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
+
+        #Extract the data from the restored dictionary
+        adapter_lora_params = restored_data['lora_weights']
+        adapter_optimizer_state = restored_data['optimizer_state']
+        lora_config_dict = restored_data['lora_config']
+
+        # Validate the LoRA config between loaded and current model in memory
+        current_lora_config = self.models[model_id].lora_config
+        if current_lora_config.rank != lora_config_dict['rank']:
+            raise ValueError(
+                f"Rank mismatch: Checkpoint has rank {lora_config_dict['rank']}, "
+                f"but model {model_id} is configured with rank {current_lora_config.rank}."
+            )
+
+        # Insert a single adapter's state into the main stacked tensor
+        def insert_slice(full_tensor, single_adapter_tensor):
+            # Only update if the full_tensor is a non-scalar array
+            if isinstance(full_tensor, jnp.ndarray) and full_tensor.ndim > 0:
+                return full_tensor.at[adapter_index].set(single_adapter_tensor)
+            else:
+                return single_adapter_tensor
+
+        # Update lora_params
+        self.lora_params = jax.tree.map(
+            insert_slice, self.lora_params, adapter_lora_params
+        )
+
+        # Update optimizer
+        optimizer_graph_state = nnx.state(self.optimizer)
+        updated_optimizer_state = jax.tree.map(
+            insert_slice, optimizer_graph_state, adapter_optimizer_state
+        )
+        nnx.update(self.optimizer, updated_optimizer_state)
+
+        logger.info(f"Loaded training checkpoint for model {model_id} (adapter {adapter_index}) from {checkpoint_dir}")
+
+        return types.LoadWeightsOutput(status="loaded successfully")
+
+    def process_save_weights(
+        self, model_id: str, request_data: types.SaveWeightsInput
+    ) -> types.SaveWeightsOutput:
+        """Process a save_weights request and save model weights, adapter config, and optimizer state."""
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not loaded")
+
+        adapter_index = self.models[model_id].adapter_index
+
+        # Make sure the user cannot store checkpoints in places like ../../<important file>
+        checkpoint_id = Path(request_data.path).name
+        output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
+
+        layer_rank = {
+            path[:-2]: int(node[adapter_index])
+            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
+            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
+        }
+
+        def extract_optimizer_params(p):
+            # Only slice if 'p' is an array with more than 0 dimensions.
+            if isinstance(p, jnp.ndarray) and p.ndim > 0:
+                return p[adapter_index]
+            # Otherwise (if it's a scalar like the step count), return it unchanged.
+            else:
+                return p
+
+        def extract_adapter_params(path, p):
+            rank = layer_rank[path[:-2]]
+            if path[-2].key == "lora_A":
+                return p[adapter_index, :, :rank]
+            elif path[-2].key == "lora_B":
+                return p[adapter_index, :rank, :]
+            else:
+                return p[adapter_index]
+
+        adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
+
+        # Save only the LoRA adapter weights
+        #save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
+
+        # Save LoRA config
+        # lora_config = LoraConfig(
+        #     r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
+        # )
+        #lora_config.save_pretrained(output_dir)
+
+        lora_config_dict = self.models[model_id].lora_config.model_dump()
+
+        #Save optimizer state
+        optimizer_graph_state = nnx.state(self.optimizer)
+        optimizer_state = jax.tree.map(extract_optimizer_params, optimizer_graph_state)
+
+        checkpoint_data = {
+            'lora_weights': adapter_lora_params,
+            'optimizer_state': optimizer_state,
+            'lora_config': lora_config_dict
+        }
+
+        checkpoints.save_checkpoint(
+            ckpt_dir=output_dir,
+            target=checkpoint_data,
+            step=0,
+            prefix="checkpoint_",
+            overwrite=True
+        )
+
+        logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
+
+        return types.SaveWeightsOutput(
+            path=f"tinker://{model_id}/{checkpoint_id}",
+            type="save_weights",
+        )
+
+
     def process_save_weights_for_sampler(
         self, model_id: str, request_data: types.SaveWeightsForSamplerInput
     ) -> types.SaveWeightsForSamplerOutput:
@@ -368,6 +507,14 @@ class TinkerEngine:
             case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
+                )
+            case types.RequestType.SAVE_WEIGHTS:
+                result = self.process_save_weights(
+                    model_id, types.SaveWeightsInput.model_validate(request_data)
+                )
+            case types.RequestType.LOAD_WEIGHTS:
+                result = self.process_load_weights(
+                    model_id, types.LoadWeightsInput.model_validate(request_data)
                 )
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
