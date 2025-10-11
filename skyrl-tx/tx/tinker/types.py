@@ -88,7 +88,6 @@ class LoadWeightsInput(BaseModel):
 
 
 class LoadWeightsOutput(BaseModel):
-    path: str
     type: str
 
 
