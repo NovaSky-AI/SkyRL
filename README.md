@@ -31,7 +31,7 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 
 
 # News
-- **[2025/10/06]** 🎉 We released SkyRL tx: An open implemenation of a backend for the Tinker API to run a Tinker-like service on their own hardware.. [[Blog](https://novasky-ai.notion.site/skyrl-tx)]
+- **[2025/10/06]** 🎉 We released SkyRL tx: An open implementation of a backend for the Tinker API to run a Tinker-like service on their own hardware. [[Blog](https://novasky-ai.notion.site/skyrl-tx)]
 - **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
 - **[2025/06/26]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
 - **[2025/05/20]** 🎉 We released SkyRL-SQL: a multi-turn RL training pipeline for Text-to-SQL, along with SkyRL-SQL-7B — a model trained on just 653 samples that outperforms both GPT-4o and o4-mini!
