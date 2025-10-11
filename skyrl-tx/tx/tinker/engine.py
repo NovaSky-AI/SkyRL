@@ -131,7 +131,7 @@ class TinkerEngine:
             adapter_index=adapter_index,
             lora_config=request_data.lora_config,
         )
-        self.accumulated_grads[model_id] = None
+        self.accumulated_grads[model_id] = {"grad_sum": None, "denominator": 0}
 
         # Update the adapter's rank and scaling in all LoRA layers
         update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
@@ -241,25 +241,38 @@ class TinkerEngine:
         target_logprobs = jnp.take_along_axis(all_logprobs, target_ids[..., None], axis=-1)  # [B, T, 1]
         target_logprobs = target_logprobs.squeeze(-1)  # [B, T]
 
-        # Extract and accumulate gradients for each model_id's specific adapter
-        num_total_examples = input_ids.shape[0]
-        for request_id, model_id, start_idx, end_idx in request_batch_slices:
-            num_adapter_examples = end_idx - start_idx
-            adapter_index = self.models[model_id].adapter_index
+        # Count examples contributed by each model in this fused batch
+        # Examples may be across multiple requests.
+        examples_per_model: dict[str, int] = {}
+        for _, mid, s, e in request_batch_slices:
+            examples_per_model[mid] = examples_per_model.get(mid, 0) + (e - s)
 
-            # Extract gradients for this specific adapter index.
+        num_total_examples = input_ids.shape[0]
+        for model_id in examples_per_model.keys():
+            adapter_index = self.models[model_id].adapter_index
+            num_adapter_examples = examples_per_model[model_id]
+
+            # Extract gradients for this adapter.
             adapter_grads_all_mean = jax.tree.map(lambda g: g[adapter_index], lora_grads)
-            # Gradient is the mean across the global batch. Scale to mean over the adapter's samples.
-            grad_scale = num_total_examples / num_adapter_examples
-            adapter_grads = jax.tree.map(
-                lambda x: x * jnp.asarray(grad_scale, dtype=x.dtype),
+
+            # Gradient is the mean across the global batch.
+            # Convert to sum over this adapter's examples.
+            grads_sum_batch = jax.tree.map(
+                lambda x: x * jnp.asarray(num_total_examples, dtype=x.dtype),
                 adapter_grads_all_mean,
             )
 
-            if self.accumulated_grads[model_id] is None:
-                self.accumulated_grads[model_id] = adapter_grads
+            grad_sum = self.accumulated_grads[model_id]
+            if grad_sum["grad_sum"] is None:
+                self.accumulated_grads[model_id] = {
+                    "grad_sum": grads_sum_batch,
+                    "denominator": num_adapter_examples,
+                }
             else:
-                raise NotImplementedError("Gradient accumulation not yet implemented")
+                self.accumulated_grads[model_id] = {
+                    "grad_sum": jax.tree.map(lambda a, b: a + b, grad_sum["grad_sum"], grads_sum_batch),
+                    "denominator": grad_sum["denominator"] + num_adapter_examples,
+                }
 
         # Compute per-request results with correct per-request losses
         for request_id, model_id, start_idx, end_idx in request_batch_slices:
@@ -293,10 +306,16 @@ class TinkerEngine:
         adapter_index = self.models[model_id].adapter_index
 
         # Get accumulated gradients for this adapter
-        adapter_grads = self.accumulated_grads.get(model_id)
-        if adapter_grads is None:
+        grad_sum = self.accumulated_grads.get(model_id)
+        if not grad_sum or grad_sum.get("grad_sum") is None or grad_sum.get("denominator", 0) == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
+
+        # Average over all examples for this adapter
+        adapter_grads = jax.tree.map(
+            lambda g: g / jnp.asarray(grad_sum["denominator"], dtype=g.dtype),
+            grad_sum["grad_sum"],
+        )
 
         # Create full gradient structure with zeros for all adapters except this one
         def expand_adapter_grads(lora_param, adapter_grad):
@@ -313,7 +332,7 @@ class TinkerEngine:
         self.optimizer.update(self.lora_params, full_lora_grads)
 
         # Clear accumulated gradients
-        self.accumulated_grads[model_id] = None
+        self.accumulated_grads[model_id] = {"sum_grads": None, "denom": 0}
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
