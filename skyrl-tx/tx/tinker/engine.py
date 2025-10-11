@@ -100,10 +100,10 @@ class TinkerEngine:
             return per_example_losses.mean(), (logits, per_token_losses)
 
         # Compile once and store, for now the inputs are going to be replicated
-        state_spec = nnx.get_partition_spec(self.lora_params)
+        state_shardings = nnx.get_named_sharding(self.lora_params, self.mesh)
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        self._compiled_loss_and_grad_fn = nnx.jit(loss_and_grad_fn, in_shardings=(state_spec, replicated, replicated, replicated, replicated, replicated))
+        self._compiled_loss_and_grad_fn = nnx.jit(loss_and_grad_fn, in_shardings=(state_shardings, replicated, replicated, replicated, replicated, replicated))
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
