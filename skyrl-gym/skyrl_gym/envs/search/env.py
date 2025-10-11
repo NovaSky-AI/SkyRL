@@ -2,9 +2,12 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, Con
 from typing import Any
 from skyrl_gym.envs.search.utils import compute_score
 from skyrl_gym.tools import SearchToolGroup
+from skyrl_gym.utils import get_logger
 import re
 from typing import Dict, Optional, List
 from omegaconf import DictConfig
+
+logger = get_logger("search")
 
 
 class SearchEnv(BaseTextEnv):
@@ -84,9 +87,14 @@ class SearchEnv(BaseTextEnv):
 
         try:
             query = self._parse_action(action)
+            if query and query[0]:
+                logger.info(f"Executing search query: {query[0][:100]}...")
             observation = self._execute_tool("SearchToolGroup", "search", query)
+            if observation:
+                logger.debug("Search completed successfully")
         except Exception as e:
             error = str(e)
+            logger.error(f"Search execution failed: {error}")
             observation = None
 
         # Wrap the observation properly as a message
