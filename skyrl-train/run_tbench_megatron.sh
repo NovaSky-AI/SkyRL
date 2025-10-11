@@ -8,32 +8,31 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/terminal_bench/run_tbench_megatron.sh
 
-export WANDB_API_KEY="c59807d68ecbef2281925f42a59269b251a12b33"
+export WANDB_API_KEY=""
 export WANDB_ENTITY="bespoke-labs"
-export PYTHONPATH="$PWD"
 
 DATA_DIR="$HOME/ez_apex_100"
-NUM_NODES=1
+NUM_NODES=4
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
-SANDBOXES_DIR="/root/SkyRL/skyrl-train/sandboxes"
+SANDBOXES_DIR="$HOME/SkyRL/skyrl-train/sandboxes"
 MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
 # Inference backend (for rollout generation)
 INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in this setup
 
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
-MEGATRON_TP=2
-MEGATRON_PP=1
+MEGATRON_TP=4
+MEGATRON_PP=2
 MEGATRON_CP=4
 
-MEGATRON_EP=4
+MEGATRON_EP=8
 MEGATRON_ETP=2
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=8
-INFERENCE_ENGINE_TP=1
+NUM_INFERENCE_ENGINES=16
+INFERENCE_ENGINE_TP=2
 
 # Torch profiler (optional)
 ENABLE_TORCH_PROFILER=false
@@ -41,9 +40,13 @@ RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
 
 export SKYRL_PYTHONPATH_EXPORT=1
-export CUDNN_PATH="$(uv run python -c 'import inspect, os, nvidia.cudnn as c; print(os.path.dirname(inspect.getfile(c)))')"
+export PYTHONPATH="/home/ubuntu/SkyRL/skyrl-train"
+export CUDNN_PATH="$(python -c 'import inspect, os, nvidia.cudnn as c; print(os.path.dirname(inspect.getfile(c)))')"
 export CPATH="$CUDNN_PATH/include:${CPATH:-}"
 export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
+export RAY_worker_register_timeout_seconds=1800
+export GLOO_SOCKET_IFNAME=enp27s0f0np0  #TODO: Make sure to change this for other nodes. Use this to check: ip -4 route
+export NCCL_SOCKET_IFNAME=enp27s0f0np0
 # export CUDA_LAUNCH_BLOCKING=1
 # export CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 # export CUDA_COREDUMP_SHOW_PROGRESS=1
@@ -52,7 +55,7 @@ export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
 # export HYDRA_FULL_ERROR=1
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
-uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
@@ -113,7 +116,7 @@ uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --wit
   generator.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
-  trainer.run_name="terminal_bench_megatron_H200_tp" \
+  trainer.run_name="terminal_bench_megatron_H200_4" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/ez_apex_ckpt" \
   trainer.hf_save_interval=25 \
