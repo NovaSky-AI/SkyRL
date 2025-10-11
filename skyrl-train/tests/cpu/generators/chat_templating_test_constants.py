@@ -3,6 +3,8 @@ Expected templated strings used for
 skyrl-train/tests/cpu/generators/test_skyrl_gym_generator_chat_templating.py::test_skyrl_gym_generator_chat_templating_exact
 """
 
+from datetime import date
+
 
 # Produced by expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
 # where expected_chat_history is:
@@ -33,10 +35,10 @@ b<|im_end|>
 b<|im_end|>
 """
 
-LLAMA3_2_EXPECTED_STR = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+LLAMA3_2_EXPECTED_STR = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 Cutting Knowledge Date: December 2023
-Today Date: 10 Oct 2025
+Today Date: {date.today().strftime("%d %b %Y")}
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
