@@ -58,7 +58,7 @@ We include a minimal version here, please see `examples/async/async_trainer.py <
                 if idx != len(self.train_dataloader) - 1:
                     await self.generation_ack.wait()
                 # Synchronize weights after training.
-                await self.weights_manager.async_sync_policy_weights_to_inference_engines()
+                await self.async_sync_policy_weights_to_inference_engines()
                 # Signal that weight sync is done, ready for next round of generation.
                 self.sync_finished.set()
                 self.generation_ack.clear()

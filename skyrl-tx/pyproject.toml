@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skyrl-tx"
+dynamic = ["version"]
+description = "Unified API for training and inference"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "datasets>=4.0.0",
+    "flax>=0.12.0",
+    "optax>=0.2.5",
+    "pillow>=11.3.0",
+    "rich>=14.1.0",
+    "safetensors>=0.6.2",
+    "transformers>=4.56.1",
+    "typer>=0.17.4",
+    # "wandb>=0.22.0",
+    "peft",
+    "hf_transfer",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "jax[cuda12]>=0.7.2",
+]
+
+tpu = [
+    "jax[tpu]>=0.7.2",
+]
+
+tinker = [
+    "tinker",
+    "fastapi[standard]",
+    "sqlmodel",
+    "sqlalchemy[asyncio]",
+    "aiosqlite",
+]
+
+dev = [
+    "mkdocs",
+    "mkdocs-material",
+    "pytest",
+    "torch",
+    "ty",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "tx.__version__"}
+
+[project.scripts]
+tx = "tx.run.main:app"

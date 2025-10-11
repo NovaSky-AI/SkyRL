@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
@@ -30,8 +31,10 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype
+import time
 
 
 @dataclass
@@ -174,6 +177,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
+        self._is_lora = kwargs.get("enable_lora", False)
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
@@ -245,6 +249,15 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
+    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
+        """Check if this is a LoRA disk loading request."""
+        is_lora = request["names"][0] == "lora_disk_load"
+        if is_lora:
+            assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
+                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
+            )
+        return is_lora
+
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
@@ -259,10 +272,23 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
+        # Check if LoRA is enabled and create LoRA requests
+        lora_requests = None
+        if self._is_lora:
+            lora_int_ids = list(self.llm.list_loras())
+            if len(lora_int_ids) > 0:
+                lora_int_id = lora_int_ids[0]
+                batch_size = len(prompt_token_ids)
+                # dummy_lora_path for placeholder (actual loading done in add_lora())
+                lora_requests = [
+                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path")
+                ] * batch_size
+
         outputs = await asyncio.to_thread(
             self.llm.generate,
             prompts=[TokensPrompt(prompt_token_ids=r) for r in prompt_token_ids],
             sampling_params=sampling_params,
+            lora_request=lora_requests,
         )
 
         return self._postprocess_outputs(outputs)
@@ -279,7 +305,8 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
-        await asyncio.to_thread(self.llm.sleep, level=kwargs.get("level", 2))
+        level = 1 if self._is_lora else kwargs.get("level", 2)
+        await asyncio.to_thread(self.llm.sleep, level=level)
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
@@ -291,12 +318,24 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
 
+    async def _load_lora_from_disk(self, lora_path: str):
+        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+        lora_id = int(time.time_ns() % 0x7FFFFFFF)
+        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        result = self.llm.add_lora(lora_request)
+        return result
+
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:
             raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
 
         if not len(request["names"]):
             raise ValueError("Update weight request should have atleast one entry in 'names'")
+
+        # Handle LoRA disk loading request
+        if self._is_lora_disk_loading_request(request):
+            lora_path = request["extras"][0]["lora_disk_path"]
+            return await self._load_lora_from_disk(lora_path)
 
         engine = self._get_engine()
         # Use IPC if handles are provided
@@ -334,6 +373,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
 
     def _create_engine(self, *args, **kwargs):
+        openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
         # engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
         engine_args = vllm.AsyncEngineArgs(enable_log_requests=True, **kwargs)
@@ -357,6 +397,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
+            **openai_kwargs,
         )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
@@ -369,13 +410,33 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
         return engine
 
+    async def _load_lora_from_disk(self, lora_path: str):
+        """Load LoRA adapters from disk using vLLM's native add_lora method."""
+        lora_id = int(time.time_ns() % 0x7FFFFFFF)
+        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
+        result = await self.llm.add_lora(lora_request)
+        return result
+
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
+        # Check if LoRA is enabled and create LoRA request
         final_output = None
+        lora_request = None
+
+        if self._is_lora:
+            lora_int_ids = list(await self.llm.list_loras())
+            if len(lora_int_ids) > 0:
+                lora_int_id = lora_int_ids[0]
+                # dummy_lora_path for placeholder (actual loading done in add_lora())
+                lora_request = LoRARequest(
+                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
+                )
+
         async for request_output in self.llm.generate(
             prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
             sampling_params=sampling_params,
             request_id=request_id,
+            lora_request=lora_request,
         ):
             final_output = request_output
 
@@ -400,10 +461,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
+        engine = self._get_engine()
+        output_processor = engine.output_processor
+        if output_processor.has_unfinished_requests():
+            logger.warning("Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
+            "generation should be done before sleep() is called. Will abort all unfinished requests.")
+            unfinished_request_ids = output_processor.request_states.keys()
+            await engine.abort(unfinished_request_ids)
+
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
         await self.reset_prefix_cache()
-        await self.llm.sleep(level=kwargs.get("level", 2))
+        level = 1 if self._is_lora else kwargs.get("level", 2)
+        await self.llm.sleep(level=level)
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
@@ -420,6 +490,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         if not len(request["names"]):
             raise ValueError("Update weight request should have atleast one entry in 'names'")
+
+        # Check for LoRA disk loading request
+        if self._is_lora_disk_loading_request(request):
+            lora_path = request["extras"][0]["lora_disk_path"]
+            return await self._load_lora_from_disk(lora_path)
 
         engine = self._get_engine()
         # Use IPC if handles are provided

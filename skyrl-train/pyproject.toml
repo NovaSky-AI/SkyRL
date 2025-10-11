@@ -39,6 +39,7 @@ dependencies = [
     "skyrl-gym",
     "flash-attn",
     "polars",
+    "s3fs",
 ]
 
 [tool.uv]
@@ -79,7 +80,7 @@ flashinfer-python = [
 
 [project.optional-dependencies]
 deepspeed = [
-    "deepspeed==0.16.5"
+    "deepspeed==0.17.6"
 ]
 dev = [
     "ruff==0.11.9",
@@ -126,7 +127,7 @@ mcore = [
   # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
   # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
   "transformer-engine[pytorch]==2.5.0",
-  "mbridge==0.13.1",
+  "mbridge==0.15.1",
   "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
 ]
 flashrl = [
@@ -150,12 +151,19 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["skyrl_train*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "skyrl_train.__version__"}
 readme = {file = ["README.md"]}
+
+# Ship default config files in the wheel
+[tool.setuptools.package-data]
+"skyrl_train" = ["config/**"]
 
 [tool.pytest.ini_options]
 addopts = "-v -s"

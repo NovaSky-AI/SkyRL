@@ -29,10 +29,9 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
-    RewardWorkerBase,
     CriticWorkerBase,
 )
-from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
+from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
 
 
@@ -97,7 +96,7 @@ class MegatronWorker:
 
     def forward(self, data):
         """
-        Override `Worker.forward` to support passing the full mini batch to the MegatronPPOPolicy.forward method.
+        Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
@@ -152,18 +151,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.check_te_import()
-        self.model: MegatronPPOPolicy = None
+        self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
 
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
-        self.strategy.offload_to_cpu(self.actor_module, self.optimizer, pin_memory, non_blocking)
+        self.strategy.offload_to_cpu(
+            self.actor_module, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
+        )
 
-    def backload_to_gpu(self, non_blocking=True):
-        self.strategy.backload_to_gpu(self.actor_module, self.optimizer, non_blocking)
+    def backload_to_gpu(self, non_blocking=True, backload_optimizer=True, backload_model=True):
+        self.strategy.backload_to_gpu(
+            self.actor_module, self.optimizer, non_blocking, backload_optimizer, backload_model
+        )
 
     def init_worker_process_group(self):
         """
@@ -243,7 +246,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         # create worker model
-        self.model = MegatronPPOPolicy(
+        self.model = MegatronModelWrapper(
             config=self.cfg,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
@@ -257,7 +260,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
 
         Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
-        worker MegatronPPOPolicy.forward_backward_mini_batch method.
+        worker MegatronModelWrapper.forward_backward_mini_batch method.
         """
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
@@ -278,7 +281,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer.zero_grad()
             pbar = tqdm(
                 dataloader,
-                desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
+                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
 
@@ -449,14 +452,14 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.check_te_import()
-        self.model: MegatronPPOPolicy = None
+        self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
 
-    def offload_to_cpu(self, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
 
-    def backload_to_gpu(self, non_blocking=True):
+    def backload_to_gpu(self, non_blocking=True, **kwargs):
         self.strategy.backload_to_gpu(self.actor_module, None, non_blocking)
 
     def init_worker_process_group(self):
@@ -505,7 +508,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronPPOPolicy(
+        self.model = MegatronModelWrapper(
             config=self.cfg, hf_config=self.hf_config, tf_config=self.tf_config, actor_module=self.actor_module
         )
 
@@ -518,11 +521,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         pass
 
 
-class MegatronRewardWorkerBase(MegatronWorker, RewardWorkerBase):
-    def __init__(self, **kwargs):
-        raise NotImplementedError()
-
-
 class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
     def __init__(self, **kwargs):
         raise NotImplementedError()
@@ -531,4 +529,3 @@ class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
 PolicyWorker = ray.remote(num_gpus=1)(MegatronPolicyWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(MegatronRefWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(MegatronCriticWorkerBase)
-RewardWorker = ray.remote(num_gpus=1)(MegatronRewardWorkerBase)

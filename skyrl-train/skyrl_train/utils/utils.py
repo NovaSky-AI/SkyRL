@@ -70,12 +70,9 @@ def validate_batch_sizes(cfg: DictConfig):
         pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
         cp = cfg.trainer.policy.megatron_config.context_parallel_size
         tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        ep = cfg.trainer.policy.megatron_config.expert_model_parallel_size
-        etp = cfg.trainer.policy.megatron_config.expert_tensor_parallel_size
-        assert pp * cp * tp == pp * ep * etp, (
-            f"Invalid Megatron parallelism: (pp * cp * tp)={pp * cp * tp} != (pp * ep * etp)={pp * ep * etp}. "
-            "Please ensure that pipeline_model_parallel_size * context_parallel_size * tensor_model_parallel_size "
-            "equals pipeline_model_parallel_size * expert_model_parallel_size * expert_tensor_parallel_size."
+        assert policy_world_size % (pp * cp * tp) == 0, (
+            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
         )
         policy_dp_size = policy_world_size // (pp * cp * tp)
     else:
@@ -148,12 +145,9 @@ def validate_batch_sizes(cfg: DictConfig):
             pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
             cp = cfg.trainer.ref.megatron_config.context_parallel_size
             tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            ep = cfg.trainer.ref.megatron_config.expert_model_parallel_size
-            etp = cfg.trainer.ref.megatron_config.expert_tensor_parallel_size
-            assert pp * cp * tp == pp * ep * etp, (
-                f"Invalid Megatron parallelism: (pp * cp * tp)={pp * cp * tp} != (pp * ep * etp)={pp * ep * etp}. "
-                "Please ensure that pipeline_model_parallel_size * context_parallel_size * tensor_model_parallel_size "
-                "equals pipeline_model_parallel_size * expert_model_parallel_size * expert_tensor_parallel_size."
+            assert ref_world_size % (pp * cp * tp) == 0, (
+                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+                "This ensures that the data parallel size is an integer."
             )
             ref_dp_size = ref_world_size // (pp * cp * tp)
         else:
@@ -266,19 +260,6 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    # Validate inference engine parallelism.
-    ep_size = cfg.generator.inference_engine_expert_parallel_size
-    dp_size = cfg.generator.inference_engine_data_parallel_size
-    tp_size = cfg.generator.inference_engine_tensor_parallel_size
-    assert (
-        dp_size == 1
-    ), "Inference data parallelism is not yet supported, but is in active development and testing: https://github.com/NovaSky-AI/SkyRL/issues/202"
-    if ep_size > 1:
-        assert dp_size * tp_size == ep_size, (
-            f"If expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
-            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
-        )
-
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
         and cfg.trainer.critic.optimizer_config.offload_after_step
@@ -306,6 +287,33 @@ def validate_cfg(cfg: DictConfig):
             raise ValueError(
                 "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
             )
+
+    if cfg.trainer.policy.model.lora.rank > 0:
+        # LoRA enabled
+        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
+        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
+        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+
+    # Validate placement
+    if cfg.trainer.placement.colocate_all:
+        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        num_rollout_gpus = (
+            cfg.generator.num_inference_engines
+            * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+        )
+        assert (
+            num_policy_gpus == num_rollout_gpus
+        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+    else:
+        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
+            assert (
+                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
+            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            assert (
+                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
+            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
 
 
 def validate_generator_cfg(cfg: DictConfig):
@@ -413,6 +421,19 @@ def validate_generator_cfg(cfg: DictConfig):
         if not cfg.generator.async_engine:
             raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
+    # Validate inference engine parallelism.
+    ep_size = cfg.generator.inference_engine_expert_parallel_size
+    dp_size = cfg.generator.inference_engine_data_parallel_size
+    tp_size = cfg.generator.inference_engine_tensor_parallel_size
+    if cfg.generator.backend == "sglang":
+        assert dp_size == 1, "Inference data parallelism is not yet supported for SGLang backend."
+        assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
+    if ep_size > 1:
+        assert dp_size * tp_size == ep_size, (
+            f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
+            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
+        )
+
 
 @ray.remote
 def get_all_env_variables():
@@ -481,6 +502,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
+        env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
+
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
@@ -509,7 +532,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
                 placement.policy_num_gpus_per_node,
                 placement.critic_num_gpus_per_node,
                 placement.ref_num_gpus_per_node,
-                placement.reward_num_gpus_per_node,
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1

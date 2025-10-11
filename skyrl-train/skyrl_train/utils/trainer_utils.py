@@ -14,7 +14,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, conc
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -89,30 +89,6 @@ def extract_step_from_path(path: str) -> int:
     if basename.startswith(GLOBAL_STEP_PREFIX):
         return int(basename.split(GLOBAL_STEP_PREFIX)[1])
     return -1
-
-
-def get_latest_checkpoint_step(checkpoint_base_path: str) -> int:
-    """
-    Get the latest global step from checkpoint directory by reading latest_ckpt_global_step.txt.
-
-    Args:
-        checkpoint_base_path: Base path where checkpoints are stored
-
-    Returns:
-        int: Latest global step, or 0 if no checkpoint found
-    """
-    latest_file_path = os.path.join(checkpoint_base_path, "latest_ckpt_global_step.txt")
-
-    if not io.exists(latest_file_path):
-        return 0
-
-    try:
-        with io.open_file(latest_file_path, "r") as f:
-            content = f.read().strip()
-        return int(content)
-    except (ValueError, IOError) as e:
-        logger.warning(f"Failed to read latest checkpoint step from {latest_file_path}: {e}")
-        return 0
 
 
 def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:

@@ -2,30 +2,22 @@
 
 # SkyRL: A Modular Full-stack RL Library for LLMs
 
-
-[![🌐 NovaSky](https://img.shields.io/badge/-Visit%20Website-5865F2?style=for-the-badge)](https://novasky-ai.github.io/) [![Github](https://img.shields.io/badge/SkyRL-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/NovaSky-AI/SkyRL) [![Twitter](https://img.shields.io/badge/NovaSky-white?style=for-the-badge&logo=X&logoColor=000&color=000&labelColor=white)](https://x.com/NovaSkyAI) [![Hugging Face Collection](https://img.shields.io/badge/NovaSky-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/NovaSky-AI) [![Discord](https://img.shields.io/badge/NovaSky-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/cJF2JUaaAN) [![Documentation](https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logo=readthedocs&logoColor=white)](https://skyrl.readthedocs.io/en/latest/)
-
-
-
-<div align="center" style="font-family: Arial, sans-serif;">
-  <p>
-    <a href="#news" style="text-decoration: none; font-weight: bold;">News</a> •
-    <a href="#links" style="text-decoration: none; font-weight: bold;">Links</a> •
-    <a href="#getting-started" style="text-decoration: none; font-weight: bold;">Getting Started</a> •
-    <a href="#citation" style="text-decoration: none; font-weight: bold;">Citation</a> •
-    <a href="#acknowledgement" style="text-decoration: none; font-weight: bold;">Acknowledgement</a> 
-  </p>
-</div>
+<p align="center">
+| <a href="https://skyrl.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://x.com/NovaSkyAI"><b>Twitter/X</b></a> | <a href="https://huggingface.co/NovaSky-AI"><b>Huggingface</b></a> | <a href="https://join.slack.com/t/skyrl/shared_invite/zt-3f6ncn5b8-QawzK3uks6ka3KWoLwsi5Q"><b>Slack Workspace</b></a> |
+</p>
 
 </div>
+
+---
 
 # Overview
 
 SkyRL is a full-stack RL library that provides the following components:
 
-- [`skyagent`](./skyagent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
-- (**NEW**) [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
-- (**NEW**) [`skyrl-gym`](./skyrl-gym): Our gynasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
+- [`skyrl-agent`](./skyrl-agent): Our agent layer for training long-horizon, real-world agents. Contains code for [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0).
+- [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
+- [`skyrl-gym`](./skyrl-gym): Our gymnasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
+- (**EXPERIMENTAL**) [`skyrl-tx`](./skyrl-tx): A cross-platform library to enable users to expose a local [Tinker](https://thinkingmachines.ai/tinker/)-like REST API for model post-training.
 
 # Getting Started
 
@@ -35,10 +27,11 @@ For model training, checkout [`skyrl-train`](./skyrl-train) to start using, modi
 
 For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your task in the simple gymnasium interface.
 
-For agentic pipelines, checkout [`skyagent`](./skyagent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.
+For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.
 
 
 # News
+- **[2025/10/06]** 🎉 We released SkyRL tx: An open implementation of a backend for the Tinker API to run a Tinker-like service on their own hardware. [[Blog](https://novasky-ai.notion.site/skyrl-tx)]
 - **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
 - **[2025/06/26]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
 - **[2025/05/20]** 🎉 We released SkyRL-SQL: a multi-turn RL training pipeline for Text-to-SQL, along with SkyRL-SQL-7B — a model trained on just 653 samples that outperforms both GPT-4o and o4-mini!
@@ -51,7 +44,7 @@ For agentic pipelines, checkout [`skyagent`](./skyagent) for our work on optimiz
 
 # Acknowledgement
 
-This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), and [**AMD**](https://www.amd.com/en.html).
+This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), [**AMD**](https://www.amd.com/en.html), [**AWS**](https://aws.amazon.com/), and [**Modal**](https://modal.com/).
 
 We adopt many lessons and code from several great projects such as [veRL](https://github.com/volcengine/verl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Search-R1](https://github.com/PeterGriffinJin/Search-R1), [OpenReasonerZero](https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero), and [NeMo-RL](https://github.com/NVIDIA-NeMo/RL). We appreciate each of these teams and their contributions to open-source research!
 
