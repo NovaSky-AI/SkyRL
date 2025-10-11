@@ -87,7 +87,9 @@ class TinkerEngine:
     def _compile_loss_function(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+        def loss_for_lora_pure(lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            # Merge state back into NNX structure
+            lora_params = nnx.State.from_flat_path(lora_state)
             merged_model = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
             logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)["logits"]
             # Compute per-example losses (don't average yet)
@@ -99,15 +101,22 @@ class TinkerEngine:
             # Return mean loss for gradient computation, but also return per-token losses
             return per_example_losses.mean(), (logits, per_token_losses)
 
-        # Compile once and store
-        # Get partition specs for the extracted state (not the Param wrappers)
+        # Compile using plain jax.jit with manual state handling
+        # Extract state once to get the pytree structure
         state = nnx.state(self.lora_params)
+        state_flat = state.flat_state()
+
+        # Get partition specs from the flat state
         state_partition_spec = nnx.get_partition_spec(state)
         # Convert partition specs to NamedSharding objects
         state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
-        loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        self._compiled_loss_and_grad_fn = nnx.jit(loss_and_grad_fn, in_shardings=(state_shardings, replicated, replicated, replicated, replicated, replicated))
+
+        loss_and_grad_fn = jax.value_and_grad(loss_for_lora_pure, has_aux=True)
+        self._compiled_loss_and_grad_fn = jax.jit(
+            loss_and_grad_fn,
+            in_shardings=(state_shardings, replicated, replicated, replicated, replicated, replicated)
+        )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -254,10 +263,15 @@ class TinkerEngine:
 
         # Compute per-example losses and gradients using the cached compiled function
         # This avoids re-jitting on every call
+        # Extract state to pass to pure jitted function
+        lora_state = nnx.state(self.lora_params).flat_state()
         with jax.set_mesh(self.mesh):
-            (avg_loss, (logits, per_token_losses)), lora_grads = self._compiled_loss_and_grad_fn(
-                self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+            (avg_loss, (logits, per_token_losses)), lora_grads_state = self._compiled_loss_and_grad_fn(
+                lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
             )
+
+        # Convert gradients back to NNX State structure
+        lora_grads = nnx.State.from_flat_path(lora_grads_state)
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
