@@ -106,10 +106,10 @@ class TinkerEngine:
         state = nnx.state(self.lora_params)
         state_flat = state.flat_state()
 
-        # Get partition specs from the flat state
-        state_partition_spec = nnx.get_partition_spec(state)
+        # Get partition specs from the flat state structure (not the State wrapper)
+        state_flat_partition_spec = nnx.get_partition_spec(state_flat)
         # Convert partition specs to NamedSharding objects
-        state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
+        state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_flat_partition_spec)
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
 
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora_pure, has_aux=True)
