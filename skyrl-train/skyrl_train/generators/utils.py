@@ -5,6 +5,7 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
+from loguru import logger
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
@@ -162,6 +163,15 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     }
     if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
+
+    # propagate additional keys with list values as-is
+    additional_keys = [
+        key for key in generator_outputs[0] if key not in result and isinstance(generator_outputs[0][key], list)
+    ]
+    if len(additional_keys):
+        logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
+    for key in additional_keys:
+        result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
 
     return result
 

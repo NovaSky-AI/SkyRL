@@ -945,6 +945,7 @@ def compute_advantages_and_returns(
     grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
 
@@ -957,4 +958,5 @@ def compute_advantages_and_returns(
         gamma=gamma,
         lambd=lambd,
         config=config,
+        **kwargs,
     )
