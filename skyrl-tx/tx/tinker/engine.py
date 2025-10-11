@@ -463,49 +463,27 @@ class TinkerEngine:
 
 def main():
     """Entry point for the background engine."""
-    from optparse import OptionParser
+    import argparse
+    from tx.tinker.config import EngineConfig, add_model
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
 
-    parser = OptionParser()
-    parser.add_option(
-        "--base-model", dest="base_model", help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL"
-    )
-    parser.add_option(
-        "--checkpoints-base-path",
-        dest="checkpoints_base_path",
-        help="Base path where checkpoints will be stored",
-        metavar="PATH",
-    )
-    parser.add_option(
-        "--max-lora-adapters",
-        dest="max_lora_adapters",
-        type="int",
-        default=32,
-        help="Maximum number of LoRA adapters (default: 32)",
-        metavar="NUM",
-    )
-    parser.add_option(
-        "--max-lora-rank",
-        dest="max_lora_rank",
-        type="int",
-        default=32,
-        help="Maximum LoRA rank (default: 32)",
-        metavar="RANK",
-    )
+    # Create argument parser and add Pydantic model fields
+    parser = argparse.ArgumentParser(description="Tinker background engine for processing training requests")
+    add_model(parser, EngineConfig)
 
-    (options, args) = parser.parse_args()
+    # Parse command-line arguments
+    args = parser.parse_args()
 
-    if not options.base_model:
-        parser.error("--base-model is required")
-    if not options.checkpoints_base_path:
-        parser.error("--checkpoints-base-path is required")
+    # Create EngineConfig from parsed arguments
+    config = EngineConfig(**vars(args))
 
+    # Initialize and run the engine
     TinkerEngine(
-        base_model_name=options.base_model,
-        checkpoints_base_path=options.checkpoints_base_path,
-        max_lora_adapters=options.max_lora_adapters,
-        max_lora_rank=options.max_lora_rank,
+        base_model_name=config.base_model,
+        checkpoints_base_path=config.checkpoints_base_path,
+        max_lora_adapters=config.max_lora_adapters,
+        max_lora_rank=config.max_lora_rank,
     ).run()
 
 
