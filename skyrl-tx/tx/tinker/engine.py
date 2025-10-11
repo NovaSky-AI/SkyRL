@@ -28,9 +28,6 @@ def round_up_to_multiple(num: int, multiple: int) -> int:
     return ((num + multiple - 1) // multiple) * multiple
 
 
-# jax.config.update("jax_use_shardy_partitioner", False)
-
-
 class TinkerEngine:
     """Background engine for processing training requests."""
 
@@ -100,25 +97,21 @@ class TinkerEngine:
             # Return mean loss for gradient computation, but also return per-token losses
             return per_example_losses.mean(), (logits, per_token_losses)
 
-        # Compile using plain jax.jit with manual state handling
-        # Extract state once to get the pytree structure
+        # Extract state once to get the pytree structure and compute the partition
         state = nnx.state(self.lora_params)
-
-        # Get partition specs from the state structure
         state_partition_spec = nnx.get_partition_spec(state)
-        # Convert partition specs to NamedSharding objects
+        # Create NamedSharding objects that tell us how models parameters and inputs should be sharded
         state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
+        scalar = jax.NamedSharding(self.mesh, jax.P())
 
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora_pure, has_aux=True)
-        # Output: ((loss, (logits, per_token_losses)), grads)
-        # Loss is a scalar, so it needs PartitionSpec()
-        scalar_replicated = jax.NamedSharding(self.mesh, jax.P())
+
         # Replicate all outputs except gradients which should match state sharding
         self._compiled_loss_and_grad_fn = jax.jit(
             loss_and_grad_fn,
             in_shardings=(state_shardings,) + (replicated,) * 5,
-            out_shardings=((scalar_replicated, (replicated, replicated)), state_shardings)
+            out_shardings=((scalar, (replicated, replicated)), state_shardings)
         )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
