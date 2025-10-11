@@ -35,7 +35,6 @@ from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype
 import time
-from loguru import logger
 
 @dataclass
 class Logprob:
@@ -310,7 +309,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         if output_processor.has_unfinished_requests():
             logger.warning("Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
             "generation should be done before sleep() is called. Will abort all unfinished requests.")
-            unfinished_request_ids = output_processor.request_states.keys()
+            unfinished_request_ids = list(output_processor.request_states.keys())
             await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
 
         level = 1 if self._is_lora else kwargs.get("level", 2)
@@ -473,7 +472,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if output_processor.has_unfinished_requests():
             logger.warning("Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
             "generation should be done before sleep() is called. Will abort all unfinished requests.")
-            unfinished_request_ids = output_processor.request_states.keys()
+            unfinished_request_ids = list(output_processor.request_states.keys())
             await engine.abort(unfinished_request_ids)
 
         # TODO(team): remove once vllm fixes this
