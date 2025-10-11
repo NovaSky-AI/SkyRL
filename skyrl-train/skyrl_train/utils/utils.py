@@ -294,6 +294,27 @@ def validate_cfg(cfg: DictConfig):
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
         assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
 
+    # Validate placement
+    if cfg.trainer.placement.colocate_all:
+        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        num_rollout_gpus = (
+            cfg.generator.num_inference_engines
+            * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+        )
+        assert (
+            num_policy_gpus == num_rollout_gpus
+        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+    else:
+        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
+            assert (
+                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
+            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            assert (
+                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
+            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
+
 
 def validate_generator_cfg(cfg: DictConfig):
     """Validates the correctness of generator-related config.
