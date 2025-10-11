@@ -103,7 +103,7 @@ class TinkerEngine:
         state_spec = nnx.get_partition_spec(self.lora_params)
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        self._compiled_loss_fn = nnx.jit(loss_and_grad_fn, in_shardings=(state_spec, replicated, replicated, replicated, replicated, replicated))
+        self._compiled_loss_and_grad_fn = nnx.jit(loss_and_grad_fn, in_shardings=(state_spec, replicated, replicated, replicated, replicated, replicated))
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
@@ -250,9 +250,10 @@ class TinkerEngine:
 
         # Compute per-example losses and gradients using the cached compiled function
         # This avoids re-jitting on every call
-        (avg_loss, (logits, per_token_losses)), lora_grads = self._compiled_loss_and_grad_fn(
-            self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
-        )
+        with jax.set_mesh(self.mesh):
+            (avg_loss, (logits, per_token_losses)), lora_grads = self._compiled_loss_and_grad_fn(
+                self.lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+            )
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
