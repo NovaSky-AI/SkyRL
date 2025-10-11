@@ -330,7 +330,7 @@ class TinkerEngine:
 
         # Construct the path to the checkpoint directory
         checkpoint_id = Path(request_data.path).name
-        checkpoint_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
+        checkpoint_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
 
         # Restore the checkpoint dictionary from the file
         restored_data = checkpoints.restore_checkpoint(
@@ -390,7 +390,7 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
+        output_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
