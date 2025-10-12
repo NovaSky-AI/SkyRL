@@ -175,8 +175,8 @@ class TinkerEngine:
     @contextmanager
     def _jit_timing_context(self, seq_len: int):
         """Context manager to track JIT compilation times for different sequence lengths."""
-        if seq_len not in self.metrics.seq_len_jit_times:
-            logger.info(f"JIT compiling for seq_len={seq_len}...")
+        if not self.config.enforce_eager and seq_len not in self.metrics.seq_len_jit_times:
+            logger.info(f"JIT compiling for seq_len={seq_len} in progress...")
             start_time = time.time()
             yield
             elapsed = time.time() - start_time
