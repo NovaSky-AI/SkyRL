@@ -12,7 +12,20 @@ from tinker import types
 def api_server():
     """Start the FastAPI server for testing."""
     process = subprocess.Popen(
-        ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.api", "--host", "0.0.0.0", "--port", "8000", "--base-model", "Qwen/Qwen3-0.6B"],
+        [
+            "uv",
+            "run",
+            "--extra",
+            "tinker",
+            "-m",
+            "tx.tinker.api",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+            "--base-model",
+            "Qwen/Qwen3-0.6B",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )

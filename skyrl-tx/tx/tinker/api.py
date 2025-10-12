@@ -38,9 +38,7 @@ async def lifespan(app: FastAPI):
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
-    logger.info(
-        f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}"
-    )
+    logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
 
     yield
 
@@ -412,9 +410,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Create EngineConfig from parsed arguments (only EngineConfig fields)
-    engine_config = EngineConfig.model_validate(
-        {k: v for k, v in vars(args).items() if k in EngineConfig.model_fields}
-    )
+    engine_config = EngineConfig.model_validate({k: v for k, v in vars(args).items() if k in EngineConfig.model_fields})
 
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config
