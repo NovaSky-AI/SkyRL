@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 LEARNING_RATE = 1e-4
 
 
-
 def round_up_seq_len(seq_len: int) -> int:
     """
     Rounds a sequence length up to roughly two significant binary digits.
@@ -43,7 +42,7 @@ def round_up_seq_len(seq_len: int) -> int:
     result = seq_len & mask
 
     if result < seq_len:
-        result += (1 << (msb_pos - 1))
+        result += 1 << (msb_pos - 1)
 
     return result
 
@@ -157,9 +156,9 @@ class TinkerEngine:
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
                 in_shardings=(state_shardings,) + (replicated,) * 5,
-                out_shardings=((scalar, (replicated, replicated)), state_shardings)
+                out_shardings=((scalar, (replicated, replicated)), state_shardings),
             )
- 
+
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
         mb = self.config.micro_batch_size
