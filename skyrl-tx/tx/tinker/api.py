@@ -32,20 +32,15 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    # Get engine config from app.state
-    config = app.state.engine_config
-
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
-    for field_name, value in config.model_dump().items():
+    for field_name, value in app.state.engine_config.model_dump().items():
         cmd.append(f"--{field_name.replace('_', '-')}")
         cmd.append(str(value))
 
     background_engine = subprocess.Popen(cmd)
     logger.info(
-        f"Started background engine with PID {background_engine.pid} "
-        f"(base_model={config.base_model}, max_lora_adapters={config.max_lora_adapters}, "
-        f"max_lora_rank={config.max_lora_rank})"
+        f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}"
     )
 
     yield
