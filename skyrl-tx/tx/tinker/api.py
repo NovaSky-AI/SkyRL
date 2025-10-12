@@ -418,12 +418,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
     args = parser.parse_args()
 
-    # Create EngineConfig from parsed arguments
-    engine_config = EngineConfig(
-        base_model=args.base_model,
-        checkpoints_base_path=args.checkpoints_base_path,
-        max_lora_adapters=args.max_lora_adapters,
-        max_lora_rank=args.max_lora_rank,
+    # Create EngineConfig from parsed arguments (only EngineConfig fields)
+    engine_config = EngineConfig.model_validate(
+        {k: v for k, v in vars(args).items() if k in EngineConfig.model_fields}
     )
 
     # Store config in app.state so lifespan can access it

@@ -475,7 +475,7 @@ def main():
     args = parser.parse_args()
 
     # Create EngineConfig from parsed arguments
-    config = EngineConfig(**vars(args))
+    config = EngineConfig.model_validate(vars(args))
 
     # Initialize and run the engine
     TinkerEngine(
