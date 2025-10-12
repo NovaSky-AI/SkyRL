@@ -4,6 +4,7 @@ import argparse
 import time
 import logging
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,9 +94,12 @@ class TinkerEngine:
         """Initialize the engine with a database connection and base model."""
         self.config = config
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-        self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
-        # Store accumulated gradients per LoRA adapter
+        # Store LoRA model metadata (model_id -> metadata)
+        self.models: dict[str, types.ModelMetadata] = {}
+        # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
         self.accumulated_grads: dict[str, AccumulatedGradients] = {}
+        # Metrics stored in the engine
+        self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model
         self.model_config = AutoConfig.from_pretrained(self.config.base_model)
@@ -168,6 +172,19 @@ class TinkerEngine:
         mb = self.config.micro_batch_size
         return total if mb <= 0 else max(1, min(mb, total))
 
+    @contextmanager
+    def _jit_timing_context(self, seq_len: int):
+        """Context manager to track JIT compilation times for different sequence lengths."""
+        if seq_len not in self.metrics.seq_len_jit_times:
+            logger.info(f"JIT compiling for seq_len={seq_len}")
+            start_time = time.time()
+            yield
+            elapsed = time.time() - start_time
+            self.metrics.seq_len_jit_times[seq_len] = elapsed
+            logger.info(f"JIT compilation for seq_len={seq_len} took {elapsed:.2f}s")
+        else:
+            yield
+
     def _forward_backward(
         self,
         input_ids: jax.Array,
@@ -178,7 +195,8 @@ class TinkerEngine:
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
         lora_state = nnx.state(self.lora_params)
-        with jax.set_mesh(self.mesh):
+        seq_len = input_ids.shape[1]
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
                 lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
             )
