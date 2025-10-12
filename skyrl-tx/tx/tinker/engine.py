@@ -164,7 +164,9 @@ class TinkerEngine:
             scalar = jax.NamedSharding(self.mesh, jax.P())
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
+                # One input sharding parameter for each argument of loss_for_lora
                 in_shardings=(state_shardings,) + (replicated,) * 5,
+                # One output sharding parameter for each return value of loss_for_lora
                 out_shardings=((scalar, (replicated, replicated)), state_shardings),
             )
 
