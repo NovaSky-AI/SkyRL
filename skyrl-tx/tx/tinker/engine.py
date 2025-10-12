@@ -230,11 +230,11 @@ class TinkerEngine:
             )
             # Average over sequence length for each example
             per_example_losses = per_token_losses.mean(axis=-1)
-            # Return mean loss for gradient computation, but also return per-token losses
-            return per_example_losses.mean(), (logits, per_token_losses)
+            # Return sum of losses (we'll divide gradients by per-adapter batch size later)
+            return per_example_losses.sum(), (logits, per_token_losses)
 
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
+        (sum_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
@@ -242,18 +242,15 @@ class TinkerEngine:
         target_logprobs = target_logprobs.squeeze(-1)  # [B, T]
 
         # Extract and accumulate gradients for each model_id's specific adapter
-        num_total_examples = input_ids.shape[0]
         for request_id, model_id, start_idx, end_idx in request_batch_slices:
             num_adapter_examples = end_idx - start_idx
             adapter_index = self.models[model_id].adapter_index
 
-            # Extract gradients for this specific adapter index.
-            adapter_grads_all_mean = jax.tree.map(lambda g: g[adapter_index], lora_grads)
-            # Gradient is the mean across the global batch. Scale to mean over the adapter's samples.
-            grad_scale = num_total_examples / num_adapter_examples
+            # Extract gradients for this adapter, and scale to mean over the adapter's samples.
+            adapter_grads_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
             adapter_grads = jax.tree.map(
-                lambda x: x * jnp.asarray(grad_scale, dtype=x.dtype),
-                adapter_grads_all_mean,
+                lambda x: x / jnp.asarray(num_adapter_examples, dtype=x.dtype),
+                adapter_grads_sum,
             )
 
             if self.accumulated_grads[model_id] is None:
