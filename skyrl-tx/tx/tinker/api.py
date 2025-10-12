@@ -407,7 +407,7 @@ if __name__ == "__main__":
     from tx.tinker.config import EngineConfig, add_model
 
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Tinker API server")
+    parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")
     add_model(parser, EngineConfig)
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")

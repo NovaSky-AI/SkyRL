@@ -465,7 +465,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
 
     # Create argument parser and add Pydantic model fields
-    parser = argparse.ArgumentParser(description="SkyRL tx background engine for processing requests")
+    parser = argparse.ArgumentParser(description="SkyRL tx tinker engine for processing requests")
     add_model(parser, EngineConfig)
 
     # Parse command-line arguments
