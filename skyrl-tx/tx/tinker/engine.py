@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.training import checkpoints
-from jax import tree_util
 
 import optax
 from transformers import AutoConfig
@@ -327,9 +326,8 @@ class TinkerEngine:
             self, model_id: str, request_data: types.LoadWeightsInput
         ) -> types.LoadWeightsOutput:
             """
-            Loads a clean, trimmed training checkpoint with extensive debugging prints.
+            Loads a clean, trimmed training checkpoint.
             """
-            # And this helper function
             def _convert_str_keys_to_int(data):
                 """Recursively converts string keys that are digits to integers for any dictionary-like object (Mapping)."""
                 if isinstance(data, Mapping):
@@ -375,7 +373,7 @@ class TinkerEngine:
             # LoRA weights update
             current_lora_state_dict = nnx.to_pure_dict(nnx.state(self.lora_params))
 
-            updated_lora_state_dict = tree_util.tree_map_with_path(
+            updated_lora_state_dict = jax.tree.map_with_path(
                 insert_trimmed_slice_with_path, current_lora_state_dict, adapter_lora_params_dict
             )
 
@@ -384,15 +382,13 @@ class TinkerEngine:
             # Optimizer state update
             optimizer_graph_state = nnx.to_pure_dict(nnx.state(self.optimizer))
 
-            updated_optimizer_state = tree_util.tree_map_with_path(
+            updated_optimizer_state = jax.tree.map_with_path(
                 insert_trimmed_slice_with_path, optimizer_graph_state, adapter_optimizer_state_dict
             )
 
             nnx.update(self.optimizer, updated_optimizer_state)
-            print("--> `nnx.update` for optimizer completed successfully.")
 
             logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
-            print("="*25 + " FINISHED `process_load_weights` " + "="*25 + "\n")
 
             return types.LoadWeightsOutput(type="load_weights")
 
@@ -407,13 +403,11 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        #get index of adapter to save
         adapter_index = self.models[model_id].adapter_index
         checkpoint_id = Path(request_data.path).name
         output_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        #same implementation as get_weigths_for_sampler
         layer_rank = {
             path[:-2]: int(node[adapter_index])
             for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
@@ -434,10 +428,8 @@ class TinkerEngine:
         adapter_lora_params_pure_dict = nnx.to_pure_dict(adapter_lora_params_graph)
 
         def extract_optimizer_params(p):
-            if isinstance(p, jnp.ndarray) and p.ndim > 0:
-                return p[adapter_index]
-            else:
-                return p
+            return p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
+        
         optimizer_state_dict = nnx.to_pure_dict(nnx.state(self.optimizer)) # Use to_pure_dict here too for consistency
         optimizer_state_pure_dict = jax.tree.map(extract_optimizer_params, optimizer_state_dict)
 

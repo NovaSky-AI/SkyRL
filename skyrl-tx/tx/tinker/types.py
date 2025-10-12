@@ -20,9 +20,6 @@ class RequestType(str, Enum):
     LOAD_WEIGHTS = "load_weights"
 
 
-
-
-
 class AdamParams(BaseModel):
     lr: float
 
