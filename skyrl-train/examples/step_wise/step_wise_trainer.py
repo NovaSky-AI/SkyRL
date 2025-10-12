@@ -143,7 +143,7 @@ class StepWiseTrainer(RayPPOTrainer):
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-
+        breakpoint()
         # overrwrite uids
         uids = [f"{trajectory_id.instance_id}" for trajectory_id in generator_output["trajectory_ids"]]
 
