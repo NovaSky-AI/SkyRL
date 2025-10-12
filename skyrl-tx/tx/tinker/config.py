@@ -15,6 +15,7 @@ class EngineConfig(BaseModel):
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
+    tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:

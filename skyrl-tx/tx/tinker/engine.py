@@ -72,9 +72,9 @@ class TinkerEngine:
         checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
-        self.mesh = jax.make_mesh((1, 4), ("dp", "tp"))
+        self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
         with jax.set_mesh(self.mesh):
-            self.model = model_class(self.config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
+            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_checkpoint(checkpoint_path, self.model_config, self.model)
 
             # Create optimizer that only targets LoRA A and B parameters
