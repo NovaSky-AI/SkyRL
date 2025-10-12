@@ -18,7 +18,7 @@ from huggingface_hub import snapshot_download
 
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
-from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
+from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint, extract_adapter_params
 from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
 
@@ -392,7 +392,6 @@ class TinkerEngine:
 
             return types.LoadWeightsOutput(type="load_weights")
 
-
     def process_save_weights(
         self, model_id: str, request_data: types.SaveWeightsInput
     ) -> types.SaveWeightsOutput:
@@ -414,22 +413,15 @@ class TinkerEngine:
             if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
         }
 
-        def extract_adapter_params(path, p):
-            rank = layer_rank[path[:-2]]
-            if path[-2].key == "lora_A":
-                return p[adapter_index, :, :rank]
-            elif path[-2].key == "lora_B":
-                return p[adapter_index, :rank, :]
-            else:
-                return p[adapter_index]
-
-        adapter_lora_params_graph = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
+        adapter_lora_params_graph = jax.tree.map_with_path(lambda path, p: 
+                                                           extract_adapter_params(path, p, layer_rank, adapter_index), 
+                                                           self.lora_params)
 
         adapter_lora_params_pure_dict = nnx.to_pure_dict(adapter_lora_params_graph)
 
         def extract_optimizer_params(p):
             return p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
-        
+            
         optimizer_state_dict = nnx.to_pure_dict(nnx.state(self.optimizer)) # Use to_pure_dict here too for consistency
         optimizer_state_pure_dict = jax.tree.map(extract_optimizer_params, optimizer_state_dict)
 
@@ -477,16 +469,9 @@ class TinkerEngine:
             if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
         }
 
-        def extract_adapter_params(path, p):
-            rank = layer_rank[path[:-2]]
-            if path[-2].key == "lora_A":
-                return p[adapter_index, :, :rank]
-            elif path[-2].key == "lora_B":
-                return p[adapter_index, :rank, :]
-            else:
-                return p[adapter_index]
-
-        adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
+        adapter_lora_params = jax.tree.map_with_path(lambda path, p: 
+                                                           extract_adapter_params(path, p, layer_rank, adapter_index), 
+                                                           self.lora_params)
 
         # Save only the LoRA adapter weights
         save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
