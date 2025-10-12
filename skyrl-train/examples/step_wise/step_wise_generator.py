@@ -107,20 +107,16 @@ class StepWiseGenerator(SkyRLGymGenerator):
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         # initial_chat_history_length = len(chat_history)
-        # chat_end_index = len(chat_history)
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             add_generation_prompt=True,
-            # chat_template=None,
             tokenize=True,
             **self.generator_cfg.chat_template_kwargs,
         )
-        # loss_mask = []  # this excludes the prompt
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
         step_id = 0
-        # full_trajectory = {"q": input_ids}
         per_step_outputs: List[AgentLoopOutput] = []
         while not done:
 
