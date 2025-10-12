@@ -176,7 +176,9 @@ class TinkerEngine:
         """Run forward+backward on a batch of inputs."""
         lora_state = nnx.state(self.lora_params)
         with jax.set_mesh(self.mesh):
-            (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(lora_state)
+            (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
+                lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+            )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
         return per_token_losses, target_logprobs, lora_grads
