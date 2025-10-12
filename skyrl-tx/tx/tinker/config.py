@@ -9,14 +9,13 @@ class EngineConfig(BaseModel):
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
     checkpoints_base_path: str = Field(
-        ...,
+        default="/tmp/tx_checkpoints",
         description="Base path where checkpoints will be stored",
-        json_schema_extra={"default": "/tmp/tx_checkpoints"},
     )
     max_lora_adapters: int = Field(
-        ..., description="Maximum number of LoRA adapters", json_schema_extra={"default": 32}
+        default=32, description="Maximum number of LoRA adapters"
     )
-    max_lora_rank: int = Field(..., description="Maximum LoRA rank", json_schema_extra={"default": 32})
+    max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
