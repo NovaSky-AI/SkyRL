@@ -33,7 +33,7 @@ def round_up_seq_len(seq_len: int) -> int:
     """
     Rounds a sequence length up to roughly two significant binary digits.
     We do this to pad sequences, so the Jax JIT compiler needs to
-    compile less different shapes.
+    compile fewer different shapes.
     """
     if seq_len <= 32:
         return 32
