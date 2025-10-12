@@ -1,47 +1,92 @@
 import modal
+import os
 from pathlib import Path
 
-app = modal.App("devpatel-skyrl-app")
 
-# Compute the SkyRL repo root robustly (works when this file is mounted standalone)
-def _find_repo_root() -> Path:
+def _find_local_repo_root() -> Path:
+    """Computes full path of local SkyRL repo robustly
+
+    Raises:
+        Exception: if cannot find local SkyRL repo
+
+    Returns:
+        Path: path object describing full path of local SkyRL repo
+    """
+    # If running inside Modal container, use the environment variable
+    if "SKYRL_REPO_ROOT" in os.environ:
+        return Path(os.environ["SKYRL_REPO_ROOT"])
+
     candidates = [Path(__file__).resolve(), Path.cwd()]
     for start in candidates:
         for base in [start] + list(start.parents):
             if (base / "skyrl-train").exists() and (base / "skyrl-gym").exists():
                 return base
-    # Fallback: if not found, return current working directory
-    return Path.cwd()
+    raise Exception("SkyRL root repo path not found")
 
-repo_path = _find_repo_root()
-print(f"Root path: {repo_path}")
 
-# This syncs your local code to /root/SkyRL in the container
-image = (
-    modal.Image.from_registry("novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8")
-    .env({"SKYRL_REPO_ROOT": "/root/SkyRL"})  # Set this environment variable in the image
-    .add_local_dir(
-        local_path=str(repo_path),
-        remote_path="/root/SkyRL",
-        ignore=[".venv", "*.pyc", "__pycache__", ".git", "*.egg-info", ".pytest_cache", "node_modules", ".DS_Store"]
+def create_modal_image() -> modal.Image:
+    """Creates a Modal image for Modal container. This uses the SkyRL container as
+    a base image. It also mounts the local SkyRL repo to the container
+
+    Returns:
+        modal.Image: container image
+    """
+
+    local_repo_path = _find_local_repo_root()
+    print(f"Root path: {local_repo_path}")
+
+    envs = {
+        "SKYRL_REPO_ROOT": "/root/SkyRL",  # where to put SkyRL in container
+    }
+
+    return (
+        modal.Image.from_registry("novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8")
+        .env(envs)
+        .add_local_dir(
+            local_path=str(local_repo_path),
+            remote_path="/root/SkyRL",
+            ignore=[
+                ".venv",
+                "*.pyc",
+                "__pycache__",
+                ".git",
+                "*.egg-info",
+                ".pytest_cache",
+                "node_modules",
+                ".DS_Store",
+            ],
+        )
     )
 
-)
 
-# Create external volume for datasets
+def create_modal_volume(volume_name: str = "skyrl-data") -> dict[str, modal.Volume]:
+    """Creates volume to attach to container.
 
-data_volume = modal.Volume.from_name("skyrl-data", create_if_missing=True)
+    Args:
+        volume_name (str, optional): Name of volume. Creates a new
+        volume if given name does not exist. Defaults to "skyrl-data".
+
+    Returns:
+        dict[str, modal.Volume]: location in container to attach the volume & volume itself
+    """
+    data_volume = modal.Volume.from_name(volume_name, create_if_missing=True)
+    return {"/root/data": data_volume}  # mounts volume at /root/data inside container
+
+
+app = modal.App(os.getenv("MODAL_APP_NAME", "devpatel-skyrl-app"))
+image = create_modal_image()
+volume = create_modal_volume()
+
 
 @app.function(
     image=image,
     gpu="L4:4",
-    volumes={"/root/data": data_volume},
-    timeout=4500, # 1 hour
+    volumes=volume,
+    timeout=3600,  # 1 hour
 )
 def run_script(command: str):
     """
-    Run any command from the SkyRL repo.
-    Example: run_script.remote("uv run examples/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k")
+    Runs COMMAND inside SkyRL/skyrl-train
     """
     import subprocess
     import os
@@ -54,8 +99,8 @@ def run_script(command: str):
     print(f"Initial working directory: {os.getcwd()}")
 
     # Change to the skyrl-train directory
-    skyrl_train_dir = os.path.join(repo_root, "skyrl-train")
-    os.chdir(skyrl_train_dir)
+    run_command_dir = os.path.join(repo_root, "skyrl-train")
+    os.chdir(run_command_dir)
     print(f"Changed to directory: {os.getcwd()}")
 
     # Ensure skyrl-gym exists inside working_dir so uv can resolve editable path
@@ -70,39 +115,16 @@ def run_script(command: str):
                 check=True,
             )
         else:
-            print("Warning: ../skyrl-gym not found; uv editable path may fail")
+            raise Exception("Cannot find skyrl-gym source")
 
-    # Rewrite pyproject to reference ./skyrl-gym (relative to working_dir)
-    try:
-        pyproject_path = os.path.join(os.getcwd(), "pyproject.toml")
-        with open(pyproject_path, "r", encoding="utf-8") as f:
-            py_text = f.read()
-        new_text = py_text.replace('path = "../skyrl-gym"', 'path = "./skyrl-gym"')
-        if new_text != py_text:
-            with open(pyproject_path, "w", encoding="utf-8") as f:
-                f.write(new_text)
-            print("Updated pyproject.toml to use ./skyrl-gym for uv sources")
-    except Exception as e:
-        print(f"Warning: failed to rewrite pyproject.toml for uv sources: {e}")
-    
-    for var in ["RAY_ADDRESS", "RAY_HEAD_NODE", "RAY_GCS_ADDRESS"]:
-        os.environ.pop(var, None)
-    try:
-        subprocess.run(
-            "ray status --address 127.0.0.1:6379",
-            shell=True,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError:
-        print("Initializing ray cluster in command line")
-        subprocess.run(
-            "ray start --head --disable-usage-stats --port 6379",
-            shell=True,
-            check=True,
-        )
-    os.environ["RAY_ADDRESS"] = "127.0.0.1:6379"
+    print("Initializing ray cluster in command line")
+    subprocess.run(
+        "ray start --head",
+        shell=True,
+        check=True,
+    )
+    # Use 'auto' to automatically detect the Ray cluster instead of hardcoded IP
+    os.environ["RAY_ADDRESS"] = "auto"
 
     # Create symlink so /home/ray/data points to /root/data (where volume is mounted)
     print("\n=== Setting up data directory symlink ===")
@@ -114,48 +136,6 @@ def run_script(command: str):
     else:
         os.symlink("/root/data", "/home/ray/data")
         print("Created symlink: /home/ray/data -> /root/data")
-
-    # Check and create required datasets
-    print("\n=== Checking for required datasets ===")
-    datasets_to_check = [
-        {
-            "name": "gsm8k",
-            "path": "/root/data/gsm8k/validation.parquet",
-            "command": "uv run examples/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
-        },
-        {
-            "name": "searchR1",
-            "path": "/root/data/searchR1/validation.parquet",
-            "command": "uv run examples/search/searchr1_dataset.py --local_dir /root/data/searchR1 --split test"
-        }
-    ]
-
-    for dataset in datasets_to_check:
-        if os.path.exists(dataset["path"]):
-            print(f"✓ Dataset '{dataset['name']}' found at {dataset['path']}")
-        else:
-            print(f"✗ Dataset '{dataset['name']}' not found at {dataset['path']}")
-            print(f"  Creating dataset '{dataset['name']}'...")
-            
-            result = subprocess.run(
-                dataset["command"],
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
-            
-            if result.returncode == 0:
-                print(f"✓ Successfully created dataset '{dataset['name']}'")
-                # Commit the volume changes
-                data_volume.commit()
-                print(f"✓ Committed changes to volume for '{dataset['name']}'")
-            else:
-                print(f"✗ Failed to create dataset '{dataset['name']}'")
-                print(f"  Error output: {result.stdout}")
-                raise Exception(f"Failed to create required dataset: {dataset['name']}")
-
-    print("\n=== All datasets ready ===\n")
 
     print(f"Running command: {command}")
     print(f"Working directory: {os.getcwd()}")
@@ -169,12 +149,12 @@ def run_script(command: str):
         stderr=subprocess.STDOUT,  # Merge stderr into stdout
         text=True,
         bufsize=1,  # Line buffered
-        universal_newlines=True
+        universal_newlines=True,
     )
 
     # Stream output line by line
     for line in process.stdout:
-        print(line, end='')  # Print each line as it comes
+        print(line, end="")  # Print each line as it comes
 
     # Wait for process to complete
     returncode = process.wait()
@@ -184,13 +164,18 @@ def run_script(command: str):
         raise Exception(f"Command failed with exit code {returncode}")
 
 
-
 @app.local_entrypoint()
 def main(command: str = "nvidia-smi"):
+    """Main entry-point for running a command in Modal-integrated SkyRL environmenmt.
+    The given command will be ran inside SkyRL/skyrl-train/
+
+    Args:
+        command (str, optional): Command to run. Defaults to "nvidia-smi".
+
+    Examples:
+        modal run main.py --command "uv run examples/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
+        MODAL_APP_NAME=benji_skyrl_app modal run main.py --command "bash examples/gsm8k/run_generation_gsm8k.sh"
     """
-    Usage: modal run integrations/modal/run_command.py --command "uv run examples/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k"
-    """
-    print(f"Submitting command to Modal: {command}")
-    result = run_script.remote(command)
-    print("\n=== Command completed successfully ===")
-    return result
+    print(f"{'=' * 5} Submitting command to Modal: {command} {'=' * 5}")
+    run_script.remote(command)
+    print(f"\n{'=' * 5} Command completed successfully {'=' * 5}")
