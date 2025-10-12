@@ -31,26 +31,26 @@ class TinkerEngine:
 
     def __init__(
         self,
-        config: EngineConfig,
+        engine_config: EngineConfig,
         db_path=DB_PATH,
     ):
         """Initialize the engine with a database connection and base model."""
+        self.engine_config = engine_config
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-        self.base_model_name = config.base_model  # Single base model for this engine
-        self.checkpoints_base_path = config.checkpoints_base_path  # Location where checkpoints will be stored
+        self.base_model_name = engine_config.base_model  # Single base model for this engine
         self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
-        self.max_lora_adapters = config.max_lora_adapters  # Maximum number of LoRA adapters
-        self.max_lora_rank = config.max_lora_rank  # Maximum LoRA rank
+        self.max_lora_adapters = engine_config.max_lora_adapters  # Maximum number of LoRA adapters
+        self.max_lora_rank = engine_config.max_lora_rank  # Maximum LoRA rank
 
         # Initialize the shared base model
-        self.config = AutoConfig.from_pretrained(self.base_model_name)
+        self.model_config = AutoConfig.from_pretrained(self.base_model_name)
 
         # Configure LoRA settings
-        self.config.max_lora_adapters = self.max_lora_adapters
-        self.config.max_lora_rank = self.max_lora_rank
+        self.model_config.max_lora_adapters = self.max_lora_adapters
+        self.model_config.max_lora_rank = self.max_lora_rank
 
-        model_class = get_model_class(self.config)
+        model_class = get_model_class(self.model_config)
 
         # Download model weights from HuggingFace
         checkpoint_path = snapshot_download(self.base_model_name, allow_patterns=["*.safetensors"])
@@ -58,8 +58,8 @@ class TinkerEngine:
         # Create model and load weights
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
         with jax.set_mesh(mesh):
-            self.model = model_class(self.config, dtype=get_dtype(self.config.dtype), rngs=nnx.Rngs(0))
-            load_checkpoint(checkpoint_path, self.config, self.model)
+            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
+            load_checkpoint(checkpoint_path, self.model_config, self.model)
 
             # Create optimizer that only targets LoRA A and B parameters
             def is_lora_param(path, value):
@@ -328,7 +328,7 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
+        output_dir = Path(self.engine_config.checkpoints_base_path) / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
@@ -351,7 +351,7 @@ class TinkerEngine:
         adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
 
         # Save only the LoRA adapter weights
-        save_checkpoint(self.config, adapter_lora_params, output_dir / "adapter_model.safetensors")
+        save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
 
         # Save LoRA config
         lora_config = LoraConfig(
