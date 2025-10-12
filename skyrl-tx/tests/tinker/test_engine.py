@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import jax
 import numpy as np
 
 from tx.tinker.engine import TinkerEngine
+from tx.tinker.config import EngineConfig
 from tx.tinker import types
 
 
@@ -31,12 +34,13 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
 
 
 def test_adapter_gradient_calculation():
-    engine = TinkerEngine(
-        base_model_name="Qwen/Qwen3-0.6B",
-        checkpoints_base_path="",
+    config = EngineConfig(
+        base_model="Qwen/Qwen3-0.6B",
+        checkpoints_base=Path(""),
         max_lora_adapters=8,
         max_lora_rank=32,
     )
+    engine = TinkerEngine(config)
 
     adapter1_id = "adapter1"
     adapter2_id = "adapter2"
