@@ -15,6 +15,10 @@ class EngineConfig(BaseModel):
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
+    micro_batch_size: int = Field(
+        default=0,
+        description="Micro-batch size for gradient accumulation; 0 means disabled (use full batch)",
+    )
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
