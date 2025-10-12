@@ -280,7 +280,12 @@ class StepWiseTrainer(RayPPOTrainer):
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        # don't validate - will error out
+        # Skip validation.
+        # NOTE (sumanthrh): `validate_generator_output` checks if the number of
+        # rows in the `input_batch` is the same as that in `generator_output`
+        # In step wise training, since each step of a row / trajectory
+        # in `input_batch` is represented as a row in `generator_output`,
+        # this check doesn't apply and it is skipped.
         # validate_generator_output(input_batch, generator_output)
 
         return generator_output
