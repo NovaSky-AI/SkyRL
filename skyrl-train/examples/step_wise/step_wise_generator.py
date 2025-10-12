@@ -53,6 +53,11 @@ class StepWiseGenerator(SkyRLGymGenerator):
         if self.batched:
             raise ValueError("StepWiseGenerator doesn't support `batched=True`")
 
+        if self.custom_chat_template is not None:
+            raise ValueError(
+                f"StepWiseGenerator doesn't support custom chat template, got {generator_cfg.chat_template}"
+            )
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -65,6 +70,11 @@ class StepWiseGenerator(SkyRLGymGenerator):
     ) -> List[AgentLoopOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
+
+        Note:
+            We ensure token-in-token-out generation. With one exceptions:
+            - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
+              This will likely be deprecated soon.
 
         Args:
             prompt: ConversationType
@@ -91,7 +101,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
         )
         done = False
 
-        # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
         # Need copy here since the prompt is a list of messages and we are going to modify it.
         chat_history = copy.deepcopy(prompt)
 
@@ -153,6 +162,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
 
+            # Token-in-token-out. Follow multi-turn chat history format.
             input_ids, response_end_idx, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
                 input_ids,
                 output_ids,

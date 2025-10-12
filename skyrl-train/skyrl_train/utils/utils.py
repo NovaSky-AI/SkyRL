@@ -65,7 +65,19 @@ def validate_batch_sizes(cfg: DictConfig):
 
     # Validate policy mini batch size
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
-    policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
+    if cfg.trainer.strategy == "megatron":
+        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
+        cp = cfg.trainer.policy.megatron_config.context_parallel_size
+        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
+        assert policy_world_size % (pp * cp * tp) == 0, (
+            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
+        )
+        policy_dp_size = policy_world_size // (pp * cp * tp)
+    else:
+        policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
     assert (
         cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0
     ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
@@ -129,7 +141,17 @@ def validate_batch_sizes(cfg: DictConfig):
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
-        ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
+        if cfg.trainer.strategy == "megatron":
+            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
+            cp = cfg.trainer.ref.megatron_config.context_parallel_size
+            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
+            assert ref_world_size % (pp * cp * tp) == 0, (
+                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+                "This ensures that the data parallel size is an integer."
+            )
+            ref_dp_size = ref_world_size // (pp * cp * tp)
+        else:
+            ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
     assert cfg.trainer.train_batch_size >= lcm_dp_size, (
@@ -271,6 +293,27 @@ def validate_cfg(cfg: DictConfig):
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
         assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+
+    # Validate placement
+    if cfg.trainer.placement.colocate_all:
+        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        num_rollout_gpus = (
+            cfg.generator.num_inference_engines
+            * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+        )
+        assert (
+            num_policy_gpus == num_rollout_gpus
+        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+    else:
+        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
+            assert (
+                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
+            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            assert (
+                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
+            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
 
 
 def validate_generator_cfg(cfg: DictConfig):

@@ -21,18 +21,24 @@ from peft import LoraConfig
 
 logger = logging.getLogger(__name__)
 
-# Base path for saving checkpoints
-CHECKPOINTS_BASE_PATH = Path("/tmp/tx_checkpoints")
 LEARNING_RATE = 1e-4
 
 
 class TinkerEngine:
     """Background engine for processing training requests."""
 
-    def __init__(self, base_model_name: str, max_lora_adapters: int, max_lora_rank: int, db_path=DB_PATH):
+    def __init__(
+        self,
+        base_model_name: str,
+        checkpoints_base_path: str,
+        max_lora_adapters: int,
+        max_lora_rank: int,
+        db_path=DB_PATH,
+    ):
         """Initialize the engine with a database connection and base model."""
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
         self.base_model_name = base_model_name  # Single base model for this engine
+        self.checkpoints_base_path = checkpoints_base_path  # Location where checkpoints will be stored
         self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
         self.max_lora_adapters = max_lora_adapters  # Maximum number of LoRA adapters
@@ -224,11 +230,11 @@ class TinkerEngine:
             )
             # Average over sequence length for each example
             per_example_losses = per_token_losses.mean(axis=-1)
-            # Return mean loss for gradient computation, but also return per-token losses
-            return per_example_losses.mean(), (logits, per_token_losses)
+            # Return sum of losses (we'll divide gradients by per-adapter batch size later)
+            return per_example_losses.sum(), (logits, per_token_losses)
 
         loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        (avg_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
+        (sum_loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
 
         # Compute logprobs for the target tokens
         all_logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
@@ -237,10 +243,15 @@ class TinkerEngine:
 
         # Extract and accumulate gradients for each model_id's specific adapter
         for request_id, model_id, start_idx, end_idx in request_batch_slices:
+            num_adapter_examples = end_idx - start_idx
             adapter_index = self.models[model_id].adapter_index
 
-            # Extract gradients for this specific adapter index
-            adapter_grads = jax.tree.map(lambda g: g[adapter_index], lora_grads)
+            # Extract gradients for this adapter, and scale to mean over the adapter's samples.
+            adapter_grads_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
+            adapter_grads = jax.tree.map(
+                lambda x: x / jnp.asarray(num_adapter_examples, dtype=x.dtype),
+                adapter_grads_sum,
+            )
 
             if self.accumulated_grads[model_id] is None:
                 self.accumulated_grads[model_id] = adapter_grads
@@ -315,7 +326,7 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_dir = CHECKPOINTS_BASE_PATH / model_id / checkpoint_id
+        output_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
@@ -458,6 +469,12 @@ def main():
         "--base-model", dest="base_model", help="Base model name (e.g., Qwen/Qwen3-0.6B)", metavar="MODEL"
     )
     parser.add_option(
+        "--checkpoints-base-path",
+        dest="checkpoints_base_path",
+        help="Base path where checkpoints will be stored",
+        metavar="PATH",
+    )
+    parser.add_option(
         "--max-lora-adapters",
         dest="max_lora_adapters",
         type="int",
@@ -478,9 +495,12 @@ def main():
 
     if not options.base_model:
         parser.error("--base-model is required")
+    if not options.checkpoints_base_path:
+        parser.error("--checkpoints-base-path is required")
 
     TinkerEngine(
         base_model_name=options.base_model,
+        checkpoints_base_path=options.checkpoints_base_path,
         max_lora_adapters=options.max_lora_adapters,
         max_lora_rank=options.max_lora_rank,
     ).run()

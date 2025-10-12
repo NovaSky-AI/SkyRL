@@ -143,7 +143,6 @@ class StepWiseTrainer(RayPPOTrainer):
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        breakpoint()
         # overrwrite uids
         uids = [f"{trajectory_id.instance_id}" for trajectory_id in generator_output["trajectory_ids"]]
 
@@ -207,7 +206,9 @@ class StepWiseTrainer(RayPPOTrainer):
             - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
         token_level_rewards = data["rewards"]
-
+        # NOTE: as such, padding rows can be ignored here, but
+        # we will need to re-pad the advantages and returns tensors
+        # in any case, so we retain them for simplicity
         advantages, returns = compute_advantages_step_wise(
             token_level_rewards=token_level_rewards,
             response_mask=data["response_mask"],
@@ -222,14 +223,18 @@ class StepWiseTrainer(RayPPOTrainer):
         )
         data["returns"] = returns
         data["advantages"] = advantages
-
-        return_sums = token_level_rewards.sum(dim=-1)
-        avg_rewards: float = return_sums[data["is_last_step"]].mean().item()
+        # remove padding while calculating metrics
+        pad_size = data.metadata["pad_size"]
+        num_samples = len(token_level_rewards)
+        return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
 
         avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
 
-        valid_advantages = torch.masked_select(data["advantages"], data["response_mask"].bool())
+        valid_advantages = torch.masked_select(data["advantages"], data["response_mask"].bool())[
+            : num_samples - pad_size, ...
+        ]
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
 
@@ -274,7 +279,12 @@ class StepWiseTrainer(RayPPOTrainer):
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        # don't validate - will error out
+        # Skip validation.
+        # NOTE (sumanthrh): `validate_generator_output` checks if the number of
+        # rows in the `input_batch` is the same as that in `generator_output`
+        # In step wise training, since each step of a row / trajectory
+        # in `input_batch` is represented as a row in `generator_output`,
+        # this check doesn't apply and it is skipped.
         # validate_generator_output(input_batch, generator_output)
 
         return generator_output
@@ -291,6 +301,7 @@ class StepWiseTrainer(RayPPOTrainer):
 
         pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
         new_tensors = {}
+        training_input.metadata["pad_size"] = pad_size
         if pad_size == 0:
             return training_input
         for key, tensor in training_input.items():
