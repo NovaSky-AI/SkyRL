@@ -119,11 +119,15 @@ class TinkerEngine:
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora_pure, has_aux=True)
 
         # Replicate all outputs except gradients which should match state sharding
-        self._compiled_loss_and_grad_fn = jax.jit(
-            loss_and_grad_fn,
-            in_shardings=(state_shardings,) + (replicated,) * 5,
-            out_shardings=((scalar, (replicated, replicated)), state_shardings)
-        )
+        if self.config.enforce_eager:
+            # Disable JIT compilation for debugging
+            self._compiled_loss_and_grad_fn = loss_and_grad_fn
+        else:
+            self._compiled_loss_and_grad_fn = jax.jit(
+                loss_and_grad_fn,
+                in_shardings=(state_shardings,) + (replicated,) * 5,
+                out_shardings=((scalar, (replicated, replicated)), state_shardings)
+            )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any optim_step for their model.
