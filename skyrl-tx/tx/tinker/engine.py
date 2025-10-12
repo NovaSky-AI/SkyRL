@@ -26,8 +26,23 @@ logger = logging.getLogger(__name__)
 LEARNING_RATE = 1e-4
 
 
-def round_up_to_multiple(num: int, multiple: int) -> int:
-    return ((num + multiple - 1) // multiple) * multiple
+def round_up_seq_len(seq_len: int) -> int:
+    """
+    Rounds a sequence length up to roughly two significant binary digits.
+    We do this to pad sequences, so the Jax JIT compiler needs to
+    compile less different shapes.
+    """
+    if seq_len <= 32:
+        return 32
+
+    msb_pos = seq_len.bit_length() - 1
+    mask = (1 << msb_pos) | (1 << (msb_pos - 1))
+    result = seq_len & mask
+
+    if result < seq_len:
+        result += (1 << (msb_pos - 1))
+
+    return result
 
 
 class TinkerEngine:
@@ -237,8 +252,8 @@ class TinkerEngine:
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
 
-        # Pad sequences to same length and bin it so the JIT has to compile fewer kernels
-        max_len = round_up_to_multiple(max(len(seq) for seq in all_input_ids), 512)
+        # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
+        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
         input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
         target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
