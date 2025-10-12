@@ -145,8 +145,9 @@ class TinkerEngine:
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
                 logits=logits, labels=target_ids, where=loss_mask
             )  # [B, T]
+            per_seq_loss = (per_token_losses * loss_mask).sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
-            return per_token_losses.mean(axis=-1).sum(), (logits, per_token_losses)
+            return per_seq_loss.sum(), (logits, per_token_losses)
 
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, has_aux=True)
 
