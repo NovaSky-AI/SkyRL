@@ -12,9 +12,7 @@ class EngineConfig(BaseModel):
         default="/tmp/tx_checkpoints",
         description="Base path where checkpoints will be stored",
     )
-    max_lora_adapters: int = Field(
-        default=32, description="Maximum number of LoRA adapters"
-    )
+    max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
 
 
