@@ -31,20 +31,17 @@ class TinkerEngine:
 
     def __init__(
         self,
-        base_model_name: str,
-        checkpoints_base_path: str,
-        max_lora_adapters: int,
-        max_lora_rank: int,
+        config: EngineConfig,
         db_path=DB_PATH,
     ):
         """Initialize the engine with a database connection and base model."""
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-        self.base_model_name = base_model_name  # Single base model for this engine
-        self.checkpoints_base_path = checkpoints_base_path  # Location where checkpoints will be stored
+        self.base_model_name = config.base_model  # Single base model for this engine
+        self.checkpoints_base_path = config.checkpoints_base_path  # Location where checkpoints will be stored
         self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
-        self.max_lora_adapters = max_lora_adapters  # Maximum number of LoRA adapters
-        self.max_lora_rank = max_lora_rank  # Maximum LoRA rank
+        self.max_lora_adapters = config.max_lora_adapters  # Maximum number of LoRA adapters
+        self.max_lora_rank = config.max_lora_rank  # Maximum LoRA rank
 
         # Initialize the shared base model
         self.config = AutoConfig.from_pretrained(self.base_model_name)
@@ -74,7 +71,7 @@ class TinkerEngine:
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
 
         logger.info(
-            f"Initialized base model {self.base_model_name} with max_lora_adapters={max_lora_adapters}, max_lora_rank={max_lora_rank}"
+            f"Initialized base model {self.base_model_name} with max_lora_adapters={self.max_lora_adapters}, max_lora_rank={self.max_lora_rank}"
         )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
@@ -478,12 +475,7 @@ def main():
     config = EngineConfig.model_validate(vars(args))
 
     # Initialize and run the engine
-    TinkerEngine(
-        base_model_name=config.base_model,
-        checkpoints_base_path=config.checkpoints_base_path,
-        max_lora_adapters=config.max_lora_adapters,
-        max_lora_rank=config.max_lora_rank,
-    ).run()
+    TinkerEngine(config).run()
 
 
 if __name__ == "__main__":
