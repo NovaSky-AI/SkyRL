@@ -16,6 +16,7 @@ import io
 from pathlib import Path
 
 from tx.tinker import types
+from tx.tinker.config import EngineConfig, add_model, config_to_argv
 from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
 
 
@@ -34,9 +35,7 @@ async def lifespan(app: FastAPI):
 
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
-    for field_name, value in app.state.engine_config.model_dump().items():
-        cmd.append(f"--{field_name.replace('_', '-')}")
-        cmd.append(str(value))
+    cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
     logger.info(
@@ -404,7 +403,6 @@ async def root():
 if __name__ == "__main__":
     import argparse
     import uvicorn
-    from tx.tinker.config import EngineConfig, add_model
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")

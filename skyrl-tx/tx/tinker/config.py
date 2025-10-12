@@ -20,8 +20,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         parser: The ArgumentParser to add arguments to
         model: The Pydantic model class
     """
-    fields = model.model_fields
-    for name, field in fields.items():
+    for name, field in model.model_fields.items():
         kwargs = {
             "help": field.description,
         }
@@ -38,3 +37,12 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             kwargs["required"] = True
 
         parser.add_argument(f"--{name.replace('_', '-')}", **kwargs)
+
+
+def config_to_argv(cfg: BaseModel) -> list[str]:
+    """This should 'unparse' a config parsed by an ArgumentParser constructed by add_model."""
+    argv = []
+    for field_name, value in cfg.model_dump().items():
+        argv.append(f"--{field_name.replace('_', '-')}")
+        argv.append(str(value))
+    return argv
