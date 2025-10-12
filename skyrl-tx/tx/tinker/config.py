@@ -34,12 +34,13 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         if field.annotation is not None:
             kwargs["type"] = field.annotation
 
-        # Check for argparse default in json_schema_extra
-        if field.json_schema_extra and "default" in field.json_schema_extra:
-            kwargs["default"] = field.json_schema_extra["default"]
-        elif field.is_required():
+        # Check for default value
+        if field.is_required():
             # Mark as required in argparse if no default is provided
             kwargs["required"] = True
+        else:
+            # For optional fields, provide the default value to argparse
+            kwargs["default"] = field.default
 
         parser.add_argument(f"--{name.replace('_', '-')}", **kwargs)
 
