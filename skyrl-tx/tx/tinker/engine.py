@@ -4,6 +4,7 @@ import argparse
 import time
 import logging
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,29 @@ from peft import LoraConfig
 logger = logging.getLogger(__name__)
 
 LEARNING_RATE = 1e-4
+
+
+def round_up_seq_len(seq_len: int) -> int:
+    """
+    Rounds a sequence length up to roughly two significant binary digits.
+    We do this to pad sequences, so the Jax JIT compiler needs to
+    compile fewer different shapes.
+    """
+    if seq_len <= 32:
+        return 32
+
+    # Find the position of the most significant bit.
+    msb_pos = seq_len.bit_length() - 1
+    # Create a mask for the two most significant bits.
+    mask = (1 << msb_pos) | (1 << (msb_pos - 1))
+    # Round down to the nearest value with at most two significant bits.
+    result = seq_len & mask
+
+    # If we rounded down, round up to the next bucket boundary.
+    if result < seq_len:
+        result += 1 << (msb_pos - 1)
+
+    return result
 
 
 @dataclass
@@ -70,9 +94,12 @@ class TinkerEngine:
         """Initialize the engine with a database connection and base model."""
         self.config = config
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-        self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
-        # Store accumulated gradients per LoRA adapter
+        # Store LoRA model metadata (model_id -> metadata)
+        self.models: dict[str, types.ModelMetadata] = {}
+        # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
         self.accumulated_grads: dict[str, AccumulatedGradients] = {}
+        # Metrics recorded in the engine
+        self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model
         self.model_config = AutoConfig.from_pretrained(self.config.base_model)
@@ -87,8 +114,8 @@ class TinkerEngine:
         checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
-        with jax.set_mesh(mesh):
+        self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
+        with jax.set_mesh(self.mesh):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_checkpoint(checkpoint_path, self.model_config, self.model)
 
@@ -105,10 +132,61 @@ class TinkerEngine:
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
         )
 
+        self._create_loss_and_grad_fn()
+
+    def _create_loss_and_grad_fn(self):
+        """Compile and cache the loss function to avoid re-jitting on every call."""
+
+        def loss_for_lora(lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            merged_model = nnx.merge(self.graphdef, lora_state, self.non_lora_params)
+            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
+                "logits"
+            ]  # [B, T, V]
+            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
+                logits=logits, labels=target_ids, where=loss_mask
+            )  # [B, T]
+            per_seq_loss = (per_token_losses * loss_mask).sum(axis=-1) / loss_mask.sum(axis=-1)
+            # Return sum of losses (we'll divide gradients by per-adapter batch size later)
+            return per_seq_loss.sum(), (logits, per_token_losses)
+
+        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, has_aux=True)
+
+        if self.config.enforce_eager:
+            # Disable JIT compilation for debugging
+            self._loss_and_grad_fn = loss_and_grad_fn
+        else:
+            # Extract state once to get the pytree structure and compute the partition
+            state = nnx.state(self.lora_params)
+            state_partition_spec = nnx.get_partition_spec(state)
+            # Create NamedSharding objects that tell us how models parameters and inputs should be sharded
+            state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
+            replicated = jax.NamedSharding(self.mesh, jax.P(None))
+            scalar = jax.NamedSharding(self.mesh, jax.P())
+            self._loss_and_grad_fn = jax.jit(
+                loss_and_grad_fn,
+                # One input sharding parameter for each argument of loss_for_lora
+                in_shardings=(state_shardings,) + (replicated,) * 5,
+                # One output sharding parameter for each return value of loss_for_lora
+                out_shardings=((scalar, (replicated, replicated)), state_shardings),
+            )
+
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
         mb = self.config.micro_batch_size
         return total if mb <= 0 else max(1, min(mb, total))
+
+    @contextmanager
+    def _jit_timing_context(self, seq_len: int):
+        """Context manager to track JIT compilation times for different sequence lengths."""
+        if not self.config.enforce_eager and seq_len not in self.metrics.seq_len_jit_times:
+            logger.info(f"JIT compiling for seq_len={seq_len} in progress...")
+            start_time = time.time()
+            yield
+            elapsed = time.time() - start_time
+            self.metrics.seq_len_jit_times[seq_len] = elapsed
+            logger.info(f"JIT compilation for seq_len={seq_len} took {elapsed:.2f}s")
+        else:
+            yield
 
     def _forward_backward(
         self,
@@ -119,21 +197,12 @@ class TinkerEngine:
         loss_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
-
-        def loss_for_lora(lora_params):
-            merged = nnx.merge(self.graphdef, lora_params, self.non_lora_params)
-            logits = merged(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
-                "logits"
-            ]  # [B, T, V]
-            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
-                logits=logits, labels=target_ids, where=loss_mask
-            )  # [B, T]
-            per_seq_loss = (per_token_losses * loss_mask).sum(axis=-1) / loss_mask.sum(axis=-1)
-            # Return sum of losses (we'll divide gradients by per-adapter batch size later)
-            return per_seq_loss.sum(), (logits, per_token_losses)
-
-        loss_and_grad_fn = nnx.value_and_grad(loss_for_lora, has_aux=True)
-        (_, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(self.lora_params)
+        lora_state = nnx.state(self.lora_params)
+        seq_len = input_ids.shape[1]
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
+            (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
+                lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+            )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
         return per_token_losses, target_logprobs, lora_grads
@@ -278,13 +347,11 @@ class TinkerEngine:
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
 
-        # Pad sequences to same length
-        max_len = max(len(seq) for seq in all_input_ids)
-        padded_inputs = [seq + [0] * (max_len - len(seq)) for seq in all_input_ids]
-        padded_targets = [seq + [0] * (max_len - len(seq)) for seq in all_targets]
+        # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
+        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
-        input_ids = jnp.array(padded_inputs, dtype=jnp.int32)
-        target_ids = jnp.array(padded_targets, dtype=jnp.int32)
+        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
+        target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
