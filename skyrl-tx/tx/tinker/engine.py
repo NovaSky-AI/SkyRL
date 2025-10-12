@@ -31,29 +31,26 @@ class TinkerEngine:
 
     def __init__(
         self,
-        engine_config: EngineConfig,
+        config: EngineConfig,
         db_path=DB_PATH,
     ):
         """Initialize the engine with a database connection and base model."""
-        self.engine_config = engine_config
+        self.config = config
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-        self.base_model_name = engine_config.base_model  # Single base model for this engine
         self.models: dict[str, types.ModelMetadata] = {}  # Store LoRA model metadata
         self.accumulated_grads = {}  # Store accumulated gradients per LoRA adapter: model_id -> grads
-        self.max_lora_adapters = engine_config.max_lora_adapters  # Maximum number of LoRA adapters
-        self.max_lora_rank = engine_config.max_lora_rank  # Maximum LoRA rank
 
         # Initialize the shared base model
-        self.model_config = AutoConfig.from_pretrained(self.base_model_name)
+        self.model_config = AutoConfig.from_pretrained(self.config.base_model)
 
         # Configure LoRA settings
-        self.model_config.max_lora_adapters = self.max_lora_adapters
-        self.model_config.max_lora_rank = self.max_lora_rank
+        self.model_config.max_lora_adapters = self.config.max_lora_adapters
+        self.model_config.max_lora_rank = self.config.max_lora_rank
 
         model_class = get_model_class(self.model_config)
 
         # Download model weights from HuggingFace
-        checkpoint_path = snapshot_download(self.base_model_name, allow_patterns=["*.safetensors"])
+        checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
@@ -71,7 +68,7 @@ class TinkerEngine:
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
 
         logger.info(
-            f"Initialized base model {self.base_model_name} with max_lora_adapters={self.max_lora_adapters}, max_lora_rank={self.max_lora_rank}"
+            f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
         )
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
@@ -115,16 +112,16 @@ class TinkerEngine:
         # Assign adapter index for this model_id
         adapter_index = max((m.adapter_index for m in self.models.values()), default=-1) + 1
 
-        if adapter_index >= self.max_lora_adapters:
-            raise ValueError(f"Maximum number of LoRA adapters ({self.max_lora_adapters}) reached")
+        if adapter_index >= self.config.max_lora_adapters:
+            raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
 
         # Extract LoRA rank and alpha from config
         lora_rank = request_data.lora_config.rank
         lora_alpha = request_data.lora_config.alpha
 
         # Validate rank doesn't exceed max
-        if not (0 < lora_rank <= self.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.max_lora_rank}")
+        if not (0 < lora_rank <= self.config.max_lora_rank):
+            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.config.max_lora_rank}")
 
         self.models[model_id] = types.ModelMetadata(
             adapter_index=adapter_index,
@@ -141,7 +138,7 @@ class TinkerEngine:
 
         return types.CreateModelOutput(
             model_id=model_id,
-            base_model=self.base_model_name,
+            base_model=self.config.base_model,
             lora_config=request_data.lora_config,
         )
 
@@ -328,7 +325,7 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_dir = Path(self.engine_config.checkpoints_base_path) / model_id / checkpoint_id
+        output_dir = Path(self.config.checkpoints_base_path) / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
