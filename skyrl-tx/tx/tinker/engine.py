@@ -98,7 +98,7 @@ class TinkerEngine:
         self.models: dict[str, types.ModelMetadata] = {}
         # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
         self.accumulated_grads: dict[str, AccumulatedGradients] = {}
-        # Metrics stored in the engine
+        # Metrics recorded in the engine
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model
