@@ -1,5 +1,6 @@
 """Background engine for processing training requests."""
 
+import argparse
 import time
 import logging
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from huggingface_hub import snapshot_download
 
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
+from tx.tinker.config import EngineConfig, add_model
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
 from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
@@ -463,9 +465,6 @@ class TinkerEngine:
 
 def main():
     """Entry point for the background engine."""
-    import argparse
-    from tx.tinker.config import EngineConfig, add_model
-
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
 
     # Create argument parser and add Pydantic model fields

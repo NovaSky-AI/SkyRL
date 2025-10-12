@@ -295,10 +295,10 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
 
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
-async def get_server_capabilities():
+async def get_server_capabilities(request: Request):
     """Retrieve information about supported models and server capabilities."""
     supported_models = [
-        SupportedModel(model_name="Qwen/Qwen3-0.6B"),
+        SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
     return GetServerCapabilitiesResponse(supported_models=supported_models)
 
@@ -358,10 +358,10 @@ def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
+    request: Request,
     unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
     checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
     session: AsyncSession = Depends(get_session),
-    request: Request = None,
 ):
     """Return the checkpoint archive bytes"""
 
@@ -419,7 +419,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Create EngineConfig from parsed arguments
-    engine_config = EngineConfig(**{k: v for k, v in vars(args).items() if k in EngineConfig.model_fields})
+    engine_config = EngineConfig(
+        base_model=args.base_model,
+        checkpoints_base_path=args.checkpoints_base_path,
+        max_lora_adapters=args.max_lora_adapters,
+        max_lora_rank=args.max_lora_rank,
+    )
 
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config

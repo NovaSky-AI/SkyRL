@@ -9,8 +9,8 @@ class EngineConfig(BaseModel):
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
     checkpoints_base_path: str = Field(..., description="Base path where checkpoints will be stored")
-    max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
-    max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
+    max_lora_adapters: int = Field(..., description="Maximum number of LoRA adapters", json_schema_extra={"default": 32})
+    max_lora_rank: int = Field(..., description="Maximum LoRA rank", json_schema_extra={"default": 32})
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
@@ -23,7 +23,6 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
     fields = model.model_fields
     for name, field in fields.items():
         kwargs = {
-            "dest": name,
             "help": field.description,
         }
 
@@ -31,8 +30,8 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         if field.annotation is not None:
             kwargs["type"] = field.annotation
 
-        # Add default if it's not required
-        if not field.is_required():
-            kwargs["default"] = field.default
+        # Check for argparse default in json_schema_extra
+        if field.json_schema_extra and "default" in field.json_schema_extra:
+            kwargs["default"] = field.json_schema_extra["default"]
 
         parser.add_argument(f"--{name.replace('_', '-')}", **kwargs)
