@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import jax
 import numpy as np
 
@@ -34,7 +36,7 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
 def test_adapter_gradient_calculation():
     config = EngineConfig(
         base_model="Qwen/Qwen3-0.6B",
-        checkpoints_base_path="",
+        checkpoints_base=Path(""),
         max_lora_adapters=8,
         max_lora_rank=32,
     )

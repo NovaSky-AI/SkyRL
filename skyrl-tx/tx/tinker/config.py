@@ -1,6 +1,7 @@
 """Configuration for the Tinker engine."""
 
 import argparse
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 
@@ -8,8 +9,8 @@ class EngineConfig(BaseModel):
     """Configuration for the Tinker engine."""
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
-    checkpoints_base_path: str = Field(
-        default="/tmp/tx_checkpoints",
+    checkpoints_base: Path = Field(
+        default=Path("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
