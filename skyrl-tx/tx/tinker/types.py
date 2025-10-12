@@ -74,6 +74,6 @@ class ModelMetadata(BaseModel):
     lora_config: LoraConfig
 
 
-# Metrics that are being tracked in the engine
+# Metrics tracked in the engine
 class EngineMetrics(BaseModel):
     seq_len_jit_times: dict[int, float] = {}
