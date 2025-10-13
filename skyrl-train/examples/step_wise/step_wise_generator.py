@@ -90,7 +90,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             rollout_logprobs: Optional[List[float]]
         """
         # Create a new environment instance
-        retokenize_chat_history = self.generator_cfg.retokenize_chat_history
+        retokenize_chat_history = self.generator_cfg.get("retokenize_chat_history", False)
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
@@ -105,7 +105,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
-        # initial_chat_history_length = len(chat_history)
+
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             add_generation_prompt=True,
@@ -181,12 +181,10 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 rollout_logprobs=None,
                 stop_reason=stop_reason,
             )
-            try:
-                assert len(per_step_output.loss_mask) == len(
-                    per_step_output.response_ids
-                ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)} and {len(per_step_output.response_ids)}"
-            except Exception:
-                breakpoint()
+
+            assert len(per_step_output.loss_mask) == len(
+                per_step_output.response_ids
+            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)} and {len(per_step_output.response_ids)}"
 
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
