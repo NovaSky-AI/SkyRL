@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import create_engine, Session, select, func
-from collections.abc import Mapping
 
 import jax
 import jax.numpy as jnp
