@@ -25,16 +25,6 @@ def ray_init_fixture(scope="module"):
     ray.init(runtime_env={"env_vars": env_vars})
     yield
     # call ray shutdown after a test regardless
-    try:
-        for actor in ray.util.list_named_actors(all_namespaces=True):
-            try:
-                actor_handle = ray.get_actor(actor["name"], namespace=actor["namespace"])
-                ray.kill(actor_handle, no_restart=True)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    
     ray.shutdown()
 
     if torch.cuda.is_available():
