@@ -16,6 +16,7 @@ from ray.util.placement_group import (
 )
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator
 
 
 class Timer:
@@ -191,8 +192,6 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
-
-    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
