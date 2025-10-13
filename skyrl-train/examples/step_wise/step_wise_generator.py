@@ -51,12 +51,15 @@ class StepWiseGenerator(SkyRLGymGenerator):
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
         if self.batched:
-            raise ValueError("StepWiseGenerator doesn't support `batched=True`")
+            raise ValueError("`StepWiseGenerator` doesn't support `batched=True`")
 
         if self.custom_chat_template is not None:
             raise ValueError(
-                f"StepWiseGenerator doesn't support custom chat template, got {generator_cfg.chat_template}"
+                f"`StepWiseGenerator` doesn't support custom chat template, got {generator_cfg.chat_template}"
             )
+
+        if not self.use_conversation_multi_turn:
+            raise ValueError("`StepWiseGenerator` doesn't support `use_conversation_multi_turn`")
 
     async def agent_loop(
         self,
@@ -70,11 +73,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
     ) -> List[AgentLoopOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
-
-        Note:
-            We ensure token-in-token-out generation. With one exceptions:
-            - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
-              This will likely be deprecated soon.
+        Provides outputs per step in the trajectory.
 
         Args:
             prompt: ConversationType
@@ -158,15 +157,15 @@ class StepWiseGenerator(SkyRLGymGenerator):
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
 
-            # Token-in-token-out. Follow multi-turn chat history format.
-            input_ids, response_end_idx, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
+            response_end_idx = len(output_ids) - 1
+
+            # Follow multi-turn chat history format.
+            input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
                 input_ids,
                 output_ids,
                 new_obs,
                 done,
             )
-            # response_end_idx in response_ids needs to be shifted
-            response_end_idx = response_end_idx - current_prompt_length
 
             if retokenize_chat_history:
                 # update the chat history
@@ -308,8 +307,9 @@ class StepWiseGenerator(SkyRLGymGenerator):
         done: bool,
     ):
         """
-        Update the input ids given a new model response and observation, following
-        token-in-token-out.
+        Update the input ids given a new model response and observation.
+
+        Appends observation messages using the model's chat template.
 
         For example (using the Qwen 2.5 chat template), a trajectory for multi-turn generation would look like:
         <|im_start|>system
@@ -329,9 +329,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
         <|im_end|>
         ...
 
-        the chat template is applied without tokenization before and after the chat history is appended to
-        in order to get new token ids in the chat template format (but without re-tokenizing the entire chat history every turn)
-
         Args:
             chat_history: ConversationType
             chat_end_index: int
@@ -345,7 +342,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
             input_ids: List[int]
         """
         input_ids += output_ids
-        response_end_idx = len(input_ids) - 1
         loss_mask = [1] * len(output_ids)
 
         # apply chat template for observations, also generate generation prompt for next turn
@@ -363,7 +359,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             if not done:
                 input_ids += self.generation_prompt_ids
                 loss_mask += [0] * len(self.generation_prompt_ids)
-        return input_ids, response_end_idx, loss_mask
+        return input_ids, loss_mask
 
     def _update_chat_history(
         self,
