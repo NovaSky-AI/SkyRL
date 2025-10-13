@@ -114,7 +114,7 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
-def extract_adapter_params(adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState):
+def extract_adapter_params(adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState) -> nnx.GraphState:
     """Helper function to extract the adapter parameters for a specific adapter index."""
     layer_rank = {
         path[:-2]: int(node[adapter_index])
