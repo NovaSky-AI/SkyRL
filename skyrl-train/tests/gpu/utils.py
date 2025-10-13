@@ -23,6 +23,7 @@ from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType
 from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+import skyrl_train.utils.ppo_utils  # Import to register policy losses
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput

@@ -228,6 +228,17 @@ def validate_cfg(cfg: DictConfig):
         )
 
     available_policy_losses = PolicyLossRegistry.list_available()
+    
+    if not available_policy_losses:
+        import skyrl_train.utils.ppo_utils
+        if ray.is_initialized():
+            try:
+                PolicyLossRegistry.sync_with_actor()
+                AdvantageEstimatorRegistry.sync_with_actor()
+                available_policy_losses = PolicyLossRegistry.list_available()
+            except Exception:
+                pass
+
     assert available_policy_losses != [], "Policy loss registry is not populated."
 
     assert (
