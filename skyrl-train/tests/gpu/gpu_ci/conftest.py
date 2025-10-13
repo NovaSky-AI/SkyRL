@@ -3,6 +3,9 @@ import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl_train.utils.utils import peer_access_supported
+import torch
+import torch.distributed as dist
+import gc
 
 
 @lru_cache(5)
@@ -12,7 +15,7 @@ def log_once(msg):
 
 
 @pytest.fixture
-def ray_init_fixture():
+def ray_init_fixture(scope="module"):
     if ray.is_initialized():
         ray.shutdown()
     env_vars = {}
@@ -22,18 +25,24 @@ def ray_init_fixture():
     ray.init(runtime_env={"env_vars": env_vars})
     yield
     # call ray shutdown after a test regardless
-    ray.shutdown()
     try:
-        ray.kill(ray.get_actor("*", allow_unknown=True), no_restart=True)
+        for actor in ray.util.list_named_actors(all_namespaces=True):
+            try:
+                actor_handle = ray.get_actor(actor["name"], namespace=actor["namespace"])
+                ray.kill(actor_handle, no_restart=True)
+            except Exception:
+                pass
     except Exception:
         pass
-
-    ray.shutdown()
+    
+    if ray.is_initialized():
+        ray.shutdown()
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+        gc.collect()
 
     try:
         if dist.is_initialized():
