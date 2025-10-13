@@ -82,7 +82,7 @@ volume = create_modal_volume()
     image=image,
     gpu="L4:4",
     volumes=volume,
-    timeout=3600,  # 1 hour
+    timeout=5000,  # 1 hour
 )
 def run_script(command: str):
     """

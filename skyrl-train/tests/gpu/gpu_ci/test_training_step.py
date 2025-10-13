@@ -21,6 +21,7 @@ def get_test_actor_config() -> DictConfig:
 
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.logger = "console"
 
     return cfg
 
