@@ -542,19 +542,16 @@ class TinkerEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
-        adapter_lora_params_pure_dict = nnx.to_pure_dict(adapter_lora_params)
 
         def extract_optimizer_params(p):
             return p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
 
-        optimizer_state_dict = nnx.to_pure_dict(nnx.state(self.optimizer))  # Use to_pure_dict here too for consistency
-        optimizer_state_pure_dict = jax.tree.map(extract_optimizer_params, optimizer_state_dict)
+        optimizer_params = jax.tree.map(extract_optimizer_params, nnx.state(self.optimizer))
 
-        lora_config_dict = self.models[model_id].lora_config.model_dump()
         checkpoint_data = {
-            "lora_weights": adapter_lora_params_pure_dict,
-            "optimizer_state": optimizer_state_pure_dict,
-            "lora_config": lora_config_dict,
+            "lora_weights": nnx.to_pure_dict(adapter_lora_params),
+            "optimizer_state": nnx.to_pure_dict(optimizer_params),
+            "lora_config": self.models[model_id].lora_config.model_dump(),
         }
 
         checkpoints.save_checkpoint(
