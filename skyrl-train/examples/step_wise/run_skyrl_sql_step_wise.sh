@@ -4,7 +4,7 @@ set -x
 # Uses 1 node with 8 GPUs.
 # huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/text_to_sql/run_skyrl_sql.sh
+# bash examples/step_wise/run_skyrl_sql_step_wise.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
@@ -70,6 +70,5 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
-  +trainer.algorithm.use_same_reward_all_steps=True \
   trainer.algorithm.policy_loss_type="dual_clip" \
   $@
