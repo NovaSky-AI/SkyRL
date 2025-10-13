@@ -479,10 +479,9 @@ class TinkerEngine:
         def insert_at_adapter(path, full_tensor, trimmed_tensor):
             if not (isinstance(full_tensor, jnp.ndarray) and full_tensor.ndim > 0):
                 return trimmed_tensor
-            param_key = path[-1].key
-            if param_key == "lora_A":
+            if path[-1].key == "lora_A":
                 return full_tensor.at[adapter_index, :, :rank].set(trimmed_tensor)
-            elif param_key == "lora_B":
+            elif path[-1].key == "lora_B":
                 return full_tensor.at[adapter_index, :rank, :].set(trimmed_tensor)
             return full_tensor.at[adapter_index].set(trimmed_tensor)
 
