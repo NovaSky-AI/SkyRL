@@ -40,6 +40,8 @@ dependencies = [
     "flash-attn",
     "polars",
     "s3fs",
+    "fastapi",
+    "uvicorn",
 ]
 
 [tool.uv]
@@ -76,9 +78,6 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
-# Custom vllm wheel for flashrl extra - built from commit 4b04dfc at https://github.com/SumanthRH/vllm/tree/flashrl
-flashrl-vllm = { url = "https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl" }
-
 
 [project.optional-dependencies]
 deepspeed = [
@@ -90,8 +89,6 @@ dev = [
     "pytest>=6.2.5",
     "pytest-asyncio",
     "pre-commit",
-    "fastapi",
-    "uvicorn",
     "litellm",
 ]
 docs = [
@@ -133,8 +130,8 @@ mcore = [
   "megatron-core==0.13.0",
 ]
 flashrl = [
-    # NOTE: Flashrl requires a custom vLLM wheel.
-    "flashrl-vllm",
+    # NOTE: Custom vLLM wheel must be installed separately.
+    # See examples/flash_rl/README.md for installation instructions.
     "torch==2.7.0",
     "flashinfer-python",
     "torchvision",
