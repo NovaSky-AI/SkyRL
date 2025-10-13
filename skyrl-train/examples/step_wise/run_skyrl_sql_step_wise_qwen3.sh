@@ -9,7 +9,7 @@ set -x
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
 DB_PATH="$HOME/data/sql/db_files/data"
-CKPT_PATH="$HOME/ckpts/skyrl_sql_qwen3_4b_ckpt_new"
+CKPT_PATH="$HOME/ckpts/skyrl_sql_qwen3_4b_stepwise"
 
 NUM_GPUS=8
 NUM_INFERENCE_ENGINES=4
