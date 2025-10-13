@@ -59,7 +59,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             )
 
         if not self.use_conversation_multi_turn:
-            raise ValueError("`StepWiseGenerator` doesn't support `use_conversation_multi_turn`")
+            raise ValueError("`StepWiseGenerator` doesn't support `use_conversation_multi_turn=False`")
 
     async def agent_loop(
         self,
@@ -173,7 +173,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 chat_history = self._update_chat_history(chat_history, output, new_obs)
 
             per_step_rewards.append((step_reward, response_end_idx))
-            response_ids = copy.deepcopy(input_ids[current_prompt_length:])  # 30
+            response_ids = copy.deepcopy(input_ids[current_prompt_length:])
             per_step_output = AgentLoopOutput(
                 response_ids=response_ids,
                 reward=step_reward,
@@ -329,16 +329,13 @@ class StepWiseGenerator(SkyRLGymGenerator):
         ...
 
         Args:
-            chat_history: ConversationType
-            chat_end_index: int
             input_ids: List[int]
             output: str
             new_obs: ConversationType
+            done: bool
         Returns:
-            chat_history: ConversationType
-            chat_end_index: int
-            loss_mask: List[int]
             input_ids: List[int]
+            loss_mask: List[int]
         """
         input_ids += output_ids
         loss_mask = [1] * len(output_ids)
