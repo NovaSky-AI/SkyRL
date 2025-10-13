@@ -551,7 +551,10 @@ class TinkerEngine:
                 "optimizer_state": nnx.to_pure_dict(optimizer_params),
                 "lora_config": self.models[model_id].lora_config.model_dump(),
             },
-            ckpt_dir=output_dir, step=0, prefix="checkpoint_", overwrite=True
+            ckpt_dir=output_dir,
+            step=0,
+            prefix="checkpoint_",
+            overwrite=True,
         )
 
         logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_dir}")
