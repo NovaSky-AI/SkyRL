@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Literal, Any, AsyncGenerator, Optional
+from typing import Literal, Any, AsyncGenerator
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
@@ -132,13 +132,13 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str
-    type: Optional[Literal["save_weights"]] = None
+    type: Literal["save_weights"] | None = None
 
 
 class LoadWeightsRequest(BaseModel):
     model_id: str
     path: str
-    type: Optional[Literal["load_weights"]] = None
+    type: Literal["load_weights"] | None = None
 
 
 class FutureResponse(BaseModel):
