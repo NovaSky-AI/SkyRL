@@ -512,7 +512,10 @@ class TinkerEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
-        extract_params = lambda p: p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
+
+        def extract_params(p):
+            return p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
+
         optimizer_params = jax.tree.map(extract_params, nnx.state(self.optimizer))
 
         checkpoints.save_checkpoint(
