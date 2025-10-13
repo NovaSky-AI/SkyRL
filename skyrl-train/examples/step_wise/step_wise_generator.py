@@ -51,12 +51,15 @@ class StepWiseGenerator(SkyRLGymGenerator):
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
         if self.batched:
-            raise ValueError("StepWiseGenerator doesn't support `batched=True`")
+            raise ValueError("`StepWiseGenerator` doesn't support `batched=True`")
 
         if self.custom_chat_template is not None:
             raise ValueError(
-                f"StepWiseGenerator doesn't support custom chat template, got {generator_cfg.chat_template}"
+                f"`StepWiseGenerator` doesn't support custom chat template, got {generator_cfg.chat_template}"
             )
+
+        if not self.use_conversation_multi_turn:
+            raise ValueError("`StepWiseGenerator` doesn't support `use_conversation_multi_turn=False`")
 
     async def agent_loop(
         self,
@@ -70,11 +73,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
     ) -> List[AgentLoopOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
-
-        Note:
-            We ensure token-in-token-out generation. With one exceptions:
-            - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
-              This will likely be deprecated soon.
+        Provides outputs per step in the trajectory.
 
         Args:
             prompt: ConversationType
@@ -90,9 +89,11 @@ class StepWiseGenerator(SkyRLGymGenerator):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        # Create a new environment instance
+        retokenize_chat_history = self.generator_cfg.get("retokenize_chat_history", False)
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+
+        # Create a new environment instance
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
         session_id = (
@@ -109,21 +110,25 @@ class StepWiseGenerator(SkyRLGymGenerator):
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             add_generation_prompt=True,
-            chat_template=self.custom_chat_template,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
-
-        initial_prompt_length = len(input_ids)
-        loss_mask = []  # this excludes the prompt
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
         step_id = 0
-
         per_step_outputs: List[AgentLoopOutput] = []
         while not done:
-            # 1. Generate output
-            # Token-in-token-out.
+
+            if retokenize_chat_history:
+                input_ids = self.tokenizer.apply_chat_template(
+                    chat_history,
+                    add_generation_prompt=True,
+                    # chat_template=None,
+                    tokenize=True,
+                    **self.generator_cfg.chat_template_kwargs,
+                )
+
             current_prompt_length = len(input_ids)
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
@@ -153,29 +158,35 @@ class StepWiseGenerator(SkyRLGymGenerator):
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
 
-            # Token-in-token-out. Follow multi-turn chat history format.
-            input_ids, response_end_idx, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
+            response_end_idx = len(output_ids) - 1
+
+            # Follow multi-turn chat history format.
+            input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
                 input_ids,
                 output_ids,
                 new_obs,
-                loss_mask,
                 done,
             )
-            response_ids = copy.deepcopy(input_ids[current_prompt_length:])
-            # response_end_idx in response_ids needs to be shifted
-            response_end_idx = response_end_idx - current_prompt_length
+
+            if retokenize_chat_history:
+                # update the chat history
+                chat_history = self._update_chat_history(chat_history, output, new_obs)
+
             per_step_rewards.append((step_reward, response_end_idx))
+            response_ids = copy.deepcopy(input_ids[current_prompt_length:])
             per_step_output = AgentLoopOutput(
                 response_ids=response_ids,
                 reward=step_reward,
-                loss_mask=copy.deepcopy(loss_mask[current_prompt_length - initial_prompt_length :]),
+                loss_mask=copy.deepcopy(loss_mask),
                 prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
                 rollout_logprobs=None,
                 stop_reason=stop_reason,
             )
+
             assert len(per_step_output.loss_mask) == len(
                 per_step_output.response_ids
-            ), "loss_mask and response_ids should have the same length"
+            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)} and {len(per_step_output.response_ids)}"
+
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
                 step_id += 1
@@ -292,12 +303,12 @@ class StepWiseGenerator(SkyRLGymGenerator):
         input_ids: List[int],
         output_ids: List[int],
         new_obs: ConversationType,
-        loss_mask: List[int],
         done: bool,
     ):
         """
-        Update the loss mask and input ids given a new model response and observation, following
-        token-in-token-out.
+        Update the input ids given a new model response and observation.
+
+        Appends observation messages using the model's chat template.
 
         For example (using the Qwen 2.5 chat template), a trajectory for multi-turn generation would look like:
         <|im_start|>system
@@ -317,26 +328,17 @@ class StepWiseGenerator(SkyRLGymGenerator):
         <|im_end|>
         ...
 
-        the chat template is applied without tokenization before and after the chat history is appended to
-        in order to get new token ids in the chat template format (but without re-tokenizing the entire chat history every turn)
-
         Args:
-            chat_history: ConversationType
-            chat_end_index: int
-            loss_mask: List[int]
             input_ids: List[int]
             output: str
             new_obs: ConversationType
+            done: bool
         Returns:
-            chat_history: ConversationType
-            chat_end_index: int
-            loss_mask: List[int]
             input_ids: List[int]
+            loss_mask: List[int]
         """
-        # append response tokens
         input_ids += output_ids
-        response_end_idx = len(input_ids) - 1
-        loss_mask += [1] * len(output_ids)
+        loss_mask = [1] * len(output_ids)
 
         # apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
@@ -353,4 +355,22 @@ class StepWiseGenerator(SkyRLGymGenerator):
             if not done:
                 input_ids += self.generation_prompt_ids
                 loss_mask += [0] * len(self.generation_prompt_ids)
-        return input_ids, response_end_idx, loss_mask
+        return input_ids, loss_mask
+
+    def _update_chat_history(
+        self,
+        chat_history: ConversationType,
+        output: str,
+        new_obs: ConversationType,
+    ):
+        # remove eos token from end of output if it exists, since it will be reapplied by the chat template
+        if output.endswith(self.tokenizer.eos_token):
+            output = output[: -len(self.tokenizer.eos_token)]
+
+        # Add assistant response to chat history
+        chat_history += [{"role": "assistant", "content": output}]
+
+        # Add observations to chat history
+        if len(new_obs) > 0:
+            chat_history += new_obs
+        return chat_history

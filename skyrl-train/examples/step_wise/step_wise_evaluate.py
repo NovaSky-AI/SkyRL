@@ -90,11 +90,7 @@ async def evaluate(
     vis = tokenizer.decode(generator_output["response_ids"][0])
     logger.info(f"Eval output example: {vis}")
 
-    # 2. Group data by data source and calculate per-dataset metrics
-    eval_metrics = calculate_per_dataset_metrics(
-        concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
-    )
-    # 2.1 only use the final step metrics
+    # Only use the final step metrics
     generator_output_last_step = defaultdict(list)
     is_last_step_mask = concat_generator_outputs["is_last_step"]
     for key in concat_generator_outputs:
@@ -104,6 +100,14 @@ async def evaluate(
                 val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
             ]
     uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
+    data_sources_last_step = [
+        data_source for data_source, is_last_step in zip(concat_data_sources, is_last_step_mask) if is_last_step
+    ]
+
+    # 2. Group data by data source and calculate per-dataset metrics
+    eval_metrics = calculate_per_dataset_metrics(
+        generator_output_last_step, uids_last_step, data_sources_last_step, cfg.generator.eval_n_samples_per_prompt
+    )
     # 3. Calculate overall metrics across all datasets
     overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
     eval_metrics.update(
