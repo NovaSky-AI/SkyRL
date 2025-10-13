@@ -89,10 +89,11 @@ class StepWiseGenerator(SkyRLGymGenerator):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        # Create a new environment instance
         retokenize_chat_history = self.generator_cfg.get("retokenize_chat_history", False)
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+
+        # Create a new environment instance
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
         session_id = (
