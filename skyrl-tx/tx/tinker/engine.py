@@ -542,20 +542,16 @@ class TinkerEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
-
-        def extract_optimizer_params(p):
-            return p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
-
-        optimizer_params = jax.tree.map(extract_optimizer_params, nnx.state(self.optimizer))
-
-        checkpoint_data = {
-            "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-            "optimizer_state": nnx.to_pure_dict(optimizer_params),
-            "lora_config": self.models[model_id].lora_config.model_dump(),
-        }
+        extract_params = lambda p: p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
+        optimizer_params = jax.tree.map(extract_params, nnx.state(self.optimizer))
 
         checkpoints.save_checkpoint(
-            ckpt_dir=output_dir, target=checkpoint_data, step=0, prefix="checkpoint_", overwrite=True
+            target={
+                "lora_weights": nnx.to_pure_dict(adapter_lora_params),
+                "optimizer_state": nnx.to_pure_dict(optimizer_params),
+                "lora_config": self.models[model_id].lora_config.model_dump(),
+            },
+            ckpt_dir=output_dir, step=0, prefix="checkpoint_", overwrite=True
         )
 
         logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_dir}")
