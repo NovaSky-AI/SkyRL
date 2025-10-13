@@ -35,8 +35,7 @@ def ray_init_fixture(scope="module"):
     except Exception:
         pass
     
-    if ray.is_initialized():
-        ray.shutdown()
+    ray.shutdown()
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
