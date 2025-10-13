@@ -457,45 +457,26 @@ class TinkerEngine:
         return types.OptimStepOutput()
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
-        """
-        Loads a clean, trimmed training checkpoint.
-        """
-
-        def _convert_str_keys_to_int(data):
-            """Recursively converts string keys that are digits to integers for any dictionary-like object (Mapping)."""
-            if isinstance(data, Mapping):
-                return {
-                    int(k) if isinstance(k, str) and k.isdigit() else k: _convert_str_keys_to_int(v)
-                    for k, v in data.items()
-                }
-            return data
-
+        """Loads a clean, trimmed training checkpoint."""
         if model_id not in self.models:
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
         adapter_index = self.models[model_id].adapter_index
-        checkpoint_id = Path(request_data.path).name
-        checkpoint_dir = self.config.checkpoints_base / model_id / checkpoint_id
+        checkpoint_dir = self.config.checkpoints_base / model_id / Path(request_data.path).name
 
         restored_data = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=None, prefix="checkpoint_")
         if restored_data is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
-        adapter_lora_params_str_keys = restored_data["lora_weights"]
-        adapter_optimizer_state_str_keys = restored_data["optimizer_state"]
-        lora_config_dict = restored_data["lora_config"]
-        rank = lora_config_dict["rank"]
-
-        adapter_lora_params_dict = _convert_str_keys_to_int(adapter_lora_params_str_keys)
-        adapter_optimizer_state_dict = _convert_str_keys_to_int(adapter_optimizer_state_str_keys)
-
-        current_lora_config = self.models[model_id].lora_config
-        if current_lora_config.rank != rank:
+        # Validate rank
+        rank = restored_data["lora_config"]["rank"]
+        if self.models[model_id].lora_config.rank != rank:
             raise ValueError(
-                f"Rank mismatch: Checkpoint has rank {rank}, but model is configured with rank {current_lora_config.rank}."
+                f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
-        def insert_trimmed_slice_with_path(path, full_tensor, trimmed_tensor):
+        # Helper to insert trimmed params at the adapter index
+        def insert_at_adapter(path, full_tensor, trimmed_tensor):
             if not (isinstance(full_tensor, jnp.ndarray) and full_tensor.ndim > 0):
                 return trimmed_tensor
             param_key = path[-1].key
@@ -503,29 +484,19 @@ class TinkerEngine:
                 return full_tensor.at[adapter_index, :, :rank].set(trimmed_tensor)
             elif param_key == "lora_B":
                 return full_tensor.at[adapter_index, :rank, :].set(trimmed_tensor)
-            else:
-                return full_tensor.at[adapter_index].set(trimmed_tensor)
+            return full_tensor.at[adapter_index].set(trimmed_tensor)
 
-        # LoRA weights update
-        current_lora_state_dict = nnx.to_pure_dict(nnx.state(self.lora_params))
+        # Helper to update state from checkpoint data
+        def update_from_checkpoint(state_obj, checkpoint_data):
+            current = nnx.to_pure_dict(nnx.state(state_obj))
+            updated = jax.tree.map_with_path(insert_at_adapter, current, checkpoint_data)
+            nnx.update(state_obj, updated)
 
-        updated_lora_state_dict = jax.tree.map_with_path(
-            insert_trimmed_slice_with_path, current_lora_state_dict, adapter_lora_params_dict
-        )
-
-        nnx.update(self.lora_params, updated_lora_state_dict)
-
-        # Optimizer state update
-        optimizer_graph_state = nnx.to_pure_dict(nnx.state(self.optimizer))
-
-        updated_optimizer_state = jax.tree.map_with_path(
-            insert_trimmed_slice_with_path, optimizer_graph_state, adapter_optimizer_state_dict
-        )
-
-        nnx.update(self.optimizer, updated_optimizer_state)
+        # Update both LoRA weights and optimizer state
+        update_from_checkpoint(self.lora_params, restored_data["lora_weights"])
+        update_from_checkpoint(self.optimizer, restored_data["optimizer_state"])
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
-
         return types.LoadWeightsOutput(type="load_weights")
 
     def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
