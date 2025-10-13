@@ -114,11 +114,11 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
 
 
 def extract_adapter_params(path, p, layer_rank, adapter_index):
-            """Helper function to extract the adapter parameters for a specific adapter index."""
-            rank = layer_rank[path[:-2]]
-            if path[-2].key == "lora_A":
-                return p[adapter_index, :, :rank]
-            elif path[-2].key == "lora_B":
-                return p[adapter_index, :rank, :]
-            else:
-                return p[adapter_index]
+    """Helper function to extract the adapter parameters for a specific adapter index."""
+    rank = layer_rank[path[:-2]]
+    if path[-2].key == "lora_A":
+        return p[adapter_index, :, :rank]
+    elif path[-2].key == "lora_B":
+        return p[adapter_index, :rank, :]
+    else:
+        return p[adapter_index]

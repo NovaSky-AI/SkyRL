@@ -275,6 +275,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
+
 @app.post("/api/v1/load_weights", response_model=FutureResponse)
 async def load_weights(request: LoadWeightsRequest, session: AsyncSession = Depends(get_session)):
     """Loads weights and training state."""
