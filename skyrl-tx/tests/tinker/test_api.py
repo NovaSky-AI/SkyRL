@@ -108,8 +108,11 @@ def test_training_workflow(service_client):
     # The first example has all 0 weights, so all losses should be 0
     assert all(v == 0.0 for v in fwdbwd_result.loss_fn_outputs[0]["elementwise_loss"].data)
 
+    # Save the optimizer state
+    resume_path = training_client.save_state(name="0001").result().path
+
     # Get a checkpoint
-    sampling_path = training_client.save_weights_for_sampler(name="0000").result().path
+    sampling_path = training_client.save_weights_for_sampler(name="final").result().path
     assert sampling_path is not None
 
     # Download the checkpoint
@@ -118,3 +121,4 @@ def test_training_workflow(service_client):
     tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
     future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
     assert len(future.result()) > 0
+

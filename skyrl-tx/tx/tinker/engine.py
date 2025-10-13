@@ -475,7 +475,7 @@ class TinkerEngine:
 
         adapter_index = self.models[model_id].adapter_index
         checkpoint_id = Path(request_data.path).name
-        checkpoint_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
+        checkpoint_dir = self.config.checkpoints_base / model_id / checkpoint_id
 
         restored_data = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=None, prefix="checkpoint_")
         if restored_data is None:
@@ -538,7 +538,7 @@ class TinkerEngine:
 
         adapter_index = self.models[model_id].adapter_index
         checkpoint_id = Path(request_data.path).name
-        output_dir = Path(self.checkpoints_base_path) / model_id / checkpoint_id
+        output_dir = self.config.checkpoints_base / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         layer_rank = {
