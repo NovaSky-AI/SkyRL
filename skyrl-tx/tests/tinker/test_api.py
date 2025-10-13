@@ -111,6 +111,9 @@ def test_training_workflow(service_client):
     # Save the optimizer state
     resume_path = training_client.save_state(name="0001").result().path
 
+    # Load the optimizer state
+    training_client.load_state(resume_path)
+
     # Get a checkpoint
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
     assert sampling_path is not None
@@ -121,4 +124,3 @@ def test_training_workflow(service_client):
     tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
     future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
     assert len(future.result()) > 0
-

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import optax
 import safetensors.numpy
@@ -113,12 +114,21 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
-def extract_adapter_params(path, p, layer_rank, adapter_index):
+def extract_adapter_params(adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState):
     """Helper function to extract the adapter parameters for a specific adapter index."""
-    rank = layer_rank[path[:-2]]
-    if path[-2].key == "lora_A":
-        return p[adapter_index, :, :rank]
-    elif path[-2].key == "lora_B":
-        return p[adapter_index, :rank, :]
-    else:
-        return p[adapter_index]
+    layer_rank = {
+        path[:-2]: int(node[adapter_index])
+        for path, node in jax.tree.flatten_with_path(non_lora_params)[0]
+        if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
+    }
+
+    def extract_params(path: tuple, p: jnp.ndarray):
+        rank = layer_rank[path[:-2]]
+        if path[-2].key == "lora_A":
+            return p[adapter_index, :, :rank]
+        elif path[-2].key == "lora_B":
+            return p[adapter_index, :rank, :]
+        else:
+            return p[adapter_index]
+
+    return jax.tree.map_with_path(extract_params, lora_params)

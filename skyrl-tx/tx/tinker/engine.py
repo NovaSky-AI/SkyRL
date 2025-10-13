@@ -541,17 +541,8 @@ class TinkerEngine:
         output_dir = self.config.checkpoints_base / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        layer_rank = {
-            path[:-2]: int(node[adapter_index])
-            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
-            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
-        }
-
-        adapter_lora_params_graph = jax.tree.map_with_path(
-            lambda path, p: extract_adapter_params(path, p, layer_rank, adapter_index), self.lora_params
-        )
-
-        adapter_lora_params_pure_dict = nnx.to_pure_dict(adapter_lora_params_graph)
+        adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
+        adapter_lora_params_pure_dict = nnx.to_pure_dict(adapter_lora_params)
 
         def extract_optimizer_params(p):
             return p[adapter_index] if isinstance(p, jnp.ndarray) and p.ndim > 0 else p
@@ -592,16 +583,7 @@ class TinkerEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
-
-        layer_rank = {
-            path[:-2]: int(node[adapter_index])
-            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
-            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
-        }
-
-        adapter_lora_params = jax.tree.map_with_path(
-            lambda path, p: extract_adapter_params(path, p, layer_rank, adapter_index), self.lora_params
-        )
+        adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
 
         # Save only the LoRA adapter weights
         save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
