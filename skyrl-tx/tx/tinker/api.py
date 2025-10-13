@@ -16,14 +16,12 @@ import io
 from pathlib import Path
 
 from tx.tinker import types
+from tx.tinker.config import EngineConfig, add_model, config_to_argv
 from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Base path for saving checkpoints
-CHECKPOINTS_BASE_PATH = Path("/tmp/tx_checkpoints")
 
 
 @asynccontextmanager
@@ -35,24 +33,12 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    # Start background engine with default base model
-    # TODO: Make this configurable via environment variable or API parameter
-    base_model = "Qwen/Qwen3-0.6B"
-    background_engine = subprocess.Popen(
-        [
-            "uv",
-            "run",
-            "--extra",
-            "tinker",
-            "-m",
-            "tx.tinker.engine",
-            "--base-model",
-            base_model,
-            "--checkpoints-base-path",
-            CHECKPOINTS_BASE_PATH,
-        ]
-    )
-    logger.info(f"Started background engine with PID {background_engine.pid} for base model {base_model}")
+    # Build subprocess command with engine config parameters
+    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
+    cmd.extend(config_to_argv(app.state.engine_config))
+
+    background_engine = subprocess.Popen(cmd)
+    logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
 
     yield
 
@@ -356,10 +342,10 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
 
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
-async def get_server_capabilities():
+async def get_server_capabilities(request: Request):
     """Retrieve information about supported models and server capabilities."""
     supported_models = [
-        SupportedModel(model_name="Qwen/Qwen3-0.6B"),
+        SupportedModel(model_name=request.app.state.engine_config.base_model),
     ]
     return GetServerCapabilitiesResponse(supported_models=supported_models)
 
@@ -419,6 +405,7 @@ def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
+    request: Request,
     unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
     checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
     session: AsyncSession = Depends(get_session),
@@ -432,8 +419,8 @@ async def download_checkpoint_archive(
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Files are saved at CHECKPOINTS_BASE_PATH/{model_id}/{checkpoint_id}/
-    checkpoint_dir = CHECKPOINTS_BASE_PATH / unique_id / checkpoint_id
+    # Files are saved at checkpoints_base/{model_id}/{checkpoint_id}/
+    checkpoint_dir = request.app.state.engine_config.checkpoints_base / unique_id / checkpoint_id
     if not checkpoint_dir.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
@@ -466,6 +453,20 @@ async def root():
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")
+    add_model(parser, EngineConfig)
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    args = parser.parse_args()
+
+    # Create EngineConfig from parsed arguments (only EngineConfig fields)
+    engine_config = EngineConfig.model_validate({k: v for k, v in vars(args).items() if k in EngineConfig.model_fields})
+
+    # Store config in app.state so lifespan can access it
+    app.state.engine_config = engine_config
+
+    uvicorn.run(app, host=args.host, port=args.port)
