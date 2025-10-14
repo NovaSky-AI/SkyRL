@@ -89,7 +89,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
-        # Generate session_id for prefix cache routing
+        # Generate session_id for sticky routing to inference engines
         # All LLM requests in this trial will share the same session_id
         session_id = uuid4().hex
 
