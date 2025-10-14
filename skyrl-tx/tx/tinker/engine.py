@@ -144,7 +144,7 @@ class TinkerEngine:
             attention_mask: jax.Array,
             adapter_indices: jax.Array,
             target_ids: jax.Array,
-            loss_mask: jax.Array
+            loss_mask: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
