@@ -4,6 +4,7 @@ uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_model_wrapper.py
 
 from skyrl_train.model_wrapper import HFModelWrapper
 import torch
+import pytest
 from unittest.mock import MagicMock, patch
 from transformers import AutoTokenizer
 import ray
@@ -99,7 +100,7 @@ def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
 
 @ray.remote(num_gpus=1)
 class ActorTask:
-    def __init__(self, rank, world_size, sequence_parallel_size):
+    def __init__(self, rank, world_size, sequence_parallel_size, use_sample_packing):
         self.rank = rank
         self.world_size = world_size
         self.sequence_parallel_size = sequence_parallel_size
@@ -113,7 +114,7 @@ class ActorTask:
             use_flash_attention_2=True,
             bf16=True,
             sequence_parallel_size=sequence_parallel_size,
-            use_sample_packing=True,
+            use_sample_packing=use_sample_packing,
         )
         group = _get_default_group()
         set_ulysses_sequence_parallel_group(group)
@@ -130,7 +131,8 @@ class ActorTask:
         dist.destroy_process_group()
 
 
-def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture):
+@pytest.mark.parametrize("use_sample_packing", [True, False])
+def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_packing):
 
     # Create input sequence
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
@@ -151,7 +153,7 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture):
         use_flash_attention_2=True,
         bf16=True,
         sequence_parallel_size=1,
-        use_sample_packing=True,
+        use_sample_packing=use_sample_packing,
     )
     model_no_sp.model.eval()
     model_no_sp.model.to("cuda:0")
@@ -165,7 +167,9 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture):
     sequence_parallel_size = 2
 
     # Create Ray tasks
-    actors = [ActorTask.remote(rank, world_size, sequence_parallel_size) for rank in range(world_size)]
+    actors = [
+        ActorTask.remote(rank, world_size, sequence_parallel_size, use_sample_packing) for rank in range(world_size)
+    ]
 
     # Run forward pass with sequence parallelism
     outputs_sp = ray.get([actor.forward.remote(input_ids, attention_mask, num_actions) for actor in actors])

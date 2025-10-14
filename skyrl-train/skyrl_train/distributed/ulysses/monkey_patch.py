@@ -85,7 +85,7 @@ def _ulysses_flash_attention_forward(
         repeats = max(ulysses_sp_size // key_states.size(2), 1)
         key_states = repeat_kv(key_states, repeats)
         value_states = repeat_kv(value_states, repeats)
-
+        # (2, 10/2, 4, 4) -> (2, 10, 2, 4)
         # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
         query_states = gather_seq_scatter_heads(query_states, seq_dim=1, head_dim=2)
         key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
@@ -106,7 +106,9 @@ def _ulysses_flash_attention_forward(
         torch.distributed.all_gather(attention_mask_list, attention_mask, group=get_ulysses_sequence_parallel_group())
         attention_mask = torch.concat(attention_mask_list, dim=-1)
 
-    # (bsz, seq_len, n_head/n, head_dim)
+    if "query_length" in kwargs:
+        kwargs["query_length"] = query_states.size(1)
+
     attn_output = _flash_attention_forward(
         query_states, key_states, value_states, attention_mask, *args, position_ids=position_ids, **kwargs
     )
