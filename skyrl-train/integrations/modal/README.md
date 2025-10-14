@@ -8,7 +8,11 @@ The Modal integration:
 - **Runs commands** from your local SkyRL repo inside Modal's cloud infrastructure
 - **Sets up a container** based on the SkyRL base image (`novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8`)
 - **Mounts your local SkyRL repository** to `/root/SkyRL` in the container
+<<<<<<< HEAD
 - **Attaches persistent volumes** for data storage at `/root/data` and `/home/ray/data`
+=======
+- **Attaches persistent volumes** for data storage at `/root/data` 
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
 - **Initializes Ray** automatically for distributed computing
 - **Streams live output** from your commands back to your local terminal
 
@@ -40,6 +44,7 @@ modal run main.py --command "uv run examples/gsm8k/gsm8k_dataset.py --output_dir
 
 #### 3. Run training script
 ```bash
+<<<<<<< HEAD
 modal run main.py --command "bash examples/gsm8k/run_generation_gsm8k.sh"
 ```
 
@@ -48,6 +53,15 @@ modal run main.py --command "bash examples/gsm8k/run_generation_gsm8k.sh"
 modal run main.py \
   --command "uv run search/run_skyrl_train_search.py" 
 ```
+=======
+modal run main.py --command "bash examples/gsm8k/run_gsm8k_modal.sh"
+```
+
+#### 4. Other scripts
+Be sure to override config variables such as `data.train_data`, `data.val_data`, `trainer.ckpt_path`,
+and `trainer.export_path` so they point to the correct persistence location inside the container, which
+defaults to `/root/data`
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
 
 ## Configuration
 
@@ -62,12 +76,21 @@ Configure the integration using environment variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MODAL_APP_NAME` | Name of your Modal app (useful for team collaboration) | `"my_skyrl_app"` |
+<<<<<<< HEAD
+=======
+| `MODAL_GPU` | GPU configuration. See [Modal docs](https://modal.com/docs/guide/gpu). Defaults to L4:1 if not specified | `"A100:4"` |
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
 
 ### Example with Environment Variables
 
 ```bash
 MODAL_APP_NAME=benji_skyrl_app \
+<<<<<<< HEAD
 modal run main.py --command "bash examples/gsm8k/run_generation_gsm8k.sh"
+=======
+MODAL_GPU=A100:4 \
+modal run main.py --command "bash examples/gsm8k/run_gsm8k_modal.sh"
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
 ```
 
 ## How It Works
@@ -83,7 +106,10 @@ The `create_modal_image()` function:
 The `create_modal_volume()` function:
 - Creates or attaches a persistent volume named `"skyrl-data"`
 - Mounts it at `/root/data` for data persistence across runs
+<<<<<<< HEAD
 - Creates a symlink at `/home/ray/data` pointing to `/root/data`
+=======
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
 
 ### 3. Command Execution
 The `run_script()` function:
@@ -104,7 +130,11 @@ To modify resources, edit the `@app.function()` decorator in `main.py`:
 ```python
 @app.function(
     image=image,
+<<<<<<< HEAD
     gpu="A100:1",  # Change GPU type/count
+=======
+    gpu="L4:1",  # use env var to configure this
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
     volumes=volume,
     timeout=7200,  # Change timeout (in seconds)
 )
@@ -112,7 +142,11 @@ To modify resources, edit the `@app.function()` decorator in `main.py`:
 
 ## Data Persistence
 
+<<<<<<< HEAD
 Data stored in `/root/data` (or `/home/ray/data`) persists across Modal runs. This is useful for:
+=======
+Data stored in `/root/data` persists across Modal runs. This is useful for:
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83
 - Storing generated datasets
 - Saving model checkpoints
 - Caching intermediate results
@@ -129,3 +163,7 @@ Data stored in `/root/data` (or `/home/ray/data`) persists across Modal runs. Th
 For issues with:
 - **Modal platform**: See [Modal documentation](https://modal.com/docs)
 - **SkyRL integration**: Check SkyRL repository issues or documentation
+<<<<<<< HEAD
+=======
+
+>>>>>>> c31ffb21555798f46799aaee37c73f547be99c83

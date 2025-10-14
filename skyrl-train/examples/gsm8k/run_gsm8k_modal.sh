@@ -2,15 +2,16 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-# export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_gsm8k.sh
+# Intended to be used with Modal (SkyRL/skyrl-train/integration/modal)
+# modal run main.py --command "WANDB_API_KEY=... bash examples/gsm8k/run_gsm8k_modal.sh"
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
 
-: "${DATA_DIR:="$HOME/data/gsm8k"}"
+DATA_DIR="/root/data/gsm8k"
+CHECK_POINT_DIR="/root/data/ckpts/gsm8k_1.5B_ckpt"
+EXPORT_PATH="/root/data/export"
 : "${NUM_GPUS:=4}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
 
@@ -25,7 +26,6 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
@@ -55,5 +55,6 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.project_name="gsm8k" \
   trainer.run_name="gsm8k_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
+  trainer.ckpt_path=$CHECK_POINT_DIR \
+  trainer.export_path=$EXPORT_PATH \
   $@
