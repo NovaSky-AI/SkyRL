@@ -12,7 +12,7 @@ class RMSNorm(nnx.Module):
     def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.eps = eps
         self.weight = Param(
-            size, dtype=dtype, kernel_init=nnx.initializers.normal(), sharding_names=(None,), rngs=rngs
+            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P(None)), rngs=rngs
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -186,8 +186,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            sharding_names=(None, None, "tp"),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
@@ -197,8 +196,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            sharding_names=(None, None, "tp"),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
@@ -208,8 +206,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            sharding_names=(None, "tp", None),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
         )
 

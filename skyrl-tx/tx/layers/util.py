@@ -3,8 +3,8 @@ import jax
 from jax import numpy as jnp
 
 
-def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, sharding_names: tuple[str | None, ...], rngs: nnx.Rngs):
-    return nnx.Param(kernel_init(rngs.param(), shape, dtype), sharding_names=sharding_names)
+def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
+    return nnx.Param(kernel_init(rngs.param(), shape, dtype))
 
 
 def prepare_routing(
