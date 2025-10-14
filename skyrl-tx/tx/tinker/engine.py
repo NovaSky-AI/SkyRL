@@ -119,10 +119,16 @@ class TinkerEngine:
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             # load_checkpoint(checkpoint_path, self.model_config, self.model)
 
-            # Create optimizer that only targets LoRA A and B parameters
+            # Split the model into graphdef and state for JIT compilation
+            self.model_graphdef, self.model_state = nnx.split(self.model)
+
+            # Split state into LoRA and non-LoRA parameters
             def is_lora_param(path, value):
                 return any(name in path for name in ["lora_A", "lora_B"])
 
+            self.lora_params, self.non_lora_params = nnx.state(self.model, is_lora_param, ...)
+
+            # Create optimizer that only targets LoRA A and B parameters
             self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
 
         logger.info(
@@ -134,7 +140,9 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(model, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+        def loss_for_lora(state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            # Reconstruct the model from graphdef and state
+            model = nnx.merge(self.model_graphdef, state)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
@@ -195,8 +203,10 @@ class TinkerEngine:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
+            # Extract current state from model
+            state = nnx.state(self.model)
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                self.model, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+                state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
