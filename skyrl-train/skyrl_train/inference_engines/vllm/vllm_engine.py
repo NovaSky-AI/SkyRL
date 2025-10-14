@@ -310,7 +310,8 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         if output_processor.has_unfinished_requests():
             logger.warning(
                 "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
-                "generation should be done before sleep() is called. Will abort all unfinished requests."
+                "generation should be done before sleep() is called. Check for potential failures or "
+                "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
             unfinished_request_ids = list(output_processor.request_states.keys())
             await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
@@ -475,7 +476,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if output_processor.has_unfinished_requests():
             logger.warning(
                 "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
-                "generation should be done before sleep() is called. Will abort all unfinished requests."
+                "generation should be done before sleep() is called. Check for potential failures or "
+                "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
             unfinished_request_ids = list(output_processor.request_states.keys())
             await engine.abort(unfinished_request_ids)
