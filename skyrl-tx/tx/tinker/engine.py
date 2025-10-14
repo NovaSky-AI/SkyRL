@@ -140,9 +140,10 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
-            # Reconstruct the model from graphdef and state
-            model = nnx.merge(self.model_graphdef, state)
+        def loss_for_lora(lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            # Reconstruct the model from graphdef, LoRA params, and non-LoRA params
+            full_state = nnx.State.merge(lora_params, non_lora_params)
+            model = nnx.merge(self.model_graphdef, full_state)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
@@ -153,25 +154,27 @@ class TinkerEngine:
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (logits, per_token_losses)
 
-        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, has_aux=True)
+        # Only differentiate with respect to lora_params (argnums=0)
+        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
             self._loss_and_grad_fn = loss_and_grad_fn
         else:
-            # Extract state once to get the pytree structure and compute the partition
-            state = nnx.state(self.model)
-            state_partition_spec = nnx.get_partition_spec(state)
-            # Create NamedSharding objects that tell us how models parameters and inputs should be sharded
-            state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
+            # Get partition specs for LoRA and non-LoRA parameters
+            lora_partition_spec = nnx.get_partition_spec(self.lora_params)
+            non_lora_partition_spec = nnx.get_partition_spec(self.non_lora_params)
+            # Create NamedSharding objects
+            lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), lora_partition_spec)
+            non_lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), non_lora_partition_spec)
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
                 # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(state_shardings,) + (replicated,) * 5,
+                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 5,
                 # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), state_shardings),
+                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
             )
 
     def _micro_batch_size(self, total: int) -> int:
@@ -203,10 +206,8 @@ class TinkerEngine:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
-            # Extract current state from model
-            state = nnx.state(self.model)
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+                self.lora_params, self.non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
