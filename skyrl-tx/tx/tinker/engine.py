@@ -156,12 +156,9 @@ class TinkerEngine:
             # Disable JIT compilation for debugging
             self._loss_and_grad_fn = loss_and_grad_fn
         else:
-            # Get partition specs for LoRA and non-LoRA parameters
-            lora_partition_spec = nnx.get_partition_spec(self.lora_params)
-            non_lora_partition_spec = nnx.get_partition_spec(self.non_lora_params)
-            # Create NamedSharding objects
-            lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), lora_partition_spec)
-            non_lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), non_lora_partition_spec)
+            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
+            lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params))
+            non_lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params))
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
             self._loss_and_grad_fn = jax.jit(
