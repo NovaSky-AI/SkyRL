@@ -300,11 +300,12 @@ class HFModelWrapper(nn.Module):
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
-            # gather dim is wrong - should be -1 in general
-            dim = log_probs.squeeze(0).ndim - 1
+            if self.use_sample_packing:
+                log_probs = log_probs.squeeze(0)
+            dim = log_probs.ndim - 1
             log_probs = gather_outputs_and_unpad(
-                log_probs.squeeze(0), gather_dim=dim, unpad_dim=dim, padding_size=pad_size
-            )
+                log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+            )  # shape can be (nnz,) - with packing or (B, S) - without packing
             if self.use_sample_packing:
                 # (nnz,) -> (1, nnz)
                 log_probs = log_probs.unsqueeze(0)
@@ -321,9 +322,11 @@ class HFModelWrapper(nn.Module):
             # entropy calculation as a metric - we use no grad
             entropy = self.chunked_entropy_from_logits_fn(logits_BSV, requires_grad=False)
             if self.sequence_parallel_size > 1:
-                dim = entropy.squeeze(0).ndim - 1
+                if self.use_sample_packing:
+                    entropy = entropy.squeeze(0)
+                dim = entropy.ndim - 1
                 entropy = gather_outputs_and_unpad(
-                    entropy.squeeze(0), gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                    entropy, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
                 )  # shape can be (nnz,) - with packing or (B,S) - without packing
                 if self.use_sample_packing:
                     entropy = entropy.unsqueeze(0)  # (1,nzz)

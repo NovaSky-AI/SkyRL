@@ -99,9 +99,9 @@ def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: Proc
     if not group:
         logger.info("No group found for gather_heads_scatter_seq")
         return x
-    dim_size = x.size(seq_dim)  # [2, 5, 2, 4] -> 5
+    dim_size = x.size(seq_dim)
     sp_world = get_ulysses_sequence_parallel_world_size(group)
-    if dim_size % sp_world != 0:  # 5 % 2 != 0
+    if dim_size % sp_world != 0:
         padding_size = sp_world - (dim_size % sp_world)
         x = _pad_tensor(x, seq_dim, padding_size)
     return SeqAllToAll.apply(group, x, seq_dim, head_dim, False)
@@ -287,9 +287,7 @@ def ulysses_pad_and_slice_inputs(
         torch.Tensor: padded and sliced position_ids
         int: pad size
     """
-    # if position_ids_rmpad is not None:
-    #     assert position_ids_rmpad.size(0) == 1
-    #     assert input_ids_rmpad.size(1) == position_ids_rmpad.size(1) # 1, seqlen
+
     if sp_size <= 1:
         return input_ids_rmpad, position_ids_rmpad, attention_mask_rmpad, 0
 
@@ -298,7 +296,7 @@ def ulysses_pad_and_slice_inputs(
     if group is None:
         raise ValueError("`sp_size` > 1 but no ulysses sequence parallel group set.")
     _, total_seq_len = input_ids_rmpad.shape
-    pad_size = (sp_size - total_seq_len % sp_size) % sp_size  # (2 - 5 % 2) % 2 = 1
+    pad_size = (sp_size - total_seq_len % sp_size) % sp_size
     if pad_size > 0:
         input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
         if position_ids_rmpad is not None:
