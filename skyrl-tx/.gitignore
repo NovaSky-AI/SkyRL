@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+uv.lock
 
 # PyInstaller
 *.manifest
@@ -71,3 +72,4 @@ site/
 # OS generated files
 .DS_Store
 Thumbs.db
+tinker.db

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
+from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointDB
 
 
 logging.basicConfig(level=logging.INFO)
@@ -162,6 +162,17 @@ class SupportedModel(BaseModel):
 class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
 
+
+class CheckpointInfo(BaseModel):
+    checkpoint_id: str
+    model_id: str
+    status: str
+    created_at: str
+    completed_at: str | None = None
+    error_message: str | None = None
+
+class ListCheckpointsResponse(BaseModel):
+    checkpoints: list[CheckpointInfo]
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
 async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
@@ -380,6 +391,25 @@ async def download_checkpoint_archive(
     return StreamingResponse(tar_buffer, media_type="application/octet-stream", headers=headers)
 
 
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints")
+async def list_checkpoints(
+    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    session: AsyncSession = Depends(get_session),
+):
+    """List checkpoints for a model."""
+    statement = select(CheckpointDB).where(CheckpointDB.model_id == unique_id)
+    result = await session.exec(statement)
+    checkpoints = result.all()
+    return ListCheckpointsResponse(checkpoints=[CheckpointInfo(
+        checkpoint_id=checkpoint.checkpoint_id,
+        model_id=checkpoint.model_id,
+        status=checkpoint.status,
+        created_at=checkpoint.created_at.isoformat(),
+        completed_at=checkpoint.completed_at.isoformat() if checkpoint.completed_at else None,
+        error_message=checkpoint.error_message,
+    ) for checkpoint in checkpoints])
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -393,6 +423,7 @@ async def root():
             "service": ["/api/v1/get_server_capabilities"],
             "telemetry": ["/api/v1/telemetry"],
             "download": ["/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive"],
+            "checkpoints": ["/api/v1/training_runs/{unique_id}/checkpoints"],
         },
     }
 

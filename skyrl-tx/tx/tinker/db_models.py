@@ -18,6 +18,12 @@ class RequestStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
+class CheckpointStatus(str, Enum):
+    """Status of a checkpoint."""
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 # SQLModel table definitions
 class ModelDB(SQLModel, table=True):
@@ -42,3 +48,15 @@ class FutureDB(SQLModel, table=True):
     status: RequestStatus = Field(default=RequestStatus.PENDING, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
+
+
+class CheckpointDB(SQLModel, table=True):
+    __tablename__ = "checkpoints"
+
+    checkpoint_id: str = Field(primary_key=True)
+    model_id: str
+    status: CheckpointStatus
+    checkpoint_path: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None
+    error_message: str | None = None

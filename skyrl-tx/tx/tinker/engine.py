@@ -17,7 +17,7 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
+from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
@@ -463,8 +463,10 @@ class TinkerEngine:
         adapter_index = self.models[model_id].adapter_index
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
-        checkpoint_id = Path(request_data.path).name
-        output_dir = self.config.checkpoints_base / model_id / checkpoint_id
+        checkpoint_name = Path(request_data.path).name
+        # Create globally unique checkpoint_id by combining model_id and checkpoint_name
+        checkpoint_id = f"{model_id}_{checkpoint_name}"
+        output_dir = self.config.checkpoints_base / model_id / checkpoint_name
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
@@ -486,19 +488,55 @@ class TinkerEngine:
 
         adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
 
-        # Save only the LoRA adapter weights
-        save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
+        # Create checkpoint database entry
+        with Session(self.db_engine) as session:
+            # Check if checkpoint already exists (checkpoint_id is now globally unique)
+            existing_checkpoint = session.get(CheckpointDB, checkpoint_id)
+            if existing_checkpoint is not None:
+                raise ValueError(f"Checkpoint '{checkpoint_name}' already exists for model '{model_id}'. Please use a different checkpoint name.")
+            
+            checkpoint_db = None
+            
+            try:
+                checkpoint_db = CheckpointDB(
+                    checkpoint_id=checkpoint_id,
+                    model_id=model_id,
+                    status=CheckpointStatus.PENDING,
+                    checkpoint_path=str(output_dir / "adapter_model.safetensors"),
+                )
+                session.add(checkpoint_db)
+                session.commit()
+                session.refresh(checkpoint_db)  # Ensure the ID is populated
+                
+                # Save only the LoRA adapter weights
+                save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
+                
+                # Save LoRA config
+                lora_config = LoraConfig(
+                    r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
+                )
+                
+                lora_config.save_pretrained(output_dir)
 
-        # Save LoRA config
-        lora_config = LoraConfig(
-            r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
-        )
-        lora_config.save_pretrained(output_dir)
+                logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
 
-        logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
+                checkpoint_db.status = CheckpointStatus.COMPLETED
+                checkpoint_db.completed_at = datetime.now(timezone.utc)
+                session.add(checkpoint_db)
+                session.commit()
+            except Exception as e:
+                logger.exception(f"Error saving checkpoint for model {model_id} (adapter {adapter_index}): {e}")
+                session.rollback()
+                if checkpoint_db is not None:
+                    checkpoint_db.status = CheckpointStatus.FAILED
+                    checkpoint_db.error_message = str(e)
+                    checkpoint_db.completed_at = datetime.now(timezone.utc)
+                    session.add(checkpoint_db)
+                    session.commit()
+                raise
 
         return types.SaveWeightsForSamplerOutput(
-            path=f"tinker://{model_id}/{checkpoint_id}",
+            path=f"tinker://{model_id}/{checkpoint_name}",
             type="save_weights_for_sampler",
         )
 

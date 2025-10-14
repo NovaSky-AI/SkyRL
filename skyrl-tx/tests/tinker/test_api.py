@@ -118,3 +118,56 @@ def test_training_workflow(service_client):
     tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
     future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
     assert len(future.result()) > 0
+
+
+def test_duplicate_checkpoint_error(service_client):
+    """Test that saving a checkpoint with the same name twice returns a user-friendly error."""
+    base_model = "Qwen/Qwen3-0.6B"
+    training_client = service_client.create_lora_training_client(base_model=base_model)
+
+    tokenizer = training_client.get_tokenizer()
+
+    # Create a simple training example
+    example = {"prompt": "Question: What is 2+2?\nAnswer:", "completion": " 4"}
+    prompt_tokens = tokenizer.encode(example["prompt"])
+    completion_tokens = tokenizer.encode(example["completion"])
+    all_tokens = prompt_tokens + completion_tokens
+    weights = [0.0] * len(prompt_tokens) + [1.0] * len(completion_tokens)
+    target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
+
+    datum = types.Datum(
+        model_input=types.ModelInput.from_ints(all_tokens[:-1]),
+        loss_fn_inputs={
+            "weights": weights[:-1],
+            "target_tokens": target_tokens[:-1],
+        },
+    )
+
+    # Run a training step first
+    fwdbwd_future = training_client.forward_backward([datum], "cross_entropy")
+    optim_future = training_client.optim_step(types.AdamParams(learning_rate=1e-4))
+    
+    fwdbwd_result = fwdbwd_future.result()
+    optim_result = optim_future.result()
+    
+    assert fwdbwd_result is not None
+    assert optim_result is not None
+
+    # Save the first checkpoint - this should succeed
+    checkpoint_name = "test_duplicate"
+    first_save = training_client.save_weights_for_sampler(name=checkpoint_name)
+    first_result = first_save.result()
+    assert first_result is not None
+    assert checkpoint_name in first_result.path
+
+    # Try to save another checkpoint with the same name - this should fail
+    second_save = training_client.save_weights_for_sampler(name=checkpoint_name)
+    
+    with pytest.raises(Exception) as exc_info:
+        second_save.result()
+    
+    # Check that the error message is user-friendly and mentions the duplicate checkpoint
+    error_message = str(exc_info.value)
+    assert "already exists" in error_message.lower()
+    assert checkpoint_name in error_message
+    assert "different checkpoint name" in error_message.lower()
