@@ -104,7 +104,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         "api_base": f"{self.base_url}/v1",
                         "key": "fake_key",
                         "session_id": session_id,
-                        "max_episodes": self.max_episodes
+                        "max_episodes": self.max_episodes,
                     },
                 ),
             )
@@ -149,7 +149,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Get logprobs for assistant messages from trial results
         # Format: [[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]
-        assistant_logprobs = getattr(results.agent_result, 'output_logprobs', None)
+        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
         assistant_msg_idx = 0
 
         for message in response_messages:
@@ -168,7 +168,9 @@ class TerminalBenchGenerator(GeneratorInterface):
                 loss_mask.extend([1] * len(msg_encoding))
                 if assistant_logprobs:
                     if assistant_msg_idx >= len(assistant_logprobs):
-                        raise ValueError(f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists.")
+                        raise ValueError(
+                            f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists."
+                        )
                     msg_logprobs = assistant_logprobs[assistant_msg_idx]
                     if len(msg_logprobs) != len(msg_encoding):
                         raise ValueError(
@@ -192,7 +194,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
         rollout_logprobs = rollout_logprobs[:max_response_tokens]
-        
+
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
