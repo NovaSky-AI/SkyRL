@@ -2,6 +2,7 @@ from typing import Optional, Callable, List
 from functools import partial
 import torch
 import torch.nn as nn
+import logging
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
@@ -37,6 +38,7 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
+        self.logger = logging.getLogger(__name__)
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -72,14 +74,21 @@ class MegatronModelWrapper:
         Returns:
             torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
         """
+        self.logger.info(f"Starting forward pass with {len(micro_batches)} micro_batches, seq_len={seq_len}, micro_batch_size={micro_batch_size}, temperature={temperature}")
+        self.logger.info(f"Use sample packing: {self.use_sample_packing}")
+        self.logger.info(f"Pipeline stage info - is_first: {mpu.is_pipeline_first_stage(ignore_virtual=True)}, is_last: {mpu.is_pipeline_last_stage(ignore_virtual=True)}")
+        
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data):
+            self.logger.info(f"Collection func called with logits shape: {logits.shape}")
             sequences = data["sequences"]
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
+            self.logger.info(f"TP rank: {tp_rank}, vocab start: {tp_rank * logits.shape[-1]}, vocab end: {(tp_rank + 1) * logits.shape[-1]}")
 
             if temperature != 1.0:
+                self.logger.info(f"Applying temperature scaling: {temperature}")
                 logits.div_(temperature)
 
             token_logprobs = from_parallel_logits_to_logprobs(
@@ -92,6 +101,7 @@ class MegatronModelWrapper:
                 cp_group=None,  # we handle cp gathering in `postprocess_packed_seqs`
                 chunk_size=None,
             )
+            self.logger.info(f"Generated token_logprobs shape: {token_logprobs.shape}")
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
@@ -99,8 +109,10 @@ class MegatronModelWrapper:
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
+            self.logger.info(f"Forward step - sequences shape: {sequences.shape}, attention_mask shape: {attention_mask.shape}")
 
             if self.use_sample_packing:
+                self.logger.info("Using sample packing preprocessing")
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
@@ -108,7 +120,9 @@ class MegatronModelWrapper:
                 )
                 new_attention_mask = None
                 new_position_ids = None
+                self.logger.info(f"Sample packing - new_sequences shape: {new_sequences.shape}")
             else:
+                self.logger.info("Using remove left padding preprocessing")
                 new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
                     sequences,
                     attention_mask,
@@ -117,15 +131,19 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
                 packed_seq_params = None
+                self.logger.info(f"Remove padding - new_sequences shape: {new_sequences.shape}, new_attention_mask shape: {new_attention_mask.shape if new_attention_mask is not None else None}")
 
+            self.logger.info("Calling model forward")
             outputs = model(
                 new_sequences,
                 new_position_ids,
                 new_attention_mask,
                 packed_seq_params=packed_seq_params,
             )
+            self.logger.info(f"Model output shape: {outputs.shape}")
 
             if self.use_sample_packing:
+                self.logger.info("Postprocessing with sample packing")
                 outputs = postprocess_packed_seqs(
                     outputs,
                     packed_seq_params,
@@ -135,6 +153,7 @@ class MegatronModelWrapper:
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
             else:
+                self.logger.info("Postprocessing with recover left padding")
                 outputs = recover_left_padding(
                     outputs,
                     new_attention_mask,
@@ -142,11 +161,14 @@ class MegatronModelWrapper:
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
-
+            
+            self.logger.info(f"Final outputs shape after postprocessing: {outputs.shape}")
             return outputs, partial(collection_func, data=batch)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
+        self.logger.info(f"Created batch generator with vpp_size={len(self.actor_module)}")
 
+        self.logger.info("Calling forward_backward_func")
         output = forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=batch_generator,
@@ -156,18 +178,27 @@ class MegatronModelWrapper:
             micro_batch_size=micro_batch_size,
             forward_only=True,
         )
+        self.logger.info(f"Forward_backward_func completed, output length: {len(output)}")
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            self.logger.info("Processing output on pipeline last stage")
             log_probs = [o["log_probs"] for o in output]
             log_probs = torch.cat(log_probs, dim=0)
+            self.logger.info(f"Concatenated log_probs shape: {log_probs.shape}")
             # take last num_actions tokens per micro; concatenate later
             # Assume all micros have same num_actions
             num_actions = micro_batches[0]["num_actions"]
+            self.logger.info(f"Taking last {num_actions} tokens per micro-batch")
             log_probs = log_probs[:, -num_actions:]
+            self.logger.info(f"Final log_probs shape: {log_probs.shape}")
         else:
             # return dummy tensor for non-last pp stages
+            self.logger.info("Returning dummy tensor for non-last pipeline stage")
             device = micro_batches[0]["sequences"].device
             log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
+            self.logger.info(f"Dummy log_probs shape: {log_probs.shape}")
+        
+        self.logger.info(f"Forward pass completed, returning log_probs with shape: {log_probs.shape}")
         return log_probs
 
     def forward_backward_mini_batch(

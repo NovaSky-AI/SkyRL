@@ -118,7 +118,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     print(f"[WARNING] Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
-                chat_history = results.agent_result.all_messages
+                chat_history = results.agent_result.metadata["all_messages"]
                 if len(chat_history) > 0:
                     break
                 else:
@@ -161,7 +161,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!", len(response_ids))
+        print("number of reponse tokens", len(response_ids))
         # import pdb; pdb.set_trace()
 
         stop_reason = "complete"  # Default for trial completion

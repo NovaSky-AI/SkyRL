@@ -11,7 +11,7 @@ export WANDB_API_KEY="854a2b39e99ffee11c76d1003eb8a777045687e9"
 export WANDB_ENTITY="bespoke-labs"
 
 DATA_DIR="$HOME/ez_apex_250"
-NUM_NODES=4
+NUM_NODES=1
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
@@ -23,14 +23,14 @@ INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in thi
 
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
 MEGATRON_TP=2
-MEGATRON_PP=4
-MEGATRON_CP=8
+MEGATRON_PP=1
+MEGATRON_CP=4
 
 MEGATRON_EP=8
 MEGATRON_ETP=1
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=32
+NUM_INFERENCE_ENGINES=8
 INFERENCE_ENGINE_TP=1
 
 # Torch profiler (optional)
@@ -42,7 +42,7 @@ export NCCL_SOCKET_IFNAME=enp13s0np0
 export NCCL_IB_HCA=mlx5_0
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3     
-export NCCL_DEBUG=INFO
+# export NCCL_DEBUG=INFO
 
 export SKYRL_PYTHONPATH_EXPORT=1
 export PYTHONPATH="/home/ubuntu/SkyRL/skyrl-train/"
@@ -59,7 +59,6 @@ export RAY_worker_register_timeout_seconds=1800
 # export CUDA_COREDUMP_GENERATION_FLAGS='skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory'
 # export CUDA_COREDUMP_FILE="/root/SkyRL/skyrl-train/cuda_coredump_%h.%p.%t"
 export HYDRA_FULL_ERROR=1
-export NCCL_DEBUG=INFO
 export TOKENIZERS_PARALLELISM=false
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
@@ -99,6 +98,10 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="full" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
+  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=true \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=true \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1 \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
@@ -107,7 +110,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=32 \
-  trainer.policy_mini_batch_size=32 \
+  trainer.policy_mini_batch_size=1 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=32000 \
@@ -124,12 +127,12 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   generator.gpu_memory_utilization=0.5 \
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
-  trainer.run_name="terminal_bench_megatron_H200_4" \
-  trainer.resume_mode=latest \
-  trainer.ckpt_path="/mnt/data/ez_apex_250_2" \
-  trainer.export_path="/mnt/data/hf_ckpt_2" \
-  trainer.hf_save_interval=1 \
-  trainer.ckpt_interval=1 \
+  trainer.run_name="terminal_bench_megatron_H200_single" \
+  trainer.resume_mode=null \
+  trainer.ckpt_path="/mnt/data/ez_apex_250_single" \
+  trainer.export_path="/mnt/data/hf_ckpt_single" \
+  trainer.hf_save_interval=10 \
+  trainer.ckpt_interval=-1 \
   trainer.algorithm.eps_clip_low=0.2 \
   trainer.algorithm.eps_clip_high=0.28 \
   trainer.algorithm.loss_reduction="token_mean" \

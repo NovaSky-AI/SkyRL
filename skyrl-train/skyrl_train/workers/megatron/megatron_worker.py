@@ -124,6 +124,7 @@ class MegatronWorker:
         self.model.eval()
         seq_len = micro_dicts[0]["sequences"].shape[1]
         mbs = micro_dicts[0]["sequences"].shape[0]
+        print("!!!!!!!! starting logprobes")
         with torch.no_grad():
             log_probs = self.model.forward(
                 micro_batches=micro_dicts,
@@ -132,6 +133,7 @@ class MegatronWorker:
                 temperature=self.cfg.generator.sampling_params.temperature,
             )
 
+        print("!!!!!!!! starting logprobes DONE")
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
