@@ -118,14 +118,11 @@ def extract_adapter_params(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
 ) -> nnx.GraphState:
     """Helper function to extract the adapter parameters for a specific adapter index."""
-    layer_rank = {
-        path[:-2]: int(node[adapter_index])
-        for path, node in jax.tree.flatten_with_path(non_lora_params)[0]
-        if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
-    }
+    flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def extract_params(path: tuple, p: jnp.ndarray):
-        rank = layer_rank[path[:-2]]
+        rank_path = (*(p.key for p in path[:-2]), "lora_ranks")
+        rank = flat_params[rank_path][adapter_index]
         if path[-2].key == "lora_A":
             return p[adapter_index, :, :rank]
         elif path[-2].key == "lora_B":
