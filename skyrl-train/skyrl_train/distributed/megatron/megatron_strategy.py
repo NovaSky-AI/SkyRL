@@ -78,7 +78,6 @@ class MegatronStrategy(DistributedStrategy):
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.megatron_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.megatron_config.pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
             expert_model_parallel_size=self.megatron_config.expert_model_parallel_size,
             expert_tensor_parallel_size=self.megatron_config.expert_tensor_parallel_size,
             use_sharp=False,

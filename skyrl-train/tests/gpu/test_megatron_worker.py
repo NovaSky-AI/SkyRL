@@ -173,11 +173,11 @@ def test_megatron_policy_weight_sync():
         # ref has same forward pass as policy - just duplicate one test to test setup
         ("ref", 2, 1, 1, 1, None, 2, False),
         ("policy", 1, 2, 1, 1, None, 2, False),
-        ("policy", 2, 2, 1, 1, None, 4, False),
+        ("policy", 1, 4, 1, 1, None, 4, False),
         ("policy", 2, 2, 1, 1, None, 4, True),
         ("policy", 1, 1, 2, 1, None, 2, True),
         ("policy", 2, 2, 2, 1, None, 8, True),
-        ("policy", 4, 2, 1, 4, None, 8, True),
+        ("policy", 4, 2, 1, 4, 1, 8, True),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -394,7 +394,7 @@ async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp
 @pytest.mark.parametrize(
     ("worker_type", "tp", "pp", "gpus_per_node"),
     [
-        ("policy", 1, 4, 4),
+        ("policy", 1, 2, 2),
     ],
 )
 async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
@@ -519,6 +519,7 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer = False
     actor_group = init_worker_with_type(
         worker_type,
         shared_pg=None,

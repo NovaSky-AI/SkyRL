@@ -30,5 +30,5 @@ ENV CUDNN_PATH=/opt/cudnn
 ENV CPATH=${CUDNN_PATH}/include:${CPATH}
 ENV LD_LIBRARY_PATH=${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}
 
-RUN pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.5.0"
+RUN pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.7.0"
 # --------------------
