@@ -1,6 +1,7 @@
 import os
 from typing import List, Any, Dict, Optional
 from dataclasses import dataclass
+from loguru import logger
 from http import HTTPStatus
 import ray
 import torch
@@ -278,7 +279,19 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
-        await asyncio.to_thread(self.llm.sleep, level=kwargs.get("level", 2))
+        engine = self._get_engine().llm_engine
+        output_processor = engine.output_processor
+        if output_processor.has_unfinished_requests():
+            logger.warning(
+                "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
+                "generation should be done before sleep() is called. Check for potential failures or "
+                "dangling requests in your Generator/Env. Aborting all unfinished requests."
+            )
+            unfinished_request_ids = list(output_processor.request_states.keys())
+            await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
+
+        level = 1 if self._is_lora else kwargs.get("level", 2)
+        await asyncio.to_thread(self.llm.sleep, level=level)
 
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
@@ -398,6 +411,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
+        engine = self._get_engine()
+        output_processor = engine.output_processor
+        if output_processor.has_unfinished_requests():
+            logger.warning(
+                "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
+                "generation should be done before sleep() is called. Check for potential failures or "
+                "dangling requests in your Generator/Env. Aborting all unfinished requests."
+            )
+            unfinished_request_ids = list(output_processor.request_states.keys())
+            await engine.abort(unfinished_request_ids)
+
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
         await self.reset_prefix_cache()
