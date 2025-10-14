@@ -72,3 +72,8 @@ class SaveWeightsForSamplerOutput(BaseModel):
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+
+
+# Metrics tracked in the engine
+class EngineMetrics(BaseModel):
+    seq_len_jit_times: dict[int, float] = {}

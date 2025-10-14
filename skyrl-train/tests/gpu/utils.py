@@ -387,7 +387,8 @@ def init_inference_engines(
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
-    initialize_ray(cfg)
+    if not ray.is_initialized():
+        initialize_ray(cfg)
     if colocate_all:
         pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)

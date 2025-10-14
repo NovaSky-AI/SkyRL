@@ -87,7 +87,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "I am a user."},
-            {"role": "assistant", "content": "I am an assistant."},
         ]
         self.base_conversation_token_ids = tokenizer.apply_chat_template(
             self.base_conversation,

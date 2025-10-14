@@ -2,6 +2,8 @@
 
 import pytest
 import subprocess
+from urllib.parse import urlparse
+
 import tinker
 from tinker import types
 
@@ -10,7 +12,20 @@ from tinker import types
 def api_server():
     """Start the FastAPI server for testing."""
     process = subprocess.Popen(
-        ["uv", "run", "--extra", "tinker", "uvicorn", "tx.tinker.api:app", "--host", "0.0.0.0", "--port", "8000"],
+        [
+            "uv",
+            "run",
+            "--extra",
+            "tinker",
+            "-m",
+            "tx.tinker.api",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+            "--base-model",
+            "Qwen/Qwen3-0.6B",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -96,3 +111,10 @@ def test_training_workflow(service_client):
     # Get a checkpoint
     sampling_path = training_client.save_weights_for_sampler(name="0000").result().path
     assert sampling_path is not None
+
+    # Download the checkpoint
+    rest_client = service_client.create_rest_client()
+    parsed_url = urlparse(sampling_path)
+    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
+    future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
+    assert len(future.result()) > 0

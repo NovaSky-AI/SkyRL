@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skyrl-train"
-version = "0.1.0"
+version = "0.2.0"
 description = "skyrl-train"
 authors = [
     {name = "NovaSkyAI", email = "novasky.berkeley@gmail.com"}
@@ -40,6 +40,8 @@ dependencies = [
     "flash-attn",
     "polars",
     "s3fs",
+    "fastapi",
+    "uvicorn",
 ]
 
 [tool.uv]
@@ -69,14 +71,13 @@ skyrl-gym = { path = "./skyrl-gym" , editable = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
-# NOTE (sumanthrh): We explictly use a flashinfer wheel from their index. 
+# NOTE (sumanthrh): We explictly use a flashinfer wheel from their index.
 # The wheels on PyPI don't come with pre-compiled kernels and the package will JIT compile them at runtime which is slow.
 # additionally, different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
 flashinfer-python = [
-    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" }, 
+    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra =='vllm'" },
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
-
 
 [project.optional-dependencies]
 deepspeed = [
@@ -88,8 +89,6 @@ dev = [
     "pytest>=6.2.5",
     "pytest-asyncio",
     "pre-commit",
-    "fastapi",
-    "uvicorn",
     "litellm",
 ]
 docs = [
@@ -128,13 +127,11 @@ mcore = [
   # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
   # "transformer-engine[pytorch]==2.5.0",
   "mbridge==0.15.1",
-  "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_r0.13.0",
+  "megatron-core==0.13.0",
 ]
 flashrl = [
-    # TODO (sumanthrh): Shift to install from git source
-    # Currently, this is the wheel built for commit 4b04dfc at: https://github.com/SumanthRH/vllm/tree/flashrl
-    # Install from git source is currently defaulting to cpu build for some reason
-    "vllm @ https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl",
+    # NOTE: Custom vLLM wheel must be installed separately.
+    # See examples/flash_rl/README.md for installation instructions.
     "torch==2.7.0",
     "flashinfer-python",
     "torchvision",
