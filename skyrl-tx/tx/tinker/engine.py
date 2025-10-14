@@ -137,7 +137,9 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+        def loss_for_lora(
+            lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+        ):
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
@@ -157,8 +159,12 @@ class TinkerEngine:
             self._loss_and_grad_fn = loss_and_grad_fn
         else:
             # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
-            lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params))
-            non_lora_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params))
+            lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
+            )
+            non_lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
+            )
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
             self._loss_and_grad_fn = jax.jit(
@@ -199,7 +205,13 @@ class TinkerEngine:
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                self.lora_params, self.non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+                self.lora_params,
+                self.non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
