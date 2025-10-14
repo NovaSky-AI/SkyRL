@@ -121,13 +121,15 @@ def extract_adapter_params(
     flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def extract_params(path: tuple, p: jnp.ndarray):
-        rank_path = (*(p.key for p in path[:-2]), "lora_ranks")
-        rank = flat_params[rank_path][adapter_index]
-        if path[-2].key == "lora_A":
-            return p[adapter_index, :, :rank]
-        elif path[-2].key == "lora_B":
-            return p[adapter_index, :rank, :]
+        path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+        if path[-2] in {"lora_A", "lora_B"}:
+            index = path.index("model")
+            rank = flat_params[(*path[index:-2], "lora_ranks")][adapter_index]
+            if p.ndim == 3:
+                return p[adapter_index, :, :rank] if path[-2] == "lora_A" else p[adapter_index, :rank, :]
+            else:
+                return p[adapter_index]
         else:
-            return p[adapter_index]
+            return p
 
     return jax.tree.map_with_path(extract_params, lora_params)
