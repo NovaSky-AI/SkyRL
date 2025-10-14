@@ -36,8 +36,8 @@ class Qwen3Attention(nnx.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         tp = get_abstract_mesh().shape.get("tp", 1)
-        # assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
-        # assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
+        assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
+        assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
         max_lora_adapters = getattr(config, "max_lora_adapters", 0)
         max_lora_rank = getattr(config, "max_lora_rank", 8)
@@ -50,7 +50,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
             rngs=rngs,
         )
         self.k_proj = LoRALinear(
@@ -61,7 +61,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
             rngs=rngs,
         )
         self.v_proj = LoRALinear(
@@ -72,7 +72,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -83,7 +83,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
             rngs=rngs,
         )
 
