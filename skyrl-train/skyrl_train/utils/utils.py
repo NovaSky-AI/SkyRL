@@ -16,8 +16,6 @@ from ray.util.placement_group import (
 )
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
-import skyrl_train.utils.ppo_utils
-from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator
 
 class Timer:
     def __init__(self, message, update_dict=None):
@@ -192,6 +190,8 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator
+
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
     ), f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
@@ -227,17 +227,6 @@ def validate_cfg(cfg: DictConfig):
         )
 
     available_policy_losses = PolicyLossRegistry.list_available()
-    
-    if not available_policy_losses:
-        import skyrl_train.utils.ppo_utils
-        if ray.is_initialized():
-            try:
-                PolicyLossRegistry.sync_with_actor()
-                AdvantageEstimatorRegistry.sync_with_actor()
-                available_policy_losses = PolicyLossRegistry.list_available()
-            except Exception:
-                pass
-
     assert available_policy_losses != [], "Policy loss registry is not populated."
 
     assert (
@@ -248,7 +237,7 @@ def validate_cfg(cfg: DictConfig):
     assert (
         cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
     ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
-
+    
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "sequence_mean",

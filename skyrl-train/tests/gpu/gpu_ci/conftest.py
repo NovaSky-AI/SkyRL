@@ -3,9 +3,6 @@ import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl_train.utils.utils import peer_access_supported
-import torch
-import torch.distributed as dist
-import gc
 
 
 @lru_cache(5)
@@ -26,20 +23,9 @@ def ray_init_fixture(scope="module"):
             "NCCL_P2P_DISABLE": "1",
             "NCCL_SHM_DISABLE": "1",
         }
+
     ray.init(runtime_env={"env_vars": env_vars})
+
     yield
-    # call ray shutdown after a test regardless
+
     ray.shutdown()
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-        gc.collect()
-
-    try:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-    except Exception:
-        pass
-
