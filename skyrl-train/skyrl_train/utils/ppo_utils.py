@@ -882,6 +882,64 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
+def repopulate_registries():
+    try:
+        pl_avail = set(PolicyLossRegistry.list_available())
+    except Exception:
+        pl_avail = set()
+
+    if "regular" not in pl_avail:
+        try:
+            PolicyLossRegistry.register(PolicyLossType.REGULAR, ppo_policy_loss)
+        except ValueError:
+            pass
+    if "dual_clip" not in pl_avail:
+        try:
+            PolicyLossRegistry.register(PolicyLossType.DUAL_CLIP, ppo_policy_loss)
+        except ValueError:
+            pass
+    if "gspo" not in pl_avail:
+        try:
+            PolicyLossRegistry.register(PolicyLossType.GSPO, gspo_policy_loss)
+        except ValueError:
+            pass
+    if "clip_cov" not in pl_avail:
+        try:
+            PolicyLossRegistry.register(PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov)
+        except ValueError:
+            pass
+    if "kl_cov" not in pl_avail:
+        try:
+            PolicyLossRegistry.register(PolicyLossType.KL_COV, compute_policy_loss_kl_cov)
+        except ValueError:
+            pass
+
+    try:
+        ae_avail = set(AdvantageEstimatorRegistry.list_available())
+    except Exception:
+        ae_avail = set()
+
+    if "grpo" not in ae_avail:
+        try:
+            AdvantageEstimatorRegistry.register(AdvantageEstimator.GRPO, compute_grpo_outcome_advantage)
+        except ValueError:
+            pass
+    if "gae" not in ae_avail:
+        try:
+            AdvantageEstimatorRegistry.register(AdvantageEstimator.GAE, compute_gae_advantage_return)
+        except ValueError:
+            pass
+    if "rloo" not in ae_avail:
+        try:
+            AdvantageEstimatorRegistry.register(AdvantageEstimator.RLOO, compute_rloo_outcome_advantage)
+        except ValueError:
+            pass
+    if "reinforce++" not in ae_avail:
+        try:
+            AdvantageEstimatorRegistry.register(AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage)
+        except ValueError:
+            pass
+
 @register_advantage_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,

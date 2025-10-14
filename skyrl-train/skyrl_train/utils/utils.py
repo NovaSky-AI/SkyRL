@@ -190,7 +190,7 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
-    from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator
+    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator, repopulate_registries
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -225,7 +225,7 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
-
+    repopulate_registries()
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
 
@@ -237,7 +237,7 @@ def validate_cfg(cfg: DictConfig):
     assert (
         cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
     ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
-    
+
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "sequence_mean",
