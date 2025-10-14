@@ -16,8 +16,8 @@ from ray.util.placement_group import (
 )
 
 from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+import skyrl_train.utils.ppo_utils
 from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, AdvantageEstimator
-
 
 class Timer:
     def __init__(self, message, update_dict=None):
@@ -192,7 +192,6 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
-
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
     ), f"only ulysses is supported as of now, got {cfg.trainer.sequence_parallel_backend}"
