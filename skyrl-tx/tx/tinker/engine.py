@@ -117,19 +117,16 @@ class TinkerEngine:
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
         with jax.set_mesh(self.mesh):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
-            # load_checkpoint(checkpoint_path, self.model_config, self.model)
+            load_checkpoint(checkpoint_path, self.model_config, self.model)
 
-            # Split the model into graphdef and state for JIT compilation
-            self.model_graphdef, self.model_state = nnx.split(self.model)
-
-            # Split state into LoRA and non-LoRA parameters
+            # Create optimizer that only targets LoRA A and B parameters
             def is_lora_param(path, value):
                 return any(name in path for name in ["lora_A", "lora_B"])
 
-            self.lora_params, self.non_lora_params = nnx.state(self.model, is_lora_param, ...)
-
-            # Create optimizer that only targets LoRA A and B parameters
             self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
+
+            # Split model into LoRA and non-LoRA parameters
+            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -143,7 +140,7 @@ class TinkerEngine:
         def loss_for_lora(lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
             # Reconstruct the model from graphdef, LoRA params, and non-LoRA params
             full_state = nnx.State.merge(lora_params, non_lora_params)
-            model = nnx.merge(self.model_graphdef, full_state)
+            model = nnx.merge(self.graphdef, full_state)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
