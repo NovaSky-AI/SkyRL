@@ -111,6 +111,7 @@ def _ulysses_flash_attention_forward(
     if "query_length" in kwargs:
         kwargs["query_length"] = query_states.size(1)
 
+    # (bsz, seq_len, n_head/n, head_dim)
     attn_output = _flash_attention_forward(
         query_states, key_states, value_states, attention_mask, *args, position_ids=position_ids, **kwargs
     )
