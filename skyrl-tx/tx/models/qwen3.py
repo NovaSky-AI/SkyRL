@@ -160,7 +160,7 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             rngs=rngs,
