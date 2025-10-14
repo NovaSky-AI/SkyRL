@@ -117,16 +117,13 @@ class TinkerEngine:
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
         with jax.set_mesh(self.mesh):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
-            load_checkpoint(checkpoint_path, self.model_config, self.model)
+            # load_checkpoint(checkpoint_path, self.model_config, self.model)
 
             # Create optimizer that only targets LoRA A and B parameters
             def is_lora_param(path, value):
                 return any(name in path for name in ["lora_A", "lora_B"])
 
             self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
-
-            # Split model into LoRA and non-LoRA parameters
-            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -137,9 +134,8 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
-            merged_model = nnx.merge(self.graphdef, lora_state, self.non_lora_params)
-            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
+        def loss_for_lora(model, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
+            logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
@@ -156,7 +152,7 @@ class TinkerEngine:
             self._loss_and_grad_fn = loss_and_grad_fn
         else:
             # Extract state once to get the pytree structure and compute the partition
-            state = nnx.state(self.lora_params)
+            state = nnx.state(self.model)
             state_partition_spec = nnx.get_partition_spec(state)
             # Create NamedSharding objects that tell us how models parameters and inputs should be sharded
             state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
@@ -197,11 +193,10 @@ class TinkerEngine:
         loss_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
-        lora_state = nnx.state(self.lora_params)
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+                self.model, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]

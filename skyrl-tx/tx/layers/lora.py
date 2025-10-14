@@ -24,8 +24,8 @@ class LoRAMixin:
         max_lora_rank: int,
         shape_A: tuple[int, ...],
         shape_B: tuple[int, ...],
-        sharding_A: jax.sharding.PartitionSpec,
-        sharding_B: jax.sharding.PartitionSpec,
+        sharding_A: tuple[str | None, ...],
+        sharding_B: tuple[str | None, ...],
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
@@ -43,13 +43,15 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
+                kernel_init=nnx.initializers.he_uniform(),
+                sharding_names=sharding_A,
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
+                kernel_init=nnx.initializers.zeros_init(),
+                sharding_names=sharding_B,
                 rngs=rngs,
             )
 
@@ -147,6 +149,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
+        sharding_names: tuple[str | None, ...],
         kernel_init: nnx.Initializer | None = None,
         rngs: nnx.Rngs,
     ) -> None:
@@ -154,7 +157,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, rngs=rngs)
+        self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, sharding_names=sharding_names, rngs=rngs)
 
         assert self.weight.value.sharding is not None, "LoRAExpert layer needs sharding"
         sharding = self.weight.value.sharding.spec
@@ -163,8 +166,8 @@ class LoRAExpert(LoRAMixin, nnx.Module):
             max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, num_experts, in_features, max_lora_rank),
             shape_B=(max_lora_adapters, num_experts, max_lora_rank, out_features),
-            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], sharding[1], None),
-            sharding_B=jax.sharding.PartitionSpec(None, sharding[0], None, sharding[2]),
+            sharding_A=(None, sharding[0], sharding[1], None),
+            sharding_B=(None, sharding[0], None, sharding[2]),
             dtype=dtype,
             rngs=rngs,
         )

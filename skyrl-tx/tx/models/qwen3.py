@@ -12,7 +12,7 @@ class RMSNorm(nnx.Module):
     def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.eps = eps
         self.weight = Param(
-            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P(None)), rngs=rngs
+            size, dtype=dtype, kernel_init=nnx.initializers.normal(), sharding_names=(None,), rngs=rngs
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -36,8 +36,8 @@ class Qwen3Attention(nnx.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         tp = get_abstract_mesh().shape.get("tp", 1)
-        assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
-        assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
+        # assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
+        # assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
         max_lora_adapters = getattr(config, "max_lora_adapters", 0)
         max_lora_rank = getattr(config, "max_lora_rank", 8)
@@ -50,7 +50,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
             rngs=rngs,
         )
         self.k_proj = LoRALinear(
@@ -61,7 +61,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
             rngs=rngs,
         )
         self.v_proj = LoRALinear(
@@ -72,7 +72,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -83,7 +83,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
             rngs=rngs,
         )
 
@@ -186,7 +186,8 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
+            sharding_names=(None, None, "tp"),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
@@ -196,7 +197,8 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
+            sharding_names=(None, None, "tp"),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
@@ -206,7 +208,8 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp", None)),
+            kernel_init=nnx.initializers.lecun_normal(),
+            sharding_names=(None, "tp", None),
             rngs=rngs,
         )
 
