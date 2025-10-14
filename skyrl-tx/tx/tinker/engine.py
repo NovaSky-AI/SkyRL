@@ -138,8 +138,14 @@ class TinkerEngine:
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
         def loss_for_lora(
-            lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
-        ):
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
