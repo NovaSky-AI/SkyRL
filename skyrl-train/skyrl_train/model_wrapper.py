@@ -268,7 +268,7 @@ class HFModelWrapper(nn.Module):
 
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if self.sequence_parallel_size > 1:
-            # NOTE: don't pass any attn mask with sample packing with same packing
+            # NOTE: don't pass any attn mask with sample packing
             attention_mask_fwd = None if self.use_flash_attention_2 and self.use_sample_packing else attention_mask_fwd
 
             # slice for sequence parallelism
@@ -300,15 +300,10 @@ class HFModelWrapper(nn.Module):
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
-            if self.use_sample_packing:
-                log_probs = log_probs.squeeze(0)
             dim = log_probs.ndim - 1
             log_probs = gather_outputs_and_unpad(
                 log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
-            )  # shape can be (nnz,) - with packing or (B, S) - without packing
-            if self.use_sample_packing:
-                # (nnz,) -> (1, nnz)
-                log_probs = log_probs.unsqueeze(0)
+            )  # shape can be (1, nnz) - with packing or (B, S) - without packing
 
         if self.use_sample_packing:
             # add padding back - postprocess logprobs to be compatible with original tensor
@@ -320,17 +315,12 @@ class HFModelWrapper(nn.Module):
 
         if compute_entropy:
             # entropy calculation as a metric - we use no grad
-            entropy = self.chunked_entropy_from_logits_fn(logits_BSV, requires_grad=False)
+            entropy_BS = self.chunked_entropy_from_logits_fn(logits_BSV, requires_grad=False)
             if self.sequence_parallel_size > 1:
-                if self.use_sample_packing:
-                    entropy = entropy.squeeze(0)
-                dim = entropy.ndim - 1
-                entropy = gather_outputs_and_unpad(
-                    entropy, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
-                )  # shape can be (nnz,) - with packing or (B,S) - without packing
-                if self.use_sample_packing:
-                    entropy = entropy.unsqueeze(0)  # (1,nzz)
-            entropy_BS = entropy
+                dim = entropy_BS.ndim - 1
+                entropy_BS = gather_outputs_and_unpad(
+                    entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                )  # shape can be (1, nnz) - with packing or (B,S) - without packing
             if self.use_sample_packing:
                 entropy_BS = pad_input(
                     entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
