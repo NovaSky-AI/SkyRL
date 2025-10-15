@@ -23,6 +23,7 @@ def cfg() -> DictConfig:
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
+    cfg.generator.inference_engine_tensor_parallel_size = 2
     validate_cfg(cfg)
 
     return cfg
@@ -154,6 +155,7 @@ def test_gradient_accumulation_scenarios(
         cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
         cfg.generator.n_samples_per_prompt = n_samples_per_prompt
         cfg.trainer.update_epochs_per_batch = update_epochs_per_batch
+        cfg.generator.inference_engine_tensor_parallel_size = 2
 
         # For logging and assertions, calculate expected accumulation steps
         dp_size = cfg.trainer.placement.policy_num_gpus_per_node
