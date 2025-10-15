@@ -221,10 +221,10 @@ class TinkerEngine:
             accumulator.add(grad_sum, count)
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
-        """Find all forward_backward ops that come before any optim_step for their model.
+        """Find all forward_backward ops that come before any destructive update for their model.
 
         Uses look-ahead scheduling: for each model, only returns forward_backward operations
-        that have no optim_step blocking them in the queue.
+        that have no optim_step or load_weights blocking them in the queue.
 
         Args:
             session: Database session
@@ -232,15 +232,17 @@ class TinkerEngine:
         Returns:
             List of FutureDB objects that can be safely batched together
         """
-        # Find the earliest pending optim_step per model (these act as barriers)
-        optim_barriers_query = (
+        # Find the earliest pending optim_step or load_weights per model (these act as barriers)
+        barriers_query = (
             select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
-            .where(FutureDB.request_type == types.RequestType.OPTIM_STEP)
+            .where(
+                FutureDB.request_type == types.RequestType.OPTIM_STEP
+                or FutureDB.request_type == types.RequestType.LOAD_WEIGHTS
+            )
             .where(FutureDB.status == RequestStatus.PENDING)
             .group_by(FutureDB.model_id)
         )
-        optim_barriers = session.exec(optim_barriers_query).all()
-        barriers = dict(optim_barriers)
+        barriers = dict(session.exec(barriers_query).all())
 
         # Get all pending forward_backward operations ordered by request_id
         fwd_bwd_query = (
@@ -251,7 +253,7 @@ class TinkerEngine:
         )
         fwd_bwd_ops = session.exec(fwd_bwd_query).all()
 
-        # Filter: only include ops that come before their model's optim barrier
+        # Filter: only include ops that come before their model's barrier
         batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return batchable
