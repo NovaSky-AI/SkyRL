@@ -492,18 +492,6 @@ class TinkerEngine:
         if restored_data is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
-        def convert_numeric_keys_to_int(obj):
-            if isinstance(obj, dict):
-                return {
-                    int(k) if isinstance(k, str) and k.isdigit() else k: convert_numeric_keys_to_int(v)
-                    for k, v in obj.items()
-                }
-            else:
-                return obj
-
-        # Update keys that represent numbers from str to int since orbax sadly converts all keys to str
-        restored_data = convert_numeric_keys_to_int(restored_data)
-
         # Validate rank
         rank = restored_data["lora_config"]["rank"]
         if self.models[model_id].lora_config.rank != rank:
