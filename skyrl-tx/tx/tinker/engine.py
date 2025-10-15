@@ -470,7 +470,6 @@ class TinkerEngine:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
         # Update keys that represent numbers from str to int since orbax sadly converts all keys to str
-
         def convert_keys(obj):
             if isinstance(obj, dict):
                 return {int(k) if isinstance(k, str) and k.isdigit() else k: convert_keys(v) for k, v in obj.items()}

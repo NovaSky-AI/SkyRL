@@ -8,6 +8,9 @@ import tinker
 from tinker import types
 
 
+BASE_MODEL = "Qwen/Qwen3-0.6B"
+
+
 @pytest.fixture(scope="module")
 def api_server():
     """Start the FastAPI server for testing."""
@@ -24,7 +27,7 @@ def api_server():
             "--port",
             "8000",
             "--base-model",
-            "Qwen/Qwen3-0.6B",
+            BASE_MODEL,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -47,13 +50,12 @@ def test_capabilities(service_client):
     """Test the get_server_capabilities endpoint."""
     capabilities = service_client.get_server_capabilities()
     model_names = [item.model_name for item in capabilities.supported_models]
-    assert "Qwen/Qwen3-0.6B" in model_names
+    assert BASE_MODEL in model_names
 
 
 def test_training_workflow(service_client):
     """Test a complete training workflow."""
-    base_model = "Qwen/Qwen3-0.6B"
-    training_client = service_client.create_lora_training_client(base_model=base_model)
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
 
     tokenizer = training_client.get_tokenizer()
 
