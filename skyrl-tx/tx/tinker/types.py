@@ -4,7 +4,7 @@
 # example, usually we try to avoid optional values in these types.
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -100,10 +100,16 @@ class SampleInput(BaseModel):
     num_samples: int
 
 
+class GeneratedSequence(BaseModel):
+    stop_reason: Literal["length", "stop"]
+    tokens: list[int]
+    logprobs: list[float]
+
+
 class SampleOutput(BaseModel):
-    sequences: list[dict]
+    sequences: list[GeneratedSequence]
     prompt_logprobs: list[float]
-    
+
 
 # Metrics tracked in the engine
 class EngineMetrics(BaseModel):
