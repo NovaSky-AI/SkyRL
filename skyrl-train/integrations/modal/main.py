@@ -80,7 +80,7 @@ volume = create_modal_volume()
 
 @app.function(
     image=image,
-    gpu=os.environ.get("MODAL_GPU", "L4:4"),
+    gpu=os.environ.get("MODAL_GPU", "L4:2"),
     volumes=volume,
     timeout=3600,  # 1 hour
 )

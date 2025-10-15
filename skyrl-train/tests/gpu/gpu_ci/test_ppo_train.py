@@ -29,7 +29,7 @@ def cfg() -> DictConfig:
     return cfg
 
 
-def test_ppo_train_basic_execution(cfg):
+def test_ppo_train_basic_execution(ray_init_fixture, cfg):
     """
     Test that ppo_train runs and returns correct structure.
 
@@ -77,7 +77,7 @@ def test_ppo_train_basic_execution(cfg):
         ray.shutdown()
 
 
-def test_ppo_train_critic_worker(cfg):
+def test_ppo_train_critic_worker(ray_init_fixture, cfg):
     """
     Test that ppo_train works for critic worker as well.
     """
@@ -129,6 +129,7 @@ def test_ppo_train_critic_worker(cfg):
     ids=["accumulation_calculation", "optimizer_stepping", "multiple_epochs"],
 )
 def test_gradient_accumulation_scenarios(
+    ray_init_fixture,
     test_id,
     micro_train_batch_size_per_gpu,
     policy_mini_batch_size,
