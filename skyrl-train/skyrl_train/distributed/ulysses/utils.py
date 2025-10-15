@@ -279,7 +279,7 @@ def ulysses_pad_and_slice_inputs(
 
     Args:
         input_ids_rmpad: shape of [bsz, seqlen]
-        position_ids_rmpad: shape of [bsz, seqlen], where bsz must be 1
+        position_ids_rmpad: shape of [bsz, seqlen]
         sp_size (int): ulysses sequence parallelism size
 
     Returns:
