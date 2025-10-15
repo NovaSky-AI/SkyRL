@@ -330,7 +330,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
 
         if not len(request["names"]):
-            raise ValueError("Update weight request should have atleast one entry in 'names'")
+            raise ValueError("Update weight request should have at least one entry in 'names'")
 
         # Handle LoRA disk loading request
         if self._is_lora_disk_loading_request(request):

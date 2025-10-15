@@ -500,3 +500,58 @@ def recover_left_padding(
 
 def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
+
+
+def broadcast_object_across_pp_ranks(obj):
+    """Broadcast an object across pipeline parallel ranks.
+
+    From Nemo-RL: https://github.com/NVIDIA-NeMo/RL/blob/0a769cc3553a265dd1ca4648de0a7d0b1ad5ece6/nemo_rl/models/policy/megatron_policy_worker.py#L136
+
+    This utility function handles broadcasting an object from the rank that owns it
+    to all other pipeline parallel ranks. If only one rank has the object (non-None),
+    it will be broadcast to all other ranks.
+
+    Args:
+        obj: The object to broadcast. Can be None on ranks that don't own it.
+
+    Returns:
+        The object on all ranks (either the original or the broadcast copy).
+
+    Raises:
+        ValueError: If the object doesn't exist on any pipeline parallel rank.
+    """
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    pp_group = mpu.get_pipeline_model_parallel_group()
+
+    if pp_size == 1:
+        return obj
+
+    # ------------------------------------------------------------------
+    # 1. Gather presence flags from all PP ranks to find the source rank
+    # ------------------------------------------------------------------
+    has_obj = obj is not None
+    obj_flags = [None] * pp_size
+    torch.distributed.all_gather_object(obj_flags, has_obj, group=pp_group)
+
+    # ------------------------------------------------------------------
+    # 2. Identify the owning rank (the only rank with True flag)
+    # ------------------------------------------------------------------
+    src_rank = None  # Rank *inside* the PP group
+    for rank, flag in enumerate(obj_flags):
+        if flag:
+            src_rank = rank
+            break
+
+    if src_rank is None:
+        raise ValueError("Object must exist on at least one PP rank")
+
+    # ------------------------------------------------------------------
+    # 3. Broadcast the object from the source rank to all ranks
+    # ------------------------------------------------------------------
+    # Use broadcast_object_list which is more robust than all_gather_object
+    obj_list = [obj]
+    pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
+    global_src = pp_ranks[src_rank]
+    torch.distributed.broadcast_object_list(obj_list, src=global_src, group=pp_group)
+
+    return obj_list[0]

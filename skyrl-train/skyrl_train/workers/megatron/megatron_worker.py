@@ -23,7 +23,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.megatron_utils import print_model_size
+from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
@@ -273,6 +273,53 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             policy_loss_fn=self.policy_loss_fn,
         )
 
+        # init weight syncing state
+        self.weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+
+        # map the params that go in each bucket
+        param_info = []
+
+        def calculate_size_in_bytes(param, tp_size, ep_size):
+            if param is None:
+                # need to broadcast for other pp ranks
+                size_in_bytes = None
+            else:
+                # Calculate size for this parameter
+                prec_to_bytes = {
+                    torch.bfloat16: 2,
+                    torch.float32: 4,
+                }
+                scale = (
+                    prec_to_bytes[torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32]
+                    / prec_to_bytes[param.dtype]
+                )
+                size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
+
+            # Broadcast size_in_bytes across pipeline parallel ranks
+            return broadcast_object_across_pp_ranks(size_in_bytes)
+
+        for task in self.weight_conversion_tasks:
+            param_info.append(
+                (
+                    task,
+                    calculate_size_in_bytes(
+                        task.param_weight,
+                        task.mapping.tp_size,
+                        task.mapping.ep_size if task.mapping.is_expert else 1,
+                    ),
+                )
+            )
+
+        self.param_buckets = [[]]
+        curr_size = 0
+        for p in param_info:
+            task, size = p
+            if curr_size + size > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB * 1024**3:
+                self.param_buckets.append([])
+                curr_size = 0
+            self.param_buckets[-1].append(task)
+            curr_size += size
+
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
@@ -407,48 +454,52 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        per_tensor_param = self.bridge.export_hf_weights(self.actor_module)
         weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
         current_size = 0
 
-        for name, param in per_tensor_param:
-            # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
-            # in the future we should improve this to use bucketed weight updates and support FlashRL + megatron for large models
-            from torch.multiprocessing.reductions import reduce_tensor
+        for bucket in self.param_buckets:
+            hf_params_generator = self.bridge.export_hf_weights(
+                self.actor_module,
+                show_progress=False,
+                conversion_tasks=bucket,
+            )
+            gathered_hf_params = {name: tensor for name, tensor in hf_params_generator}
+            for name, param in gathered_hf_params.items():
+                # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
+                # in the future we should improve this to use bucketed weight updates and support FlashRL + megatron for large models
+                from torch.multiprocessing.reductions import reduce_tensor
 
-            device = torch.cuda.current_device()
-            param = param.to(device, non_blocking=True)
-            param = param.to(generator_dtype)
-            weight = param.data.clone()
-            ipc_handle = reduce_tensor(weight)
+                device = torch.cuda.current_device()
+                param = param.to(device, non_blocking=True)
+                param = param.to(generator_dtype)
+                weight = param.data.clone()
+                ipc_handle = reduce_tensor(weight)
 
-            ipc_handle = {get_physical_gpu_id(): ipc_handle}
-            ipc_handle_list = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+                ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                ipc_handle_list = [None] * torch.distributed.get_world_size()
+                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+
+                if torch.distributed.get_rank() == 0:
+                    ipc_handles = {}
+                    for d in ipc_handle_list:
+                        ipc_handles.update(d)
+
+                    current_size += weight.nbytes
+                    weights_update_request["names"].append(name)
+                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                    weights_update_request["shapes"].append(param.shape)
+                    weights_update_request["extras"].append({"ipc_handles": ipc_handles})
 
             if torch.distributed.get_rank() == 0:
-                ipc_handles = {}
-                for d in ipc_handle_list:
-                    ipc_handles.update(d)
-
-                current_size += weight.nbytes
-                weights_update_request["names"].append(name)
-                weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                weights_update_request["shapes"].append(param.shape)
-                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
-                    await inference_engine_client.update_named_weights(weights_update_request)
-                    current_size = 0
-                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-                    # force collect any sent tensors if possible to be memory efficient
-                    torch.cuda.ipc_collect()
+                await inference_engine_client.update_named_weights(weights_update_request)
+                current_size = 0
+                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            # force collect any sent tensors if possible to be memory efficient
+            torch.cuda.ipc_collect()
 
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
-        if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
-            await inference_engine_client.update_named_weights(weights_update_request)
-            torch.cuda.ipc_collect()
         torch.distributed.barrier()
         torch.cuda.synchronize()
 

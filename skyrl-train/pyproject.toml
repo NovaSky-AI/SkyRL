@@ -127,7 +127,6 @@ mcore = [
   # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.7.0" --verbose
   "flashinfer-python",
   "transformer-engine[pytorch]==2.7.0",
-  "mbridge==0.15.1",
   "megatron-bridge==0.2.0rc6",
   "megatron-core@git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.15.0rc6",
 ]
