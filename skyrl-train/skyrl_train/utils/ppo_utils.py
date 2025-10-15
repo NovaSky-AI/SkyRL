@@ -936,9 +936,12 @@ def repopulate_registries():
             pass
     if "reinforce++" not in ae_avail:
         try:
-            AdvantageEstimatorRegistry.register(AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage)
+            AdvantageEstimatorRegistry.register(
+                AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage
+            )
         except ValueError:
             pass
+
 
 @register_advantage_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
