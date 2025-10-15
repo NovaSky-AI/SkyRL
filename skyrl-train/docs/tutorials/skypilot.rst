@@ -17,10 +17,6 @@ names (for example ``infra: nebius`` with ``accelerators: L40:2``) to target a
 different cloud.
 
 .. code-block:: bash
-
-    git clone https://github.com/NovaSky-AI/SkyRL.git
-    cd SkyRL
-
     # Install uv if you have not already.
     curl -LsSf https://astral.sh/uv/install.sh | sh
 
