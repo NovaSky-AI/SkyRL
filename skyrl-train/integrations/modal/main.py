@@ -47,9 +47,6 @@ def create_modal_image() -> modal.Image:
             remote_path="/root/SkyRL",
             ignore=[
                 ".venv",
-                "**/.venv",
-                "**/venv",
-                "venv",
                 "*.pyc",
                 "__pycache__",
                 ".git",
@@ -83,7 +80,7 @@ volume = create_modal_volume()
 
 @app.function(
     image=image,
-    gpu=os.environ.get("MODAL_GPU", "L4:2"),
+    gpu=os.environ.get("MODAL_GPU", "L4:1"),
     volumes=volume,
     timeout=3600,  # 1 hour
 )
@@ -105,13 +102,6 @@ def run_script(command: str):
     run_command_dir = os.path.join(repo_root, "skyrl-train")
     os.chdir(run_command_dir)
     print(f"Changed to directory: {os.getcwd()}")
-
-    # Remove any .venv directories to avoid architecture mismatches
-    for venv_dir in [".venv", "venv"]:
-        venv_path = os.path.join(os.getcwd(), venv_dir)
-        if os.path.exists(venv_path):
-            print(f"Removing {venv_dir} directory to avoid architecture conflicts")
-            subprocess.run(f"rm -rf {venv_path}", shell=True, check=True)
 
     # Ensure skyrl-gym exists inside working_dir so uv can resolve editable path
     gym_src = os.path.join("..", "skyrl-gym")
