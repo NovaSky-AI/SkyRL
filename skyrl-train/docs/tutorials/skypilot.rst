@@ -60,7 +60,7 @@ full set of options allowed see `SkyPilot docs <https://docs.skypilot.co/en/late
 
   # Set to a git repository 
   workdir:
-    url: https://github.com/skypilot-org/skypilot.git
+    url: https://github.com/NovaSky-AI/SkyRL.git
     ref: main
 
   # Set secrets

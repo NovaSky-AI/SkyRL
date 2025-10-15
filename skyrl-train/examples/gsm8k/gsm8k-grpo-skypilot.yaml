@@ -10,7 +10,7 @@ num_nodes: 1         # cluster size
 
 # Set to a git repository 
 workdir:
-  url: https://github.com/skypilot-org/skypilot.git
+  url: https://github.com/NovaSky-AI/SkyRL.git
   ref: main
 
 # Set secrets
