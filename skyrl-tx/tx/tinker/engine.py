@@ -485,14 +485,14 @@ class TinkerEngine:
         if restored_data is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
-        # Update keys that represent numbers from str to int since orbax sadly converts all keys to str
-        def convert_keys(obj):
+        def convert_numeric_keys_to_int(obj):
             if isinstance(obj, dict):
-                return {int(k) if isinstance(k, str) and k.isdigit() else k: convert_keys(v) for k, v in obj.items()}
+                return {int(k) if isinstance(k, str) and k.isdigit() else k: convert_numeric_keys_to_int(v) for k, v in obj.items()}
             else:
                 return obj
 
-        restored_data = convert_keys(restored_data)
+        # Update keys that represent numbers from str to int since orbax sadly converts all keys to str
+        restored_data = convert_numeric_keys_to_int(restored_data)
 
         # Validate rank
         rank = restored_data["lora_config"]["rank"]
@@ -506,9 +506,9 @@ class TinkerEngine:
             if not (isinstance(full_tensor, jnp.ndarray) and full_tensor.ndim > 0):
                 return trimmed_tensor
             if path[-1].key == "lora_A":
-                return full_tensor.at[adapter_index, :, :rank].set(trimmed_tensor)
+                return full_tensor.at[adapter_index, ..., :, :rank].set(trimmed_tensor)
             elif path[-1].key == "lora_B":
-                return full_tensor.at[adapter_index, :rank, :].set(trimmed_tensor)
+                return full_tensor.at[adapter_index, ..., :rank, :].set(trimmed_tensor)
             return full_tensor.at[adapter_index].set(trimmed_tensor)
 
         # Helper to update state from checkpoint data
