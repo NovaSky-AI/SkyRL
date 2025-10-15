@@ -122,15 +122,11 @@ def extract_adapter_params(
 
     def extract_params(path: tuple, p: jnp.ndarray):
         path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-        if path[-2] in {"lora_A", "lora_B"}:
-            rank_path = (*path[path.index("model") : -2], "lora_ranks")
-            rank = flat_params[rank_path][adapter_index]
-            assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-            if p.ndim == 3:
-                return p[adapter_index][:, :rank] if path[-2] == "lora_A" else p[adapter_index][:rank, :]
-            if p.ndim == 4:
-                return p[adapter_index][:, :, :rank] if path[-2] == "lora_A" else p[adapter_index][:, :rank, :]
-        else:
+        if path[-2] not in {"lora_A", "lora_B"}:
             return p
+        rank_path = (*path[path.index("model"):-2], "lora_ranks")
+        rank = flat_params[rank_path][adapter_index]
+        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
+        return p[adapter_index, ..., :, :rank] if path[-2] == "lora_A" else p[adapter_index, ..., :rank, :]
 
     return jax.tree.map_with_path(extract_params, lora_params)
