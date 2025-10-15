@@ -577,6 +577,7 @@ class TinkerEngine:
         )
 
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
+        """Generate text samples from the model."""
         raise NotImplementedError()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
