@@ -27,8 +27,8 @@ from tx.utils.models import (
     get_model_class,
     save_checkpoint,
     load_checkpoint,
-    extract_adapter_params,
-    insert_adapter_params,
+    extract_adapter_state,
+    insert_adapter_state,
 )
 from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
@@ -500,8 +500,8 @@ class TinkerEngine:
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_params(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
-        insert_adapter_params(
+        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
+        insert_adapter_state(
             adapter_index, nnx.state(self.optimizer), self.non_lora_params, restored_data["optimizer_state"]
         )
 
@@ -521,8 +521,8 @@ class TinkerEngine:
         output_dir = self.config.checkpoints_base / model_id / checkpoint_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
-        optimizer_params = extract_adapter_params(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
+        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
 
         checkpoints.save_checkpoint(
             target={
@@ -558,7 +558,7 @@ class TinkerEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
-        adapter_lora_params = extract_adapter_params(adapter_index, self.lora_params, self.non_lora_params)
+        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
 
         # Save only the LoRA adapter weights
         save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")

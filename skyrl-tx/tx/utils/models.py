@@ -122,13 +122,13 @@ def get_rank_path(path: tuple, lora_name: str) -> tuple:
     return (*path[model_idx:lora_idx], "lora_ranks")
 
 
-def extract_adapter_params(
+def extract_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
 ) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
     flat_params = dict(nnx.to_flat_state(non_lora_params))
 
-    def extract_params(path: tuple, p: jnp.ndarray):
+    def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return p
         rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
@@ -138,10 +138,10 @@ def extract_adapter_params(
         if path[-2].key == "lora_B":
             return p[adapter_index, ..., :rank, :]
 
-    return jax.tree.map_with_path(extract_params, lora_params)
+    return jax.tree.map_with_path(extract_state, lora_params)
 
 
-def insert_adapter_params(
+def insert_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
@@ -149,7 +149,7 @@ def insert_adapter_params(
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    def insert_params(path: tuple, p: jax.Array, new: jax.Array):
+    def insert_state(path: tuple, p: jax.Array, new: jax.Array):
         if path[-1].key not in {"lora_A", "lora_B"}:
             return new
         rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
@@ -159,5 +159,5 @@ def insert_adapter_params(
         elif path[-1].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_params, nnx.to_pure_dict(lora_params), new_params)
+    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
     nnx.update(lora_params, updated)
