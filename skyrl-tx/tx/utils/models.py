@@ -114,19 +114,48 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
+def get_rank_path(path: tuple, lora_name: str) -> tuple:
+    "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
+    path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+    model_idx = path.index("model")
+    lora_idx = path.index(lora_name)
+    return (*path[model_idx:lora_idx], "lora_ranks")
+
+
 def extract_adapter_params(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
 ) -> nnx.GraphState:
-    """Helper function to extract the adapter parameters for a specific adapter index."""
+    "Helper function to extract the adapter parameters for a specific adapter index."
     flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def extract_params(path: tuple, p: jnp.ndarray):
-        path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-        if path[-2] not in {"lora_A", "lora_B"}:
+        if path[-2].key not in {"lora_A", "lora_B"}:
             return p
-        rank_path = (*path[path.index("model") : -2], "lora_ranks")
-        rank = flat_params[rank_path][adapter_index]
+        rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        return p[adapter_index, ..., :, :rank] if path[-2] == "lora_A" else p[adapter_index, ..., :rank, :]
+        if path[-2].key == "lora_A":
+            return p[adapter_index, ..., :, :rank]
+        if path[-2].key == "lora_B":
+            return p[adapter_index, ..., :rank, :]
 
     return jax.tree.map_with_path(extract_params, lora_params)
+
+
+def insert_adapter_params(
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: nnx.GraphState
+):
+    "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
+    flat_params = dict(nnx.to_flat_state(non_lora_params))
+
+    def insert_params(path: tuple, p: jax.Array, new: jax.Array):
+        if path[-1].key not in {"lora_A", "lora_B"}:
+            return new
+        rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
+        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
+        if path[-1].key == "lora_A":
+            return p.at[adapter_index, ..., :, :rank].set(new)
+        elif path[-1].key == "lora_B":
+            return p.at[adapter_index, ..., :rank, :].set(new)
+
+    updated = jax.tree.map_with_path(insert_params, nnx.to_pure_dict(lora_params), new_params)
+    nnx.update(lora_params, updated)

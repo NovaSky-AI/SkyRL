@@ -22,7 +22,14 @@ from huggingface_hub import snapshot_download
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint, extract_adapter_params
+from tx.utils.models import (
+    get_dtype,
+    get_model_class,
+    save_checkpoint,
+    load_checkpoint,
+    extract_adapter_params,
+    insert_adapter_params,
+)
 from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
 
@@ -504,25 +511,11 @@ class TinkerEngine:
                 f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
-        # Helper to insert trimmed params at the adapter index
-        def insert_at_adapter(path, full_tensor, trimmed_tensor):
-            if not (isinstance(full_tensor, jnp.ndarray) and full_tensor.ndim > 0):
-                return trimmed_tensor
-            if path[-1].key == "lora_A":
-                return full_tensor.at[adapter_index, ..., :, :rank].set(trimmed_tensor)
-            elif path[-1].key == "lora_B":
-                return full_tensor.at[adapter_index, ..., :rank, :].set(trimmed_tensor)
-            return full_tensor.at[adapter_index].set(trimmed_tensor)
-
-        # Helper to update state from checkpoint data
-        def update_from_checkpoint(state_obj, checkpoint_data):
-            current = nnx.to_pure_dict(nnx.state(state_obj))
-            updated = jax.tree.map_with_path(insert_at_adapter, current, checkpoint_data)
-            nnx.update(state_obj, updated)
-
         # Update both LoRA weights and optimizer state
-        update_from_checkpoint(self.lora_params, restored_data["lora_weights"])
-        update_from_checkpoint(self.optimizer, restored_data["optimizer_state"])
+        insert_adapter_params(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
+        insert_adapter_params(
+            adapter_index, nnx.state(self.optimizer), self.non_lora_params, restored_data["optimizer_state"]
+        )
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
