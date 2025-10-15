@@ -259,8 +259,8 @@ class TinkerEngine:
         barriers_query = (
             select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
             .where(
-                FutureDB.request_type == types.RequestType.OPTIM_STEP
-                or FutureDB.request_type == types.RequestType.LOAD_WEIGHTS
+                (FutureDB.request_type == types.RequestType.OPTIM_STEP)
+                | (FutureDB.request_type == types.RequestType.LOAD_WEIGHTS)
             )
             .where(FutureDB.status == RequestStatus.PENDING)
             .group_by(FutureDB.model_id)
