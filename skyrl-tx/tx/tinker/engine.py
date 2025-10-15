@@ -576,6 +576,9 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
+    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
+        raise NotImplementedError()
+
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
             case types.RequestType.CREATE_MODEL:
@@ -586,6 +589,8 @@ class TinkerEngine:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
+            case types.RequestType.SAMPLE:
+                result = self.process_sample(model_id, types.SampleInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS:
                 result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:

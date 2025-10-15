@@ -129,6 +129,12 @@ class SaveWeightsForSamplerRequest(BaseModel):
     path: str
 
 
+class SampleRequest(BaseModel):
+    model_id: str
+    prompt: dict[str, Any]
+    sampling_params: dict[str, Any]
+    num_samples: int
+
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str
@@ -335,6 +341,32 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
         request_data=types.SaveWeightsForSamplerInput(path=request.path),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
+@app.post("/api/v1/sample", response_model=FutureResponse)
+async def sample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
+    """Generates samples from the model."""
+    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
+    result = await session.exec(statement)
+    model = result.first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.SAMPLE,
+        model_id=request.model_id,
+        request_data=types.SampleInput(
+            prompt=request.prompt,
+            sampling_params=request.sampling_params,
+            num_samples=request.num_samples,
+        ),
     )
 
     await session.commit()

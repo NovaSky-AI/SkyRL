@@ -18,6 +18,7 @@ class RequestType(str, Enum):
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
+    SAMPLE = "sample"
 
 
 class AdamParams(BaseModel):
@@ -92,6 +93,17 @@ class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
 
+
+class SampleInput(BaseModel):
+    prompt: dict[str, Any]
+    sampling_params: dict[str, Any]
+    num_samples: int
+
+
+class SampleOutput(BaseModel):
+    sequences: list[dict]
+    prompt_logprobs: list[float]
+    
 
 # Metrics tracked in the engine
 class EngineMetrics(BaseModel):
