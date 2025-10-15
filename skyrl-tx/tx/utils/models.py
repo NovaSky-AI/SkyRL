@@ -8,6 +8,7 @@ from typing import Callable, TYPE_CHECKING
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import safetensors.numpy
 from transformers import PretrainedConfig
@@ -54,7 +55,7 @@ def get_param_key(path: tuple) -> str:
 def get_expert_key(path: tuple, expert_idx: int) -> str:
     "Get the safetensors key for an expert weight model path."
     path = tuple(s if s != "experts" else f"experts.{expert_idx}" for s in path)
-    return ".".join(map(str, path)) + ".weight"
+    return ".".join(map(str, path))
 
 
 def load_checkpoint(checkpoint_dir: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
@@ -69,9 +70,8 @@ def load_checkpoint(checkpoint_dir: str | os.PathLike, config: PretrainedConfig,
         if "lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path:
             continue
         if "experts" in path:
-            # In order to load the expert weights, we concatenate the relevant tensors
-            expert_tensors = [tensors[get_expert_key(path, i)].T for i in range(config.num_experts)]
-            tensors[key] = jnp.stack(expert_tensors, axis=0)
+            experts_tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
+            tensors[key] = jax.device_put(experts_tensor, param.sharding)
         else:
             tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:

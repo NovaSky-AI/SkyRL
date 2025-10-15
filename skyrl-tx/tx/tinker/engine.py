@@ -139,9 +139,17 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
-            merged_model = nnx.merge(self.graphdef, lora_state, self.non_lora_params)
-            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
+        def loss_for_lora(
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array,
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            model = nnx.merge(self.graphdef, lora_params, non_lora_params)
+            logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
@@ -151,25 +159,28 @@ class TinkerEngine:
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (logits, per_token_losses)
 
-        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, has_aux=True)
+        # Only differentiate with respect to lora_params (argnums=0)
+        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
             self._loss_and_grad_fn = loss_and_grad_fn
         else:
-            # Extract state once to get the pytree structure and compute the partition
-            state = nnx.state(self.lora_params)
-            state_partition_spec = nnx.get_partition_spec(state)
-            # Create NamedSharding objects that tell us how models parameters and inputs should be sharded
-            state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
+            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
+            lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
+            )
+            non_lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
+            )
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
                 # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(state_shardings,) + (replicated,) * 5,
+                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 5,
                 # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), state_shardings),
+                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
             )
 
     def _micro_batch_size(self, total: int) -> int:
@@ -199,11 +210,16 @@ class TinkerEngine:
         loss_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
-        lora_state = nnx.state(self.lora_params)
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+                self.lora_params,
+                self.non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]

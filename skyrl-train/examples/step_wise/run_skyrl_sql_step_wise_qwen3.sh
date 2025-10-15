@@ -1,29 +1,32 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
+# Colocated GRPO training+generation for Qwen3-4B on SkyRL-SQL-653 data with step-wise training
 # Uses 1 node with 8 GPUs.
 # huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/step_wise/run_skyrl_sql_step_wise.sh
+# bash examples/step_wise/run_skyrl_sql_step_wise_qwen3.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
 DB_PATH="$HOME/data/sql/db_files/data"
-CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt_new"
+CKPT_PATH="$HOME/ckpts/skyrl_sql_qwen3_4b_stepwise"
 
 NUM_GPUS=8
 NUM_INFERENCE_ENGINES=4
 TP_SIZE=2
 MAX_INPUT_LENGTH=29000
 MAX_GENERATE_LENGTH=3000
-TRAIN_BATCH_SIZE=256
+TRAIN_BATCH_SIZE=64
 MAX_TURNS=6
 
+# NOTE: we set `generator.retokenize_chat_history` to true so that 
+# chat template is applied to the input each time - this ensures
+# that previous think tokens are removed 
 uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
-  trainer.policy.model.path="Qwen/Qwen2.5-Coder-7B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen3-4B" \
   trainer.epochs=30 \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -36,15 +39,15 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=8 \
-  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=6000 \
   generator.max_input_length=$MAX_INPUT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy_mini_batch_size=$TRAIN_BATCH_SIZE \
   trainer.algorithm.use_kl_loss=false \
-  trainer.ckpt_interval=60 \
+  trainer.ckpt_interval=10 \
   trainer.hf_save_interval=30 \
   trainer.dump_data_batch=true \
   generator.backend=vllm \
@@ -63,12 +66,13 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
-  trainer.project_name="gptoss_multiturn" \
-  trainer.run_name="skyrlsql_multiturn_test_7b" \
+  trainer.project_name="stepwise_multiturn" \
+  trainer.run_name="skyrlsql_multiturn_qwen3" \
   trainer.resume_mode=null \
   trainer.ckpt_path=$CKPT_PATH \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
+  trainer.eval_before_train=true \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
+  +generator.retokenize_chat_history=true \
   $@
