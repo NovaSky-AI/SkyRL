@@ -13,6 +13,8 @@ from sqlmodel import create_engine, Session, select, func
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.training import checkpoints
+
 import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
@@ -20,7 +22,14 @@ from huggingface_hub import snapshot_download
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.utils.models import get_dtype, get_model_class, save_checkpoint, load_checkpoint
+from tx.utils.models import (
+    get_dtype,
+    get_model_class,
+    save_checkpoint,
+    load_checkpoint,
+    extract_adapter_state,
+    insert_adapter_state,
+)
 from tx.layers.lora import update_adapter_config
 from peft import LoraConfig
 
@@ -137,9 +146,17 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def loss_for_lora(lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask):
-            merged_model = nnx.merge(self.graphdef, lora_state, self.non_lora_params)
-            logits = merged_model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
+        def loss_for_lora(
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array,
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            model = nnx.merge(self.graphdef, lora_params, non_lora_params)
+            logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
             per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
@@ -149,25 +166,28 @@ class TinkerEngine:
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (logits, per_token_losses)
 
-        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, has_aux=True)
+        # Only differentiate with respect to lora_params (argnums=0)
+        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
             self._loss_and_grad_fn = loss_and_grad_fn
         else:
-            # Extract state once to get the pytree structure and compute the partition
-            state = nnx.state(self.lora_params)
-            state_partition_spec = nnx.get_partition_spec(state)
-            # Create NamedSharding objects that tell us how models parameters and inputs should be sharded
-            state_shardings = jax.tree.map(lambda spec: jax.NamedSharding(self.mesh, spec), state_partition_spec)
+            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
+            lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
+            )
+            non_lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
+            )
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
                 # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(state_shardings,) + (replicated,) * 5,
+                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 5,
                 # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), state_shardings),
+                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
             )
 
     def _micro_batch_size(self, total: int) -> int:
@@ -197,11 +217,16 @@ class TinkerEngine:
         loss_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
-        lora_state = nnx.state(self.lora_params)
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                lora_state, input_ids, attention_mask, adapter_indices, target_ids, loss_mask
+                self.lora_params,
+                self.non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
@@ -219,10 +244,10 @@ class TinkerEngine:
             accumulator.add(grad_sum, count)
 
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
-        """Find all forward_backward ops that come before any optim_step for their model.
+        """Find all forward_backward ops that come before any destructive update for their model.
 
         Uses look-ahead scheduling: for each model, only returns forward_backward operations
-        that have no optim_step blocking them in the queue.
+        that have no optim_step or load_weights blocking them in the queue.
 
         Args:
             session: Database session
@@ -230,15 +255,17 @@ class TinkerEngine:
         Returns:
             List of FutureDB objects that can be safely batched together
         """
-        # Find the earliest pending optim_step per model (these act as barriers)
-        optim_barriers_query = (
+        # Find the earliest pending optim_step or load_weights per model (these act as barriers)
+        barriers_query = (
             select(FutureDB.model_id, func.min(FutureDB.request_id).label("barrier_id"))
-            .where(FutureDB.request_type == types.RequestType.OPTIM_STEP)
+            .where(
+                (FutureDB.request_type == types.RequestType.OPTIM_STEP)
+                | (FutureDB.request_type == types.RequestType.LOAD_WEIGHTS)
+            )
             .where(FutureDB.status == RequestStatus.PENDING)
             .group_by(FutureDB.model_id)
         )
-        optim_barriers = session.exec(optim_barriers_query).all()
-        barriers = dict(optim_barriers)
+        barriers = dict(session.exec(barriers_query).all())
 
         # Get all pending forward_backward operations ordered by request_id
         fwd_bwd_query = (
@@ -249,7 +276,7 @@ class TinkerEngine:
         )
         fwd_bwd_ops = session.exec(fwd_bwd_query).all()
 
-        # Filter: only include ops that come before their model's optim barrier
+        # Filter: only include ops that come before their model's barrier
         batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return batchable
@@ -453,6 +480,69 @@ class TinkerEngine:
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
 
+    def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
+        """Loads a clean, trimmed training checkpoint."""
+        if model_id not in self.models:
+            raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
+
+        adapter_index = self.models[model_id].adapter_index
+        checkpoint_dir = self.config.checkpoints_base / model_id / Path(request_data.path).name
+
+        restored_data = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=None, prefix="checkpoint_")
+        if restored_data is None:
+            raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
+
+        # Validate rank
+        rank = restored_data["lora_config"]["rank"]
+        if self.models[model_id].lora_config.rank != rank:
+            raise ValueError(
+                f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
+            )
+
+        # Update both LoRA weights and optimizer state
+        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
+        insert_adapter_state(
+            adapter_index, nnx.state(self.optimizer), self.non_lora_params, restored_data["optimizer_state"]
+        )
+
+        logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
+        return types.LoadWeightsOutput(type="load_weights")
+
+    def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
+        """
+        Saves a clean training checkpoint by converting the trimmed NNX graph
+        to a pure dictionary before serialization, following official Flax docs.
+        """
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not loaded")
+
+        adapter_index = self.models[model_id].adapter_index
+        checkpoint_id = Path(request_data.path).name
+        output_dir = self.config.checkpoints_base / model_id / checkpoint_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
+
+        checkpoints.save_checkpoint(
+            target={
+                "lora_weights": nnx.to_pure_dict(adapter_lora_params),
+                "optimizer_state": nnx.to_pure_dict(optimizer_params),
+                "lora_config": self.models[model_id].lora_config.model_dump(),
+            },
+            ckpt_dir=output_dir,
+            step=0,
+            prefix="checkpoint_",
+            overwrite=True,
+        )
+
+        logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_dir}")
+
+        return types.SaveWeightsOutput(
+            path=f"tinker://{model_id}/{checkpoint_id}",
+            type="save_weights",
+        )
+
     def process_save_weights_for_sampler(
         self, model_id: str, request_data: types.SaveWeightsForSamplerInput
     ) -> types.SaveWeightsForSamplerOutput:
@@ -468,23 +558,7 @@ class TinkerEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
-
-        layer_rank = {
-            path[:-2]: int(node[adapter_index])
-            for path, node in jax.tree.flatten_with_path(self.non_lora_params)[0]
-            if len(path) >= 2 and getattr(path[-2], "key", None) == "lora_ranks"
-        }
-
-        def extract_adapter_params(path, p):
-            rank = layer_rank[path[:-2]]
-            if path[-2].key == "lora_A":
-                return p[adapter_index, :, :rank]
-            elif path[-2].key == "lora_B":
-                return p[adapter_index, :rank, :]
-            else:
-                return p[adapter_index]
-
-        adapter_lora_params = jax.tree.map_with_path(extract_adapter_params, self.lora_params)
+        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
 
         # Save only the LoRA adapter weights
         save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
@@ -512,6 +586,10 @@ class TinkerEngine:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
+            case types.RequestType.SAVE_WEIGHTS:
+                result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
+            case types.RequestType.LOAD_WEIGHTS:
+                result = self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
         return result.model_dump()

@@ -7,7 +7,6 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_engine
 """
 
 import pytest
-import ray
 import hydra
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -17,10 +16,9 @@ from tests.gpu.utils import are_responses_similar, get_test_prompts, init_remote
 from transformers import AutoTokenizer
 from omegaconf import DictConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import config_dir
 
-MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 def get_test_actor_config() -> DictConfig:
@@ -124,98 +122,92 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
     ],
     ids=["vllm", "vllm_dp2", "sglang"],
 )
-def test_inference_engines_generation(backend: str, tp_size: int, dp_size: int):
+def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
     """
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
+    cfg = get_test_actor_config()
+    cfg.generator.backend = backend
+
+    prompts = get_test_prompts(MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
     try:
-        cfg = get_test_actor_config()
-        cfg.generator.backend = backend
-        initialize_ray(cfg)
-
-        prompts = get_test_prompts(MODEL)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL)
-
-        try:
-            llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
-            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-
-            # Batched generation
-            remote_batch_responses, batch_finish_reasons = asyncio.run(
-                run_batch_generation(llm_client, prompts, sampling_params)
-            )
-            assert len(remote_batch_responses) == len(
-                prompts
-            ), f"Number of responses should match number of prompts, got {len(remote_batch_responses)} responses but {len(prompts)} prompts"
-            assert len(batch_finish_reasons) == len(
-                prompts
-            ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
-
-            # Single generation (ie, submit individual requests)
-            remote_single_responses, single_finish_reasons = asyncio.run(
-                run_single_generation(llm_client, prompts, sampling_params)
-            )
-            assert len(remote_single_responses) == len(
-                prompts
-            ), f"Number of responses should match number of prompts, got {len(remote_single_responses)} responses but {len(prompts)} prompts"
-            assert len(single_finish_reasons) == len(
-                prompts
-            ), f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
-
-            # Ensure batched and single generation outputs are (roughly) the same
-            for i in range(len(prompts)):
-                if not are_responses_similar(remote_batch_responses[i], remote_single_responses[i], tolerance=0.01):
-                    print(
-                        f"Remote batch and single generation responses are not similar, got batch={remote_batch_responses[i]} and single={remote_single_responses[i]}"
-                    )
-
-        finally:
-            if "remote_server_process" in locals():
-                remote_server_process.terminate()
-                remote_server_process.wait()
-
-        # Get responses from Ray engine
-        llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
+        llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Batched generation
-        local_batch_responses, batch_finish_reasons = asyncio.run(
+        remote_batch_responses, batch_finish_reasons = asyncio.run(
             run_batch_generation(llm_client, prompts, sampling_params)
         )
-        assert len(local_batch_responses) == len(
+        assert len(remote_batch_responses) == len(
             prompts
-        ), f"Number of responses should match number of prompts, got {len(local_batch_responses)} responses but {len(prompts)} prompts"
+        ), f"Number of responses should match number of prompts, got {len(remote_batch_responses)} responses but {len(prompts)} prompts"
         assert len(batch_finish_reasons) == len(
             prompts
         ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
 
         # Single generation (ie, submit individual requests)
-        local_single_responses, single_finish_reasons = asyncio.run(
+        remote_single_responses, single_finish_reasons = asyncio.run(
             run_single_generation(llm_client, prompts, sampling_params)
         )
-        assert len(local_single_responses) == len(
+        assert len(remote_single_responses) == len(
             prompts
-        ), f"Number of responses should match number of prompts, got {len(local_single_responses)} responses but {len(prompts)} prompts"
+        ), f"Number of responses should match number of prompts, got {len(remote_single_responses)} responses but {len(prompts)} prompts"
         assert len(single_finish_reasons) == len(
             prompts
         ), f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
 
         # Ensure batched and single generation outputs are (roughly) the same
         for i in range(len(prompts)):
-            if not are_responses_similar(local_batch_responses[i], local_single_responses[i], tolerance=0.01):
+            if not are_responses_similar(remote_batch_responses[i], remote_single_responses[i], tolerance=0.01):
                 print(
-                    f"Local batch and single generation responses are not similar, got batch={local_batch_responses[i]} and single={local_single_responses[i]}"
+                    f"Remote batch and single generation responses are not similar, got batch={remote_batch_responses[i]} and single={remote_single_responses[i]}"
                 )
-
-        # Finally, ensure that remote and local outputs are (roughly) the same
-        for i in range(len(prompts)):
-            if not are_responses_similar(remote_batch_responses[i], local_batch_responses[i], tolerance=0.01):
-                print(
-                    f"Remote and local batch generation responses are not similar, got remote={remote_batch_responses[i]} and local={local_batch_responses[i]}"
-                )
-
     finally:
-        ray.shutdown()
+        if "remote_server_process" in locals():
+            remote_server_process.terminate()
+            remote_server_process.wait()
+
+    # Get responses from Ray engine
+    llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
+    sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+
+    # Batched generation
+    local_batch_responses, batch_finish_reasons = asyncio.run(
+        run_batch_generation(llm_client, prompts, sampling_params)
+    )
+    assert len(local_batch_responses) == len(
+        prompts
+    ), f"Number of responses should match number of prompts, got {len(local_batch_responses)} responses but {len(prompts)} prompts"
+    assert len(batch_finish_reasons) == len(
+        prompts
+    ), f"Number of finish reasons should match number of prompts, got {len(batch_finish_reasons)} finish reasons but {len(prompts)} prompts"
+
+    # Single generation (ie, submit individual requests)
+    local_single_responses, single_finish_reasons = asyncio.run(
+        run_single_generation(llm_client, prompts, sampling_params)
+    )
+    assert len(local_single_responses) == len(
+        prompts
+    ), f"Number of responses should match number of prompts, got {len(local_single_responses)} responses but {len(prompts)} prompts"
+    assert len(single_finish_reasons) == len(
+        prompts
+    ), f"Number of finish reasons should match number of prompts, got {len(single_finish_reasons)} finish reasons but {len(prompts)} prompts"
+
+    # Ensure batched and single generation outputs are (roughly) the same
+    for i in range(len(prompts)):
+        if not are_responses_similar(local_batch_responses[i], local_single_responses[i], tolerance=0.01):
+            print(
+                f"Local batch and single generation responses are not similar, got batch={local_batch_responses[i]} and single={local_single_responses[i]}"
+            )
+
+    # Finally, ensure that remote and local outputs are (roughly) the same
+    for i in range(len(prompts)):
+        if not are_responses_similar(remote_batch_responses[i], local_batch_responses[i], tolerance=0.01):
+            print(
+                f"Remote and local batch generation responses are not similar, got remote={remote_batch_responses[i]} and local={local_batch_responses[i]}"
+            )
 
 
 @pytest.mark.parametrize(
@@ -227,44 +219,37 @@ def test_inference_engines_generation(backend: str, tp_size: int, dp_size: int):
     ],
     ids=["vllm_dp2", "sglang"],
 )
-def test_token_based_generation(backend: str, tp_size: int, dp_size: int):
+def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
     """Test generation using prompt_token_ids for the specified backend."""
 
-    try:
-        cfg = get_test_actor_config()
-        cfg.generator.backend = backend
-        initialize_ray(cfg)
+    cfg = get_test_actor_config()
+    cfg.generator.backend = backend
 
-        prompts = get_test_prompts(MODEL, 3)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL)
-        prompt_token_ids = tokenizer.apply_chat_template(
-            prompts, add_generation_prompt=True, tokenize=True, return_dict=True
-        )["input_ids"]
+    prompts = get_test_prompts(MODEL, 3)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompt_token_ids = tokenizer.apply_chat_template(
+        prompts, add_generation_prompt=True, tokenize=True, return_dict=True
+    )["input_ids"]
 
-        llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+    llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
+    sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
-        # Test batch generation with tokens
-        token_batch_responses, _ = asyncio.run(
-            run_batch_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
-        )
-        assert len(token_batch_responses) == len(prompts)
+    # Test batch generation with tokens
+    token_batch_responses, _ = asyncio.run(
+        run_batch_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+    )
+    assert len(token_batch_responses) == len(prompts)
 
-        # Test single generation with tokens
-        token_single_responses, _ = asyncio.run(
-            run_single_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
-        )
-        assert len(token_single_responses) == len(prompts)
+    # Test single generation with tokens
+    token_single_responses, _ = asyncio.run(
+        run_single_generation_with_tokens(llm_client, prompt_token_ids, sampling_params)
+    )
+    assert len(token_single_responses) == len(prompts)
 
-        # Compare with prompt-based generation
-        prompt_responses, _ = asyncio.run(run_batch_generation(llm_client, prompts, sampling_params))
+    # Compare with prompt-based generation
+    prompt_responses, _ = asyncio.run(run_batch_generation(llm_client, prompts, sampling_params))
 
-        # Outputs should be similar since we're using the same inputs
-        for i in range(len(prompts)):
-            if not are_responses_similar([token_batch_responses[i]], [prompt_responses[i]], tolerance=0.01):
-                print(
-                    f"Token and prompt responses differ: token={token_batch_responses[i]}, prompt={prompt_responses[i]}"
-                )
-
-    finally:
-        ray.shutdown()
+    # Outputs should be similar since we're using the same inputs
+    for i in range(len(prompts)):
+        if not are_responses_similar([token_batch_responses[i]], [prompt_responses[i]], tolerance=0.01):
+            print(f"Token and prompt responses differ: token={token_batch_responses[i]}, prompt={prompt_responses[i]}")
