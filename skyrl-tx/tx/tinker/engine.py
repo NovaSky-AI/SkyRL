@@ -487,7 +487,10 @@ class TinkerEngine:
 
         def convert_numeric_keys_to_int(obj):
             if isinstance(obj, dict):
-                return {int(k) if isinstance(k, str) and k.isdigit() else k: convert_numeric_keys_to_int(v) for k, v in obj.items()}
+                return {
+                    int(k) if isinstance(k, str) and k.isdigit() else k: convert_numeric_keys_to_int(v)
+                    for k, v in obj.items()
+                }
             else:
                 return obj
 
