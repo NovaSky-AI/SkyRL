@@ -171,35 +171,35 @@ def create_ray_wrapped_inference_engines(
                     else {}
                 )
 
-            engine = actor_class.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                scheduling_strategy=dp_rank_sched,
-            ).remote(
-                model=pretrain,
-                enforce_eager=enforce_eager,
-                worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
-                tensor_parallel_size=tensor_parallel_size,
-                enable_expert_parallel=expert_parallel_size > 1,
-                distributed_executor_backend=distributed_executor_backend,
-                seed=seed + i * data_parallel_size + dp_rank,
-                enable_prefix_caching=enable_prefix_caching,
-                dtype=model_dtype,
-                trust_remote_code=True,
-                vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
-                gpu_memory_utilization=gpu_memory_utilization,
-                bundle_indices=dp_rank_bundles,
-                num_gpus=0.2 if use_hybrid_engine else 1,
-                enable_sleep_mode=inference_engine_enable_sleep,
-                noset_visible_devices=noset_visible_devices,
-                max_num_batched_tokens=max_num_batched_tokens,
-                max_num_seqs=max_num_seqs,
-                max_logprobs=1,  # only need chosen-token logprobs
-                **dp_kwargs,
-                **engine_init_kwargs,
-                **lora_kwargs,
-            )
-            inference_engine_actors.append(engine)
+                engine = actor_class.options(
+                    num_cpus=num_gpus_per_actor,
+                    num_gpus=num_gpus_per_actor,
+                    scheduling_strategy=dp_rank_sched,
+                ).remote(
+                    model=pretrain,
+                    enforce_eager=enforce_eager,
+                    worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                    tensor_parallel_size=tensor_parallel_size,
+                    enable_expert_parallel=expert_parallel_size > 1,
+                    distributed_executor_backend=distributed_executor_backend,
+                    seed=seed + i * data_parallel_size + dp_rank,
+                    enable_prefix_caching=enable_prefix_caching,
+                    dtype=model_dtype,
+                    trust_remote_code=True,
+                    vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    bundle_indices=dp_rank_bundles,
+                    num_gpus=0.2 if use_hybrid_engine else 1,
+                    enable_sleep_mode=inference_engine_enable_sleep,
+                    noset_visible_devices=noset_visible_devices,
+                    max_num_batched_tokens=max_num_batched_tokens,
+                    max_num_seqs=max_num_seqs,
+                    max_logprobs=1,  # only need chosen-token logprobs
+                    **dp_kwargs,
+                    **engine_init_kwargs,
+                    **lora_kwargs,
+                )
+                inference_engine_actors.append(engine)
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
 
