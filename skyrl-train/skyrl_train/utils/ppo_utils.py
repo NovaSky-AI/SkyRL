@@ -884,28 +884,30 @@ def compute_gae_advantage_return(
 
 def repopulate_registries():
     pl_avail = set(PolicyLossRegistry.list_available())
-    pl_types = {"regular": [PolicyLossType.REGULAR, ppo_policy_loss], 
-                "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss], 
-                "gspo": [PolicyLossType.GSPO, gspo_policy_loss], 
-                "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov], 
-                "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov]}
+    pl_types = {
+        "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
+        "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
+        "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+        "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
+        "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
+    }
 
-    
     for pl_name, (pl_type, pl_func) in pl_types.items():
         if pl_name not in pl_avail:
             PolicyLossRegistry.register(pl_type, pl_func)
 
     ae_avail = set(AdvantageEstimatorRegistry.list_available())
-    ae_types = {"grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage], 
-                "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return], 
-                "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage], 
-                "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage]}
+    ae_types = {
+        "grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage],
+        "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
+        "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
+        "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+    }
 
     for ae_name, (ae_type, ae_func) in ae_types.items():
         if ae_name not in ae_avail:
             AdvantageEstimatorRegistry.register(ae_type, ae_func)
 
-    
 
 @register_advantage_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
