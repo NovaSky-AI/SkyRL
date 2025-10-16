@@ -128,10 +128,12 @@ class SaveWeightsForSamplerRequest(BaseModel):
 
 
 class SampleRequest(BaseModel):
-    model_id: str
+    model_id: str | None = None
+    model_path: str | None = None
     prompt: dict[str, Any]
     sampling_params: dict[str, Any]
     num_samples: int
+    prompt_logprobs: bool = False
 
 
 class SaveWeightsRequest(BaseModel):
@@ -347,10 +349,18 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-@app.post("/api/v1/sample", response_model=FutureResponse)
-async def sample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
-    """Generates samples from the model."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
+@app.post("/api/v1/asample", response_model=FutureResponse)
+async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
+    """Generates samples from the model (async version)."""
+    # Extract model_id from model_path if provided (format: tinker://model_id/checkpoint_name)
+    if request.model_path:
+        model_id = request.model_path.split("//")[1].split("/")[0]
+    elif request.model_id:
+        model_id = request.model_id
+    else:
+        raise HTTPException(status_code=400, detail="Either model_id or model_path must be provided")
+
+    statement = select(ModelDB).where(ModelDB.model_id == model_id)
     result = await session.exec(statement)
     model = result.first()
 
@@ -360,7 +370,7 @@ async def sample(request: SampleRequest, session: AsyncSession = Depends(get_ses
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.SAMPLE,
-        model_id=request.model_id,
+        model_id=model_id,
         request_data=types.SampleInput(
             prompt=request.prompt,
             sampling_params=request.sampling_params,

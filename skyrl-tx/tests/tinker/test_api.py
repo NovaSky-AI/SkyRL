@@ -28,6 +28,7 @@ def api_server():
             "8000",
             "--base-model",
             BASE_MODEL,
+            "--enable-dummy-sample",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -128,3 +129,37 @@ def test_training_workflow(service_client):
     tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
     future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
     assert len(future.result()) > 0
+
+
+def test_sample(service_client):
+    """Test the sample endpoint."""
+    # Create a training client and save weights to get a valid model
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+    tokenizer = training_client.get_tokenizer()
+
+    # Save weights to get a valid model path
+    save_future = training_client.save_weights_for_sampler(name="test_sample")
+    save_result = save_future.result()
+    model_path = save_result.path
+
+    # Create a sampling client from the saved model path
+    sampling_client = service_client.create_sampling_client(model_path)
+
+    # Create a simple prompt
+    prompt_text = "Hello"
+    prompt = types.ModelInput.from_ints(tokenizer.encode(prompt_text, add_special_tokens=True))
+
+    # Call the sample endpoint using the sampling client
+    sample_future = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
+        num_samples=1,
+    )
+
+    # Get the result
+    sample_result = sample_future.result()
+
+    # Verify we got sequences back
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 1
+    assert len(sample_result.sequences[0].tokens) > 0
