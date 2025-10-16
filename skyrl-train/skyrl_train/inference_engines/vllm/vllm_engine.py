@@ -127,29 +127,56 @@ class WorkerWrap:
             del weight
 
     def update_weights_cuda_ipc(
-        self, names: List[str], dtypes: List[str], shapes: List[int], ipc_handles: List[Dict[str, Any]]
+        self,
+        names: List[str],
+        dtypes: List[str],
+        shapes: List[int],
+        sizes: List[int],
+        ipc_handles: List[Dict[str, Any]],
+        packed: bool = False,
     ):
-
         weight_list = []
-        for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
 
-            dtype = str_to_torch_dtype(dtype)
+        if packed:
+            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
+            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
+            assert (
+                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
+            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
+
             device = torch.cuda.current_device()
             props = torch.cuda.get_device_properties(device)
             physical_gpu_id = str(props.uuid)
 
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-
-            handle = ipc_handle[physical_gpu_id]
-
+            handle = ipc_handles[0][physical_gpu_id]
             device_id = self.device.index
             func, args = handle
             list_args = list(args)
-            # the key is to change device id to the current device id
-            # in case two processes have different CUDA_VISIBLE_DEVICES
             list_args[6] = device_id
-            weight = func(*list_args)
-            weight_list.append((name, weight))
+            packed_tensor = func(*list_args)
+
+            offset = 0
+            for name, shape, size in zip(names, shapes, sizes):
+                weight_list.append((name, packed_tensor[offset : offset + size].view(*shape)))
+                offset += size
+        else:
+            for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
+
+                dtype = str_to_torch_dtype(dtype)
+                device = torch.cuda.current_device()
+                props = torch.cuda.get_device_properties(device)
+                physical_gpu_id = str(props.uuid)
+
+                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+
+                handle = ipc_handle[physical_gpu_id]
+
+                device_id = self.device.index
+                func, args = handle
+                list_args = list(args)
+                list_args[6] = device_id
+                weight = func(*list_args)
+                weight_list.append((name, weight))
 
         self.model_runner.model.load_weights(weights=weight_list)
 
@@ -347,7 +374,9 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request["names"],
                     request["dtypes"],
                     request["shapes"],
+                    request["sizes"],
                     [extra["ipc_handles"] for extra in request["extras"]],
+                    request.get("packed", False),
                 ),
             )
         else:
@@ -499,7 +528,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request["names"],
                     request["dtypes"],
                     request["shapes"],
+                    request["sizes"],
                     [extra["ipc_handles"] for extra in request["extras"]],
+                    request.get("packed", False),
                 ),
             )
         else:

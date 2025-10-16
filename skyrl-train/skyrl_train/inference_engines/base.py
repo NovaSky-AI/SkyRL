@@ -31,7 +31,9 @@ class NamedWeightsUpdateRequest(TypedDict):
     names: List[str]
     dtypes: List[str]
     shapes: List[List[int]]
+    sizes: List[int]
     extras: Optional[List[Dict[str, Any]]]
+    packed: bool
 
 
 class InferenceEngineInterface(ABC):

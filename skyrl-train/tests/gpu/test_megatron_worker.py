@@ -122,8 +122,9 @@ def test_megatron_policy_weight_sync():
         cfg.generator.inference_engine_tensor_parallel_size = 8
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(

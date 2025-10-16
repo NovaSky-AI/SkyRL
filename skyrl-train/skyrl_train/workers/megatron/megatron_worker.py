@@ -446,6 +446,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
+        from torch.multiprocessing.reductions import reduce_tensor
+
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
         cache_reset_task = None
@@ -454,8 +456,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-        current_size = 0
+        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
+        device = torch.cuda.current_device()
 
         for bucket in self.param_buckets:
             hf_params_generator = self.bridge.export_hf_weights(
@@ -464,36 +466,45 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 conversion_tasks=bucket,
             )
             gathered_hf_params = {name: tensor for name, tensor in hf_params_generator}
-            for name, param in gathered_hf_params.items():
-                # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
-                # in the future we should improve this to use bucketed weight updates and support FlashRL + megatron for large models
-                from torch.multiprocessing.reductions import reduce_tensor
+            gathered_hf_params = {
+                name: tensor.to(device=device, dtype=generator_dtype) for name, tensor in gathered_hf_params.items()
+            }
 
-                device = torch.cuda.current_device()
-                param = param.to(device, non_blocking=True)
-                param = param.to(generator_dtype)
-                weight = param.data.clone()
-                ipc_handle = reduce_tensor(weight)
+            total_size = sum(tensor.numel() for tensor in gathered_hf_params.values())
+            packed_tensor = torch.empty(
+                total_size,
+                device=device,
+                dtype=generator_dtype,
+                requires_grad=False,
+            )
 
-                ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                ipc_handle_list = [None] * torch.distributed.get_world_size()
-                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+            offset = 0
+            # Copy tensors into consolidated buffers
+            for key, tensor in gathered_hf_params.items():
+                size = tensor.numel()
+                packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
+                offset += size
+                weights_update_request["names"].append(key)
+                weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                weights_update_request["shapes"].append(tensor.shape)
+                weights_update_request["sizes"].append(size)
 
-                if torch.distributed.get_rank() == 0:
-                    ipc_handles = {}
-                    for d in ipc_handle_list:
-                        ipc_handles.update(d)
+            ipc_handle = reduce_tensor(packed_tensor)
+            ipc_handle = {get_physical_gpu_id(): ipc_handle}
+            ipc_handle_list = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
-                    current_size += weight.nbytes
-                    weights_update_request["names"].append(name)
-                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                    weights_update_request["shapes"].append(param.shape)
-                    weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+            ipc_handles = {}
+            for d in ipc_handle_list:
+                ipc_handles.update(d)
+
+            weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+            weights_update_request["packed"] = True
 
             if torch.distributed.get_rank() == 0:
                 await inference_engine_client.update_named_weights(weights_update_request)
-                current_size = 0
-                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
+
             # force collect any sent tensors if possible to be memory efficient
             torch.cuda.ipc_collect()
 
