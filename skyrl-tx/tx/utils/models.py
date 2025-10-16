@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
+from cloudpathlib import CloudPath
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -12,8 +13,11 @@ import numpy as np
 import optax
 import safetensors.numpy
 from transformers import PretrainedConfig
+import peft
 
 from tx import models
+from tx.utils.storage import pack_and_upload
+from tx.tinker.types import LoraConfig
 
 if TYPE_CHECKING:
     import torch
@@ -43,13 +47,13 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
 
-def get_param_key(path: tuple) -> str:
+def get_param_key(path: tuple, prefix: str = "") -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
         path = (*path[:-1], "weight")
     elif path[-1] in {"lora_A", "lora_B"}:
         path = (*path, "weight")
-    return ".".join(map(str, path))
+    return prefix + ".".join(map(str, path))
 
 
 def get_expert_key(path: tuple, expert_idx: int) -> str:
@@ -58,7 +62,7 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
     return ".".join(map(str, path))
 
 
-def load_checkpoint(checkpoint_dir: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
+def load_safetensors(checkpoint_dir: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
@@ -81,13 +85,13 @@ def load_checkpoint(checkpoint_dir: str | os.PathLike, config: PretrainedConfig,
     nnx.update(model, nnx.from_flat_state(updates))
 
 
-def save_checkpoint(config: PretrainedConfig, model: nnx.Module, filename: str | os.PathLike) -> None:
+def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path, prefix: str = "") -> None:
     model_params = nnx.to_flat_state(nnx.state(model))
     tensors = {}
     for path, param in model_params:
         if "rngs" in path:
             continue
-        key = get_param_key(path)
+        key = get_param_key(path, prefix=prefix)
         if "experts" in path:
             for i in range(config.num_experts):
                 tensors[get_expert_key(path, i)] = param[i, :, :].T
@@ -98,6 +102,36 @@ def save_checkpoint(config: PretrainedConfig, model: nnx.Module, filename: str |
             param = param.reshape(-1, param.shape[-1])
         tensors[key] = param if "embed_tokens" in path else param.T
     safetensors.numpy.save_file(tensors, filename)
+
+
+def save_lora_checkpoint(
+    model: models.Qwen3ForCausalLM, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
+):
+    """Save a LoRA checkpoint as a tar.gz archive.
+
+    Args:
+        model: The Qwen3ForCausalLM model to extract LoRA parameters from
+        adapter_config: LoRA adapter configuration
+        adapter_index: Index of the adapter to save
+        output_path: Path to save the checkpoint tar.gz file
+    """
+
+    def is_lora_param(path, value):
+        return any(name in path for name in ["lora_A", "lora_B"])
+
+    _, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
+
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+
+    peft_config = peft.LoraConfig(r=adapter_config.rank, lora_alpha=adapter_config.alpha)
+    with pack_and_upload(output_path) as temp_dir:
+        save_safetensors(
+            model.config,
+            adapter_lora_params,
+            temp_dir / "adapter_model.safetensors",
+            prefix="base_model.model.",
+        )
+        peft_config.save_pretrained(temp_dir)
 
 
 class OptimizerName(str, Enum):

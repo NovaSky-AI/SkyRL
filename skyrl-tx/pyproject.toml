@@ -20,6 +20,7 @@ dependencies = [
     # "wandb>=0.22.0",
     "peft",
     "hf_transfer",
+    "cloudpathlib>=0.23.0",
 ]
 
 [project.optional-dependencies]
@@ -39,12 +40,25 @@ tinker = [
     "aiosqlite",
 ]
 
+aws = [
+    "cloudpathlib[s3]",
+]
+
+gcp = [
+    "cloudpathlib[gs]",
+]
+
+azure = [
+    "cloudpathlib[azure]",
+]
+
 dev = [
     "mkdocs",
     "mkdocs-material",
     "pytest",
     "torch",
     "ty",
+    "cloudpathlib[s3]",
 ]
 
 [tool.setuptools]

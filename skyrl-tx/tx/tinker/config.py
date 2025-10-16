@@ -1,7 +1,8 @@
 """Configuration for the Tinker engine."""
 
 import argparse
-from pathlib import Path
+
+from cloudpathlib import AnyPath
 from pydantic import BaseModel, Field
 
 
@@ -9,8 +10,8 @@ class EngineConfig(BaseModel):
     """Configuration for the Tinker engine."""
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
-    checkpoints_base: Path = Field(
-        default=Path("/tmp/tx_checkpoints"),
+    checkpoints_base: AnyPath = Field(
+        default=AnyPath("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
@@ -21,6 +22,10 @@ class EngineConfig(BaseModel):
         description="Micro-batch size for gradient accumulation; 0 means disabled (use full batch)",
     )
     enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
+    shard_attention_heads: bool = Field(
+        default=True,
+        description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
+    )
     enable_dummy_sample: bool = Field(default=False, description="Enable dummy sampling for testing")
 
 

@@ -191,8 +191,7 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
-
-    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
+    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -228,13 +227,19 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    assert (
-        cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
-    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
+    # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
+    repopulate_all_registries()
+    available_policy_losses = PolicyLossRegistry.list_available()
+    assert available_policy_losses != [], "Policy loss registry is not populated."
 
     assert (
-        cfg.trainer.algorithm.advantage_estimator in AdvantageEstimatorRegistry.list_available()
-    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {AdvantageEstimatorRegistry.list_available()}"
+        cfg.trainer.algorithm.policy_loss_type in available_policy_losses
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+
+    available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
+    assert (
+        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
+    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",

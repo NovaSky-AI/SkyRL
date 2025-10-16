@@ -1,9 +1,9 @@
 """Tests for the Tinker API mock server using the real tinker client."""
 
-import pytest
 import subprocess
 from urllib.parse import urlparse
 
+import pytest
 import tinker
 from tinker import types
 

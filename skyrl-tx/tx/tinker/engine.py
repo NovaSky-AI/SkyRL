@@ -22,16 +22,16 @@ from huggingface_hub import snapshot_download
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
+from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
     get_dtype,
     get_model_class,
-    save_checkpoint,
-    load_checkpoint,
+    save_lora_checkpoint,
+    load_safetensors,
     extract_adapter_state,
     insert_adapter_state,
 )
 from tx.layers.lora import update_adapter_config
-from peft import LoraConfig
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,7 @@ class TinkerEngine:
         # Configure LoRA settings
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
         self.model_config.max_lora_rank = self.config.max_lora_rank
+        self.model_config.shard_attention_heads = self.config.shard_attention_heads
 
         model_class = get_model_class(self.model_config)
 
@@ -126,7 +127,7 @@ class TinkerEngine:
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
         with jax.set_mesh(self.mesh):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
-            load_checkpoint(checkpoint_path, self.model_config, self.model)
+            load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Create optimizer that only targets LoRA A and B parameters
             def is_lora_param(path, value):
@@ -387,7 +388,7 @@ class TinkerEngine:
         )
         loss_mask = jnp.array(
             [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
-            dtype=jnp.int32,
+            dtype=jnp.bool_,
         )
 
         total_bs = int(input_ids.shape[0])
@@ -486,9 +487,12 @@ class TinkerEngine:
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
         adapter_index = self.models[model_id].adapter_index
-        checkpoint_dir = self.config.checkpoints_base / model_id / Path(request_data.path).name
+        checkpoint_id = Path(request_data.path).name
+        checkpoint_dir = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        restored_data = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=None, prefix="checkpoint_")
+        with download_and_unpack(checkpoint_dir) as temp_dir:
+            restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
+
         if restored_data is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
@@ -518,25 +522,25 @@ class TinkerEngine:
 
         adapter_index = self.models[model_id].adapter_index
         checkpoint_id = Path(request_data.path).name
-        output_dir = self.config.checkpoints_base / model_id / checkpoint_id
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
         optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
 
-        checkpoints.save_checkpoint(
-            target={
-                "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                "optimizer_state": nnx.to_pure_dict(optimizer_params),
-                "lora_config": self.models[model_id].lora_config.model_dump(),
-            },
-            ckpt_dir=output_dir,
-            step=0,
-            prefix="checkpoint_",
-            overwrite=True,
-        )
+        with pack_and_upload(output_path) as temp_dir:
+            checkpoints.save_checkpoint(
+                target={
+                    "lora_weights": nnx.to_pure_dict(adapter_lora_params),
+                    "optimizer_state": nnx.to_pure_dict(optimizer_params),
+                    "lora_config": self.models[model_id].lora_config.model_dump(),
+                },
+                ckpt_dir=temp_dir,
+                step=0,
+                prefix="checkpoint_",
+                overwrite=True,
+            )
 
-        logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_dir}")
+        logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
         return types.SaveWeightsOutput(
             path=f"tinker://{model_id}/{checkpoint_id}",
@@ -550,26 +554,16 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
+        lora_model = self.models[model_id]
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_dir = self.config.checkpoints_base / model_id / checkpoint_id
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        # Collect LoRA rank for each layer and then the LoRA parameters for adapter_index
-        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+        # Save the LoRA adapter weights and LoRA config as tar.gz
+        save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
 
-        # Save only the LoRA adapter weights
-        save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
-
-        # Save LoRA config
-        lora_config = LoraConfig(
-            r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
-        )
-        lora_config.save_pretrained(output_dir)
-
-        logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
+        logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
 
         return types.SaveWeightsForSamplerOutput(
             path=f"tinker://{model_id}/{checkpoint_id}",

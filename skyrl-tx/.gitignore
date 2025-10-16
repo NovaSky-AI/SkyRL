@@ -71,3 +71,6 @@ site/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Local artifacts
+tinker.db
