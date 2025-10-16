@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
+from urllib.parse import urlparse
 import asyncio
 import logging
 import subprocess
@@ -125,6 +126,17 @@ class OptimStepRequest(BaseModel):
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
     path: str
+
+
+class SampleRequest(BaseModel):
+    # For now we require model_path, in the official SDK there can actually be
+    # either model_path or base_model, the latter to sample from the base model:
+    # https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/sample_request.py
+    model_path: str
+    prompt: dict[str, Any]
+    sampling_params: dict[str, Any]
+    num_samples: int
+    prompt_logprobs: bool = False
 
 
 class SaveWeightsRequest(BaseModel):
@@ -333,6 +345,38 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
         request_data=types.SaveWeightsForSamplerInput(path=request.path),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
+@app.post("/api/v1/asample", response_model=FutureResponse)
+async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
+    """Generates samples from the model (async version)."""
+    # Extract model_id and checkpoint_id from model_path (format: tinker://model_id/checkpoint_name)
+    parsed = urlparse(request.model_path)
+    if parsed.scheme != "tinker" or not (model_id := parsed.netloc) or not (checkpoint_id := parsed.path.lstrip("/")):
+        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
+
+    statement = select(ModelDB).where(ModelDB.model_id == model_id)
+    result = await session.exec(statement)
+    model = result.first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.SAMPLE,
+        model_id=model_id,
+        request_data=types.SampleInput(
+            prompt=request.prompt,
+            sampling_params=request.sampling_params,
+            num_samples=request.num_samples,
+            checkpoint_id=checkpoint_id,
+        ),
     )
 
     await session.commit()
