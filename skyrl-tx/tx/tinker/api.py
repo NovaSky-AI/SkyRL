@@ -108,7 +108,7 @@ class ModelInfoResponse(BaseModel):
     model_data: ModelData
 
 
-class ForwardBackwardInput(BaseModel):
+class ForwardBackwardRequest(BaseModel):
     model_id: str
     forward_backward_input: dict[str, Any]
 
@@ -231,7 +231,7 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 
 
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: ForwardBackwardInput, session: AsyncSession = Depends(get_session)):
+async def forward_backward(request: ForwardBackwardRequest, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients."""
     statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
     result = await session.exec(statement)
