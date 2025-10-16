@@ -228,7 +228,7 @@ def validate_cfg(cfg: DictConfig):
         )
     
     #TODO (devpatel): move to initializing ray and syncing registries codepath at startup
-    repopulate_registries()
+    repopulate_all_registries()
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
 
