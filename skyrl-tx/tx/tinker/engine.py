@@ -116,6 +116,7 @@ class TinkerEngine:
         # Configure LoRA settings
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
         self.model_config.max_lora_rank = self.config.max_lora_rank
+        self.model_config.shard_attention_heads = self.config.shard_attention_heads
 
         model_class = get_model_class(self.model_config)
 
@@ -387,7 +388,7 @@ class TinkerEngine:
         )
         loss_mask = jnp.array(
             [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
-            dtype=jnp.int32,
+            dtype=jnp.bool_,
         )
 
         total_bs = int(input_ids.shape[0])

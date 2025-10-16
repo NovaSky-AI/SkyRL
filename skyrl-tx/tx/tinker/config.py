@@ -22,6 +22,10 @@ class EngineConfig(BaseModel):
         description="Micro-batch size for gradient accumulation; 0 means disabled (use full batch)",
     )
     enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
+    shard_attention_heads: bool = Field(
+        default=True,
+        description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
+    )
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
