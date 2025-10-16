@@ -139,25 +139,16 @@ def test_sample(service_client):
 
     # Save weights to get a valid model path
     save_future = training_client.save_weights_for_sampler(name="test_sample")
-    save_result = save_future.result()
-    model_path = save_result.path
+    model_path = save_future.result().path
 
-    # Create a sampling client from the saved model path
+    # Create a sampling client from the saved model path and get a sample
     sampling_client = service_client.create_sampling_client(model_path)
-
-    # Create a simple prompt
-    prompt_text = "Hello"
-    prompt = types.ModelInput.from_ints(tokenizer.encode(prompt_text, add_special_tokens=True))
-
-    # Call the sample endpoint using the sampling client
-    sample_future = sampling_client.sample(
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    sample_result = sampling_client.sample(
         prompt=prompt,
         sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
         num_samples=1,
-    )
-
-    # Get the result
-    sample_result = sample_future.result()
+    ).result()
 
     # Verify we got sequences back
     assert sample_result is not None
