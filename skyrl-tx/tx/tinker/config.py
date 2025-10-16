@@ -68,10 +68,7 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
         arg_name = field_name.replace("_", "-")
 
         if field.annotation is bool:
-            if value:
-                argv.append(f"--{arg_name}")
-            else:
-                argv.append(f"--no-{arg_name}")
+            argv.append(f"--{arg_name}" if value else f"--no-{arg_name}")
         else:
             argv.append(f"--{arg_name}")
             argv.append(str(value))
