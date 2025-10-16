@@ -761,7 +761,10 @@ class PolicyWorkerBase(Worker):
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
             else:
                 action_logits = output["logits"][:, -num_actions - 1 : -1, :]
-                entropy_BS = chunked_entropy_from_logits(action_logits, requires_grad=False)
+                action_attention_mask = attention_mask[:, -num_actions - 1 : -1]
+                entropy_BS = chunked_entropy_from_logits(
+                    action_logits, requires_grad=False, attention_mask=action_attention_mask
+                )
 
             entropy = entropy_BS.sum().item() / entropy_BS.numel()
 
