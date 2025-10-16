@@ -97,7 +97,7 @@ async def run_generator_end_to_end(
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=True,
         async_engine=use_async_engine,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=32768,
         max_num_seqs=1024,
         tokenizer=tokenizer,
         sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
