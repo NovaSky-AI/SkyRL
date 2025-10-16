@@ -133,6 +133,7 @@ class SampleRequest(BaseModel):
     sampling_params: dict[str, Any]
     num_samples: int
 
+
 class SaveWeightsRequest(BaseModel):
     model_id: str
     path: str

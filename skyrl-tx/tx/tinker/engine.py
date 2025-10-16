@@ -574,13 +574,16 @@ class TinkerEngine:
         """Generate text samples from the model."""
         if self.config.enable_dummy_sample:
             num_samples = request_data.num_samples
-            sequences = [types.GeneratedSequence(stop_reason="length", tokens=[100, 200, 300], logprobs=[-0.1, -0.2, -0.3]) for _ in range(num_samples)]
+            sequences = [
+                types.GeneratedSequence(stop_reason="length", tokens=[100, 200, 300], logprobs=[-0.1, -0.2, -0.3])
+                for _ in range(num_samples)
+            ]
 
             return types.SampleOutput(
                 sequences=sequences,
                 prompt_logprobs=[-0.05, -0.15, -0.25],
             )
-        
+
         raise NotImplementedError()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
