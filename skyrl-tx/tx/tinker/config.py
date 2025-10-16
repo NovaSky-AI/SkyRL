@@ -46,12 +46,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             parser.add_argument(
                 f"--{arg_name}", action="store_true", dest=name, default=field.default, help=field.description
             )
-            parser.add_argument(
-                f"--no-{arg_name}",
-                action="store_false",
-                dest=name,
-                help=f"Disable {arg_name}",
-            )
+            parser.add_argument(f"--no-{arg_name}", action="store_false", dest=name, help=f"Disable {arg_name}")
         else:
             # Add type if available
             if field.annotation is not None:
