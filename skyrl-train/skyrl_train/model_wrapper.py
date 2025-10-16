@@ -317,15 +317,15 @@ class HFModelWrapper(nn.Module):
             # entropy calculation as a metric - we use no grad
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
             # For non-sample packing: pass the attention mask to exclude padding tokens
-            if self.use_sample_packing:
-                # Sample packing: entropy calculated on unpacked data (no mask needed)
-                entropy_BS = self.chunked_entropy_from_logits_fn(logits_BSV, requires_grad=False)
-            else:
+            entropy_mask = None
+            if not self.use_sample_packing:
                 # Non-sample packing: pass attention mask to handle padding
                 # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
-                entropy_BS = self.chunked_entropy_from_logits_fn(
-                    logits_BSV, requires_grad=False, attention_mask=attention_mask_fwd
-                )
+                entropy_mask = attention_mask_fwd
+
+            entropy_BS = self.chunked_entropy_from_logits_fn(
+                logits_BSV, requires_grad=False, attention_mask=entropy_mask
+            )
 
             if self.sequence_parallel_size > 1:
                 dim = entropy_BS.ndim - 1
