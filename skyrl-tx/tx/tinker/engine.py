@@ -584,7 +584,7 @@ class TinkerEngine:
                 prompt_logprobs=[-0.05, -0.15, -0.25],
             )
 
-        raise NotImplementedError()
+        raise NotImplementedError("sample endpoint not yet fully implemented")
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
