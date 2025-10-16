@@ -922,8 +922,6 @@ def repopulate_registries():
     PolicyLossRegistry.repopulate_registry()
     AdvantageEstimatorRegistry.repopulate_registry()
 
-    return True
-
 
 @register_advantage_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
