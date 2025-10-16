@@ -31,7 +31,6 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
-from skyrl_train.utils.torch_utils import chunked_entropy_from_logits
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
@@ -755,16 +754,9 @@ class PolicyWorkerBase(Worker):
             )
         # entropy
         with torch.no_grad():
-            if "entropy" in output:
-                # batch_size, seqlen
-                entropy_BS = output["entropy"]
-                entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-            else:
-                action_logits = output["logits"][:, -num_actions - 1 : -1, :]
-                action_attention_mask = attention_mask[:, -num_actions - 1 : -1]
-                entropy_BS = chunked_entropy_from_logits(
-                    action_logits, requires_grad=False, attention_mask=action_attention_mask
-                )
+            # batch_size, seqlen
+            entropy_BS = output["entropy"]
+            entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
 
             entropy = entropy_BS.sum().item() / entropy_BS.numel()
 
