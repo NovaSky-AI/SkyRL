@@ -1,4 +1,4 @@
-from pathlib import Path
+from cloudpathlib import AnyPath
 
 import jax
 import numpy as np
@@ -61,7 +61,7 @@ def _assert_tree_allclose(t1, t2, rtol=1e-3, atol=1e-3, min_match_pct=99.0):
 def test_adapter_gradient_calculation():
     config = EngineConfig(
         base_model="Qwen/Qwen3-0.6B",
-        checkpoints_base=Path(""),
+        checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
     )
@@ -125,7 +125,7 @@ def test_micro_batch_grad_accumulation():
     # Build engine and two adapters.
     config = EngineConfig(
         base_model="Qwen/Qwen3-0.6B",
-        checkpoints_base=Path(""),
+        checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
         micro_batch_size=4,
@@ -172,7 +172,7 @@ def test_micro_batch_grad_accumulation():
     # Build a second engine without micro-batching
     config = EngineConfig(
         base_model="Qwen/Qwen3-0.6B",
-        checkpoints_base=Path(""),
+        checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
         micro_batch_size=0,

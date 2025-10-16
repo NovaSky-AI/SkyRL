@@ -9,15 +9,13 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 import asyncio
-import subprocess
 import logging
-import tarfile
-import io
-from pathlib import Path
+import subprocess
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
 from tx.tinker.db_models import ModelDB, FutureDB, DB_PATH, RequestStatus
+from tx.utils.storage import download_file
 
 
 logging.basicConfig(level=logging.INFO)
@@ -392,18 +390,6 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-# This function is synchronous and should not be run directly in an async endpoint
-def create_tar_archive(checkpoint_dir: Path) -> tuple[io.BytesIO, int]:
-    tar_buffer = io.BytesIO()
-    with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
-        for p in checkpoint_dir.iterdir():
-            if p.is_file():
-                tar.add(p, arcname=p.name)
-    tar_size = tar_buffer.tell()
-    tar_buffer.seek(0)
-    return tar_buffer, tar_size
-
-
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
 async def download_checkpoint_archive(
     request: Request,
@@ -412,28 +398,25 @@ async def download_checkpoint_archive(
     session: AsyncSession = Depends(get_session),
 ):
     """Return the checkpoint archive bytes"""
-
-    # Ensure model exists
     statement = select(ModelDB).where(ModelDB.model_id == unique_id)
     result = await session.exec(statement)
     model = result.first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Files are saved at checkpoints_base/{model_id}/{checkpoint_id}/
-    checkpoint_dir = request.app.state.engine_config.checkpoints_base / unique_id / checkpoint_id
-    if not checkpoint_dir.exists():
+    checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
+    if not checkpoint_path.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
-    # Package directory into a tar.gz in-memory
-    tar_buffer, tar_size = await asyncio.to_thread(create_tar_archive, checkpoint_dir)
+    file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
+
     filename = f"{unique_id}_{checkpoint_id}.tar.gz"
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Length": str(tar_size),
+        "Content-Length": str(file_buffer.getbuffer().nbytes),
     }
 
-    return StreamingResponse(tar_buffer, media_type="application/octet-stream", headers=headers)
+    return StreamingResponse(file_buffer, media_type="application/octet-stream", headers=headers)
 
 
 @app.get("/")
