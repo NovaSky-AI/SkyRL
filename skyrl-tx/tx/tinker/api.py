@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
+from urllib.parse import urlparse
 import asyncio
 import logging
 import subprocess
@@ -128,8 +129,10 @@ class SaveWeightsForSamplerRequest(BaseModel):
 
 
 class SampleRequest(BaseModel):
-    model_id: str | None = None
-    model_path: str | None = None
+    # For now we require model_path, in the official SDK there can actually be
+    # either model_path or base_model, the latter to sample from the base model:
+    # https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/sample_request.py
+    model_path: str
     prompt: dict[str, Any]
     sampling_params: dict[str, Any]
     num_samples: int
@@ -352,13 +355,10 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    # Extract model_id from model_path if provided (format: tinker://model_id/checkpoint_name)
-    if request.model_path:
-        model_id = request.model_path.split("//")[1].split("/")[0]
-    elif request.model_id:
-        model_id = request.model_id
-    else:
-        raise HTTPException(status_code=400, detail="Either model_id or model_path must be provided")
+    # Extract model_id from model_path (format: tinker://model_id/checkpoint_name)
+    parsed = urlparse(request.model_path)
+    if parsed.scheme != "tinker" or not (model_id := parsed.netloc):
+        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/...")
 
     statement = select(ModelDB).where(ModelDB.model_id == model_id)
     result = await session.exec(statement)
