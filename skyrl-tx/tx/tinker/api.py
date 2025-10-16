@@ -357,7 +357,7 @@ async def asample(request: SampleRequest, session: AsyncSession = Depends(get_se
     """Generates samples from the model (async version)."""
     # Extract model_id and checkpoint_id from model_path (format: tinker://model_id/checkpoint_name)
     parsed = urlparse(request.model_path)
-    if parsed.scheme != "tinker" or not (model_id := parsed.netloc) or not (checkpoint_id := parsed.path.lstrip('/')):
+    if parsed.scheme != "tinker" or not (model_id := parsed.netloc) or not (checkpoint_id := parsed.path.lstrip("/")):
         raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
 
     statement = select(ModelDB).where(ModelDB.model_id == model_id)
