@@ -419,7 +419,7 @@ class BaseFunctionRegistry:
         cls._functions.clear()
         cls._ray_actor = None
         cls._synced_to_actor = False
-    
+
     @classmethod
     def repopulate(cls):
         """Repopulate the registry with the default functions."""
@@ -463,6 +463,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
         for ae_name, (ae_type, ae_func) in ae_types.items():
             if ae_name not in ae_avail:
                 cls.register(ae_type, ae_func)
+
 
 class PolicyLossType(StrEnum):
     REGULAR = "regular"
