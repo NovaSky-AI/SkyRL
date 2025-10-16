@@ -455,7 +455,7 @@ async def get_checkpoint_archive_url(
 
     # Generate URL to the download endpoint and return 302 redirect
     download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
-    expires = datetime.utcnow() + timedelta(minutes=15)
+    expires = datetime.utcnow() + timedelta(minutes=120)
 
     response = RedirectResponse(url=download_url, status_code=302)
     response.headers["Expires"] = expires.strftime("%a, %d %b %Y %H:%M:%S GMT")
