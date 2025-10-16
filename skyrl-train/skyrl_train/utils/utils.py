@@ -226,6 +226,8 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
+    
+    #TODO (devpatel): move to initializing ray and syncing registries codepath at startup
     repopulate_registries()
     available_policy_losses = PolicyLossRegistry.list_available()
     assert available_policy_losses != [], "Policy loss registry is not populated."
