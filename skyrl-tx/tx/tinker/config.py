@@ -36,19 +36,15 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         model: The Pydantic model class
     """
     for name, field in model.model_fields.items():
+        argument_name = name.replace('_', '-')
         kwargs = {
             "help": field.description,
         }
 
         if field.annotation is bool:
-            # For boolean flags, use 'store_true' if the default is False, 'store_false' if default is True
-            if field.default is False:
-                kwargs["action"] = "store_true"
-            else:
-                assert field.default is True
-                # For True defaults, use --no-{name} flag with store_false
-                parser.add_argument(f"--no-{name.replace('_', '-')}", action="store_false", dest=name, **kwargs)
-                continue
+            # For boolean flags, add both --{name} and --no-{name} to support explicit values
+            parser.add_argument(f"--{argument_name}", action="store_true", dest=name, default=field.default, help=kwargs.get("help"))
+            parser.add_argument(f"--no-{argument_name}", action="store_false", dest=name, help=f"Disable {kwargs.get('help', argument_name)}")
         else:
             # Add type if available
             if field.annotation is not None:
@@ -62,7 +58,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
                 # For optional fields, provide the default value to argparse
                 kwargs["default"] = field.default
 
-        parser.add_argument(f"--{name.replace('_', '-')}", **kwargs)
+            parser.add_argument(f"--{argument_name}", **kwargs)
 
 
 def config_to_argv(cfg: BaseModel) -> list[str]:
@@ -70,18 +66,14 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
     argv = []
     for field_name, value in cfg.model_dump().items():
         field = cfg.model_fields[field_name]
+        argument_name = field_name.replace('_', '-')
 
         if field.annotation is bool:
-            # For boolean flags with False default, only add the flag if True (store_true)
-            if field.default is False:
-                if value:
-                    argv.append(f"--{field_name.replace('_', '-')}")
-            # For boolean flags with True default, only add --no-flag if False (store_false)
+            if value:
+                argv.append(f"--{argument_name}")
             else:
-                assert field.default is True
-                if not value:
-                    argv.append(f"--no-{field_name.replace('_', '-')}")
+                argv.append(f"--no-{argument_name}")
         else:
-            argv.append(f"--{field_name.replace('_', '-')}")
+            argv.append(f"--{argument_name}")
             argv.append(str(value))
     return argv
