@@ -758,7 +758,7 @@ class PolicyWorkerBase(Worker):
             entropy_BS = output["entropy"]
             entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
 
-            entropy = entropy_BS.sum().item() / entropy_BS.numel()
+            entropy = masked_mean(entropy_BS, loss_mask)
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
