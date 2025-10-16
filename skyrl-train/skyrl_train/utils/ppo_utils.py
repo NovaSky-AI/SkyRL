@@ -918,11 +918,6 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
-def repopulate_registries():
-    PolicyLossRegistry.repopulate_registry()
-    AdvantageEstimatorRegistry.repopulate_registry()
-
-
 @register_advantage_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
@@ -974,6 +969,11 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+def repopulate_all_registries():
+    PolicyLossRegistry.repopulate_registry()
+    AdvantageEstimatorRegistry.repopulate_registry()
 
 
 def compute_advantages_and_returns(
