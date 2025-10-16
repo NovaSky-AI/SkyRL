@@ -755,7 +755,7 @@ class PolicyWorkerBase(Worker):
             )
         # entropy
         with torch.no_grad():
-            if self.cfg.trainer.use_sample_packing:
+            if "entropy" in output:
                 # batch_size, seqlen
                 entropy_BS = output["entropy"]
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
