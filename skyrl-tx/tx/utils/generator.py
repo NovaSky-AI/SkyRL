@@ -38,8 +38,7 @@ def sample_token(logits: jax.Array, *, temperature: float = 1.0, key: jax.Array)
         logits = logits / temperature
 
     # Sample from the distribution
-    probs = jax.nn.softmax(logits, axis=-1)
-    return jax.random.categorical(key, jnp.log(probs + 1e-10), axis=-1)
+    return jax.random.categorical(key, logits, axis=-1)
 
 
 class GeneratorMixin:
