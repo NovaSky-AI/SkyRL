@@ -4,6 +4,7 @@ import subprocess
 from urllib.parse import urlparse
 
 import pytest
+import requests
 import tinker
 from tinker import types
 
@@ -123,12 +124,21 @@ def test_training_workflow(service_client):
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
     assert sampling_path is not None
 
-    # Download the checkpoint
+    # Get checkpoint download URL and download the checkpoint
     rest_client = service_client.create_rest_client()
     parsed_url = urlparse(sampling_path)
-    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
-    future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
-    assert len(future.result()) > 0
+    training_run_id = parsed_url.netloc
+    checkpoint_id = parsed_url.path.lstrip("/")
+    checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
+    assert checkpoint_response is not None
+    assert checkpoint_response.url is not None
+    assert checkpoint_response.expires is not None
+
+    # Actually download the checkpoint
+    download_response = requests.get(checkpoint_response.url)
+    assert download_response.status_code == 200
+    assert len(download_response.content) > 0
+    assert download_response.headers.get("Content-Type") == "application/octet-stream"
 
 
 def test_sample(service_client):
