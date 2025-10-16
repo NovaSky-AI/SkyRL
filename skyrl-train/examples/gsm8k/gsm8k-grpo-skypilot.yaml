@@ -4,42 +4,25 @@ resources:
   accelerators: L40S:4 # 4x 48 GB GPUs; adjust to the SKU that matches your quota
   memory: 64+          # every node has at least 64 GB memory
   ports: 6479          # expose port for ray dashboard
-# check the skypilot documentation for what clouds network tier is supported.
 #  network_tier: best # when using multiple nodes, communication can become a bottleneck
 
 num_nodes: 1         # cluster size
 
-# --------------- Work Directory Synchronization (workdir) ---------------
-# Defines the local working directory to be synchronized to the remote cluster.
-# Here, '.' means synchronizing the directory where the sky submit command is currently run.
-# For this script, run the command from the repository root after cloning SkyRL.
-workdir: .
+# Set to a git repository 
+workdir:
+  url: https://github.com/NovaSky-AI/SkyRL.git
+  ref: main
 
-# --------------- (secrets) ---------------
+# Set secrets
 secrets:
   WANDB_API_KEY: null
-  # Either add your key here, or add it when launching with sky launch .... --secret WANDB_API_KEY="1234"
 
-# --------------- File Mounts/Data Upload (file_mounts) ---------------
-# If your dataset (gsm8k folder) is local, it needs to be uploaded to the
-# remote cluster. We prepare the data in the setup step here. Uncomment these
-# lines if you have the data locally already.
-
-#file_mounts:
-#  # Remote path (relative to remote user's home directory): Local path
-#  # /remote/dir1/file: /local/dir1/file
-#  data/gsm8k: ~/data/gsm8k
-
-# --------------- Environment variables ---------------
 envs:
   LOGGER: "wandb"  # change to "console" to print to stdout
   INFERENCE_BACKEND: "vllm"
   # INFERENCE_BACKEND: "sglang"
-  # The quickstart configuration targets 4x 48 GB GPUs. On smaller GPUs, lower the
-  # micro batch sizes or switch to a smaller Qwen checkpoint per the Quickstart guide.
 
 
-# --------------- Environment Setup (setup) ---------------
 # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
 setup: |
   cd skyrl-train
@@ -51,7 +34,6 @@ setup: |
 
 # If you already have processed the data locally, delete the above line
 
-# --------------- Run Command (run) ---------------
 # The actual task commands to be executed on the remote cluster.
 # This script will first start the Ray cluster (different ray start commands are executed on Head and Worker nodes).
 # Then, your training script will only be run on the Head node (SKYPILOT_NODE_RANK == 0).
