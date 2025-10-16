@@ -184,4 +184,3 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_
 
     # Cleanup
     ray.get([actor.cleanup.remote() for actor in actors])
-    ray.shutdown()
