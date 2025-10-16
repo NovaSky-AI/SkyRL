@@ -36,15 +36,22 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         model: The Pydantic model class
     """
     for name, field in model.model_fields.items():
-        argument_name = name.replace('_', '-')
+        arg_name = name.replace("_", "-")
         kwargs = {
             "help": field.description,
         }
 
         if field.annotation is bool:
-            # For boolean flags, add both --{name} and --no-{name} to support explicit values
-            parser.add_argument(f"--{argument_name}", action="store_true", dest=name, default=field.default, help=kwargs.get("help"))
-            parser.add_argument(f"--no-{argument_name}", action="store_false", dest=name, help=f"Disable {kwargs.get('help', argument_name)}")
+            # For boolean flags, add both --{arg_name} and --no-{arg_name} to support explicit values
+            parser.add_argument(
+                f"--{arg_name}", action="store_true", dest=name, default=field.default, help=field.description
+            )
+            parser.add_argument(
+                f"--no-{arg_name}",
+                action="store_false",
+                dest=name,
+                help=f"Disable {arg_name}",
+            )
         else:
             # Add type if available
             if field.annotation is not None:
@@ -58,7 +65,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
                 # For optional fields, provide the default value to argparse
                 kwargs["default"] = field.default
 
-            parser.add_argument(f"--{argument_name}", **kwargs)
+            parser.add_argument(f"--{arg_name}", **kwargs)
 
 
 def config_to_argv(cfg: BaseModel) -> list[str]:
@@ -66,14 +73,14 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
     argv = []
     for field_name, value in cfg.model_dump().items():
         field = cfg.model_fields[field_name]
-        argument_name = field_name.replace('_', '-')
+        arg_name = field_name.replace("_", "-")
 
         if field.annotation is bool:
             if value:
-                argv.append(f"--{argument_name}")
+                argv.append(f"--{arg_name}")
             else:
-                argv.append(f"--no-{argument_name}")
+                argv.append(f"--no-{arg_name}")
         else:
-            argv.append(f"--{argument_name}")
+            argv.append(f"--{arg_name}")
             argv.append(str(value))
     return argv
