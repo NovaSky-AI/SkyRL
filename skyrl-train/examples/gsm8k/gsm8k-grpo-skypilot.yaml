@@ -2,13 +2,13 @@
 resources:
   infra: aws # replace this with what cloud you want to launch on
   accelerators: L40S:4 # 4x 48 GB GPUs; adjust to the SKU that matches your quota
-  memory: 64+ # every node has at least 64 GB memory
-  ports: 6479 # expose port for ray dashboard
+  memory: 64+          # every node has at least 64 GB memory
+  ports: 6479          # expose port for ray dashboard
 #  network_tier: best # when using multiple nodes, communication can become a bottleneck
 
 num_nodes: 2 # cluster size
 
-# Set to a git repository
+# Set to a git repository 
 workdir:
   url: https://github.com/NovaSky-AI/SkyRL.git
   ref: main
