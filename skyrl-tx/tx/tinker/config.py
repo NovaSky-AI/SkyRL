@@ -21,6 +21,7 @@ class EngineConfig(BaseModel):
         description="Micro-batch size for gradient accumulation; 0 means disabled (use full batch)",
     )
     enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
+    enable_dummy_sample: bool = Field(default=False, description="Enable dummy sampling for testing")
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
