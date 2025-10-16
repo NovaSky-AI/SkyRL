@@ -1,12 +1,12 @@
 # Run this from the repository root after cloning SkyRL.
 resources:
-  infra: aws # replace this with what cloud you want to launch on
+  infra: aws           # replace this with what cloud you want to launch on
   accelerators: L40S:4 # 4x 48 GB GPUs; adjust to the SKU that matches your quota
   memory: 64+          # every node has at least 64 GB memory
   ports: 6479          # expose port for ray dashboard
 #  network_tier: best # when using multiple nodes, communication can become a bottleneck
 
-num_nodes: 2 # cluster size
+num_nodes: 2         # cluster size
 
 # Set to a git repository 
 workdir:
@@ -18,7 +18,7 @@ secrets:
   WANDB_API_KEY: null
 
 envs:
-  LOGGER: "wandb" # change to "console" to print to stdout
+  LOGGER: "wandb"  # change to "console" to print to stdout
   INFERENCE_BACKEND: "vllm"
   # INFERENCE_BACKEND: "sglang"
   NUM_EPOCHS: 20
