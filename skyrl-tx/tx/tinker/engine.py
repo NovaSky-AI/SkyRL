@@ -116,6 +116,7 @@ class TinkerEngine:
         # Configure LoRA settings
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
         self.model_config.max_lora_rank = self.config.max_lora_rank
+        self.model_config.shard_attention_heads = self.config.shard_attention_heads
 
         model_class = get_model_class(self.model_config)
 
@@ -387,7 +388,7 @@ class TinkerEngine:
         )
         loss_mask = jnp.array(
             [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
-            dtype=jnp.int32,
+            dtype=jnp.bool_,
         )
 
         total_bs = int(input_ids.shape[0])
@@ -569,6 +570,23 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
+    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
+        """Generate text samples from the model."""
+        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
+        if self.config.enable_dummy_sample:
+            num_samples = request_data.num_samples
+            sequences = [
+                types.GeneratedSequence(stop_reason="length", tokens=[100, 200, 300], logprobs=[-0.1, -0.2, -0.3])
+                for _ in range(num_samples)
+            ]
+
+            return types.SampleOutput(
+                sequences=sequences,
+                prompt_logprobs=[-0.05, -0.15, -0.25],
+            )
+
+        raise NotImplementedError("sample endpoint not yet fully implemented")
+
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
             case types.RequestType.CREATE_MODEL:
@@ -579,6 +597,8 @@ class TinkerEngine:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
+            case types.RequestType.SAMPLE:
+                result = self.process_sample(model_id, types.SampleInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS:
                 result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:

@@ -4,7 +4,7 @@
 # example, usually we try to avoid optional values in these types.
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -18,6 +18,7 @@ class RequestType(str, Enum):
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
+    SAMPLE = "sample"
 
 
 class AdamParams(BaseModel):
@@ -91,6 +92,24 @@ class LoadWeightsOutput(BaseModel):
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+
+
+class SampleInput(BaseModel):
+    prompt: dict[str, Any]
+    sampling_params: dict[str, Any]
+    num_samples: int
+    checkpoint_id: str
+
+
+class GeneratedSequence(BaseModel):
+    stop_reason: Literal["length", "stop"]
+    tokens: list[int]
+    logprobs: list[float]
+
+
+class SampleOutput(BaseModel):
+    sequences: list[GeneratedSequence]
+    prompt_logprobs: list[float]
 
 
 # Metrics tracked in the engine
