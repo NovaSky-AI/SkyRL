@@ -43,13 +43,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
 
         if field.annotation is bool:
             # For boolean flags, use BooleanOptionalAction to support both --{arg_name} and --no-{arg_name}
-            parser.add_argument(
-                f"--{arg_name}",
-                action=argparse.BooleanOptionalAction,
-                dest=name,
-                default=field.default,
-                help=field.description,
-            )
+            kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": field.default}
         else:
             # Add type if available
             if field.annotation is not None:
@@ -63,7 +57,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
                 # For optional fields, provide the default value to argparse
                 kwargs["default"] = field.default
 
-            parser.add_argument(f"--{arg_name}", **kwargs)
+        parser.add_argument(f"--{arg_name}", **kwargs)
 
 
 def config_to_argv(cfg: BaseModel) -> list[str]:
