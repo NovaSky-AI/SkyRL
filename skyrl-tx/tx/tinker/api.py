@@ -447,8 +447,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
     args = parser.parse_args()
 
-    # Create EngineConfig from parsed arguments (only EngineConfig fields)
-    engine_config = EngineConfig.model_validate({k: v for k, v in vars(args).items() if k in EngineConfig.model_fields})
+    # Create EngineConfig from parsed arguments (only EngineConfig fields, excluding None values)
+    engine_config = EngineConfig.model_validate({k: v for k, v in vars(args).items() if k in EngineConfig.model_fields and v is not None})
 
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config

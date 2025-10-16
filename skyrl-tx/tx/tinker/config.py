@@ -41,9 +41,14 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         }
 
         if field.annotation is bool:
-            # For boolean flags, use 'store_true' if the default is False.
-            if not field.default:
+            # For boolean flags, use 'store_true' if the default is False, 'store_false' if default is True
+            if field.default is False:
                 kwargs["action"] = "store_true"
+            else:
+                assert field.default is True
+                # For True defaults, use --no-{name} flag with store_false
+                parser.add_argument(f"--no-{name.replace('_', '-')}", action="store_false", dest=name, **kwargs)
+                continue
         else:
             # Add type if available
             if field.annotation is not None:
@@ -66,10 +71,16 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
     for field_name, value in cfg.model_dump().items():
         field = cfg.model_fields[field_name]
 
-        # For boolean flags with store_true action, only add the flag if True
-        if field.annotation is bool and not field.default:
-            if value:
-                argv.append(f"--{field_name.replace('_', '-')}")
+        if field.annotation is bool:
+            # For boolean flags with False default, only add the flag if True (store_true)
+            if field.default is False:
+                if value:
+                    argv.append(f"--{field_name.replace('_', '-')}")
+            # For boolean flags with True default, only add --no-flag if False (store_false)
+            else:
+                assert field.default is True
+                if not value:
+                    argv.append(f"--no-{field_name.replace('_', '-')}")
         else:
             argv.append(f"--{field_name.replace('_', '-')}")
             argv.append(str(value))
