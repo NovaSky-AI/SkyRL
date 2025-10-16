@@ -355,10 +355,10 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    # Extract model_id from model_path (format: tinker://model_id/checkpoint_name)
+    # Extract model_id and checkpoint_id from model_path (format: tinker://model_id/checkpoint_name)
     parsed = urlparse(request.model_path)
-    if parsed.scheme != "tinker" or not (model_id := parsed.netloc):
-        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/...")
+    if parsed.scheme != "tinker" or not (model_id := parsed.netloc) or not (checkpoint_id := parsed.path.lstrip('/')):
+        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
 
     statement = select(ModelDB).where(ModelDB.model_id == model_id)
     result = await session.exec(statement)
@@ -375,6 +375,7 @@ async def asample(request: SampleRequest, session: AsyncSession = Depends(get_se
             prompt=request.prompt,
             sampling_params=request.sampling_params,
             num_samples=request.num_samples,
+            checkpoint_id=checkpoint_id,
         ),
     )
 

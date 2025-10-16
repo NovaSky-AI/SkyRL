@@ -98,6 +98,7 @@ class SampleInput(BaseModel):
     prompt: dict[str, Any]
     sampling_params: dict[str, Any]
     num_samples: int
+    checkpoint_id: str
 
 
 class GeneratedSequence(BaseModel):

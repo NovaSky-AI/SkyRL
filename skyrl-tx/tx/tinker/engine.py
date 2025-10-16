@@ -572,6 +572,7 @@ class TinkerEngine:
 
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
         """Generate text samples from the model."""
+        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
         if self.config.enable_dummy_sample:
             num_samples = request_data.num_samples
             sequences = [
