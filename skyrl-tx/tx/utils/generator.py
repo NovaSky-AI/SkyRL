@@ -2,10 +2,6 @@
 
 This module provides a GeneratorMixin class that can be inherited by causal language models
 to add efficient text generation capabilities with KV cache for faster decoding.
-
-Inspired by vLLM's prefill-decode architecture:
-- Prefill stage: Process the full prompt and populate KV cache
-- Decode stage: Generate tokens one at a time using cached keys/values
 """
 
 from dataclasses import dataclass
