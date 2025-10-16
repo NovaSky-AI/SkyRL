@@ -1,5 +1,6 @@
 from skyrl_train.utils.torch_utils import chunked_cross_entropy_from_log_probs, chunked_entropy_from_logits
 import torch
+import pytest
 import math
 
 
@@ -95,19 +96,17 @@ def test_chunked_entropy_from_logits_attention_mask_shape_validation():
 
     # Wrong shape: different batch size
     wrong_mask_batch = torch.ones(3, 3, dtype=torch.float32)
-    try:
+
+    # For wrong batch size
+    with pytest.raises(ValueError, match="does not match logits shape"):
         chunked_entropy_from_logits(logits, attention_mask=wrong_mask_batch)
-        assert False, "Should have raised ValueError for wrong batch size"
-    except ValueError as e:
-        assert "does not match logits shape" in str(e)
 
     # Wrong shape: different sequence length
     wrong_mask_seqlen = torch.ones(2, 4, dtype=torch.float32)
-    try:
+
+    # For wrong sequence length
+    with pytest.raises(ValueError, match="does not match logits shape"):
         chunked_entropy_from_logits(logits, attention_mask=wrong_mask_seqlen)
-        assert False, "Should have raised ValueError for wrong sequence length"
-    except ValueError as e:
-        assert "does not match logits shape" in str(e)
 
     # Correct shape should work
     correct_mask = torch.ones(2, 3, dtype=torch.float32)
