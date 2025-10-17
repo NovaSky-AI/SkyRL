@@ -55,7 +55,7 @@ class FutureDB(SQLModel, table=True):
 class CheckpointDB(SQLModel, table=True):
     __tablename__ = "checkpoints"
 
-    model_id: str = Field(primary_key=True)
+    model_id: str = Field(foreign_key="models.model_id", primary_key=True)
     checkpoint_id: str = Field(primary_key=True)
     status: CheckpointStatus
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

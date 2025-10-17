@@ -65,6 +65,16 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+async def get_model(session: AsyncSession, model_id: str) -> ModelDB:
+    """Fetch a model by ID, raising 404 if not found."""
+    statement = select(ModelDB).where(ModelDB.model_id == model_id)
+    result = await session.exec(statement)
+    model = result.first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    return model
+
+
 async def create_future(
     session: AsyncSession,
     request_type: types.RequestType,
@@ -89,7 +99,11 @@ async def create_checkpoint(
     model_id: str,
     checkpoint_id: str,
 ):
-    """Create a pending CheckpointDB entry."""
+    """Create a pending CheckpointDB entry, ensuring the model exists."""
+    # Check if model exists (required for foreign key constraint)
+    await get_model(session, model_id)
+
+    # Check if checkpoint already exists
     existing_checkpoint = await session.get(CheckpointDB, (model_id, checkpoint_id))
     if existing_checkpoint is not None:
         raise HTTPException(
@@ -285,12 +299,7 @@ class GetInfoRequest(BaseModel):
 @app.post("/api/v1/get_info", response_model=ModelInfoResponse)
 async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depends(get_session)):
     """Retrieve information about the current model."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    model = await get_model(session, request.model_id)
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
@@ -303,12 +312,7 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 @app.get("/api/v1/training_runs/{model_id}", response_model=TrainingRun)
 async def get_training_run(model_id: str, session: AsyncSession = Depends(get_session)):
     """Get training run for session resumption."""
-    statement = select(ModelDB).where(ModelDB.model_id == model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Training run not found")
+    model = await get_model(session, model_id)
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
 
@@ -329,12 +333,7 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
 async def forward_backward(request: ForwardBackwardInput, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    await get_model(session, request.model_id)
 
     request_id = await create_future(
         session=session,
@@ -351,12 +350,7 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
 @app.post("/api/v1/optim_step", response_model=FutureResponse)
 async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(get_session)):
     """Update model using accumulated gradients."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    await get_model(session, request.model_id)
 
     request_id = await create_future(
         session=session,
@@ -373,12 +367,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 @app.post("/api/v1/load_weights", response_model=FutureResponse)
 async def load_weights(request: LoadWeightsRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Loads weights and training state."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    await get_model(session, request.model_id)
 
     path = types.TinkerPath.parse(request.path)
     if (
@@ -408,13 +397,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
 @app.post("/api/v1/save_weights", response_model=FutureResponse)
 async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights and training state."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-
+    # Create pending checkpoint entry (validates model exists)
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
@@ -436,13 +419,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
 async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights in a format compatible with sampling/inference servers."""
-    statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-
+    # Create pending checkpoint entry (validates model exists)
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
@@ -468,12 +445,7 @@ async def asample(request: SampleRequest, session: AsyncSession = Depends(get_se
     if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
         raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
 
-    statement = select(ModelDB).where(ModelDB.model_id == model_id)
-    result = await session.exec(statement)
-    model = result.first()
-
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    await get_model(session, model_id)
 
     request_id = await create_future(
         session=session,
@@ -543,17 +515,20 @@ async def send_telemetry(request: TelemetryRequest):
 
 
 async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
-    """Validate that a model and checkpoint exist, returning the checkpoint path."""
-    statement = select(ModelDB).where(ModelDB.model_id == unique_id)
-    result = await session.exec(statement)
-    model = result.first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
+    """Validate that a model and checkpoint exist in the database, returning the checkpoint path."""
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id))
 
-    checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
-    if not checkpoint_path.exists():
+    if not checkpoint_db:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
+    if checkpoint_db.status == CheckpointStatus.PENDING:
+        raise HTTPException(status_code=425, detail=f"Checkpoint is still being created")
+
+    if checkpoint_db.status == CheckpointStatus.FAILED:
+        error_msg = checkpoint_db.error_message or "Unknown error"
+        raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {error_msg}")
+
+    checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
     return checkpoint_path
 
 
