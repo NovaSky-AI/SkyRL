@@ -487,8 +487,8 @@ class TinkerEngine:
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
         adapter_index = self.models[model_id].adapter_index
-        source_model_id = request_data.path.split("/")[2]  
-        checkpoint_id = request_data.path.split("/")[-1] 
+        source_model_id = request_data.path.split("/")[2]
+        checkpoint_id = request_data.path.split("/")[-1]
         checkpoint_dir = self.config.checkpoints_base / source_model_id / f"{checkpoint_id}.tar.gz"
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
@@ -570,7 +570,7 @@ class TinkerEngine:
             path=f"tinker://{model_id}/{checkpoint_id}",
             type="save_weights_for_sampler",
         )
-    
+
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
         """Generate text samples from the model."""
         logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
