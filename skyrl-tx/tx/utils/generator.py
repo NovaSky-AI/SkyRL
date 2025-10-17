@@ -44,7 +44,7 @@ class GeneratorMixin:
     a generate() method that efficiently produces text using KV caching.
 
     The model class must implement:
-    - __call__(input_ids, positions, attention_mask=None, adapter_indices=None, kv_cache=None)
+    - __call__(input_ids, attention_mask, adapter_indices=None, kv_cache=None)
       that returns dict with 'logits' and 'kv_cache'
 
     Example:
@@ -77,13 +77,11 @@ class GeneratorMixin:
             Generated token sequences [batch_size, seq_len + max_new_tokens]
         """
         rng = jax.random.PRNGKey(seed)
-        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)
+        generated_ids = input_ids
 
         # Prefill: process full prompt
-        outputs = self(input_ids, positions, attention_mask=attention_mask)
+        outputs = self(input_ids, attention_mask=attention_mask)
         kv_cache = outputs["kv_cache"]
-        next_position = positions[:, -1:] + 1
-        generated_ids = input_ids
 
         # Decode: generate tokens one at a time
         for step in range(max_new_tokens):
@@ -93,9 +91,7 @@ class GeneratorMixin:
             attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
 
             if step < max_new_tokens - 1:
-                outputs = self(
-                    next_token[:, None], next_position + step, attention_mask=attention_mask, kv_cache=kv_cache
-                )
+                outputs = self(next_token[:, None], attention_mask=attention_mask, kv_cache=kv_cache)
                 kv_cache = outputs["kv_cache"]
 
         return generated_ids
