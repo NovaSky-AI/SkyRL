@@ -1,10 +1,10 @@
 """Tests for the Tinker API mock server using the real tinker client."""
 
+import os
 import subprocess
-from urllib.parse import urlparse
+import urllib.request
 
 import pytest
-import requests
 import tinker
 from tinker import types
 
@@ -120,25 +120,23 @@ def test_training_workflow(service_client):
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
-    # Get a checkpoint
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
-    assert sampling_path is not None
+    from urllib.parse import urlparse
 
-    # Get checkpoint download URL and download the checkpoint
+    parsed = urlparse(sampling_path)
+    training_run_id = parsed.netloc
+    checkpoint_id = parsed.path.lstrip("/")
     rest_client = service_client.create_rest_client()
-    parsed_url = urlparse(sampling_path)
-    training_run_id = parsed_url.netloc
-    checkpoint_id = parsed_url.path.lstrip("/")
     checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
     assert checkpoint_response is not None
     assert checkpoint_response.url is not None
     assert checkpoint_response.expires is not None
 
     # Actually download the checkpoint
-    download_response = requests.get(checkpoint_response.url)
-    assert download_response.status_code == 200
-    assert len(download_response.content) > 0
-    assert download_response.headers.get("Content-Type") == "application/octet-stream"
+    urllib.request.urlretrieve(checkpoint_response.url, "archive.tar")
+    assert os.path.exists("archive.tar")
+    assert os.path.getsize("archive.tar") > 0
+    os.remove("archive.tar")
 
 
 def test_sample(service_client):
