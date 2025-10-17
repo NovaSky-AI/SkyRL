@@ -364,16 +364,14 @@ class Qwen3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids)
-        all_hidden_states = [] if output_hidden_states else None
+        all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
         for layer_idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            layer_cache = None
-            if kv_cache is not None:
-                layer_cache = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
+            layer_cache = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]) if kv_cache is not None else None
 
             hidden_states, (k, v) = layer(
                 hidden_states,
