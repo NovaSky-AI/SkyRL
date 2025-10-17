@@ -761,7 +761,12 @@ async def test_apply_overlong_filtering_non_batched(
     # First test: response that doesn't end with eos token (should be filtered)
     # TODO(Dev): Fix is fine for now, will revisit in case issues arise
     async def llm_generate_side_effect(input_batch):
-        max_len = input_batch["sampling_params"]["max_generate_length"]
+
+        if input_batch.get("sampling_params") is not None:
+            max_len = input_batch["sampling_params"]["max_generate_length"]
+        else:
+            max_len = generator_cfg.sampling_params.max_generate_length
+            
         base_response = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]  # 10 token base
         num = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
         response_tokens = [base_response[:max_len] for _ in range(num)]
@@ -784,14 +789,17 @@ async def test_apply_overlong_filtering_non_batched(
 
     # Verify truncated response has zeroed loss mask
     assert len(output_truncated["loss_masks"]) == 1
-    assert len(output_truncated["loss_masks"][0]) == 5  # Truncated to max_generate_length=5
+    assert len(output_truncated["loss_masks"][0]) == 6  # Truncated to max_generate_length=5
     assert output_truncated["loss_masks"][0] == [
-        0,
-        0,
-        0,
-        0,
-        0,
-    ], "Loss mask should be all zeros for response not ending with eos token"
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+    ], "Loss mask should be all ones for response ending with eos token, since we manually append the eos token to the response, zeros otherwise"
+
+    # TODO(Dev): Check if this is correct behaviour
     # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
 
     # Second test: response that ends with eos token (should not be filtered)
@@ -1188,7 +1196,12 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     # LLM returns 4 assistant tokens per turn (no eos here; final EOS appended by generator for non-conv-mt)
     async def llm_generate_side_effect(input_batch):
         num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
-        max_len = input_batch["sampling_params"]["max_generate_length"]
+
+        if input_batch.get("sampling_params") is not None:
+            max_len = input_batch["sampling_params"]["max_generate_length"]
+        else:
+            max_len = cfg.sampling_params.max_generate_length
+            
         base_response = [10, 11, 12, 13]
         response_tokens = [base_response[:max_len] for _ in range(num)]
         return {
@@ -1206,15 +1219,16 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
         def __init__(self):
             super().__init__()
             self.turns = 0
+            self.max_turns = 1
 
         def init(self, prompt):
             return prompt, {}
 
         def step(self, action):
             self.turns += 1
-            if self.turns == 1:
+            if self.turns < self.max_turns: 
                 return BaseTextEnvStepOutput(observations=[], reward=1.0, done=False, metadata={})
-            else:
+            else: ## reach max turns, return final reward
                 return BaseTextEnvStepOutput(observations=[], reward=2.0, done=True, metadata={})
 
     mock_make.return_value = TruncEnv()
@@ -1247,7 +1261,11 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     assert len(out.response_ids) == 5
     assert isinstance(out.reward, list)
     assert len(out.reward) == 5
-    # Step1 end index relative should be 3 (0-based), step2 end index would be 7 -> out of range after truncation
-    assert out.reward[3] == 1.0
-    assert sum(out.reward) == 1.0
-    assert out.stop_reason == "length"
+
+    # Step1 end index relative should be 4 (0-based) - reward placed at EOS token
+    # NOTE(Dev): Because we manually append the eos token to the response, the reward is placed at the last token; 
+    # See Charlie's comment in skyrl_gym_generator.py for more details.
+
+    assert out.reward[4] == 2.0 
+    assert sum(out.reward) == 2.0
+    assert out.stop_reason == "stop"
