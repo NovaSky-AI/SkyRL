@@ -3,8 +3,11 @@
 # types as well as the database models, but are distinct. For
 # example, usually we try to avoid optional values in these types.
 
+from __future__ import annotations
+
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -16,6 +19,28 @@ class RequestType(str, Enum):
     FORWARD_BACKWARD = "forward_backward"
     OPTIM_STEP = "optim_step"
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
+    SAVE_WEIGHTS = "save_weights"
+    LOAD_WEIGHTS = "load_weights"
+    SAMPLE = "sample"
+
+
+class TinkerPath(BaseModel):
+    primary_id: str
+    kind: str
+    secondary_id: str
+
+    @classmethod
+    def parse(cls, url: str) -> TinkerPath | None:
+        """Parse a URL string into a TinkerPath object."""
+        parsed = urlparse(url)
+
+        match (parsed.scheme, *parsed.path.split("/")):
+            case ("tinker", "", secondary_id):
+                return cls(primary_id=parsed.netloc, kind="", secondary_id=secondary_id)
+            case ("tinker", "", kind, secondary_id):
+                return cls(primary_id=parsed.netloc, kind=kind, secondary_id=secondary_id)
+            case _:
+                return None
 
 
 class AdamParams(BaseModel):
@@ -69,6 +94,47 @@ class SaveWeightsForSamplerOutput(BaseModel):
     type: str
 
 
+class SaveWeightsInput(BaseModel):
+    path: str
+
+
+class SaveWeightsOutput(BaseModel):
+    path: str
+    type: str
+
+
+class LoadWeightsInput(BaseModel):
+    source_model_id: str
+    checkpoint_id: str
+
+
+class LoadWeightsOutput(BaseModel):
+    type: str
+
+
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+
+
+class SampleInput(BaseModel):
+    prompt: dict[str, Any]
+    sampling_params: dict[str, Any]
+    num_samples: int
+    checkpoint_id: str
+
+
+class GeneratedSequence(BaseModel):
+    stop_reason: Literal["length", "stop"]
+    tokens: list[int]
+    logprobs: list[float]
+
+
+class SampleOutput(BaseModel):
+    sequences: list[GeneratedSequence]
+    prompt_logprobs: list[float]
+
+
+# Metrics tracked in the engine
+class EngineMetrics(BaseModel):
+    seq_len_jit_times: dict[int, float] = {}

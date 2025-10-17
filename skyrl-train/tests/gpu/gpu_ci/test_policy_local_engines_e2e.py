@@ -1,9 +1,9 @@
 """
 # Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm --extra deepspeed pytest tests/gpu/test_policy_local_engines_e2e.py -m "vllm"
+uv run --isolated --extra dev --extra vllm --extra deepspeed pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
 
 # Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang --extra deepspeed pytest tests/gpu/test_policy_local_engines_e2e.py -m "sglang"
+uv run --isolated --extra dev --extra sglang --extra deepspeed pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "sglang"
 """
 
 import pytest
@@ -15,7 +15,6 @@ from omegaconf import DictConfig
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, AdvantageEstimatorRegistry
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -72,7 +71,7 @@ def get_test_actor_config() -> DictConfig:
         "colocate_gloo_fsdp_sglang",
     ],
 )
-def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, backend, tp_size):
+def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, backend, tp_size):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -111,6 +110,4 @@ def test_policy_local_engines_e2e(colocate_all, weight_sync_backend, strategy, b
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
-        AdvantageEstimatorRegistry.reset()
-        PolicyLossRegistry.reset()
         ray.shutdown()

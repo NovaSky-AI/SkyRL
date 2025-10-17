@@ -57,12 +57,33 @@ def chunked_cross_entropy_from_log_probs(
 
 # NOTE: we don't actually use jaxtype for runtime type checking since it doesn't play well with torch compile
 def chunked_entropy_from_logits(
-    logits: Float[torch.Tensor, "batch_size seqlen vocab"], requires_grad: bool = False
+    logits: Float[torch.Tensor, "batch_size seqlen vocab"],
+    requires_grad: bool = False,
+    attention_mask: Float[torch.Tensor, "batch_size seqlen"] = None,
 ) -> Float[torch.Tensor, "batch_size seqlen"]:
     """Chunked entropy calculation from logits.
 
     Avoids allocating a full log probabilities tensor to save memory. For models like Qwen with large vocab sizes, this can reduce gpu memory significantly (~O(10GB))
+
+    Args:
+        logits: Input logits of shape (batch_size, seqlen, vocab_size)
+        requires_grad: Whether to enable gradient computation
+        attention_mask: Optional attention mask of shape (batch_size, seqlen). When provided,
+                       entropy values for padded positions (mask=0) will be zeroed out.
+
+    Returns:
+        Entropy tensor of shape (batch_size, seqlen). If attention_mask is provided,
+        positions with mask=0 will have entropy=0.
     """
+    # Validate attention mask shape if provided
+    if attention_mask is not None:
+        if attention_mask.shape != (logits.shape[0], logits.shape[1]):
+            raise ValueError(
+                f"attention_mask shape {attention_mask.shape} does not match logits shape "
+                f"(batch_size={logits.shape[0]}, seqlen={logits.shape[1]}). "
+                f"Expected attention_mask shape: ({logits.shape[0]}, {logits.shape[1]})"
+            )
+
     cm = nullcontext() if requires_grad else torch.no_grad()
     with cm:
         # Calculate entropy in chunks to avoid OOM
@@ -80,6 +101,12 @@ def chunked_entropy_from_logits(
             # Calculate entropy for this chunk
             chunk_probs = chunk_logprob.exp()
             chunk_entropy = -(chunk_probs * chunk_logprob).sum(-1)
+
+            # Apply attention mask if provided
+            if attention_mask is not None:
+                chunk_mask = attention_mask[:, start_idx:end_idx]
+                chunk_entropy = chunk_entropy * chunk_mask
+
             entropy_tensor[:, start_idx:end_idx] = chunk_entropy
     return entropy_tensor
 

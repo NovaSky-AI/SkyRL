@@ -386,7 +386,8 @@ def init_inference_engines(
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
-    initialize_ray(cfg)
+    if not ray.is_initialized():
+        initialize_ray(cfg)
     if colocate_all:
         pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
@@ -512,7 +513,7 @@ def init_remote_inference_servers(
     # Start the vLLM server process
     server_process = subprocess.Popen(remote_server_command, env=env)
 
-    wait_for_server(url=f"localhost:{engine_port}", health_path="health")
+    wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=120)
     print(f"Server at localhost:{engine_port} is online")
 
     engines = create_remote_inference_engines(

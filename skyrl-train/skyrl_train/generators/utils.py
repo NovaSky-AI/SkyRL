@@ -5,6 +5,8 @@ import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
+from loguru import logger
+from skyrl_gym.metrics import aggregate_for_environment
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
@@ -163,6 +165,15 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
         result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
+    # propagate additional keys with list values as-is
+    additional_keys = [
+        key for key in generator_outputs[0] if key not in result and isinstance(generator_outputs[0][key], list)
+    ]
+    if len(additional_keys):
+        logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
+    for key in additional_keys:
+        result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+
     return result
 
 
@@ -185,7 +196,24 @@ def apply_overlong_filtering(
     ]
 
 
-def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], List[List[float]]]):
+def get_rollout_metrics(
+    responses: List[List[int]],
+    rewards: Union[List[float], List[List[float]]],
+    env_metrics: Optional[List[Dict[str, Any]]] = None,
+    env_classes: Optional[List[str]] = None,
+):
+    """
+    Computes rollout metrics including token statistics and optional environment-specific metrics.
+
+    Args:
+        responses: List of token ID sequences for each response
+        rewards: List of rewards (either per-trajectory or per-token)
+        env_metrics: Optional list of environment-specific metrics for each trajectory
+        env_classes: Optional list of environment class names for each trajectory
+
+    Returns:
+        Dictionary of aggregated metrics
+    """
     num_tokens_arr = np.array([len(response) for response in responses])
     # Support both response-level and token-level rewards
     flat_rewards = []
@@ -204,7 +232,7 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
     # average tokens for zero rewards
     avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
 
-    return {
+    rollout_metrics = {
         "generate/min_num_tokens": np.min(num_tokens_arr).item(),
         "generate/max_num_tokens": np.max(num_tokens_arr).item(),
         "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
@@ -212,6 +240,18 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+    if env_metrics is not None and env_classes is not None:
+        env_to_metrics = defaultdict(list)
+        for i, metrics in enumerate(env_metrics):
+            env_to_metrics[env_classes[i]].append(metrics)
+        for env_name, metrics in env_to_metrics.items():
+            # Aggregate metrics across all trajectories for the same environment
+            agg = aggregate_for_environment(env_name, metrics)
+            for key, value in agg.items():
+                rollout_metrics[f"environment/{key}"] = value
+
+    return rollout_metrics
 
 
 def prepare_generator_input(
@@ -301,9 +341,6 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "I am a user."},
     ]
-    if messages[0]["role"] != "assistant":
-        # add an assistant message as well if the first role is user/tool
-        base_conversation.append({"role": "assistant", "content": "I am an assistant."})
     base_conversation_token_ids = tokenizer.apply_chat_template(
         base_conversation,
         add_generation_prompt=False,

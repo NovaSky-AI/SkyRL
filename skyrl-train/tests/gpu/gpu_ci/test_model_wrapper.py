@@ -4,6 +4,7 @@ uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_model_wrapper.py
 
 from skyrl_train.model_wrapper import HFModelWrapper
 import torch
+import pytest
 from unittest.mock import MagicMock, patch
 from transformers import AutoTokenizer
 import ray
@@ -99,7 +100,7 @@ def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
 
 @ray.remote(num_gpus=1)
 class ActorTask:
-    def __init__(self, rank, world_size, sequence_parallel_size):
+    def __init__(self, rank, world_size, sequence_parallel_size, use_sample_packing):
         self.rank = rank
         self.world_size = world_size
         self.sequence_parallel_size = sequence_parallel_size
@@ -113,7 +114,7 @@ class ActorTask:
             use_flash_attention_2=True,
             bf16=True,
             sequence_parallel_size=sequence_parallel_size,
-            use_sample_packing=True,
+            use_sample_packing=use_sample_packing,
         )
         group = _get_default_group()
         set_ulysses_sequence_parallel_group(group)
@@ -124,13 +125,14 @@ class ActorTask:
     def forward(self, input_ids, attention_mask, num_actions):
         input_ids = input_ids.to("cuda")
         attention_mask = attention_mask.to("cuda")
-        return self.model(input_ids, num_actions, attention_mask)
+        return self.model(input_ids, num_actions, attention_mask, return_output=True, compute_entropy=True)
 
     def cleanup(self):
         dist.destroy_process_group()
 
 
-def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture):
+@pytest.mark.parametrize("use_sample_packing", [True, False])
+def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture, use_sample_packing):
 
     # Create input sequence
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
@@ -151,33 +153,86 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture):
         use_flash_attention_2=True,
         bf16=True,
         sequence_parallel_size=1,
-        use_sample_packing=True,
+        use_sample_packing=use_sample_packing,
     )
     model_no_sp.model.eval()
     model_no_sp.model.to("cuda:0")
 
     # Forward pass without sequence parallelism
     with torch.no_grad():
-        output_no_sp = model_no_sp(input_ids.to("cuda:0"), num_actions, attention_mask.to("cuda:0"))
+        logprobs_no_sp, output_no_sp = model_no_sp(
+            input_ids.to("cuda:0"), num_actions, attention_mask.to("cuda:0"), compute_entropy=True, return_output=True
+        )
 
     # Now run with sequence parallelism using Ray
     world_size = 2
     sequence_parallel_size = 2
 
     # Create Ray tasks
-    actors = [ActorTask.remote(rank, world_size, sequence_parallel_size) for rank in range(world_size)]
+    actors = [
+        ActorTask.remote(rank, world_size, sequence_parallel_size, use_sample_packing) for rank in range(world_size)
+    ]
 
     # Run forward pass with sequence parallelism
-    outputs_sp = ray.get([actor.forward.remote(input_ids, attention_mask, num_actions) for actor in actors])
+    results_sp = ray.get([actor.forward.remote(input_ids, attention_mask, num_actions) for actor in actors])
 
     # Verify outputs match
-    # Since we're using sequence parallelism, each GPU processes half the sequence
-    # and the outputs should be gathered and match the non-parallel output
-    for i, output_sp in enumerate(outputs_sp):
+    # # Since we're using sequence parallelism, each GPU processes half the sequence
+    # # and the outputs should be gathered and match the non-parallel output
+    for i, (logprob_sp, output_sp) in enumerate(results_sp):
         assert torch.allclose(
-            output_sp, output_no_sp
-        ), f"Outputs with sequence parallelism don't match outputs without sequence parallelism for rank {i}"
+            logprob_sp, logprobs_no_sp
+        ), f"Logprobs with sequence parallelism don't match logprobs without sequence parallelism for rank {i}"
+        assert torch.allclose(
+            output_no_sp["entropy"], output_sp["entropy"]
+        ), "Entropy with sequence parallelism doesn't match entropy without sequence parallelism"
 
     # Cleanup
     ray.get([actor.cleanup.remote() for actor in actors])
-    ray.shutdown()
+
+
+def test_actor_entropy_consistency_sample_packing():
+    """Tests that entropy calculation is consistent with and without sample packing"""
+
+    # Create input sequence
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
+    input_ids = [
+        [tokenizer.pad_token_id] * 3 + [10, 14, 200, 3, 40, tokenizer.eos_token_id] + [tokenizer.pad_token_id],
+        [tokenizer.pad_token_id, 12, 13, 220, 1000, 3, 40, tokenizer.eos_token_id] + [tokenizer.pad_token_id] * 2,
+    ]
+    attention_mask = [[0] * 3 + [1] * 6 + [0], [0] + [1] * 7 + [0] * 2]
+    num_actions = 4
+
+    # Convert to tensors
+    input_ids = torch.tensor(input_ids)
+    attention_mask = torch.tensor(attention_mask)
+
+    # First run without sample packing
+    model = HFModelWrapper(
+        pretrain_or_model=MODEL_NAME,
+        use_flash_attention_2=True,
+        bf16=True,
+        sequence_parallel_size=1,
+        use_sample_packing=False,
+    )
+
+    model.model.eval()
+    model.model.to("cuda:0")
+
+    with torch.no_grad():
+        _, output_no_pack = model(
+            input_ids.to("cuda:0"), num_actions, attention_mask.to("cuda:0"), compute_entropy=True, return_output=True
+        )
+
+    # Switch to using sample packing
+    model.use_sample_packing = True
+
+    with torch.no_grad():
+        _, output_pack = model(
+            input_ids.to("cuda:0"), num_actions, attention_mask.to("cuda:0"), compute_entropy=True, return_output=True
+        )
+
+    # Entropy results should be very close
+    assert torch.allclose(
+        output_no_pack["entropy"], output_pack["entropy"]
+    ), "Entropy with sample packing doesn't match entropy without sample packing"

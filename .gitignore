@@ -39,3 +39,9 @@ docs/_spelling/
 /skyrl-gym/dist
 
 *.log
+
+# SQLite database files
+*.db
+
+# uv lock files
+uv.lock

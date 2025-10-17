@@ -6,7 +6,7 @@ from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
 from tx.models import Qwen3ForCausalLM
-from tx.utils.models import get_dtype, load_checkpoint
+from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
 
 
@@ -20,7 +20,7 @@ def test_lora_training():
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
-        load_checkpoint(checkpoint_path, config, model)
+        load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
         update_adapter_config(model, adapter_index=0, lora_rank=16, lora_alpha=16)
