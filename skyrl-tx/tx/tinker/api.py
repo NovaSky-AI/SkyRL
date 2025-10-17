@@ -1,7 +1,7 @@
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -183,7 +183,7 @@ class SampleRequest(BaseModel):
 
 class SaveWeightsRequest(BaseModel):
     model_id: str
-    path: str
+    path: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255)
     type: Literal["save_weights"] | None = None
 
 
@@ -409,6 +409,13 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Create pending checkpoint entry (path is validated to be a valid checkpoint_id)
+    await create_checkpoint(
+        session=session,
+        model_id=request.model_id,
+        checkpoint_id=request.path,
+    )
 
     request_id = await create_future(
         session=session,
