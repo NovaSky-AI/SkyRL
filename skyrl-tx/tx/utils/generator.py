@@ -49,7 +49,7 @@ class GeneratorMixin:
 
     The model class must implement:
     - __call__(input_ids, attention_mask=None, adapter_indices=None, kv_cache=None)
-      that returns dict with 'logits' and optionally 'kv_cache'
+      that returns dict with 'logits' and 'kv_cache'
 
     Example:
         class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
@@ -92,8 +92,8 @@ class GeneratorMixin:
         # Get the logits for the last token in the prompt
         logits = outputs["logits"][:, -1, :]  # [batch_size, vocab_size]
 
-        # Initialize KV cache if the model supports it
-        kv_cache = outputs.get("kv_cache", None)
+        # Get the KV cache from the prefill stage
+        kv_cache = outputs["kv_cache"]
 
         # Sample the first generated token
         rng, sample_key = jax.random.split(rng)
@@ -104,17 +104,12 @@ class GeneratorMixin:
 
         # DECODE STAGE: Generate remaining tokens one at a time
         for step in range(max_new_tokens - 1):
-            # Forward pass with the full sequence so far (or just new token if KV cache is available)
-            if kv_cache is not None:
-                # Use KV cache: only process the last generated token
-                current_input = next_token[:, None]  # [batch_size, 1]
-                outputs = self(current_input, kv_cache=kv_cache)
-            else:
-                # No KV cache: process the full sequence
-                outputs = self(generated_ids)
+            # Use KV cache: only process the last generated token
+            current_input = next_token[:, None]  # [batch_size, 1]
+            outputs = self(current_input, kv_cache=kv_cache)
 
             logits = outputs["logits"][:, -1, :]  # [batch_size, vocab_size]
-            kv_cache = outputs.get("kv_cache", None)
+            kv_cache = outputs["kv_cache"]
 
             # Sample next token
             rng, sample_key = jax.random.split(rng)

@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import Param, prepare_routing
-from tx.utils.generator import GeneratorMixin
+from tx.utils.generator import GeneratorMixin, KVCache
 
 
 class RMSNorm(nnx.Module):
@@ -101,7 +101,9 @@ class Qwen3Attention(nnx.Module):
         *,
         attention_mask: jax.Array | None = None,
         adapter_indices: jax.Array | None = None,
-    ) -> jax.Array:
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        position_offset: int = 0,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
 
         # Reshape each: [B,T,H*D] -> [B,T,H,D]
         B, T, _ = x.shape
@@ -109,10 +111,20 @@ class Qwen3Attention(nnx.Module):
         k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim))
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
-        position_ids = jnp.arange(x.shape[1])[None, :].repeat(x.shape[0], axis=0)
+        # Apply RoPE with correct position offset
+        position_ids = jnp.arange(position_offset, position_offset + T)[None, :].repeat(B, axis=0)
 
         q = apply_rope(q, position_ids, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, position_ids, self.head_dim, self.config.rope_theta)
+
+        # Update KV cache
+        if kv_cache is not None:
+            cached_k, cached_v = kv_cache
+            k = jnp.concatenate([cached_k, k], axis=1)
+            v = jnp.concatenate([cached_v, v], axis=1)
+
+        # Store updated cache
+        updated_cache = (k, v)
 
         if self.num_kv_heads != self.num_heads:
             num_groups = self.num_heads // self.num_kv_heads
@@ -129,7 +141,7 @@ class Qwen3Attention(nnx.Module):
         )
 
         attn_out_flat = attn_output.reshape(B, T, self.num_heads * self.head_dim)  # [B,T,H,D] -> [B,T,H*D]
-        return self.o_proj(attn_out_flat, adapter_indices=adapter_indices)
+        return self.o_proj(attn_out_flat, adapter_indices=adapter_indices), updated_cache
 
 
 class Qwen3MLP(nnx.Module):
@@ -300,13 +312,17 @@ class Qwen3DecoderLayer(nnx.Module):
         *,
         attention_mask: jax.Array | None = None,
         adapter_indices: jax.Array | None = None,
-    ) -> jax.Array:
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        position_offset: int = 0,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        hidden_states, updated_cache = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
             adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            position_offset=position_offset,
         )
         hidden_states = residual + hidden_states
 
@@ -315,7 +331,7 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states = self.mlp(hidden_states, adapter_indices=adapter_indices)
         hidden_states = residual + hidden_states
 
-        return hidden_states
+        return hidden_states, updated_cache
 
 
 class Qwen3Model(nnx.Module):
@@ -342,7 +358,8 @@ class Qwen3Model(nnx.Module):
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
-    ) -> dict[str, jax.Array | list[jax.Array]]:
+        kv_cache: KVCache | None = None,
+    ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -351,23 +368,48 @@ class Qwen3Model(nnx.Module):
 
         all_hidden_states: list[jax.Array] = []
 
-        for layer in self.layers:
+        # Calculate position offset from KV cache
+        position_offset = 0
+        if kv_cache is not None and len(kv_cache.keys) > 0:
+            # Get sequence length from first layer's cached keys
+            position_offset = kv_cache.keys[0].shape[1]
+
+        # Collect updated caches for all layers
+        updated_keys: list[jax.Array] = []
+        updated_values: list[jax.Array] = []
+
+        for layer_idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            hidden_states = layer(
+            # Get this layer's cache if available
+            layer_cache = None
+            if kv_cache is not None and layer_idx < len(kv_cache.keys):
+                layer_cache = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
+
+            hidden_states, updated_cache = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
+                kv_cache=layer_cache,
+                position_offset=position_offset,
             )
+
+            # Store updated cache
+            updated_keys.append(updated_cache[0])
+            updated_values.append(updated_cache[1])
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
+        # Build updated KV cache
+        updated_kv_cache = KVCache(keys=updated_keys, values=updated_values)
+
         return {
             "last_hidden_state": hidden_states,
             "hidden_states": all_hidden_states,
+            "kv_cache": updated_kv_cache,
         }
 
 
@@ -394,12 +436,14 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
-    ) -> dict[str, jax.Array | list[jax.Array]]:
+        kv_cache: KVCache | None = None,
+    ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
         )
         hidden_states = outputs["last_hidden_state"]
         if self.config.tie_word_embeddings:
