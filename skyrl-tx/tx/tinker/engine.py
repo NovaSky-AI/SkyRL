@@ -179,7 +179,7 @@ class TinkerEngine:
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
 
-            loss_mask = jnp.where(loss_mask, 1.0, 0.0).astype(jnp.float32)
+            loss_mask = loss_mask.astype(jnp.float32)
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
                 return jax.lax.switch(
@@ -196,7 +196,7 @@ class TinkerEngine:
                 advantages, 
             ) 
 
-            per_seq_loss = (per_token_losses * loss_mask).sum(axis=-1) / loss_mask.sum(axis=-1)
+            per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (logits, per_token_losses)
 
