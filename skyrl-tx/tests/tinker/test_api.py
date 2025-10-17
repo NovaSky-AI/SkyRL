@@ -122,13 +122,17 @@ def test_training_workflow(service_client):
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
+    # Test that we can restore the training run
+    training_client = service_client.create_training_client_from_state(resume_path)
+    # Verify the restored client has the same state by running forward_backward again
+    fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    assert fwdbwd_result3.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
+
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
-    parsed = urlparse(sampling_path)
-    training_run_id = parsed.netloc
-    checkpoint_id = parsed.path.lstrip("/")
+    path = types.TinkerPath.parse(sampling_path)
     rest_client = service_client.create_rest_client()
     # Download the checkpoint
-    checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
+    checkpoint_response = rest_client.get_checkpoint_archive_url(path.primary_id, path.secondary_id).result()
     with tempfile.NamedTemporaryFile() as tmp_archive:
         urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
         assert os.path.getsize(tmp_archive.name) > 0

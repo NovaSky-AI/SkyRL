@@ -335,7 +335,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
 
 
 @app.post("/api/v1/load_weights", response_model=FutureResponse)
-async def load_weights(request: LoadWeightsRequest, session: AsyncSession = Depends(get_session)):
+async def load_weights(request: LoadWeightsRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Loads weights and training state."""
     statement = select(ModelDB).where(ModelDB.model_id == request.model_id)
     result = await session.exec(statement)
@@ -344,11 +344,24 @@ async def load_weights(request: LoadWeightsRequest, session: AsyncSession = Depe
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
+    path = types.TinkerPath.parse(request.path)
+    if (
+        not path
+        or path.kind != "weights"
+        or not (source_model_id := path.primary_id)
+        or not (checkpoint_id := path.secondary_id)
+    ):
+        raise HTTPException(
+            status_code=400, detail="request.path must be in format tinker://source_model_id/weights/checkpoint_id"
+        )
+
+    await validate_checkpoint(req, source_model_id, checkpoint_id, session)
+
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
-        request_data=types.LoadWeightsInput(path=request.path),
+        request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
     )
 
     await session.commit()
@@ -403,9 +416,8 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    # Extract model_id and checkpoint_id from model_path (format: tinker://model_id/checkpoint_name)
-    parsed = urlparse(request.model_path)
-    if parsed.scheme != "tinker" or not (model_id := parsed.netloc) or not (checkpoint_id := parsed.path.lstrip("/")):
+    path = types.TinkerPath.parse(request.model_path)
+    if not path or not path.kind == "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
         raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
 
     statement = select(ModelDB).where(ModelDB.model_id == model_id)

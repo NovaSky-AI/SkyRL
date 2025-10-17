@@ -3,8 +3,11 @@
 # types as well as the database models, but are distinct. For
 # example, usually we try to avoid optional values in these types.
 
+from __future__ import annotations
+
 from enum import Enum
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -19,6 +22,25 @@ class RequestType(str, Enum):
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
+
+
+class TinkerPath(BaseModel):
+    primary_id: str
+    kind: str
+    secondary_id: str
+
+    @classmethod
+    def parse(cls, url: str) -> TinkerPath | None:
+        """Parse a URL string into a TinkerUrl object."""
+        parsed = urlparse(url)
+
+        match (parsed.scheme, *parsed.path.split("/")):
+            case ("tinker", "", secondary_id):
+                return cls(primary_id=parsed.netloc, kind="", secondary_id=secondary_id)
+            case ("tinker", "", kind, secondary_id):
+                return cls(primary_id=parsed.netloc, kind=kind, secondary_id=secondary_id)
+            case _:
+                return None
 
 
 class AdamParams(BaseModel):
@@ -82,7 +104,8 @@ class SaveWeightsOutput(BaseModel):
 
 
 class LoadWeightsInput(BaseModel):
-    path: str
+    source_model_id: str
+    checkpoint_id: str
 
 
 class LoadWeightsOutput(BaseModel):
