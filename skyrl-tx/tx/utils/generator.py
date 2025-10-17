@@ -92,7 +92,8 @@ class GeneratorMixin:
             generated_ids = jnp.concatenate([generated_ids, next_token[:, None]], axis=1)
             attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
 
-            outputs = self(next_token[:, None], next_position + step, attention_mask=attention_mask, kv_cache=kv_cache)
-            kv_cache = outputs["kv_cache"]
+            if step < max_new_tokens - 1:
+                outputs = self(next_token[:, None], next_position + step, attention_mask=attention_mask, kv_cache=kv_cache)
+                kv_cache = outputs["kv_cache"]
 
         return generated_ids
