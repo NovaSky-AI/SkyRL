@@ -135,7 +135,7 @@ class Qwen3Attention(nnx.Module):
             v,
             scale=1.0 / self.head_dim**0.5,
             mask=attention_mask[:, None, None, :].astype(bool) if attention_mask is not None else None,
-            is_causal=(q.shape[1] == k.shape[1]),
+            is_causal=kv_cache is None,
         )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
