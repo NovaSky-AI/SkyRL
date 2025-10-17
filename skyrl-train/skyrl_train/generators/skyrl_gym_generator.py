@@ -38,6 +38,7 @@ class AgentLoopOutput:
     loss_mask: List[int]
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
+    env_metrics: Dict[str, Any]
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -256,6 +257,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 stop_reason = "length"
                 break
 
+        # Get environment-specific metrics after the episode is done
+        env_metrics = env.get_metrics()
+        # Close the environment
         await self._run_in_executor_if_available(env.close)
 
         prompt_ids = input_ids[:initial_prompt_length]
@@ -326,6 +330,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             rollout_logprobs=rollout_logprobs,
+            env_metrics=env_metrics,
         )
 
     async def generate_batched(
@@ -371,9 +376,12 @@ class SkyRLGymGenerator(GeneratorInterface):
         truncated_responses = []
         rewards = []
         loss_masks = []
+        env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
-        for i, (response, response_ids, env) in enumerate(zip(responses, all_response_ids, envs)):
+        for i, (response, response_ids, env, env_class) in enumerate(
+            zip(responses, all_response_ids, envs, env_classes)
+        ):
             # step on environment and compute reward
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, response)
             reward = env_step_output["reward"]
@@ -387,11 +395,14 @@ class SkyRLGymGenerator(GeneratorInterface):
                 sample_logprobs = logprobs[i][: len(response_ids)]
                 truncated_logprobs.append(sample_logprobs)
 
+            # Get environment-specific metrics
+            env_metrics.append(env.get_metrics())
+            # Close the environment
             await self._run_in_executor_if_available(env.close)
 
         prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
         responses = truncated_responses
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.apply_overlong_filtering:
             loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
@@ -458,6 +469,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         stop_reasons = [output.stop_reason for output in all_outputs]
         loss_masks = [output.loss_mask for output in all_outputs]
         prompt_token_ids = [output.prompt_ids for output in all_outputs]
+        env_metrics = [output.env_metrics for output in all_outputs]
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -471,7 +483,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_logprobs = None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
