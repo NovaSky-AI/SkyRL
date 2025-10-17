@@ -32,9 +32,9 @@ def sample_token(logits: jax.Array, *, temperature: float = 1.0, key: jax.Array)
         key: JAX random key for sampling
 
     Returns:
-        Sampled token indices [batch_size]
+        Sampled token indices [batch_size, 1]
     """
-    return jax.random.categorical(key, logits / temperature, axis=-1)
+    return jax.random.categorical(key, logits / temperature, axis=-1)[:, None]
 
 
 class GeneratorMixin:
@@ -86,10 +86,10 @@ class GeneratorMixin:
         for step in range(max_new_tokens):
             rng, sample_key = jax.random.split(rng)
             next_token = sample_token(outputs["logits"][:, -1, :], temperature=temperature, key=sample_key)
-            generated_ids = jnp.concatenate([generated_ids, next_token[:, None]], axis=1)
+            generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
 
             if step < max_new_tokens - 1:
-                attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
-                outputs = self(next_token[:, None], attention_mask=attention_mask, kv_cache=outputs["kv_cache"])
+                attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
+                outputs = self(next_token, attention_mask=attention_mask, kv_cache=outputs["kv_cache"])
 
         return generated_ids

@@ -387,7 +387,7 @@ class Qwen3Model(nnx.Module):
 
         return {
             "last_hidden_state": hidden_states,
-            "hidden_states": all_hidden_states or [],
+            "hidden_states": all_hidden_states,
             "kv_cache": KVCache(keys=updated_keys, values=updated_values),
         }
 
