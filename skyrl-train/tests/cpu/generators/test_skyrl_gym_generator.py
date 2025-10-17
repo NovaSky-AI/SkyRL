@@ -788,15 +788,24 @@ async def test_apply_overlong_filtering_non_batched(
 
     # Verify truncated response has zeroed loss mask
     assert len(output_truncated["loss_masks"]) == 1
-    assert len(output_truncated["loss_masks"][0]) == 6  # Truncated to max_generate_length=5
+    # assert len(output_truncated["loss_masks"][0]) == 6  # Truncated to max_generate_length=5
+    # assert output_truncated["loss_masks"][0] == [
+    #     1,
+    #     1,
+    #     1,
+    #     1,
+    #     1,
+    #     1,
+    # ], "Loss mask should be all ones for response ending with eos token, since we manually append the eos token to the response, zeros otherwise"
+
+    assert len(output_truncated["loss_masks"][0]) == 5
     assert output_truncated["loss_masks"][0] == [
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-    ], "Loss mask should be all ones for response ending with eos token, since we manually append the eos token to the response, zeros otherwise"
+        0,
+        0,
+        0,
+        0,
+        0,
+    ], "Loss mask should be all zeros for response not ending with eos token"
 
     # TODO(Dev): Check if this is correct behaviour
     # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
@@ -806,8 +815,8 @@ async def test_apply_overlong_filtering_non_batched(
     mock_env.init.return_value = ([{"role": "user", "content": "Fresh input"}], {})
     mock_llm.generate = AsyncMock(
         return_value={
-            "responses": ["truncated response"],
-            "stop_reasons": ["length"],
+            "responses": ["normal response"],
+            "stop_reasons": ["stop"],
             "response_ids": [[20, 21, 4]],  # 3 tokens, ends with eos token 4
         }
     )

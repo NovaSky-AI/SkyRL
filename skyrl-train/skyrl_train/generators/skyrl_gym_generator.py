@@ -285,7 +285,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         appended_eos_token = False
 
         if not self.use_conversation_multi_turn:
-            if response_ids[-1] != self.tokenizer.eos_token_id:
+            if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 appended_eos_token = True
