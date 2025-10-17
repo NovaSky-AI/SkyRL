@@ -128,10 +128,9 @@ def test_training_workflow(service_client):
     rest_client = service_client.create_rest_client()
     # Download the checkpoint
     checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
-    urllib.request.urlretrieve(checkpoint_response.url, "archive.tar")
-    assert os.path.exists("archive.tar")
-    assert os.path.getsize("archive.tar") > 0
-    os.remove("archive.tar")
+    with tempfile.NamedTemporaryFile() as tmp_archive:
+        urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
+        assert os.path.getsize(tmp_archive.name) > 0
 
 
 def test_sample(service_client):
