@@ -22,7 +22,7 @@ from tx.utils.storage import download_file
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Validation patterns for IDs
+# Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 ID_MAX_LENGTH = 255
 
@@ -415,7 +415,6 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Create pending checkpoint entry (path is validated to be a valid checkpoint_id)
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
@@ -444,7 +443,6 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Create pending checkpoint entry
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
@@ -607,7 +605,7 @@ async def list_checkpoints(
     """List checkpoints for a model."""
     statement = select(CheckpointDB).where(CheckpointDB.model_id == unique_id)
     result = await session.exec(statement)
-    checkpoints = result.all()
+
     return ListCheckpointsResponse(
         checkpoints=[
             CheckpointInfo(
@@ -618,7 +616,7 @@ async def list_checkpoints(
                 completed_at=checkpoint.completed_at.isoformat() if checkpoint.completed_at else None,
                 error_message=checkpoint.error_message,
             )
-            for checkpoint in checkpoints
+            for checkpoint in result.all()
         ]
     )
 

@@ -133,7 +133,6 @@ def test_training_workflow(service_client):
     training_run_id = parsed.netloc
     checkpoint_id = parsed.path.lstrip("/")
     rest_client = service_client.create_rest_client()
-
     # Download the checkpoint
     checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
     with tempfile.NamedTemporaryFile() as tmp_archive:
