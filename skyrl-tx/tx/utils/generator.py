@@ -49,7 +49,7 @@ class GeneratorMixin:
     a generate() method that efficiently produces text using KV caching.
 
     The model class must implement:
-    - __call__(input_ids, attention_mask=None, adapter_indices=None, kv_cache=None)
+    - __call__(input_ids, positions, attention_mask=None, adapter_indices=None, kv_cache=None)
       that returns dict with 'logits' and 'kv_cache'
 
     Example:
@@ -88,7 +88,9 @@ class GeneratorMixin:
 
         # PREFILL STAGE: Process the full prompt
         # This computes attention over the entire input sequence and populates the KV cache
-        outputs = self(input_ids)
+        batch_size, seq_len = input_ids.shape
+        positions = jnp.arange(seq_len)[None, :].repeat(batch_size, axis=0)
+        outputs = self(input_ids, positions)
 
         # Get the logits for the last token in the prompt
         logits = outputs["logits"][:, -1, :]  # [batch_size, vocab_size]
@@ -107,7 +109,9 @@ class GeneratorMixin:
         for step in range(max_new_tokens - 1):
             # Use KV cache: only process the last generated token
             current_input = next_token[:, None]  # [batch_size, 1]
-            outputs = self(current_input, kv_cache=kv_cache)
+            # Position is the current sequence length (cached length + 1)
+            current_position = jnp.array([[seq_len + step]], dtype=jnp.int32).repeat(batch_size, axis=0)
+            outputs = self(current_input, current_position, kv_cache=kv_cache)
 
             logits = outputs["logits"][:, -1, :]  # [batch_size, vocab_size]
             kv_cache = outputs["kv_cache"]

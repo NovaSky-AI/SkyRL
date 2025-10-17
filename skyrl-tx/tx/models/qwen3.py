@@ -98,11 +98,11 @@ class Qwen3Attention(nnx.Module):
     def __call__(
         self,
         x: jax.Array,
+        positions: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
-        position_offset: int = 0,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
 
         # Reshape each: [B,T,H*D] -> [B,T,H,D]
@@ -111,13 +111,11 @@ class Qwen3Attention(nnx.Module):
         k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim))
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
-        # Apply RoPE with correct position offset
-        position_ids = jnp.arange(position_offset, position_offset + T)[None, :].repeat(B, axis=0)
+        # Apply RoPE with explicit positions
+        q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
+        k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        q = apply_rope(q, position_ids, self.head_dim, self.config.rope_theta)
-        k = apply_rope(k, position_ids, self.head_dim, self.config.rope_theta)
-
-        # Update KV cache
+        # Update KV cache by concatenating with cached keys/values
         if kv_cache is not None:
             cached_k, cached_v = kv_cache
             k = jnp.concatenate([cached_k, k], axis=1)
@@ -309,20 +307,20 @@ class Qwen3DecoderLayer(nnx.Module):
     def __call__(
         self,
         hidden_states: jax.Array,
+        positions: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
-        position_offset: int = 0,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
+            positions,
             attention_mask=attention_mask,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
-            position_offset=position_offset,
         )
         hidden_states = residual + hidden_states
 
@@ -354,6 +352,7 @@ class Qwen3Model(nnx.Module):
     def __call__(
         self,
         input_ids: jax.Array,
+        positions: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
@@ -367,12 +366,6 @@ class Qwen3Model(nnx.Module):
         hidden_states = self.embed_tokens(input_ids)
 
         all_hidden_states: list[jax.Array] = []
-
-        # Calculate position offset from KV cache
-        position_offset = 0
-        if kv_cache is not None and len(kv_cache.keys) > 0:
-            # Get sequence length from first layer's cached keys
-            position_offset = kv_cache.keys[0].shape[1]
 
         # Collect updated caches for all layers
         updated_keys: list[jax.Array] = []
@@ -389,10 +382,10 @@ class Qwen3Model(nnx.Module):
 
             hidden_states, updated_cache = layer(
                 hidden_states,
+                positions,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
                 kv_cache=layer_cache,
-                position_offset=position_offset,
             )
 
             # Store updated cache
@@ -432,6 +425,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
     def __call__(
         self,
         input_ids: jax.Array,
+        positions: jax.Array,
         *,
         attention_mask: jax.Array | None = None,
         output_hidden_states: bool | None = None,
@@ -440,6 +434,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
     ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         outputs = self.model(
             input_ids,
+            positions,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
