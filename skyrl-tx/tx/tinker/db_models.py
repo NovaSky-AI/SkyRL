@@ -18,12 +18,14 @@ class RequestStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
+
 class CheckpointStatus(str, Enum):
     """Status of a checkpoint."""
 
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
+
 
 # SQLModel table definitions
 class ModelDB(SQLModel, table=True):

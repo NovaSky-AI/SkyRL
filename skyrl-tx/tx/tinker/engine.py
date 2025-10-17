@@ -591,7 +591,9 @@ class TinkerEngine:
             # Save the LoRA adapter weights and LoRA config as tar.gz
             save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
 
-            logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}")
+            logger.info(
+                f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}"
+            )
 
         return types.SaveWeightsForSamplerOutput(
             path=f"tinker://{model_id}/{checkpoint_id}",

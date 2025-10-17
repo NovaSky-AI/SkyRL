@@ -22,6 +22,10 @@ from tx.utils.storage import download_file
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Validation patterns for IDs
+ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
+ID_MAX_LENGTH = 255
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,8 +93,7 @@ async def create_checkpoint(
     existing_checkpoint = await session.get(CheckpointDB, (model_id, checkpoint_id))
     if existing_checkpoint is not None:
         raise HTTPException(
-            status_code=409,
-            detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
+            status_code=409, detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
         )
 
     checkpoint_db = CheckpointDB(
@@ -167,7 +170,7 @@ class OptimStepRequest(BaseModel):
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-    path: str
+    path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
 
 
 class SampleRequest(BaseModel):
@@ -183,7 +186,7 @@ class SampleRequest(BaseModel):
 
 class SaveWeightsRequest(BaseModel):
     model_id: str
-    path: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255)
+    path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
     type: Literal["save_weights"] | None = None
 
 
@@ -235,8 +238,10 @@ class CheckpointInfo(BaseModel):
     completed_at: str | None = None
     error_message: str | None = None
 
+
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[CheckpointInfo]
+
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
 async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
@@ -557,8 +562,8 @@ async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: s
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
 async def get_checkpoint_archive_url(
     request: Request,
-    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    checkpoint_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """Return a 302 redirect to the download URL (SDK expects this pattern)"""
@@ -576,8 +581,8 @@ async def get_checkpoint_archive_url(
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/download")
 async def download_checkpoint_archive(
     request: Request,
-    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    checkpoint_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """Actually download the checkpoint archive bytes"""
@@ -596,21 +601,26 @@ async def download_checkpoint_archive(
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints")
 async def list_checkpoints(
-    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """List checkpoints for a model."""
     statement = select(CheckpointDB).where(CheckpointDB.model_id == unique_id)
     result = await session.exec(statement)
     checkpoints = result.all()
-    return ListCheckpointsResponse(checkpoints=[CheckpointInfo(
-        checkpoint_id=checkpoint.checkpoint_id,
-        model_id=checkpoint.model_id,
-        status=checkpoint.status,
-        created_at=checkpoint.created_at.isoformat(),
-        completed_at=checkpoint.completed_at.isoformat() if checkpoint.completed_at else None,
-        error_message=checkpoint.error_message,
-    ) for checkpoint in checkpoints])
+    return ListCheckpointsResponse(
+        checkpoints=[
+            CheckpointInfo(
+                checkpoint_id=checkpoint.checkpoint_id,
+                model_id=checkpoint.model_id,
+                status=checkpoint.status,
+                created_at=checkpoint.created_at.isoformat(),
+                completed_at=checkpoint.completed_at.isoformat() if checkpoint.completed_at else None,
+                error_message=checkpoint.error_message,
+            )
+            for checkpoint in checkpoints
+        ]
+    )
 
 
 @app.get("/")
