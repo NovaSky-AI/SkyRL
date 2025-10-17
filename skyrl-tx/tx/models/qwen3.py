@@ -106,7 +106,7 @@ class Qwen3Attention(nnx.Module):
         B, T, _ = x.shape
 
         # Compute positions from attention mask
-        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)[:, -T:]
+        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1)[:, -T:] - 1, 0)
 
         # Project and reshape to [B, T, num_heads, head_dim]
         q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))

@@ -12,7 +12,7 @@ from tx.utils.models import load_safetensors
 
 def test_qwen3_generate():
     """Test batched text generation with KV caching matches HuggingFace."""
-    model_name = "Qwen/Qwen3-1.7B"
+    model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
