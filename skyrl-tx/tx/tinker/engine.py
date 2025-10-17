@@ -558,50 +558,40 @@ class TinkerEngine:
         lora_model = self.models[model_id]
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
-        checkpoint_name = Path(request_data.path).name
-        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_name}.tar.gz"
-
-        # Save the LoRA adapter weights and LoRA config as tar.gz
-        save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
+        checkpoint_id = Path(request_data.path).name
+        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         # Create checkpoint database entry
         with Session(self.db_engine) as session:
-            # Check if checkpoint already exists (checkpoint_id is now globally unique)
-            existing_checkpoint = session.get(CheckpointDB, checkpoint_id)
+            # Check if checkpoint already exists (using composite primary key)
+            existing_checkpoint = session.get(CheckpointDB, (model_id, checkpoint_id))
             if existing_checkpoint is not None:
-                raise ValueError(f"Checkpoint '{checkpoint_name}' already exists for model '{model_id}'. Please use a different checkpoint name.")
-            
+                raise ValueError(f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'. Please use a different checkpoint name.")
+
             checkpoint_db = None
-            
+
             try:
                 checkpoint_db = CheckpointDB(
-                    checkpoint_id=checkpoint_id,
                     model_id=model_id,
+                    checkpoint_id=checkpoint_id,
                     status=CheckpointStatus.PENDING,
-                    checkpoint_path=str(output_dir / "adapter_model.safetensors"),
+                    checkpoint_path=str(output_path),
                 )
                 session.add(checkpoint_db)
                 session.commit()
-                session.refresh(checkpoint_db)  # Ensure the ID is populated
-                
-                # Save only the LoRA adapter weights
-                save_checkpoint(self.model_config, adapter_lora_params, output_dir / "adapter_model.safetensors")
-                
-                # Save LoRA config
-                lora_config = LoraConfig(
-                    r=self.models[model_id].lora_config.rank, lora_alpha=self.models[model_id].lora_config.alpha
-                )
-                
-                lora_config.save_pretrained(output_dir)
+                session.refresh(checkpoint_db)  # Ensure the entry is persisted
 
-                logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {adapter_index}) to {output_dir}")
+                # Save the LoRA adapter weights and LoRA config as tar.gz
+                save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
+
+                logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}")
 
                 checkpoint_db.status = CheckpointStatus.COMPLETED
                 checkpoint_db.completed_at = datetime.now(timezone.utc)
                 session.add(checkpoint_db)
                 session.commit()
             except Exception as e:
-                logger.exception(f"Error saving checkpoint for model {model_id} (adapter {adapter_index}): {e}")
+                logger.exception(f"Error saving checkpoint for model {model_id} (adapter {lora_model.adapter_index}): {e}")
                 session.rollback()
                 if checkpoint_db is not None:
                     checkpoint_db.status = CheckpointStatus.FAILED
@@ -614,7 +604,7 @@ class TinkerEngine:
         logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
 
         return types.SaveWeightsForSamplerOutput(
-            path=f"tinker://{model_id}/{checkpoint_name}",
+            path=f"tinker://{model_id}/{checkpoint_id}",
             type="save_weights_for_sampler",
         )
 

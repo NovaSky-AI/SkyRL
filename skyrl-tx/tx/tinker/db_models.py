@@ -53,8 +53,8 @@ class FutureDB(SQLModel, table=True):
 class CheckpointDB(SQLModel, table=True):
     __tablename__ = "checkpoints"
 
+    model_id: str = Field(primary_key=True)
     checkpoint_id: str = Field(primary_key=True)
-    model_id: str
     status: CheckpointStatus
     checkpoint_path: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
