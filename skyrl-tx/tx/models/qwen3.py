@@ -370,13 +370,11 @@ class Qwen3Model(nnx.Module):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            layer_cache = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]) if kv_cache is not None else None
-
             hidden_states, (k, v) = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
-                kv_cache=layer_cache,
+                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
             )
             updated_keys.append(k)
             updated_values.append(v)
