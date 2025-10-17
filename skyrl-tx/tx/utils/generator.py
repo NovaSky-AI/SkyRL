@@ -86,11 +86,10 @@ class GeneratorMixin:
 
         # Compute positions: cumulative sum of attention mask, clamped to avoid negatives
         positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)
-        actual_seq_lengths = jnp.sum(attention_mask, axis=1, dtype=jnp.int32)
 
         # Prefill: process full prompt and populate KV cache
         outputs = self(input_ids, positions, attention_mask=attention_mask)
-        logits = outputs["logits"][jnp.arange(batch_size), actual_seq_lengths - 1, :]
+        logits = outputs["logits"][:, -1, :]
         kv_cache = outputs["kv_cache"]
 
         # Sample first token and initialize sequences
@@ -103,7 +102,7 @@ class GeneratorMixin:
         for step in range(max_new_tokens - 1):
             outputs = self(
                 next_token[:, None],
-                (actual_seq_lengths + step)[:, None],
+                (positions[:, -1] + 1 + step)[:, None],
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
             )
