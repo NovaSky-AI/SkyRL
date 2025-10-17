@@ -83,27 +83,16 @@ class GeneratorMixin:
         outputs = self(input_ids, positions, attention_mask=attention_mask)
         kv_cache = outputs["kv_cache"]
         next_position = positions[:, -1:] + 1
+        generated_ids = input_ids
 
-        # Sample first token
-        rng, sample_key = jax.random.split(rng)
-        next_token = sample_token(outputs["logits"][:, -1, :], temperature=temperature, key=sample_key)
-        generated_ids = jnp.concatenate([input_ids, next_token[:, None]], axis=1)
-        attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
-
-        # Decode: generate remaining tokens
-        for step in range(max_new_tokens - 1):
-            outputs = self(
-                next_token[:, None],
-                next_position + step,
-                attention_mask=attention_mask,
-                kv_cache=kv_cache,
-            )
-            kv_cache = outputs["kv_cache"]
-
+        # Decode: generate tokens one at a time
+        for step in range(max_new_tokens):
             rng, sample_key = jax.random.split(rng)
             next_token = sample_token(outputs["logits"][:, -1, :], temperature=temperature, key=sample_key)
-
             generated_ids = jnp.concatenate([generated_ids, next_token[:, None]], axis=1)
             attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
+
+            outputs = self(next_token[:, None], next_position + step, attention_mask=attention_mask, kv_cache=kv_cache)
+            kv_cache = outputs["kv_cache"]
 
         return generated_ids
