@@ -561,47 +561,28 @@ class TinkerEngine:
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        # Create checkpoint database entry
+        # Update checkpoint database entry status
         with Session(self.db_engine) as session:
-            # Check if checkpoint already exists (using composite primary key)
-            existing_checkpoint = session.get(CheckpointDB, (model_id, checkpoint_id))
-            if existing_checkpoint is not None:
-                raise ValueError(f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'. Please use a different checkpoint name.")
-
-            checkpoint_db = None
+            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id))
+            if checkpoint_db is None:
+                raise ValueError(f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}'")
 
             try:
-                checkpoint_db = CheckpointDB(
-                    model_id=model_id,
-                    checkpoint_id=checkpoint_id,
-                    status=CheckpointStatus.PENDING,
-                    checkpoint_path=str(output_path),
-                )
-                session.add(checkpoint_db)
-                session.commit()
-                session.refresh(checkpoint_db)  # Ensure the entry is persisted
-
                 # Save the LoRA adapter weights and LoRA config as tar.gz
                 save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
 
                 logger.info(f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}")
 
                 checkpoint_db.status = CheckpointStatus.COMPLETED
+            except Exception as e:
+                logger.exception(f"Error saving checkpoint for model {model_id} (adapter {lora_model.adapter_index}): {e}")
+                checkpoint_db.status = CheckpointStatus.FAILED
+                checkpoint_db.error_message = str(e)
+                raise
+            finally:
                 checkpoint_db.completed_at = datetime.now(timezone.utc)
                 session.add(checkpoint_db)
                 session.commit()
-            except Exception as e:
-                logger.exception(f"Error saving checkpoint for model {model_id} (adapter {lora_model.adapter_index}): {e}")
-                session.rollback()
-                if checkpoint_db is not None:
-                    checkpoint_db.status = CheckpointStatus.FAILED
-                    checkpoint_db.error_message = str(e)
-                    checkpoint_db.completed_at = datetime.now(timezone.utc)
-                    session.add(checkpoint_db)
-                    session.commit()
-                raise
-
-        logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
 
         return types.SaveWeightsForSamplerOutput(
             path=f"tinker://{model_id}/{checkpoint_id}",

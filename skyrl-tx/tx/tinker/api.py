@@ -15,7 +15,7 @@ import subprocess
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus
+from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus
 from tx.utils.storage import download_file
 
 
@@ -78,6 +78,28 @@ async def create_future(
     await session.flush()  # Flush to generate auto-increment request_id
     assert future_db.request_id
     return future_db.request_id
+
+
+async def create_checkpoint(
+    session: AsyncSession,
+    model_id: str,
+    checkpoint_id: str,
+):
+    """Create a pending CheckpointDB entry."""
+    existing_checkpoint = await session.get(CheckpointDB, (model_id, checkpoint_id))
+    if existing_checkpoint is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
+        )
+
+    checkpoint_db = CheckpointDB(
+        model_id=model_id,
+        checkpoint_id=checkpoint_id,
+        status=CheckpointStatus.PENDING,
+    )
+    session.add(checkpoint_db)
+    await session.flush()
 
 
 class LoRAConfig(BaseModel):
@@ -409,6 +431,18 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Parse checkpoint_id from path
+    path = types.TinkerPath.parse(request.path)
+    if not path or not (checkpoint_id := path.primary_id):
+        raise HTTPException(status_code=400, detail="Invalid checkpoint path format")
+
+    # Create pending checkpoint entry
+    await create_checkpoint(
+        session=session,
+        model_id=request.model_id,
+        checkpoint_id=checkpoint_id,
+    )
 
     request_id = await create_future(
         session=session,

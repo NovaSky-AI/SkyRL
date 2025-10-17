@@ -56,7 +56,6 @@ class CheckpointDB(SQLModel, table=True):
     model_id: str = Field(primary_key=True)
     checkpoint_id: str = Field(primary_key=True)
     status: CheckpointStatus
-    checkpoint_path: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     error_message: str | None = None
