@@ -435,14 +435,8 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-@app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
-async def get_checkpoint_archive_url(
-    request: Request,
-    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    session: AsyncSession = Depends(get_session),
-):
-    """Return a 302 redirect to the download URL (SDK expects this pattern)"""
+async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
+    """Validate that a model and checkpoint exist, returning the checkpoint path."""
     statement = select(ModelDB).where(ModelDB.model_id == unique_id)
     result = await session.exec(statement)
     model = result.first()
@@ -452,6 +446,19 @@ async def get_checkpoint_archive_url(
     checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
     if not checkpoint_path.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+
+    return checkpoint_path
+
+
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
+async def get_checkpoint_archive_url(
+    request: Request,
+    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a 302 redirect to the download URL (SDK expects this pattern)"""
+    await validate_checkpoint(request, unique_id, checkpoint_id, session)
 
     # Generate URL to the download endpoint and return 302 redirect
     download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
@@ -470,15 +477,7 @@ async def download_checkpoint_archive(
     session: AsyncSession = Depends(get_session),
 ):
     """Actually download the checkpoint archive bytes"""
-    statement = select(ModelDB).where(ModelDB.model_id == unique_id)
-    result = await session.exec(statement)
-    model = result.first()
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-
-    checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
-    if not checkpoint_path.exists():
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+    checkpoint_path = await validate_checkpoint(request, unique_id, checkpoint_id, session)
 
     file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
 
