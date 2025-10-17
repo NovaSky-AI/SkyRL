@@ -136,7 +136,7 @@ class Qwen3Attention(nnx.Module):
             k,
             v,
             scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool) if attention_mask is not None else None,
+            mask=attention_mask[:, None, None, :].astype(bool),
             is_causal=kv_cache is None,
         )
 
