@@ -1,6 +1,6 @@
 import torch
 from typing import List, Tuple, Union, Optional, Dict, Any
-from collections import defaultdict, DefaultDict
+from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 from skyrl_train.inference_engines.base import ConversationType
@@ -242,7 +242,7 @@ def get_rollout_metrics(
     }
 
     if env_metrics is not None and env_classes is not None:
-        env_to_metrics: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+        env_to_metrics = defaultdict(list)
         for i, metrics in enumerate(env_metrics):
             env_to_metrics[env_classes[i]].append(metrics)
         for env_name, metrics in env_to_metrics.items():
