@@ -415,7 +415,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
     path = types.TinkerPath.parse(request.model_path)
-    if not path or not path.kind == "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
+    if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
         raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
 
     statement = select(ModelDB).where(ModelDB.model_id == model_id)
