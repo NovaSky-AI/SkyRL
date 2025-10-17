@@ -3,6 +3,7 @@ import tempfile
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tx.models import Qwen3ForCausalLM
@@ -11,8 +12,6 @@ from tx.utils.models import load_safetensors
 
 def test_qwen3_generate():
     """Test batched text generation with KV caching matches HuggingFace."""
-    import torch
-
     model_name = "Qwen/Qwen3-1.7B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
