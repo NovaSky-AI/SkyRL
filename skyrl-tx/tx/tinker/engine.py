@@ -487,8 +487,9 @@ class TinkerEngine:
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
         adapter_index = self.models[model_id].adapter_index
-        checkpoint_id = Path(request_data.path).name
-        checkpoint_dir = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        checkpoint_dir = (
+            self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
+        )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
             restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
@@ -543,7 +544,7 @@ class TinkerEngine:
         logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
         return types.SaveWeightsOutput(
-            path=f"tinker://{model_id}/{checkpoint_id}",
+            path=f"tinker://{model_id}/weights/{checkpoint_id}",
             type="save_weights",
         )
 
