@@ -28,18 +28,13 @@ def sample_token(logits: jax.Array, *, temperature: float = 1.0, key: jax.Array)
 
     Args:
         logits: Logits tensor [batch_size, vocab_size]
-        temperature: Sampling temperature (higher = more random)
+        temperature: Sampling temperature
         key: JAX random key for sampling
 
     Returns:
         Sampled token indices [batch_size]
     """
-    # Apply temperature
-    if temperature != 1.0:
-        logits = logits / temperature
-
-    # Sample from the distribution
-    return jax.random.categorical(key, logits, axis=-1)
+    return jax.random.categorical(key, logits / temperature, axis=-1)
 
 
 class GeneratorMixin:
