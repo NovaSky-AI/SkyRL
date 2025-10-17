@@ -298,21 +298,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
-<<<<<<< HEAD
-<<<<<<< HEAD
+
         appended_eos_token = False
-=======
         if self.max_turns > 1:
             max_response_tokens = max_tokens + max_input_length - initial_prompt_length
         else:
             max_response_tokens = max_tokens
 
->>>>>>> dc49242 (mask losses and response ids if they exceed max_response_tokens (final check for multiturn))
-=======
->>>>>>> ff865bf (All CPU tests pass except one -> modified test to account for proper max len support)
         if not self.use_conversation_multi_turn:
             if response_ids[-1] != self.tokenizer.eos_token_id:
-<<<<<<< HEAD
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 appended_eos_token = True
@@ -322,13 +316,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             stop_reason = "length"
             response_ids = response_ids[:max_response_tokens]
             loss_mask = loss_mask[:max_response_tokens]
-=======
                 if len(response_ids) < max_tokens:
                     response_ids.append(self.tokenizer.eos_token_id)
                     loss_mask.append(1)
                 else:
                     stop_reason = "length"
->>>>>>> ff865bf (All CPU tests pass except one -> modified test to account for proper max len support)
 
         # Build reward output
         if retokenize_chat_history:

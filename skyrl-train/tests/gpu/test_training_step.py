@@ -26,9 +26,12 @@ def get_test_actor_config() -> DictConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
 <<<<<<< HEAD
+<<<<<<< HEAD
     cfg.generator.inference_engine_tensor_parallel_size = 2
 =======
 >>>>>>> 8fea171 (any missing commits?)
+=======
+>>>>>>> 2c2f3b759f12a91aafde37f9e07426c915a5eef1
 
     return cfg
 
