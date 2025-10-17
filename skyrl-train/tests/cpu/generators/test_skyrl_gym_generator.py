@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
-from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_train.config.utils import get_default_config
 
 
@@ -930,8 +930,9 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Two-step env with rewards 0.3 then 1.7
-    class TwoStepEnv:
+    class TwoStepEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -945,9 +946,6 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
                 )
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=1.7, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = TwoStepEnv()
 
@@ -1021,8 +1019,9 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Env: two steps with rewards 0.5 then 0.25; first step has an observation, second has none
-    class MTEnv:
+    class MTEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -1036,9 +1035,6 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
                 )
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=0.25, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = MTEnv()
 
@@ -1114,8 +1110,9 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Env with rewards: None then 2.5
-    class RetokEnv:
+    class RetokEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -1129,9 +1126,6 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
                 )  # noqa: E501
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=2.5, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = RetokEnv()
 
@@ -1197,8 +1191,9 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Env with two steps, rewards on both; no observations to keep math simple
-    class TruncEnv:
+    class TruncEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -1210,9 +1205,6 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
                 return BaseTextEnvStepOutput(observations=[], reward=1.0, done=False, metadata={})
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=2.0, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = TruncEnv()
 

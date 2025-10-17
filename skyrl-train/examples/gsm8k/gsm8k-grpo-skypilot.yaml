@@ -4,42 +4,25 @@ resources:
   accelerators: L40S:4 # 4x 48 GB GPUs; adjust to the SKU that matches your quota
   memory: 64+          # every node has at least 64 GB memory
   ports: 6479          # expose port for ray dashboard
-# check the skypilot documentation for what clouds network tier is supported.
 #  network_tier: best # when using multiple nodes, communication can become a bottleneck
 
-num_nodes: 1         # cluster size
+num_nodes: 2         # cluster size
 
-# --------------- Work Directory Synchronization (workdir) ---------------
-# Defines the local working directory to be synchronized to the remote cluster.
-# Here, '.' means synchronizing the directory where the sky submit command is currently run.
-# For this script, run the command from the repository root after cloning SkyRL.
-workdir: .
+# Set to a git repository 
+workdir:
+  url: https://github.com/NovaSky-AI/SkyRL.git
+  ref: main
 
-# --------------- (secrets) ---------------
+# Set secrets
 secrets:
   WANDB_API_KEY: null
-  # Either add your key here, or add it when launching with sky launch .... --secret WANDB_API_KEY="1234"
 
-# --------------- File Mounts/Data Upload (file_mounts) ---------------
-# If your dataset (gsm8k folder) is local, it needs to be uploaded to the
-# remote cluster. We prepare the data in the setup step here. Uncomment these
-# lines if you have the data locally already.
-
-#file_mounts:
-#  # Remote path (relative to remote user's home directory): Local path
-#  # /remote/dir1/file: /local/dir1/file
-#  data/gsm8k: ~/data/gsm8k
-
-# --------------- Environment variables ---------------
 envs:
   LOGGER: "wandb"  # change to "console" to print to stdout
   INFERENCE_BACKEND: "vllm"
   # INFERENCE_BACKEND: "sglang"
-  # The quickstart configuration targets 4x 48 GB GPUs. On smaller GPUs, lower the
-  # micro batch sizes or switch to a smaller Qwen checkpoint per the Quickstart guide.
+  NUM_EPOCHS: 20
 
-
-# --------------- Environment Setup (setup) ---------------
 # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
 setup: |
   cd skyrl-train
@@ -51,7 +34,6 @@ setup: |
 
 # If you already have processed the data locally, delete the above line
 
-# --------------- Run Command (run) ---------------
 # The actual task commands to be executed on the remote cluster.
 # This script will first start the Ray cluster (different ray start commands are executed on Head and Worker nodes).
 # Then, your training script will only be run on the Head node (SKYPILOT_NODE_RANK == 0).
@@ -89,6 +71,12 @@ run: |
       ray start --head --disable-usage-stats --port 6479
     fi
     wait_for_ray 127.0.0.1:6479
+    # Ensure rollout GPUs match policy GPUs when colocating all models.
+    # With colocate_all=true, we must have:
+    #   policy_num_gpus_per_node * policy_num_nodes ==
+    #   num_inference_engines * inference_engine_tensor_parallel_size * inference_engine_data_parallel_size
+    # Given TP=1 and DP=1, set num_inference_engines to total policy GPUs across the cluster.
+    TOTAL_POLICY_GPUS=$((SKYPILOT_NUM_GPUS_PER_NODE * SKYPILOT_NUM_NODES))
     uv run --isolated --extra "$INFERENCE_BACKEND" -m skyrl_train.entrypoints.main_base \
       data.train_data="['${DATA_DIR}/train.parquet']" \
       data.val_data="['${DATA_DIR}/validation.parquet']" \
@@ -100,17 +88,17 @@ run: |
       trainer.placement.ref_num_gpus_per_node="$SKYPILOT_NUM_GPUS_PER_NODE" \
       trainer.placement.ref_num_nodes="$SKYPILOT_NUM_NODES" \
       trainer.placement.policy_num_nodes="$SKYPILOT_NUM_NODES" \
-      generator.num_inference_engines="$SKYPILOT_NUM_GPUS_PER_NODE" \
+      generator.num_inference_engines="$TOTAL_POLICY_GPUS" \
       generator.inference_engine_tensor_parallel_size=1 \
-      trainer.epochs=20 \
+      trainer.epochs=${NUM_EPOCHS} \
       trainer.eval_batch_size=1024 \
       trainer.eval_before_train=true \
       trainer.eval_interval=5 \
       trainer.update_epochs_per_batch=1 \
       trainer.train_batch_size=1024 \
       trainer.policy_mini_batch_size=256 \
-      trainer.micro_forward_batch_size_per_gpu=64 \
-      trainer.micro_train_batch_size_per_gpu=64 \
+      trainer.micro_forward_batch_size_per_gpu=40 \
+      trainer.micro_train_batch_size_per_gpu=40 \
       trainer.ckpt_interval=10 \
       trainer.max_prompt_length=512 \
       generator.sampling_params.max_generate_length=1024 \

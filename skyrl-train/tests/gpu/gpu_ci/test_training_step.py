@@ -12,6 +12,7 @@ from tests.gpu.utils import init_worker_with_type, make_dummy_experience, valida
 from skyrl_train.utils.utils import print_mem
 from skyrl_train.entrypoints.main_base import config_dir
 
+
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
@@ -21,6 +22,8 @@ def get_test_actor_config() -> DictConfig:
 
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.logger = "console"
+    cfg.generator.inference_engine_tensor_parallel_size = 2
 
     return cfg
 
@@ -43,7 +46,7 @@ def cfg() -> DictConfig:
         "unpacked-fsdp2",
     ],
 )
-async def test_policy_training_step(cfg, packed, strategy):
+async def test_policy_training_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
@@ -99,7 +102,7 @@ async def test_policy_training_step(cfg, packed, strategy):
         "unpacked-fsdp2",
     ],
 )
-async def test_critic_training_step(cfg, packed, strategy):
+async def test_critic_training_step(ray_init_fixture, cfg, packed, strategy):
     """
     Full test: initialize critic actor group, send dummy experience to training_step, validate output.
     """
