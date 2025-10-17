@@ -1,6 +1,8 @@
 """
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_training_step.py
+uv run --isolated --extra dev --extra deepspeed pytest tests/gpu/test_training_step.py
+
+Ensure you set WANDB_API_KEY in your environment.
 """
 
 import ray
