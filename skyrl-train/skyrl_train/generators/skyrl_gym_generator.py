@@ -186,14 +186,13 @@ class SkyRLGymGenerator(GeneratorInterface):
         cumulative_response_tokens = 0
     
         while not done:
-            remaining_tokens = max_tokens - cumulative_response_tokens
-            
-            if remaining_tokens <= 0:
+            max_generate_length = min(max_generate_length, max_input_length + max_tokens - len(input_ids))
+            if max_generate_length <= 0:
                 stop_reason = "length"
                 break
                 
             updated_sampling_params = sampling_params.copy() if sampling_params is not None else {}
-            updated_sampling_params["max_generate_length"] = remaining_tokens
+            updated_sampling_params["max_generate_length"] = max_generate_length
 
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
