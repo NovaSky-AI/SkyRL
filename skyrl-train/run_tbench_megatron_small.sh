@@ -22,32 +22,34 @@ MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct"
 INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in this setup
 
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
-MEGATRON_TP=2
-MEGATRON_PP=2
+MEGATRON_TP=4
+MEGATRON_PP=1
 MEGATRON_CP=8
 
-MEGATRON_EP=8
+MEGATRON_EP=16
 MEGATRON_ETP=2
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=32
-INFERENCE_ENGINE_TP=1
+NUM_INFERENCE_ENGINES=16
+INFERENCE_ENGINE_TP=2
 
 # Torch profiler (optional)
 ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
 
-export NCCL_SOCKET_IFNAME=enp13s0np0
-export NCCL_IB_HCA=mlx5_0
+export NCCL_SOCKET_IFNAME=enp210s0f0np0
+export GLOO_SOCKET_IFNAME=enp210s0f0np0
+export NCCL_IB_HCA=mlx5_ib0
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3     
 export NCCL_DEBUG=INFO
 
 export SKYRL_PYTHONPATH_EXPORT=1
-export PYTHONPATH="/home/ubuntu/SkyRL/skyrl-train/"
+export PYTHONPATH="$HOME/SkyRL/skyrl-train/"
 # export CUDNN_PATH="$(python -c 'import inspect, os, nvidia.cudnn as c; print(os.path.dirname(inspect.getfile(c)))')"
-export CUDNN_PATH="/opt/cudnn"
+# export CUDNN_PATH="/home/user/SkyRL/skyrl-train/.venv/lib/python3.12/site-packages/nvidia/cudnn"
+# export CUDNN_PATH="/opt/cudnn"
 export CPATH="$CUDNN_PATH/include:${CPATH:-}"
 export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
 export RAY_worker_register_timeout_seconds=1800
@@ -61,8 +63,10 @@ export RAY_worker_register_timeout_seconds=1800
 export HYDRA_FULL_ERROR=1
 export NCCL_DEBUG=INFO
 
+# uv pip install -U numpy
+
 # data.train_data="['$DATA_DIR/train.parquet']" \
-uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
@@ -97,10 +101,10 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="full" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
-  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=true \
-  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=true \
-  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
-  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1 \
+  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=0.0 \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
@@ -127,14 +131,15 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
   trainer.run_name="terminal_bench_megatron_H200_4_small" \
-  trainer.ckpt_path="/mnt/data/ez_apex_250_small" \
-  trainer.export_path="/mnt/data/hf_ckpt_small" \
+  trainer.ckpt_path="$HOME/ez_apex_250_small" \
+  trainer.export_path="$HOME/hf_ckpt_small" \
   trainer.hf_save_interval=1 \
   trainer.ckpt_interval=1 \
   trainer.algorithm.eps_clip_low=0.2 \
   trainer.algorithm.eps_clip_high=0.28 \
   trainer.algorithm.loss_reduction="token_mean" \
   generator.apply_overlong_filtering=true \
+  trainer.resume_mode=latest \
   $@
 
 
