@@ -57,12 +57,13 @@ class GeneratorMixin:
             ...
 
         model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=rngs)
-        generated = model.generate(input_ids, max_new_tokens=100, temperature=0.8)
+        generated = model.generate(input_ids, attention_mask, max_new_tokens=100, temperature=0.8)
     """
 
     def generate(
         self,
         input_ids: jax.Array,
+        attention_mask: jax.Array,
         *,
         max_new_tokens: int = 50,
         temperature: float = 1.0,
@@ -70,57 +71,50 @@ class GeneratorMixin:
     ) -> jax.Array:
         """Generate text autoregressively with KV caching.
 
-        This method implements a two-stage generation process:
-        1. Prefill: Process the full input prompt and populate KV cache
-        2. Decode: Generate tokens one at a time, updating the cache
-
         Args:
             input_ids: Input token IDs [batch_size, seq_len]
+            attention_mask: Attention mask [batch_size, seq_len], 1 for real tokens, 0 for padding
             max_new_tokens: Maximum number of new tokens to generate
-            temperature: Sampling temperature (default: 1.0)
+            temperature: Sampling temperature
             seed: Random seed for sampling
 
         Returns:
             Generated token sequences [batch_size, seq_len + max_new_tokens]
         """
-        # Initialize random key
         rng = jax.random.PRNGKey(seed)
-
-        # PREFILL STAGE: Process the full prompt
-        # This computes attention over the entire input sequence and populates the KV cache
         batch_size, seq_len = input_ids.shape
-        positions = jnp.arange(seq_len)[None, :].repeat(batch_size, axis=0)
-        outputs = self(input_ids, positions)
 
-        # Get the logits for the last token in the prompt
-        logits = outputs["logits"][:, -1, :]  # [batch_size, vocab_size]
+        # Compute positions: cumulative sum of attention mask, clamped to avoid negatives
+        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)
+        actual_seq_lengths = jnp.sum(attention_mask, axis=1, dtype=jnp.int32)
 
-        # Get the KV cache from the prefill stage
+        # Prefill: process full prompt and populate KV cache
+        outputs = self(input_ids, positions, attention_mask=attention_mask)
+        logits = outputs["logits"][jnp.arange(batch_size), actual_seq_lengths - 1, :]
         kv_cache = outputs["kv_cache"]
 
-        # Sample the first generated token
+        # Sample first token and initialize sequences
         rng, sample_key = jax.random.split(rng)
-        next_token = sample_token(logits, temperature=temperature, key=sample_key)  # [batch_size]
-
-        # Initialize generated sequence with input + first generated token
+        next_token = sample_token(logits, temperature=temperature, key=sample_key)
         generated_ids = jnp.concatenate([input_ids, next_token[:, None]], axis=1)
+        attention_mask = jnp.concatenate([attention_mask, jnp.ones((batch_size, 1), dtype=jnp.int32)], axis=1)
 
-        # DECODE STAGE: Generate remaining tokens one at a time
+        # Decode: generate remaining tokens one at a time
         for step in range(max_new_tokens - 1):
-            # Use KV cache: only process the last generated token
-            current_input = next_token[:, None]  # [batch_size, 1]
-            # Position is the current sequence length (cached length + 1)
-            current_position = jnp.array([[seq_len + step]], dtype=jnp.int32).repeat(batch_size, axis=0)
-            outputs = self(current_input, current_position, kv_cache=kv_cache)
+            outputs = self(
+                next_token[:, None],
+                (actual_seq_lengths + step)[:, None],
+                attention_mask=attention_mask,
+                kv_cache=kv_cache
+            )
 
-            logits = outputs["logits"][:, -1, :]  # [batch_size, vocab_size]
+            logits = outputs["logits"][:, -1, :]
             kv_cache = outputs["kv_cache"]
 
-            # Sample next token
             rng, sample_key = jax.random.split(rng)
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
 
-            # Append to generated sequence
             generated_ids = jnp.concatenate([generated_ids, next_token[:, None]], axis=1)
+            attention_mask = jnp.concatenate([attention_mask, jnp.ones((batch_size, 1), dtype=jnp.int32)], axis=1)
 
         return generated_ids

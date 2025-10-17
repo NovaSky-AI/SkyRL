@@ -104,42 +104,40 @@ class Qwen3Attention(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-
-        # Reshape each: [B,T,H*D] -> [B,T,H,D]
         B, T, _ = x.shape
+
+        # Project and reshape to [B, T, num_heads, head_dim]
         q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
         k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim))
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
-        # Apply RoPE with explicit positions
+        # Apply RoPE
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Update KV cache by concatenating with cached keys/values
+        # Concatenate with cache
         if kv_cache is not None:
-            cached_k, cached_v = kv_cache
-            k = jnp.concatenate([cached_k, k], axis=1)
-            v = jnp.concatenate([cached_v, v], axis=1)
+            k = jnp.concatenate([kv_cache[0], k], axis=1)
+            v = jnp.concatenate([kv_cache[1], v], axis=1)
 
-        # Store updated cache
+        # Store cache before GQA repetition
         updated_cache = (k, v)
 
+        # GQA: repeat KV heads if needed
         if self.num_kv_heads != self.num_heads:
-            num_groups = self.num_heads // self.num_kv_heads
-            k = jnp.repeat(k, num_groups, axis=2)
-            v = jnp.repeat(v, num_groups, axis=2)
+            k = jnp.repeat(k, self.num_heads // self.num_kv_heads, axis=2)
+            v = jnp.repeat(v, self.num_heads // self.num_kv_heads, axis=2)
 
+        # Attention (causal only during prefill)
         attn_output = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
+            q, k, v,
             scale=1.0 / self.head_dim**0.5,
             mask=attention_mask[:, None, None, :].astype(bool) if attention_mask is not None else None,
-            is_causal=True,
+            is_causal=(q.shape[1] == k.shape[1]),
         )
 
-        attn_out_flat = attn_output.reshape(B, T, self.num_heads * self.head_dim)  # [B,T,H,D] -> [B,T,H*D]
-        return self.o_proj(attn_out_flat, adapter_indices=adapter_indices), updated_cache
+        output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
+        return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
 
 
 class Qwen3MLP(nnx.Module):
@@ -364,45 +362,34 @@ class Qwen3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids)
-
-        all_hidden_states: list[jax.Array] = []
-
-        # Collect updated caches for all layers
-        updated_keys: list[jax.Array] = []
-        updated_values: list[jax.Array] = []
+        all_hidden_states = [] if output_hidden_states else None
+        updated_keys, updated_values = [], []
 
         for layer_idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            # Get this layer's cache if available
             layer_cache = None
             if kv_cache is not None and layer_idx < len(kv_cache.keys):
                 layer_cache = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
 
-            hidden_states, updated_cache = layer(
-                hidden_states,
-                positions,
+            hidden_states, (k, v) = layer(
+                hidden_states, positions,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
                 kv_cache=layer_cache,
             )
-
-            # Store updated cache
-            updated_keys.append(updated_cache[0])
-            updated_values.append(updated_cache[1])
+            updated_keys.append(k)
+            updated_values.append(v)
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        # Build updated KV cache
-        updated_kv_cache = KVCache(keys=updated_keys, values=updated_values)
-
         return {
             "last_hidden_state": hidden_states,
-            "hidden_states": all_hidden_states,
-            "kv_cache": updated_kv_cache,
+            "hidden_states": all_hidden_states or [],
+            "kv_cache": KVCache(keys=updated_keys, values=updated_values),
         }
 
 
