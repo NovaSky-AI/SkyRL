@@ -14,12 +14,11 @@ def test_qwen3_generate():
     import torch
 
     model_name = "Qwen/Qwen3-1.7B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     # Prepare batched input (left-padded for generation)
     inputs = ["The capital of France is ", "The future of AI is "]
-    tokenizer.padding_side = "left"
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
     input_ids = batch.input_ids.numpy()
     attention_mask = batch.attention_mask.numpy()
