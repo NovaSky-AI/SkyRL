@@ -157,7 +157,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
-        print(f"session_id: {session_id}")
+
         done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
@@ -192,13 +192,13 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
+                    prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
                 )
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids],
-                    trajectory_ids=[trajectory_id],
+                    session_ids=[session_id],
                     sampling_params=sampling_params,
                 )
 
@@ -285,27 +285,12 @@ class SkyRLGymGenerator(GeneratorInterface):
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         appended_eos_token = False
-        # if self.max_turns > 1:
-        #     max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-        # else:
-        #     max_response_tokens = max_tokens
 
         if not self.use_conversation_multi_turn:
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 appended_eos_token = True
-
-        # # mask losses and response ids if they exceed max_response_tokens (final check for multiturn)
-        # if len(response_ids) > max_response_tokens:
-        #     stop_reason = "length"
-        #     response_ids = response_ids[:max_response_tokens]
-        #     loss_mask = loss_mask[:max_response_tokens]
-        #         if len(response_ids) < max_tokens:
-        #             response_ids.append(self.tokenizer.eos_token_id)
-        #             loss_mask.append(1)
-        #         else:
-        #             stop_reason = "length"
 
         # Build reward output
         if retokenize_chat_history:
