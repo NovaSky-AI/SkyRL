@@ -9,8 +9,7 @@ from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
-from urllib.parse import urlparse
-from datetime import datetime, timedelta
+from datetime import timedelta
 import asyncio
 import logging
 import subprocess
