@@ -31,7 +31,7 @@ class TinkerPath(BaseModel):
 
     @classmethod
     def parse(cls, url: str) -> TinkerPath | None:
-        """Parse a URL string into a TinkerUrl object."""
+        """Parse a URL string into a TinkerPath object."""
         parsed = urlparse(url)
 
         match (parsed.scheme, *parsed.path.split("/")):
