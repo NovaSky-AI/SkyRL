@@ -790,7 +790,7 @@ class PolicyWorkerBase(Worker):
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "ppo_clip_ratio": clip_ratio,
-            "policy_entropy": entropy,
+            "policy_entropy": entropy.item(),
         }
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
