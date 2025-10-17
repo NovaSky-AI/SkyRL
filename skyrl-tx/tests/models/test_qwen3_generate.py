@@ -39,7 +39,7 @@ def test_qwen3_generate():
         load_safetensors(tmp, config, model)
 
         output = model.generate(
-            batch.input_ids.numpy(), batch.attention_mask.numpy(), max_new_tokens=10, temperature=0.01, seed=42
+            batch.input_ids.numpy(), batch.attention_mask.numpy(), max_new_tokens=10, temperature=0.0, seed=42
         )
 
         assert jnp.array_equal(output, hf_output.numpy()), "Generated tokens don't match HuggingFace"

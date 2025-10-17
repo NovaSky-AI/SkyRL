@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 @dataclass
 class KVCache:
-    """Key-value cache for all layers."""
+    """Key-value cache for all layers, each entry in the list corresponds to one layer."""
 
     keys: list[jax.Array]
     values: list[jax.Array]
@@ -16,6 +16,8 @@ class KVCache:
 
 def sample_token(logits: jax.Array, *, temperature: float, key: jax.Array) -> jax.Array:
     """Sample next token from logits using temperature."""
+    if temperature == 0.0:
+        return jnp.argmax(logits, axis=-1)[:, None]
     return jax.random.categorical(key, logits / temperature, axis=-1)[:, None]
 
 
