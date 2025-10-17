@@ -157,6 +157,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        print(f"session_id: {session_id}")
         done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
@@ -181,19 +182,26 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[float, Optional[int]]] = []
+        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
 
         while not done:
-            # 1. Generate output
+
+            if len(input_ids) > max_input_length:
+                stop_reason = "length"
+                break
+
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
+                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
                 )
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
+                    prompt_token_ids=[input_ids],
+                    trajectory_ids=[trajectory_id],
+                    sampling_params=sampling_params,
                 )
+
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
@@ -253,10 +261,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
 
-            if len(input_ids) > max_input_length:
-                stop_reason = "length"
-                break
-
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
         # Close the environment
@@ -281,24 +285,27 @@ class SkyRLGymGenerator(GeneratorInterface):
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         appended_eos_token = False
+        # if self.max_turns > 1:
+        #     max_response_tokens = max_tokens + max_input_length - initial_prompt_length
+        # else:
+        #     max_response_tokens = max_tokens
+
         if not self.use_conversation_multi_turn:
-            # we might need to add the eos token to the response ids
             if response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 appended_eos_token = True
 
-        # need to truncate loss mask correctly for responses that go to max length
-        if self.max_turns > 1:
-            # max total resp length = max tokens (max length of final turn generation) + max_input_length (max input for any generation turn) - len(original prompt)
-            max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-        else:
-            max_response_tokens = max_tokens
-
-        if len(response_ids) > max_response_tokens:
-            stop_reason = "length"
-        response_ids = response_ids[:max_response_tokens]
-        loss_mask = loss_mask[:max_response_tokens]
+        # # mask losses and response ids if they exceed max_response_tokens (final check for multiturn)
+        # if len(response_ids) > max_response_tokens:
+        #     stop_reason = "length"
+        #     response_ids = response_ids[:max_response_tokens]
+        #     loss_mask = loss_mask[:max_response_tokens]
+        #         if len(response_ids) < max_tokens:
+        #             response_ids.append(self.tokenizer.eos_token_id)
+        #             loss_mask.append(1)
+        #         else:
+        #             stop_reason = "length"
 
         # Build reward output
         if retokenize_chat_history:
