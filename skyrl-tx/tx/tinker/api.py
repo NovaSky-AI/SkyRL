@@ -432,16 +432,11 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Parse checkpoint_id from path
-    path = types.TinkerPath.parse(request.path)
-    if not path or not (checkpoint_id := path.primary_id):
-        raise HTTPException(status_code=400, detail="Invalid checkpoint path format")
-
     # Create pending checkpoint entry
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
-        checkpoint_id=checkpoint_id,
+        checkpoint_id=request.path,
     )
 
     request_id = await create_future(
