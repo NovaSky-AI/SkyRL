@@ -1,6 +1,6 @@
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Literal, Any, AsyncGenerator
 from uuid import uuid4
@@ -9,6 +9,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from urllib.parse import urlparse
+from datetime import datetime, timedelta
 import asyncio
 import logging
 import subprocess
@@ -434,14 +435,8 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-@app.get("/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive")
-async def download_checkpoint_archive(
-    request: Request,
-    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
-    session: AsyncSession = Depends(get_session),
-):
-    """Return the checkpoint archive bytes"""
+async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
+    """Validate that a model and checkpoint exist, returning the checkpoint path."""
     statement = select(ModelDB).where(ModelDB.model_id == unique_id)
     result = await session.exec(statement)
     model = result.first()
@@ -451,6 +446,38 @@ async def download_checkpoint_archive(
     checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
     if not checkpoint_path.exists():
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+
+    return checkpoint_path
+
+
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
+async def get_checkpoint_archive_url(
+    request: Request,
+    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a 302 redirect to the download URL (SDK expects this pattern)"""
+    await validate_checkpoint(request, unique_id, checkpoint_id, session)
+
+    # Generate URL to the download endpoint and return 302 redirect
+    download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
+    expires = datetime.utcnow() + timedelta(minutes=120)
+
+    response = RedirectResponse(url=download_url, status_code=302)
+    response.headers["Expires"] = expires.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    return response
+
+
+@app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/download")
+async def download_checkpoint_archive(
+    request: Request,
+    unique_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    checkpoint_id: str = fastapi.Path(..., pattern=r"^[a-zA-Z0-9_-]+$", max_length=255),
+    session: AsyncSession = Depends(get_session),
+):
+    """Actually download the checkpoint archive bytes"""
+    checkpoint_path = await validate_checkpoint(request, unique_id, checkpoint_id, session)
 
     file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
 
@@ -475,7 +502,10 @@ async def root():
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
             "telemetry": ["/api/v1/telemetry"],
-            "download": ["/api/v1/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}/archive"],
+            "download": [
+                "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive",
+                "/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/download",
+            ],
         },
     }
 
