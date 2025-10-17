@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import pytest
 import tinker
 from tinker import types
+import tx
 
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
@@ -129,7 +130,7 @@ def test_training_workflow(service_client):
     assert fwdbwd_result3.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
-    path = types.TinkerPath.parse(sampling_path)
+    path = tx.tinker.types.TinkerPath.parse(sampling_path)
     rest_client = service_client.create_rest_client()
     # Download the checkpoint
     checkpoint_response = rest_client.get_checkpoint_archive_url(path.primary_id, path.secondary_id).result()
