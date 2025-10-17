@@ -16,7 +16,6 @@ def test_qwen3_generate():
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
-    # Prepare batched input (left-padded for generation)
     inputs = ["The capital of France is ", "The future of AI is "]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
@@ -28,9 +27,8 @@ def test_qwen3_generate():
             max_new_tokens=10,
             do_sample=False,
         )
-    hf_decoded = [tokenizer.decode(ids, skip_special_tokens=True) for ids in hf_output]
 
-    # Load our implementation
+    # Generate with our implementation
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
         config = AutoConfig.from_pretrained(model_name)
@@ -40,16 +38,8 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        # Generate with our implementation
-        generated = model.generate(
+        output = model.generate(
             batch.input_ids.numpy(), batch.attention_mask.numpy(), max_new_tokens=10, temperature=0.01, seed=42
         )
-        our_decoded = [tokenizer.decode(ids, skip_special_tokens=True) for ids in generated]
 
-        # Verify match
-        print("\nComparison:")
-        for i in range(len(inputs)):
-            print(f"  {i+1}. {our_decoded[i]}")
-            assert hf_decoded[i] == our_decoded[i], f"Mismatch: HF={hf_decoded[i]}, Ours={our_decoded[i]}"
-
-        print("✓ All outputs match HuggingFace")
+        assert jnp.array_equal(output, hf_output.numpy()), "Generated tokens don't match HuggingFace"
