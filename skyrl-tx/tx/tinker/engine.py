@@ -487,8 +487,9 @@ class TinkerEngine:
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
         adapter_index = self.models[model_id].adapter_index
-        checkpoint_id = Path(request_data.path).name
-        checkpoint_dir = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        source_model_id = request_data.path.split("/")[2]  
+        checkpoint_id = request_data.path.split("/")[-1] 
+        checkpoint_dir = self.config.checkpoints_base / source_model_id / f"{checkpoint_id}.tar.gz"
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
             restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
@@ -543,7 +544,7 @@ class TinkerEngine:
         logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
         return types.SaveWeightsOutput(
-            path=f"tinker://{model_id}/{checkpoint_id}",
+            path=f"tinker://{model_id}/weights/{checkpoint_id}",
             type="save_weights",
         )
 
@@ -570,23 +571,6 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the model."""
-        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
-        if self.config.enable_dummy_sample:
-            num_samples = request_data.num_samples
-            sequences = [
-                types.GeneratedSequence(stop_reason="length", tokens=[100, 200, 300], logprobs=[-0.1, -0.2, -0.3])
-                for _ in range(num_samples)
-            ]
-
-            return types.SampleOutput(
-                sequences=sequences,
-                prompt_logprobs=[-0.05, -0.15, -0.25],
-            )
-
-        raise NotImplementedError("sample endpoint not yet fully implemented")
-
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
             case types.RequestType.CREATE_MODEL:
@@ -597,8 +581,6 @@ class TinkerEngine:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
-            case types.RequestType.SAMPLE:
-                result = self.process_sample(model_id, types.SampleInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS:
                 result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:

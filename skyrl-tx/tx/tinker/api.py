@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal, Any, AsyncGenerator
+from datetime import datetime
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
@@ -107,6 +108,26 @@ class ModelInfoResponse(BaseModel):
     model_id: str
     status: str
     model_data: ModelData
+
+
+class Checkpoint(BaseModel):
+    checkpoint_id: str
+    checkpoint_type: Literal["training", "sampler"]
+    time: datetime
+    tinker_path: str
+
+
+class TrainingRun(BaseModel):
+    training_run_id: str
+    base_model: str
+    model_owner: str = "default"
+    is_lora: bool = True
+    corrupted: bool = False
+    lora_rank: int | None = None
+    last_request_time: datetime
+    last_checkpoint: Checkpoint | None = None
+    last_sampler_checkpoint: Checkpoint | None = None
+    user_metadata: dict[str, str] | None = None
 
 
 class ForwardBackwardInput(BaseModel):
@@ -240,6 +261,32 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
     )
 
     return ModelInfoResponse(model_id=model.model_id, status=model.status, model_data=model_data)
+
+
+@app.get("/api/v1/training_runs/{model_id}", response_model=TrainingRun)
+async def get_training_run(model_id: str, session: AsyncSession = Depends(get_session)):
+    """Get training run for session resumption."""
+    statement = select(ModelDB).where(ModelDB.model_id == model_id)
+    result = await session.exec(statement)
+    model = result.first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    lora_config = types.LoraConfig.model_validate(model.lora_config)
+
+    return TrainingRun(
+        training_run_id=model.model_id,
+        base_model=model.base_model,
+        model_owner="default",
+        is_lora=True,
+        corrupted=False,
+        lora_rank=lora_config.rank,
+        last_request_time=model.created_at,
+        last_checkpoint=None,
+        last_sampler_checkpoint=None,
+        user_metadata=None,
+    )
 
 
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
@@ -470,7 +517,7 @@ async def root():
         "name": "Tinker API Mock",
         "version": "0.0.1",
         "endpoints": {
-            "models": ["/api/v1/create_model", "/api/v1/get_info"],
+            "models": ["/api/v1/create_model", "/api/v1/get_info", "/api/v1/training_runs/{model_id}"],
             "training": ["/api/v1/forward_backward", "/api/v1/optim_step"],
             "futures": ["/api/v1/retrieve_future"],
             "service": ["/api/v1/get_server_capabilities"],
