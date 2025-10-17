@@ -30,7 +30,7 @@ def test_qwen3_generate():
             torch.from_numpy(input_ids),
             attention_mask=torch.from_numpy(attention_mask),
             max_new_tokens=10,
-            do_sample=False
+            do_sample=False,
         )
     hf_decoded = [tokenizer.decode(ids, skip_special_tokens=True) for ids in hf_output]
 

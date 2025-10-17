@@ -105,7 +105,7 @@ class GeneratorMixin:
                 next_token[:, None],
                 (actual_seq_lengths + step)[:, None],
                 attention_mask=attention_mask,
-                kv_cache=kv_cache
+                kv_cache=kv_cache,
             )
 
             logits = outputs["logits"][:, -1, :]

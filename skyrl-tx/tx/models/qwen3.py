@@ -130,7 +130,9 @@ class Qwen3Attention(nnx.Module):
 
         # Attention (causal only during prefill)
         attn_output = jax.nn.dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             scale=1.0 / self.head_dim**0.5,
             mask=attention_mask[:, None, None, :].astype(bool) if attention_mask is not None else None,
             is_causal=(q.shape[1] == k.shape[1]),
@@ -370,11 +372,12 @@ class Qwen3Model(nnx.Module):
                 all_hidden_states.append(hidden_states)
 
             layer_cache = None
-            if kv_cache is not None and layer_idx < len(kv_cache.keys):
+            if kv_cache is not None:
                 layer_cache = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
 
             hidden_states, (k, v) = layer(
-                hidden_states, positions,
+                hidden_states,
+                positions,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
                 kv_cache=layer_cache,
