@@ -192,7 +192,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], trajectory_ids=[trajectory_id], sampling_params=sampling_params
+                    prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
                 )
             else:
                 # Token-in-token-out.
