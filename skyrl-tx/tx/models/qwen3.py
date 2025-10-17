@@ -4,7 +4,7 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import Qwen3Config
 
-from tx.layers.lora import LoRAExpert, LoRALinear
+from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
 from tx.layers.util import Param, prepare_routing
 from tx.utils.generator import GeneratorMixin, KVCache
 
@@ -336,10 +336,15 @@ class Qwen3Model(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.embed_tokens = nnx.Embed(
+        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
+        max_lora_rank = getattr(config, "max_lora_rank", 8)
+
+        self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
             dtype=dtype,
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
             rngs=rngs,
@@ -362,7 +367,7 @@ class Qwen3Model(nnx.Module):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
