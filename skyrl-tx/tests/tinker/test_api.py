@@ -1,6 +1,9 @@
 """Tests for the Tinker API mock server using the real tinker client."""
 
+import os
 import subprocess
+import tempfile
+import urllib.request
 from urllib.parse import urlparse
 
 import pytest
@@ -119,16 +122,16 @@ def test_training_workflow(service_client):
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
-    # Get a checkpoint
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
-    assert sampling_path is not None
-
-    # Download the checkpoint
+    parsed = urlparse(sampling_path)
+    training_run_id = parsed.netloc
+    checkpoint_id = parsed.path.lstrip("/")
     rest_client = service_client.create_rest_client()
-    parsed_url = urlparse(sampling_path)
-    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
-    future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
-    assert len(future.result()) > 0
+    # Download the checkpoint
+    checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
+    with tempfile.NamedTemporaryFile() as tmp_archive:
+        urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
+        assert os.path.getsize(tmp_archive.name) > 0
 
 
 def test_sample(service_client):
