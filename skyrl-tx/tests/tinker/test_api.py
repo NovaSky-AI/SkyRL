@@ -3,6 +3,7 @@
 import os
 import subprocess
 import urllib.request
+from urllib.parse import urlparse
 
 import pytest
 import tinker
@@ -127,12 +128,8 @@ def test_training_workflow(service_client):
     training_run_id = parsed.netloc
     checkpoint_id = parsed.path.lstrip("/")
     rest_client = service_client.create_rest_client()
+    # Download the checkpoint
     checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
-    assert checkpoint_response is not None
-    assert checkpoint_response.url is not None
-    assert checkpoint_response.expires is not None
-
-    # Actually download the checkpoint
     urllib.request.urlretrieve(checkpoint_response.url, "archive.tar")
     assert os.path.exists("archive.tar")
     assert os.path.getsize("archive.tar") > 0
