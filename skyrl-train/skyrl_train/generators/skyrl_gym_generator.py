@@ -197,9 +197,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             else:
                 # Token-in-token-out.
                 engine_input = InferenceEngineInput(
-                    prompt_token_ids=[input_ids],
-                    session_ids=[session_id],
-                    sampling_params=sampling_params,
+                    prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
 
             engine_output = await self.inference_engine_client.generate(engine_input)
