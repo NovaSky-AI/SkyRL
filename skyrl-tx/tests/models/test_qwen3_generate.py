@@ -19,14 +19,12 @@ def test_qwen3_generate():
     # Prepare batched input (left-padded for generation)
     inputs = ["The capital of France is ", "The future of AI is "]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
-    input_ids = batch.input_ids.numpy()
-    attention_mask = batch.attention_mask.numpy()
 
     # Generate with HuggingFace (reference)
     with torch.no_grad():
         hf_output = hf_model.generate(
-            torch.from_numpy(input_ids),
-            attention_mask=torch.from_numpy(attention_mask),
+            batch.input_ids,
+            attention_mask=batch.attention_mask,
             max_new_tokens=10,
             do_sample=False,
         )
@@ -43,7 +41,9 @@ def test_qwen3_generate():
         load_safetensors(tmp, config, model)
 
         # Generate with our implementation
-        generated = model.generate(input_ids, attention_mask, max_new_tokens=10, temperature=0.01, seed=42)
+        generated = model.generate(
+            batch.input_ids.numpy(), batch.attention_mask.numpy(), max_new_tokens=10, temperature=0.01, seed=42
+        )
         our_decoded = [tokenizer.decode(ids, skip_special_tokens=True) for ids in generated]
 
         # Verify match
