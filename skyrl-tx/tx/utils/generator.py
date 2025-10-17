@@ -82,38 +82,33 @@ class GeneratorMixin:
             Generated token sequences [batch_size, seq_len + max_new_tokens]
         """
         rng = jax.random.PRNGKey(seed)
-        batch_size, seq_len = input_ids.shape
-
-        # Compute positions: cumulative sum of attention mask, clamped to avoid negatives
         positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)
 
-        # Prefill: process full prompt and populate KV cache
+        # Prefill: process full prompt
         outputs = self(input_ids, positions, attention_mask=attention_mask)
-        logits = outputs["logits"][:, -1, :]
         kv_cache = outputs["kv_cache"]
+        next_position = positions[:, -1:] + 1
 
-        # Sample first token and initialize sequences
+        # Sample first token
         rng, sample_key = jax.random.split(rng)
-        next_token = sample_token(logits, temperature=temperature, key=sample_key)
+        next_token = sample_token(outputs["logits"][:, -1, :], temperature=temperature, key=sample_key)
         generated_ids = jnp.concatenate([input_ids, next_token[:, None]], axis=1)
-        attention_mask = jnp.concatenate([attention_mask, jnp.ones((batch_size, 1), dtype=jnp.int32)], axis=1)
+        attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
 
-        # Decode: generate remaining tokens one at a time
+        # Decode: generate remaining tokens
         for step in range(max_new_tokens - 1):
             outputs = self(
                 next_token[:, None],
-                (positions[:, -1] + 1 + step)[:, None],
+                next_position + step,
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
             )
-
-            logits = outputs["logits"][:, -1, :]
             kv_cache = outputs["kv_cache"]
 
             rng, sample_key = jax.random.split(rng)
-            next_token = sample_token(logits, temperature=temperature, key=sample_key)
+            next_token = sample_token(outputs["logits"][:, -1, :], temperature=temperature, key=sample_key)
 
             generated_ids = jnp.concatenate([generated_ids, next_token[:, None]], axis=1)
-            attention_mask = jnp.concatenate([attention_mask, jnp.ones((batch_size, 1), dtype=jnp.int32)], axis=1)
+            attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)[:, None]], axis=1)
 
         return generated_ids
