@@ -1,3 +1,8 @@
+"""Flex attention implementation for attention sink 
+
+Modified from Unsloth to support attention masks: https://github.com/unslothai/unsloth-zoo/blob/main/unsloth_zoo/flex_attention/attention_sink.py
+"""
+
 # Unsloth Zoo - Utilities for Unsloth
 # Copyright 2023-present Daniel Han-Chen, Michael Han-Chen & the Unsloth team. All rights reserved.
 #
@@ -129,7 +134,8 @@ def old_flex_attention_with_sink(
         else causal_mask_with_sink
     )
 
-    if attention_mask is not None:
+    # ignore attention mask if all 1s
+    if attention_mask is not None and not attention_mask.all():
         attn_size = attention_mask.size()
         # In some cases, huggingface will preprocess this to be a 4d attention mask
         # 0 -> token it can attend to

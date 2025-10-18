@@ -58,7 +58,7 @@ def patch_function_past_key_values(
 pass
 
 
-def patch_GptOssAttention(sequence_parallel_size: int = 1, sequence_parallel_rank: Optional[int] = None):
+def patch_GptOssAttention():
     try:
         from .flex_attn_sink import (
             old_flex_attention_with_sink,

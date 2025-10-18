@@ -136,12 +136,7 @@ class HFModelWrapper(nn.Module):
 
                     AttentionInterface.register("custom_flex", custom_attention)
                     AttentionMaskInterface.register("custom_flex", custom_attention_mask)
-                    # attn_implementation =  "custom_flex" <- not working
-                    sequence_parallel_rank = get_ulysses_sequence_parallel_rank()
-                    patch_GptOssAttention(self.sequence_parallel_size, sequence_parallel_rank=sequence_parallel_rank)
                     # set attention implementation to be `custom_flex`
-                    # NOTE: even though we set the attention implementation to be `custom_flex`, we still the patch the full
-                    # attention layer for now
                     self.model.set_attn_implementation("custom_flex")
                     self.attn_implementation = "custom_flex"
 
