@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
 import subprocess
@@ -100,17 +101,7 @@ async def create_checkpoint(
     checkpoint_id: str,
     checkpoint_type: types.CheckpointType,
 ):
-    """Create a pending CheckpointDB entry, ensuring the model exists."""
-    # Check if model exists (required for foreign key constraint)
-    await get_model(session, model_id)
-
-    # Check if checkpoint already exists
-    existing_checkpoint = await session.get(CheckpointDB, (model_id, checkpoint_id))
-    if existing_checkpoint is not None:
-        raise HTTPException(
-            status_code=409, detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
-        )
-
+    """Create a pending CheckpointDB entry, relying on database constraints for validation."""
     checkpoint_db = CheckpointDB(
         model_id=model_id,
         checkpoint_id=checkpoint_id,
@@ -118,7 +109,20 @@ async def create_checkpoint(
         status=CheckpointStatus.PENDING,
     )
     session.add(checkpoint_db)
-    await session.flush()
+
+    try:
+        await session.flush()
+    except IntegrityError:
+        # Determine which constraint failed by checking if the model exists
+        statement = select(ModelDB).where(ModelDB.model_id == model_id)
+        result = await session.exec(statement)
+
+        if not result.first():
+            raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+        else:
+            raise HTTPException(
+                status_code=409, detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
+            )
 
 
 class LoRAConfig(BaseModel):
