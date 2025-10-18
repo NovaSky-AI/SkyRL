@@ -100,13 +100,14 @@ class Qwen3Attention(nnx.Module):
         x: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
-        # Compute positions from attention mask
-        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1)[:, -T:] - 1, 0)
+        # Slice positions to match input sequence length
+        positions = positions[:, -T:]
 
         # Project and reshape to [B, T, num_heads, head_dim]
         q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
@@ -311,6 +312,7 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
@@ -319,6 +321,7 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
+            positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
@@ -354,6 +357,7 @@ class Qwen3Model(nnx.Module):
         input_ids: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
@@ -373,6 +377,7 @@ class Qwen3Model(nnx.Module):
             hidden_states, (k, v) = layer(
                 hidden_states,
                 attention_mask=attention_mask,
+                positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
             )
@@ -411,13 +416,19 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         input_ids: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
     ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
+        if positions is None:
+            batch_size, seq_length = input_ids.shape
+            positions = jnp.tile(jnp.arange(seq_length)[None, :], (batch_size, 1))
+
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
+            positions=positions,
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,

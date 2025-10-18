@@ -40,7 +40,8 @@ class GeneratorMixin:
         scores = [] if return_scores else None
 
         # Prefill: process full prompt
-        outputs = self(input_ids, attention_mask=attention_mask)
+        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)
+        outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
 
         # Decode: generate tokens one at a time
         for step in range(max_new_tokens):
@@ -55,7 +56,8 @@ class GeneratorMixin:
 
             if step < max_new_tokens - 1:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
-                outputs = self(next_token, attention_mask=attention_mask, kv_cache=outputs["kv_cache"])
+                positions = jnp.concatenate([positions, positions[:, -1:] + 1], axis=1)
+                outputs = self(next_token, attention_mask=attention_mask, positions=positions, kv_cache=outputs["kv_cache"])
 
         if return_scores:
             return generated_ids, scores
