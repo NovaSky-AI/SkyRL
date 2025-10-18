@@ -188,7 +188,6 @@ class RayPPOTrainer:
                         generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
                         if keep_sampling:  # continue sampling
                             # update progress bar for current batch (but not global step)
-                            pbar.update(1)
                             continue
 
                     # if we are not continuing sampling, we sleep the inference engine
