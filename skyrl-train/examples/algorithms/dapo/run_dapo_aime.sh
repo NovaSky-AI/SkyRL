@@ -93,7 +93,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.logger="$LOGGER" \
   trainer.project_name="aime" \
   trainer.run_name="aime_dapo" \
-  trainer.resume_mode=null \
+  trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
   trainer.ckpt_path="$HOME/ckpts/aime_1.5B_ckpt" \
   $@
