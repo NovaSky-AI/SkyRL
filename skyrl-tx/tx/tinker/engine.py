@@ -19,7 +19,7 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus
+from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.utils.storage import download_and_unpack, pack_and_upload
@@ -143,6 +143,31 @@ class TinkerEngine:
         )
 
         self._create_loss_and_grad_fn()
+
+    @contextmanager
+    def _checkpoint_status_context(self, model_id: str, checkpoint_id: str):
+        """Context manager to handle checkpoint DB status updates.
+
+        Fetches the checkpoint entry, yields it, and updates its status to COMPLETED
+        or FAILED based on whether an exception occurred.
+        """
+        with Session(self.db_engine) as session:
+            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id))
+            if checkpoint_db is None:
+                raise ValueError(f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}'")
+
+            try:
+                yield checkpoint_db
+                checkpoint_db.status = CheckpointStatus.COMPLETED
+            except Exception as e:
+                logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
+                checkpoint_db.status = CheckpointStatus.FAILED
+                checkpoint_db.error_message = str(e)
+                raise
+            finally:
+                checkpoint_db.completed_at = datetime.now(timezone.utc)
+                session.add(checkpoint_db)
+                session.commit()
 
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
@@ -522,26 +547,27 @@ class TinkerEngine:
             raise ValueError(f"Model {model_id} not loaded")
 
         adapter_index = self.models[model_id].adapter_index
-        checkpoint_id = Path(request_data.path).name
+        checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
-        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
+        with self._checkpoint_status_context(model_id, checkpoint_id):
+            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+            optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
 
-        with pack_and_upload(output_path) as temp_dir:
-            checkpoints.save_checkpoint(
-                target={
-                    "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                    "optimizer_state": nnx.to_pure_dict(optimizer_params),
-                    "lora_config": self.models[model_id].lora_config.model_dump(),
-                },
-                ckpt_dir=temp_dir,
-                step=0,
-                prefix="checkpoint_",
-                overwrite=True,
-            )
+            with pack_and_upload(output_path) as temp_dir:
+                checkpoints.save_checkpoint(
+                    target={
+                        "lora_weights": nnx.to_pure_dict(adapter_lora_params),
+                        "optimizer_state": nnx.to_pure_dict(optimizer_params),
+                        "lora_config": self.models[model_id].lora_config.model_dump(),
+                    },
+                    ckpt_dir=temp_dir,
+                    step=0,
+                    prefix="checkpoint_",
+                    overwrite=True,
+                )
 
-        logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
+            logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
         return types.SaveWeightsOutput(
             path=f"tinker://{model_id}/weights/{checkpoint_id}",
@@ -561,10 +587,13 @@ class TinkerEngine:
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        # Save the LoRA adapter weights and LoRA config as tar.gz
-        save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
+        with self._checkpoint_status_context(model_id, checkpoint_id):
+            # Save the LoRA adapter weights and LoRA config as tar.gz
+            save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
 
-        logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
+            logger.info(
+                f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}"
+            )
 
         return types.SaveWeightsForSamplerOutput(
             path=f"tinker://{model_id}/{checkpoint_id}",
