@@ -517,7 +517,7 @@ async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: s
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
     if checkpoint_db.status == CheckpointStatus.PENDING:
-        raise HTTPException(status_code=425, detail=f"Checkpoint is still being created")
+        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
 
     if checkpoint_db.status == CheckpointStatus.FAILED:
         error_msg = checkpoint_db.error_message or "Unknown error"
