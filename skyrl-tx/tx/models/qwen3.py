@@ -105,9 +105,8 @@ class Qwen3Attention(nnx.Module):
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
-        # Compute sequential positions starting from cache length
-        cache_len = 0 if kv_cache is None else kv_cache[0].shape[1]
-        positions = jnp.arange(cache_len, cache_len + T)[None, :].repeat(B, axis=0)
+        # Compute positions from attention mask
+        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1)[:, -T:] - 1, 0)
 
         # Project and reshape to [B, T, num_heads, head_dim]
         q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
