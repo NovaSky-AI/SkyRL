@@ -51,7 +51,10 @@ class TinkerPath(BaseModel):
 
 
 class AdamParams(BaseModel):
-    lr: float
+    learning_rate: float
+    beta1: float
+    beta2: float
+    eps: float
 
 
 class LoraConfig(BaseModel):
