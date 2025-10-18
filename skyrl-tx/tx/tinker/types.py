@@ -24,6 +24,13 @@ class RequestType(str, Enum):
     SAMPLE = "sample"
 
 
+class CheckpointType(str, Enum):
+    """Type of checkpoint."""
+
+    TRAINING = "training"
+    SAMPLER = "sampler"
+
+
 class TinkerPath(BaseModel):
     primary_id: str
     kind: str

@@ -98,6 +98,7 @@ async def create_checkpoint(
     session: AsyncSession,
     model_id: str,
     checkpoint_id: str,
+    checkpoint_type: types.CheckpointType,
 ):
     """Create a pending CheckpointDB entry, ensuring the model exists."""
     # Check if model exists (required for foreign key constraint)
@@ -113,6 +114,7 @@ async def create_checkpoint(
     checkpoint_db = CheckpointDB(
         model_id=model_id,
         checkpoint_id=checkpoint_id,
+        checkpoint_type=checkpoint_type,
         status=CheckpointStatus.PENDING,
     )
     session.add(checkpoint_db)
@@ -244,17 +246,8 @@ class GetServerCapabilitiesResponse(BaseModel):
     supported_models: list[SupportedModel]
 
 
-class CheckpointInfo(BaseModel):
-    checkpoint_id: str
-    model_id: str
-    status: str
-    created_at: str
-    completed_at: str | None = None
-    error_message: str | None = None
-
-
 class ListCheckpointsResponse(BaseModel):
-    checkpoints: list[CheckpointInfo]
+    checkpoints: list[Checkpoint]
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
@@ -402,6 +395,7 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
         session=session,
         model_id=request.model_id,
         checkpoint_id=request.path,
+        checkpoint_type=types.CheckpointType.TRAINING,
     )
 
     request_id = await create_future(
@@ -424,6 +418,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         model_id=request.model_id,
         checkpoint_id=request.path,
+        checkpoint_type=types.CheckpointType.SAMPLER,
     )
 
     request_id = await create_future(
@@ -578,22 +573,29 @@ async def list_checkpoints(
     session: AsyncSession = Depends(get_session),
 ):
     """List checkpoints for a model."""
-    statement = select(CheckpointDB).where(CheckpointDB.model_id == unique_id)
+    statement = (
+        select(CheckpointDB)
+        .where(CheckpointDB.model_id == unique_id)
+        .where(CheckpointDB.status == CheckpointStatus.COMPLETED)
+    )
     result = await session.exec(statement)
 
-    return ListCheckpointsResponse(
-        checkpoints=[
-            CheckpointInfo(
+    checkpoints = []
+    for checkpoint in result.all():
+        # Construct tinker_path based on checkpoint type
+        path_kind = "weights" if checkpoint.checkpoint_type == types.CheckpointType.TRAINING else "sampler_weights"
+        tinker_path = f"tinker://{unique_id}/{path_kind}/{checkpoint.checkpoint_id}"
+
+        checkpoints.append(
+            Checkpoint(
                 checkpoint_id=checkpoint.checkpoint_id,
-                model_id=checkpoint.model_id,
-                status=checkpoint.status,
-                created_at=checkpoint.created_at.isoformat(),
-                completed_at=checkpoint.completed_at.isoformat() if checkpoint.completed_at else None,
-                error_message=checkpoint.error_message,
+                checkpoint_type=checkpoint.checkpoint_type.value,
+                time=checkpoint.completed_at or checkpoint.created_at,
+                tinker_path=tinker_path,
             )
-            for checkpoint in result.all()
-        ]
-    )
+        )
+
+    return ListCheckpointsResponse(checkpoints=checkpoints)
 
 
 @app.get("/")
