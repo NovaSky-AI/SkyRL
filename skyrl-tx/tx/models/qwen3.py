@@ -122,15 +122,9 @@ class Qwen3Attention(nnx.Module):
             k = jnp.concatenate([kv_cache[0], k], axis=1)
             v = jnp.concatenate([kv_cache[1], v], axis=1)
 
-        # Store cache before GQA repetition
         updated_cache = (k, v)
 
-        if self.num_kv_heads != self.num_heads:
-            num_groups = self.num_heads // self.num_kv_heads
-            k = jnp.repeat(k, num_groups, axis=2)
-            v = jnp.repeat(v, num_groups, axis=2)
-
-        # Attention (causal only during prefill)
+        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
         attn_output = jax.nn.dot_product_attention(
             q,
             k,
