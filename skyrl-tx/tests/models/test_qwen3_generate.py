@@ -42,13 +42,18 @@ def test_qwen3_generate():
         load_safetensors(tmp, config, model)
 
         output, our_scores = model.generate(
-            batch.input_ids.numpy(), batch.attention_mask.numpy(), max_new_tokens=10, temperature=0.0, seed=42, return_scores=True
+            batch.input_ids.numpy(),
+            batch.attention_mask.numpy(),
+            max_new_tokens=10,
+            temperature=0.0,
+            seed=42,
+            return_scores=True,
         )
 
         assert jnp.array_equal(output, hf_output.sequences.numpy()), "Generated tokens don't match HuggingFace"
 
         # Compare scores (logits) for each generated token
         for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, our_scores)):
-            assert np.allclose(hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3), (
-                f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"
-            )
+            assert np.allclose(
+                hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3
+            ), f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"

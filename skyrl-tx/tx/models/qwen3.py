@@ -106,9 +106,6 @@ class Qwen3Attention(nnx.Module):
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
-        # Slice positions to match input sequence length
-        positions = positions[:, -T:]
-
         # Project and reshape to [B, T, num_heads, head_dim]
         q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
         k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim))

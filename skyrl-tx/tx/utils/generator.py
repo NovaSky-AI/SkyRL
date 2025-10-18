@@ -53,6 +53,9 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask, input_ids.shape[1])
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
 
+        # Keep track of only the last position for decoding
+        last_positions = positions[:, -1:]
+
         # Decode: generate tokens one at a time
         for step in range(max_new_tokens):
             rng, sample_key = jax.random.split(rng)
@@ -66,8 +69,11 @@ class GeneratorMixin:
 
             if step < max_new_tokens - 1:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
-                positions = jnp.concatenate([positions, positions[:, -1:] + 1], axis=1)
-                outputs = self(next_token, attention_mask=attention_mask, positions=positions, kv_cache=outputs["kv_cache"])
+                # Increment position for the new token
+                last_positions = last_positions + 1
+                outputs = self(
+                    next_token, attention_mask=attention_mask, positions=last_positions, kv_cache=outputs["kv_cache"]
+                )
 
         if return_scores:
             return generated_ids, scores
