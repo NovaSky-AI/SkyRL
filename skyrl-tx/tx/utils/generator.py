@@ -32,10 +32,12 @@ class GeneratorMixin:
         max_new_tokens: int,
         temperature: float,
         seed: int,
-    ) -> jax.Array:
+        return_scores: bool = False,
+    ) -> jax.Array | tuple[jax.Array, list[jax.Array]]:
         """Generate text autoregressively with KV caching."""
         rng = jax.random.PRNGKey(seed)
         generated_ids = input_ids
+        scores = [] if return_scores else None
 
         # Prefill: process full prompt
         outputs = self(input_ids, attention_mask=attention_mask)
@@ -43,11 +45,18 @@ class GeneratorMixin:
         # Decode: generate tokens one at a time
         for step in range(max_new_tokens):
             rng, sample_key = jax.random.split(rng)
-            next_token = sample_token(outputs["logits"][:, -1, :], temperature=temperature, key=sample_key)
+            logits = outputs["logits"][:, -1, :]
+
+            if return_scores:
+                scores.append(logits)
+
+            next_token = sample_token(logits, temperature=temperature, key=sample_key)
             generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
 
             if step < max_new_tokens - 1:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
                 outputs = self(next_token, attention_mask=attention_mask, kv_cache=outputs["kv_cache"])
 
+        if return_scores:
+            return generated_ids, scores
         return generated_ids
