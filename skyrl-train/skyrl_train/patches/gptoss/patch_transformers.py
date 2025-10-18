@@ -1,3 +1,7 @@
+"""Patches for GPTOSS's transformer layer
+
+Adapted from Unsloth's flex attention integration: https://github.com/unslothai/unsloth-zoo/blob/main/unsloth_zoo/temporary_patches/gpt_oss.py
+"""
 from typing import Optional, Union, Callable, List, Any
 import torch
 import torch.nn as nn

@@ -1,3 +1,4 @@
+"""Simple script to sanity check flex attention patches for GPTOSS"""
 import ray
 
 
@@ -52,6 +53,9 @@ def run_task():
         output1 = model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
         logprobs1 = logprobs_from_logits(output1["logits"], input_ids)
 
+    # uncommment this to patch the full attention module
+    # from skyrl_train.patches.gptoss.patch_transformers import patch_GptOssAttention
+    # patch_GptOssAttention()
     model.set_attn_implementation("custom_flex")
 
     with torch.no_grad():
