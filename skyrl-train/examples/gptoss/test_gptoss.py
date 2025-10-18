@@ -1,4 +1,5 @@
 """Simple script to sanity check flex attention patches for GPTOSS"""
+
 import ray
 
 
@@ -79,4 +80,3 @@ def run_task(with_padding: bool = True):
 ray.init()
 ray.get(run_task.remote(with_padding=False))
 ray.get(run_task.remote(with_padding=True))
-

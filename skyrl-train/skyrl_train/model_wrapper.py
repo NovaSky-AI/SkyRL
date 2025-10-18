@@ -19,9 +19,6 @@ from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, 
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
-from skyrl_train.distributed.ulysses.utils import (
-    get_ulysses_sequence_parallel_rank,
-)
 
 
 class HFModelWrapper(nn.Module):
@@ -129,7 +126,6 @@ class HFModelWrapper(nn.Module):
                     # patch attention with Unsloth's flex attn
                     from skyrl_train.patches.gptoss.patch_transformers import (
                         custom_attention,
-                        patch_GptOssAttention,
                         custom_attention_mask,
                     )
                     from transformers import AttentionInterface, AttentionMaskInterface
