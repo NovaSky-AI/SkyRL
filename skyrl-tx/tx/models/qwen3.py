@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import Param, prepare_routing
-from tx.utils.generator import GeneratorMixin, KVCache
+from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
 class RMSNorm(nnx.Module):
@@ -422,8 +422,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         kv_cache: KVCache | None = None,
     ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         if positions is None:
-            batch_size, seq_length = input_ids.shape
-            positions = jnp.tile(jnp.arange(seq_length)[None, :], (batch_size, 1))
+            positions = compute_positions(attention_mask, input_ids.shape[1])
 
         outputs = self.model(
             input_ids,

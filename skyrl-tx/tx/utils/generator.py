@@ -21,6 +21,16 @@ def sample_token(logits: jax.Array, *, temperature: float, key: jax.Array) -> ja
     return jax.random.categorical(key, logits / temperature, axis=-1)[:, None]
 
 
+def compute_positions(attention_mask: jax.Array, seq_length: int) -> jax.Array:
+    """Compute positions from attention mask.
+
+    Positions start at 0 from the first non-zero value in the attention mask
+    and increment sequentially.
+    """
+    first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
+    return jnp.arange(seq_length)[None, :] - first_token_idx
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -40,7 +50,7 @@ class GeneratorMixin:
         scores = [] if return_scores else None
 
         # Prefill: process full prompt
-        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1) - 1, 0)
+        positions = compute_positions(attention_mask, input_ids.shape[1])
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
 
         # Decode: generate tokens one at a time
