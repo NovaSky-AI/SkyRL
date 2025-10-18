@@ -21,14 +21,14 @@ def sample_token(logits: jax.Array, *, temperature: float, key: jax.Array) -> ja
     return jax.random.categorical(key, logits / temperature, axis=-1)[:, None]
 
 
-def compute_positions(attention_mask: jax.Array, seq_length: int) -> jax.Array:
+def compute_positions(attention_mask: jax.Array) -> jax.Array:
     """Compute positions from attention mask.
 
     Positions start at 0 from the first non-zero value in the attention mask
     and increment sequentially.
     """
     first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
-    return jnp.arange(seq_length)[None, :] - first_token_idx
+    return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
 class GeneratorMixin:
@@ -50,7 +50,7 @@ class GeneratorMixin:
         scores = [] if return_scores else None
 
         # Prefill: process full prompt
-        positions = compute_positions(attention_mask, input_ids.shape[1])
+        positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
 
         # Keep track of only the last position for decoding

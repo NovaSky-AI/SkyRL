@@ -419,7 +419,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         kv_cache: KVCache | None = None,
     ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         if positions is None:
-            positions = compute_positions(attention_mask, input_ids.shape[1])
+            positions = compute_positions(attention_mask)
 
         outputs = self.model(
             input_ids,
