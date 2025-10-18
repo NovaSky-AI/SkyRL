@@ -21,9 +21,8 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
 from skyrl_train.distributed.ulysses.utils import (
     get_ulysses_sequence_parallel_rank,
-    ulysses_pad_and_slice_inputs,
-    gather_outputs_and_unpad,
 )
+
 
 class HFModelWrapper(nn.Module):
     """
@@ -76,7 +75,9 @@ class HFModelWrapper(nn.Module):
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
-            assert self.attn_implementation == "flash_attention_2", "Flash attention 2 should be used for `use_sample_packing`"
+            assert (
+                self.attn_implementation == "flash_attention_2"
+            ), "Flash attention 2 should be used for `use_sample_packing`"
 
         if isinstance(pretrain_or_model, str):
             # Note: dschf is defined in function scope to avoid global effects

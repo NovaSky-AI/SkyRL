@@ -23,11 +23,9 @@ __all__ = [
     "create_block_mask",
     "compiled_create_block_mask",
     "FlexAttentionCache",
-
     "causal_mask",
     "generate_causal_mask_with_padding",
     "generate_decoding_causal_mask_with_padding",
-
     "generate_sliding_window_mask",
     "generate_sliding_window_mask_with_padding",
     "generate_decoding_sliding_window_mask_with_padding",
@@ -35,6 +33,7 @@ __all__ = [
 
 import torch
 import functools
+
 FLEX_ATTENTION_KV_INCREMENT = 512
 
 try:
@@ -43,6 +42,7 @@ try:
         flex_attention as _flex_attention,
         create_block_mask as _create_block_mask,
     )
+
     HAS_FLEX_ATTENTION = True
     from torch.nn.attention.flex_attention import _score_mod_signature, _mask_mod_signature
 
@@ -50,7 +50,9 @@ try:
     # InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 65536 Hardware limit:65536 Reducing block sizes or `num_stages` may help.
     # See https://github.com/pytorch/pytorch/issues/133254#issuecomment-2408710459
     # https://github.com/pytorch/pytorch/issues/133254#issuecomment-2539969593
-    vram_of_gpu = min(torch.cuda.memory.mem_get_info(i)[-1]/1024/1024/1024 for i in range(torch.cuda.device_count()))
+    vram_of_gpu = min(
+        torch.cuda.memory.mem_get_info(i)[-1] / 1024 / 1024 / 1024 for i in range(torch.cuda.device_count())
+    )
     kernel_options = None
     if vram_of_gpu <= 16:
         kernel_options = {
@@ -61,7 +63,7 @@ try:
             "BLOCK_M2": 32,
             "BLOCK_N2": 32,
         }
-        _flex_attention = functools.partial(_flex_attention, kernel_options = kernel_options)
+        _flex_attention = functools.partial(_flex_attention, kernel_options=kernel_options)
     elif vram_of_gpu <= 24:
         kernel_options = {
             "BLOCK_M": 64,
@@ -71,36 +73,36 @@ try:
             "BLOCK_M2": 64,
             "BLOCK_N2": 32,
         }
-        _flex_attention = functools.partial(_flex_attention, kernel_options = kernel_options)
+        _flex_attention = functools.partial(_flex_attention, kernel_options=kernel_options)
     pass
     flex_attention = torch.compile(_flex_attention)
 
     @functools.lru_cache
-    def create_block_mask_cached(mask_mod, M, N, device = "cuda"):
+    def create_block_mask_cached(mask_mod, M, N, device="cuda"):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
-        return _create_block_mask(mask_mod, None, None, M, N, device = device)
+        return _create_block_mask(mask_mod, None, None, M, N, device=device)
 
     @functools.lru_cache
-    def create_block_mask(mask_mod, bsz, head, M, N, device = "cuda"):
+    def create_block_mask(mask_mod, bsz, head, M, N, device="cuda"):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
-        return _create_block_mask(mask_mod, bsz, head, M, N, device = device)
+        return _create_block_mask(mask_mod, bsz, head, M, N, device=device)
 
-    def compiled_create_block_mask_cached(mask_mod, M, N, device = "cuda"):
+    def compiled_create_block_mask_cached(mask_mod, M, N, device="cuda"):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
         # See https://github.com/meta-pytorch/attention-gym/issues/15#issuecomment-2284148665
         # _compile MUST be on to reduce VRAM otherwise O(N^2) usage
-        return _create_block_mask(mask_mod, None, None, M, N, device = device, _compile = True)
+        return _create_block_mask(mask_mod, None, None, M, N, device=device, _compile=True)
 
-    def compiled_create_block_mask(mask_mod, bsz, head, M, N, device = "cuda"):
+    def compiled_create_block_mask(mask_mod, bsz, head, M, N, device="cuda"):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
         # _compile MUST be on to reduce VRAM otherwise O(N^2) usage
-        return _create_block_mask(mask_mod, bsz, head, M, N, device = device, _compile = True)
+        return _create_block_mask(mask_mod, bsz, head, M, N, device=device, _compile=True)
 
     def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
         """Causal mask for Flex Attention"""
         return q_idx >= kv_idx
 
-    def generate_causal_mask_with_padding(padding_start_idx = None):
+    def generate_causal_mask_with_padding(padding_start_idx=None):
         """
         Causal mask for Flex Attention with left padding support.
         Normal causal mask:
@@ -122,15 +124,17 @@ try:
         assert padding_start_idx is not None and type(padding_start_idx) is torch.Tensor
         assert padding_start_idx.dim() == 1
         assert padding_start_idx.shape[0] >= 1
+
         def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
             """Causal mask for Flex Attention"""
-            q_start =  q_idx >= padding_start_idx[batch_idx]
+            q_start = q_idx >= padding_start_idx[batch_idx]
             k_start = kv_idx >= padding_start_idx[batch_idx]
             return q_start & k_start & (q_idx >= kv_idx)
-        causal_mask.__name__ = causal_mask.__doc__ = f"causal_mask_with_left_padding"
+
+        causal_mask.__name__ = causal_mask.__doc__ = "causal_mask_with_left_padding"
         return causal_mask
 
-    def generate_decoding_causal_mask_with_padding(padding_start_idx = None):
+    def generate_decoding_causal_mask_with_padding(padding_start_idx=None):
         """
         For decoding purposes only. We remove q_padded since decoding attends to 1 q
         Assume padded tokens = 5
@@ -146,16 +150,19 @@ try:
         assert padding_start_idx is not None and type(padding_start_idx) is torch.Tensor
         assert padding_start_idx.dim() == 1
         assert padding_start_idx.shape[0] >= 1
+
         def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
             """Causal mask for Flex Attention"""
             k_start = kv_idx >= padding_start_idx[batch_idx]
             return k_start & (q_idx >= kv_idx)
-        causal_mask.__name__ = causal_mask.__doc__ = f"decoding_causal_mask_with_left_padding"
+
+        causal_mask.__name__ = causal_mask.__doc__ = "decoding_causal_mask_with_left_padding"
         return causal_mask
 
     @functools.lru_cache
     def generate_sliding_window_mask(window_size: int):
         """Sliding window mask for Flex Attention"""
+
         def sliding_window(batch_idx, head_idx, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
             """
@@ -177,23 +184,26 @@ try:
             # Official PyTorch attends to 1 extra token
             # windowed_mask = q_idx - kv_idx <= window_size
             return causal_mask & windowed_mask
+
         sliding_window.__name__ = sliding_window.__doc__ = f"sliding_window_{window_size}"
         return sliding_window
 
-    def generate_sliding_window_mask_with_padding(window_size: int, padding_start_idx = None):
+    def generate_sliding_window_mask_with_padding(window_size: int, padding_start_idx=None):
         assert padding_start_idx is not None and type(padding_start_idx) is torch.Tensor
         assert padding_start_idx.dim() == 1
         assert padding_start_idx.shape[0] >= 1
+
         def sliding_window(batch_idx, head_idx, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
             windowed_mask = q_idx - kv_idx < window_size
-            q_padded =  q_idx >= padding_start_idx[batch_idx]
+            q_padded = q_idx >= padding_start_idx[batch_idx]
             k_padded = kv_idx >= padding_start_idx[batch_idx]
             return q_padded & k_padded & causal_mask & windowed_mask
+
         sliding_window.__name__ = sliding_window.__doc__ = f"sliding_window_with_left_padding_{window_size}"
         return sliding_window
 
-    def generate_decoding_sliding_window_mask_with_padding(window_size: int, padding_start_idx = None):
+    def generate_decoding_sliding_window_mask_with_padding(window_size: int, padding_start_idx=None):
         """
         We cannot use padding_start_idx[batch_idx] for SWA decoding since
         assume padding_start_idx=[3406, 4000, 0] and SW=128 then it'll always
@@ -207,18 +217,28 @@ try:
     def get_score_mod_w_offset(score_mod: _score_mod_signature, _offset: torch.tensor):
         def _score_mod(score, b, h, q, kv):
             return score_mod(score, b, h, q + _offset, kv)
+
         return _score_mod
 
     def get_mask_mod_w_offset(mask_mod: _mask_mod_signature, _offset: torch.tensor):
         def _mask_mod(b, h, q, kv):
             return mask_mod(b, h, q + _offset, kv)
+
         return _mask_mod
 
     # Used for every attention layer
     class FlexAttentionCache:
-        __slots__ = \
-            "offset", "offset_tensor", "mask_mod_with_offset", "block_mask", "mask_mod", \
-            "max_length", "block_size", "sliding_window", "block_mask_slice",
+        __slots__ = (
+            "offset",
+            "offset_tensor",
+            "mask_mod_with_offset",
+            "block_mask",
+            "mask_mod",
+            "max_length",
+            "block_size",
+            "sliding_window",
+            "block_mask_slice",
+        )
 
         def __init__(self, key, mask_mod, sliding_window):
             bsz, heads_KV, qlen_KV, dim = key.shape
@@ -253,8 +273,8 @@ try:
                 """
                 # Get next multiple of FLEX_ATTENTION_KV_INCREMENT
                 div, mod = divmod(qlen_KV, FLEX_ATTENTION_KV_INCREMENT)
-                n = FLEX_ATTENTION_KV_INCREMENT*div + (FLEX_ATTENTION_KV_INCREMENT if mod != 0 else 0)
-                self.offset = qlen_KV - 2 # Minus two since we need the block mask to use the saved offset_tensor
+                n = FLEX_ATTENTION_KV_INCREMENT * div + (FLEX_ATTENTION_KV_INCREMENT if mod != 0 else 0)
+                self.offset = qlen_KV - 2  # Minus two since we need the block mask to use the saved offset_tensor
                 # Minus 2 and not -1 since we do pre-incrementing and not post-incrementing
                 # See self.offset += 1
                 if self.offset <= -2:
@@ -301,14 +321,14 @@ try:
                 since 128 means index 127
                 """
                 n = sliding_window
-                self.offset = min(sliding_window, qlen_KV) - 2 # Minus 2 since block mask is indexing
+                self.offset = min(sliding_window, qlen_KV) - 2  # Minus 2 since block mask is indexing
                 if self.offset <= -2:
                     # Minimum is -1
                     self.offset = -1
                     # During decoding we do self.offset += 1, so self.offset = 0
-                self.sliding_window = sliding_window - 1 # Minus 1 since token 128 means index 127
-            self.offset_tensor = torch.tensor(self.offset, device = key.device, dtype = torch.int32)
-            self.block_mask = compiled_create_block_mask(mask_mod, bsz, heads_KV, n, n, device = key.device)
+                self.sliding_window = sliding_window - 1  # Minus 1 since token 128 means index 127
+            self.offset_tensor = torch.tensor(self.offset, device=key.device, dtype=torch.int32)
+            self.block_mask = compiled_create_block_mask(mask_mod, bsz, heads_KV, n, n, device=key.device)
             self.mask_mod = mask_mod
             self.max_length = n
             self.block_size = self.block_mask.BLOCK_SIZE[0]
@@ -323,7 +343,7 @@ try:
             if (self.sliding_window is None) or (self.offset < self.sliding_window):
                 self.offset += 1
                 self.offset_tensor.add_(1)
-            elif (self.sliding_window is not None):
+            elif self.sliding_window is not None:
                 # Quick return since sliding window mask has the same block mask always
                 # Can only enter here if (self.offset < self.sliding_window) fails
                 # ie the maximum sliding window has been reached already
@@ -332,7 +352,9 @@ try:
                 # Must be >= since offset=127, max_length=128 means size=127+1=128
                 # since we do zero indexing
                 self.max_length += FLEX_ATTENTION_KV_INCREMENT
-                self.block_mask = compiled_create_block_mask(self.mask_mod, bsz, heads_KV, self.max_length, self.max_length, device = key.device)
+                self.block_mask = compiled_create_block_mask(
+                    self.mask_mod, bsz, heads_KV, self.max_length, self.max_length, device=key.device
+                )
                 self.block_size = self.block_mask.BLOCK_SIZE[0]
             block_offset = self.offset // self.block_size
             block_mask_slice = self.block_mask[:, :, block_offset]
@@ -342,9 +364,10 @@ try:
             block_mask_slice.seq_lengths = (1, qlen_KV)
             self.block_mask_slice = block_mask_slice
             return block_mask_slice
+
     pass
 
-except:
+except Exception:
     HAS_FLEX_ATTENTION = False
     FLEX_ATTENTION_BLOCK_SIZE = None
     flex_attention = None

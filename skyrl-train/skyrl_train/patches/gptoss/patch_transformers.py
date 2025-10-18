@@ -21,7 +21,7 @@ def patch_function_past_key_values(
     original_func = getattr(target_obj, attr_name)
     try:
         old_keys = inspect.signature(original_func).parameters.keys()
-    except:
+    except Exception:
         logger.error(f"Cannot inspect {target_obj.__name__}")
         return False
     success = False
@@ -39,7 +39,7 @@ def patch_function_past_key_values(
         ):
             if key in new_keys and key in old_keys:
                 try:
-                    orig_func = getattr(target_obj, attr_name)
+                    orig_func = getattr(target_obj, attr_name)  # noqa: F841
                     setattr(target_obj, attr_name, func)
                     success = True
                     break
@@ -193,7 +193,7 @@ def patch_GptOssAttention(sequence_parallel_size: int = 1, sequence_parallel_ran
         assert getattr(self, "sinks", None) is not None, "self_attn must have sinks"
         sinks = self.sinks
         num_key_value_groups = getattr(self, "num_key_value_groups", 1)
-        scale = getattr(self, "scaling", None) or getattr(self, "scale", None) or scale
+        scale = getattr(self, "scaling", None) or getattr(self, "scale", None)
         sliding_window = getattr(self, "sliding_window", None)
         attn_output = old_flex_attention_with_sink(
             query_states,
@@ -209,7 +209,6 @@ def patch_GptOssAttention(sequence_parallel_size: int = 1, sequence_parallel_ran
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
-
 
     functions = []
 
@@ -260,14 +259,14 @@ def custom_attention(
     assert getattr(module, "sinks", None) is not None, "self_attn must have sinks"
     sinks = module.sinks
     num_key_value_groups = getattr(module, "num_key_value_groups", 1)
-    scale = getattr(module, "scaling", None) or getattr(module, "scale", None) or scale
+    scale = getattr(module, "scaling", None) or getattr(module, "scale", None)
     sliding_window = getattr(module, "sliding_window", None)
 
     attn_output = old_flex_attention_with_sink(
-        query, 
-        key, 
-        value, 
-        attention_mask=attention_mask, 
+        query,
+        key,
+        value,
+        attention_mask=attention_mask,
         scale=scale,
         num_key_value_groups=num_key_value_groups,
         sinks=sinks,

@@ -4,11 +4,10 @@ import ray
 @ray.remote(num_gpus=1)
 def run_task():
 
-    from skyrl_train.patches.gptoss.patch_transformers import custom_attention_mask, patch_GptOssAttention, custom_attention
+    from skyrl_train.patches.gptoss.patch_transformers import custom_attention_mask, custom_attention
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from skyrl_train.model_wrapper import logprobs_from_logits
-
 
     from transformers import AttentionInterface, AttentionMaskInterface
 
@@ -61,7 +60,6 @@ def run_task():
         # NOTE: this is actually a high error in logprobs.
         # TODO: revisit flex attention patches to see if this can be improved
         torch.testing.assert_close(logprobs1, logprobs2, atol=1e-2, rtol=0.02)
-
 
 
 ray.init()

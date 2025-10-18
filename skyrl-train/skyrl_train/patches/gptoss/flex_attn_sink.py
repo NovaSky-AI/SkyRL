@@ -20,8 +20,6 @@ __all__ = [
 
 import torch
 import functools
-import math
-import torch.nn.functional as F
 from torch.nn.attention.flex_attention import (
     create_block_mask as _create_block_mask,
 )
@@ -43,6 +41,7 @@ def causal_mask_with_sink(batch, head, q_idx, kv_idx):
     sink_first_column = kv_idx == 0
     return causal_mask | sink_first_column
 
+
 @functools.lru_cache
 def generate_sliding_window_with_sink(window_size: int):
     def sliding_window(batch, head, q_idx, kv_idx):
@@ -56,6 +55,7 @@ def generate_sliding_window_with_sink(window_size: int):
 
     sliding_window.__name__ = sliding_window.__doc__ = f"sliding_window_{window_size}_sink"
     return sliding_window
+
 
 @functools.lru_cache
 def generate_sink_score_mod(
