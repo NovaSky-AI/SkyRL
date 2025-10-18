@@ -524,8 +524,7 @@ async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: s
         raise HTTPException(status_code=425, detail="Checkpoint is still being created")
 
     if checkpoint_db.status == CheckpointStatus.FAILED:
-        error_msg = checkpoint_db.error_message or "Unknown error"
-        raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {error_msg}")
+        raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
     checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
     return checkpoint_path
@@ -594,7 +593,7 @@ async def list_checkpoints(
             Checkpoint(
                 checkpoint_id=checkpoint.checkpoint_id,
                 checkpoint_type=checkpoint.checkpoint_type.value,
-                time=checkpoint.completed_at or checkpoint.created_at,
+                time=checkpoint.completed_at,
                 tinker_path=tinker_path,
             )
         )

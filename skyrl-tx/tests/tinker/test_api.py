@@ -100,6 +100,9 @@ def test_training_workflow(service_client):
 
     # Save the optimizer state
     resume_path = training_client.save_state(name="0000").result().path
+    # Get the training run ID from the first save
+    parsed_resume = urlparse(resume_path)
+    original_training_run_id = parsed_resume.netloc
 
     # Run training step
     fwdbwd_future = training_client.forward_backward(processed_examples, "cross_entropy")
@@ -138,6 +141,14 @@ def test_training_workflow(service_client):
     with tempfile.NamedTemporaryFile() as tmp_archive:
         urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
         assert os.path.getsize(tmp_archive.name) > 0
+
+    # List all checkpoints for the original training run
+    checkpoints_response = rest_client.list_checkpoints(original_training_run_id).result()
+    assert checkpoints_response is not None
+    assert len(checkpoints_response.checkpoints) > 0
+    # Verify that the checkpoint we created is in the list
+    checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
+    assert "0000" in checkpoint_ids
 
 
 def test_sample(service_client):
