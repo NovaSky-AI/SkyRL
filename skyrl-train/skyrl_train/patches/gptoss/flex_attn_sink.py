@@ -134,8 +134,7 @@ def old_flex_attention_with_sink(
         else causal_mask_with_sink
     )
 
-    # ignore attention mask if all 1s
-    if attention_mask is not None and not attention_mask.all():
+    if attention_mask is not None:
         attn_size = attention_mask.size()
         # In some cases, huggingface will preprocess this to be a 4d attention mask
         # 0 -> token it can attend to
