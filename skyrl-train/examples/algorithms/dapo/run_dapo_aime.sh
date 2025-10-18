@@ -37,8 +37,9 @@ MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
 TRAIN_BATCH_SIZE=512
-N_SAMPLES_PER_PROMPT=16
 MINI_BATCH_SIZE=32
+N_SAMPLES_PER_PROMPT=16
+EVAL_N_SAMPLES_PER_PROMPT=16
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -87,6 +88,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="aime" \
