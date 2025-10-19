@@ -18,18 +18,17 @@
 
 from collections import defaultdict
 from enum import StrEnum
-from typing import Callable, List, Tuple, Union, Optional, Literal
 from functools import wraps
-import torch
+from typing import Callable, List, Literal, Optional, Tuple, Union
+
 import numpy as np
-
-from omegaconf import DictConfig
-from skyrl_train.training_batch import TrainingInputBatch
-from jaxtyping import Float
-
 import ray
+import torch
+from jaxtyping import Float
 from loguru import logger
+from omegaconf import DictConfig
 
+from skyrl_train.training_batch import TrainingInputBatch
 
 # Import cloudpickle for function serialization
 try:
@@ -183,7 +182,6 @@ def ppo_critic_loss(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[float]]:
-
     if config.value_clip is not None:
         values_clipped = old_values + (values - old_values).clamp(-config.value_clip, config.value_clip)
         surr1 = (values_clipped - returns) ** 2
@@ -457,7 +455,10 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage],
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
-            "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+            "reinforce++": [
+                AdvantageEstimator.REINFORCE_PP,
+                compute_reinforce_plus_plus_outcome_advantage,
+            ],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -621,7 +622,9 @@ def gspo_policy_loss(
         # The GSPO paper uses sequence_mean reduction; there's no reason
         # why a user couldn't use token_mean reduction, but
         # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+        from loguru import (
+            logger as logger_,  # have to do lazy import to avoid pickling error
+        )
 
         logger_.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 
@@ -653,6 +656,7 @@ def gspo_policy_loss(
 
     return loss, clip_ratio
 
+
 @register_policy_loss(PolicyLossType.CISPO)
 def compute_policy_loss_cispo(
     log_probs: torch.Tensor,
@@ -666,21 +670,22 @@ def compute_policy_loss_cispo(
     as proposed in https://arxiv.org/abs/2506.13585.
 
     Instead of clipping the importance sampling ratio in the loss directly, as done
-    in PPO and GRPO loss, CISPO clips the importance sampling ratio in the policy gradient
+    in PPO loss, CISPO clips the importance sampling ratio in the policy gradient
     update step. This means the model can still learn from samples whose importance sampling
-    ratio is clipped in CISPO, as opposed to GRPO and PPO where these samples have zero 
+    ratio is clipped in CISPO, as opposed to GRPO and PPO where these samples have zero
     gradient and are essentially ignored.
     """
     ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     clamped_ratio = torch.clamp(ratio, 1 - config.eps_clip_low, 1 + config.eps_clip_high)
     loss = -advantages * clamped_ratio.detach() * log_probs
 
-    is_clipped = (ratio > 1-config.eps_clip_low) | (ratio < 1+config.eps_clip_high)
+    is_clipped = (ratio > 1 - config.eps_clip_low) | (ratio < 1 + config.eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
-    # CISPO paper uses 
+    # CISPO paper uses
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
     return loss, clip_ratio
+
 
 @register_policy_loss(PolicyLossType.CLIP_COV)
 def compute_policy_loss_clip_cov(
@@ -740,7 +745,10 @@ def compute_policy_loss_clip_cov(
     # Apply correction mask to losses
     pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
     pg_loss = reduce_loss(
-        loss=pg_losses, loss_mask=loss_mask, loss_reduction=config.loss_reduction, max_seq_len=config.max_seq_len
+        loss=pg_losses,
+        loss_mask=loss_mask,
+        loss_reduction=config.loss_reduction,
+        max_seq_len=config.max_seq_len,
     )
 
     return pg_loss, clip_frac.item()
@@ -787,12 +795,19 @@ def compute_policy_loss_kl_cov(
 
             if len(large_cov_idxs) > 0:
                 large_cov_idxs = all_valid_idx[large_cov_idxs]
-                pg_losses[large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]] = pg_losses_kl[
-                    large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]
+                pg_losses[
+                    large_cov_idxs // advantages.shape[1],
+                    large_cov_idxs % advantages.shape[1],
+                ] = pg_losses_kl[
+                    large_cov_idxs // advantages.shape[1],
+                    large_cov_idxs % advantages.shape[1],
                 ]
 
     pg_loss = reduce_loss(
-        loss=pg_losses, loss_mask=loss_mask, loss_reduction=config.loss_reduction, max_seq_len=config.max_seq_len
+        loss=pg_losses,
+        loss_mask=loss_mask,
+        loss_reduction=config.loss_reduction,
+        max_seq_len=config.max_seq_len,
     )
 
     # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0

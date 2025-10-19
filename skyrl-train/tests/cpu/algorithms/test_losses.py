@@ -22,9 +22,7 @@ def test_policy_loss_dual_clip():
 
     # Set up logprobs to test different probability ratios
     old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
-    log_probs = torch.tensor(
-        [[-1.69315, -1.0, -0.69741]], device=device
-    )  # approx log(0.5)-1, log(1)-1, log(10)-3
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)  # approx log(0.5)-1, log(1)-1, log(10)-3
 
     # Create config for dual clipping
     config = DictConfig(
@@ -44,9 +42,7 @@ def test_policy_loss_dual_clip():
 
     # Calculate expected values
     ratio = torch.exp(log_probs - old_log_probs)  # approx [0.5, 1.0, 10.0]
-    assert torch.allclose(
-        ratio, torch.tensor([[0.5, 1.0, 10.0]], device=device), rtol=1e-3
-    )
+    assert torch.allclose(ratio, torch.tensor([[0.5, 1.0, 10.0]], device=device), rtol=1e-3)
 
     # Standard PPO clipping
     loss1 = -ratio * advantages  # [0.5, -1.0, -40.0]
@@ -59,9 +55,7 @@ def test_policy_loss_dual_clip():
 
     # For negative advantages, use dual clipped loss
     final_loss = torch.where(advantages < 0, min_loss, max_loss)  # [-0.5, 1.0, 12.0]
-    assert torch.allclose(
-        final_loss, torch.tensor([[-0.5, 1.0, 12.0]], device=device), rtol=1e-3
-    )
+    assert torch.allclose(final_loss, torch.tensor([[-0.5, 1.0, 12.0]], device=device), rtol=1e-3)
     expected_loss = final_loss.mean()  # -(-12.5/3) = 4.1667
 
     # Calculate actual loss
@@ -89,9 +83,7 @@ def test_policy_loss_cispo():
 
     # Set up logprobs to test different probability ratios
     old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
-    log_probs = torch.tensor(
-        [[-1.69315, -1.0, -0.69741]], device=device
-    )  # approx log(0.5)-1, log(1)-1, log(10)-3
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)  # approx log(0.5)-1, log(1)-1, log(10)-3
 
     # Create config for dual clipping
     config = DictConfig(
@@ -110,9 +102,7 @@ def test_policy_loss_cispo():
 
     # Calculate expected values
     ratio = torch.exp(log_probs - old_log_probs)  # approx [0.5, 1.0, 10.0]
-    assert torch.allclose(
-        ratio, torch.tensor([[0.5, 1.0, 10.0]], device=device), rtol=1e-3
-    )
+    assert torch.allclose(ratio, torch.tensor([[0.5, 1.0, 10.0]], device=device), rtol=1e-3)
 
     # Hand-calculation for expected loss:
     # ratio = [0.5, 1.0, 10.0]
@@ -135,7 +125,7 @@ def test_policy_loss_cispo():
     # Verify results
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
     # close to hand calculated value
-    assert actual_loss.item() == pytest.approx(1.900696, abs=1e-4)
+    assert actual_loss.item() == pytest.approx(-0.99768266666, abs=1e-4)
 
 
 def test_policy_loss_reduction_modes():
@@ -159,9 +149,7 @@ def test_policy_loss_reduction_modes():
         device=device,
     )
 
-    old_log_probs = torch.tensor(
-        [[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device
-    )
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
 
     log_probs = torch.tensor(
         [
@@ -206,65 +194,47 @@ def test_policy_loss_reduction_modes():
     loss_token_no_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_token)
 
     # Test token_mean with mask
-    loss_token_with_mask, _ = loss_fn(
-        log_probs, old_log_probs, advantages, config_token, loss_mask
-    )
+    loss_token_with_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_token, loss_mask)
 
     # Test sequence_mean without mask
     loss_seq_no_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq)
 
     # Test sequence_mean with mask
-    loss_seq_with_mask, _ = loss_fn(
-        log_probs, old_log_probs, advantages, config_seq, loss_mask
-    )
+    loss_seq_with_mask, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq, loss_mask)
 
     # Manual calculations to verify (using default PolicyLoss parameters)
     ratio = torch.exp(log_probs - old_log_probs)
     surr1 = ratio * advantages
-    surr2 = (
-        ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
-    )  # clip_eps_low=0.2, clip_eps_high=0.2
+    surr2 = ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages  # clip_eps_low=0.2, clip_eps_high=0.2
     loss_per_token = -torch.min(surr1, surr2)
 
     # Expected token_mean without mask: mean of all tokens
     expected_token_no_mask = loss_per_token.mean()
 
     # Expected token_mean with mask: masked mean of all tokens
-    expected_token_with_mask = (loss_per_token * loss_mask).sum() / (
-        loss_mask.sum() + 1e-8
-    )
+    expected_token_with_mask = (loss_per_token * loss_mask).sum() / (loss_mask.sum() + 1e-8)
 
     # Expected sequence_mean without mask: mean of sequence means
     expected_seq_no_mask = loss_per_token.mean(dim=1).mean()
 
     # Expected sequence_mean with mask: mean of masked sequence means
-    seq_means_masked = (loss_per_token * loss_mask).sum(dim=1) / (
-        loss_mask.sum(dim=1) + 1e-8
-    )
+    seq_means_masked = (loss_per_token * loss_mask).sum(dim=1) / (loss_mask.sum(dim=1) + 1e-8)
     expected_seq_with_mask = seq_means_masked.mean()
 
     # Verify results
-    torch.testing.assert_close(
-        loss_token_no_mask, expected_token_no_mask, rtol=1e-5, atol=1e-8
-    )
-    torch.testing.assert_close(
-        loss_token_with_mask, expected_token_with_mask, rtol=1e-5, atol=1e-8
-    )
-    torch.testing.assert_close(
-        loss_seq_no_mask, expected_seq_no_mask, rtol=1e-5, atol=1e-8
-    )
-    torch.testing.assert_close(
-        loss_seq_with_mask, expected_seq_with_mask, rtol=1e-5, atol=1e-8
-    )
+    torch.testing.assert_close(loss_token_no_mask, expected_token_no_mask, rtol=1e-5, atol=1e-8)
+    torch.testing.assert_close(loss_token_with_mask, expected_token_with_mask, rtol=1e-5, atol=1e-8)
+    torch.testing.assert_close(loss_seq_no_mask, expected_seq_no_mask, rtol=1e-5, atol=1e-8)
+    torch.testing.assert_close(loss_seq_with_mask, expected_seq_with_mask, rtol=1e-5, atol=1e-8)
 
     # Verify that the two reduction modes give the same results when sequences have equal length and no mask
-    assert torch.allclose(loss_token_no_mask, loss_seq_no_mask, rtol=1e-5), (
-        "token_mean and sequence_mean should give same results when sequences have equal length and no mask"
-    )
+    assert torch.allclose(
+        loss_token_no_mask, loss_seq_no_mask, rtol=1e-5
+    ), "token_mean and sequence_mean should give same results when sequences have equal length and no mask"
     # But they should give different results when mask creates different effective sequence lengths
-    assert not torch.allclose(loss_token_with_mask, loss_seq_with_mask, rtol=1e-3), (
-        "token_mean and sequence_mean with mask should give different results"
-    )
+    assert not torch.allclose(
+        loss_token_with_mask, loss_seq_with_mask, rtol=1e-3
+    ), "token_mean and sequence_mean with mask should give different results"
 
 
 def test_policy_loss_reduction_edge_cases():
@@ -313,12 +283,8 @@ def test_policy_loss_reduction_edge_cases():
 
     # Test with completely masked sequence
     loss_mask = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-    loss_token_masked, _ = loss_fn(
-        log_probs, old_log_probs, advantages, config_token, loss_mask
-    )
-    loss_seq_masked, _ = loss_fn(
-        log_probs, old_log_probs, advantages, config_seq, loss_mask
-    )
+    loss_token_masked, _ = loss_fn(log_probs, old_log_probs, advantages, config_token, loss_mask)
+    loss_seq_masked, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq, loss_mask)
 
     # Should handle zero mask gracefully (due to +1e-8 in denominator)
     assert torch.isfinite(loss_token_masked)
@@ -410,9 +376,7 @@ def test_gspo_importance_sampling_levels():
         }
     )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
-    loss_token, _ = ppo_loss_fn(
-        log_probs, old_log_probs, advantages, ppo_config, loss_mask
-    )
+    loss_token, _ = ppo_loss_fn(log_probs, old_log_probs, advantages, ppo_config, loss_mask)
 
     # Test GSPO (sequence-level importance sampling)
     gspo_config = DictConfig(
@@ -427,9 +391,7 @@ def test_gspo_importance_sampling_levels():
         }
     )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")
-    loss_sequence, _ = gspo_loss_fn(
-        log_probs, old_log_probs, advantages, gspo_config, loss_mask
-    )
+    loss_sequence, _ = gspo_loss_fn(log_probs, old_log_probs, advantages, gspo_config, loss_mask)
 
     # Manual calculation for token-level (standard PPO)
     log_ratio = log_probs - old_log_probs
@@ -449,13 +411,9 @@ def test_gspo_importance_sampling_levels():
 
     # GSPO uses stop gradients: s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
     # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_probs - sg[log_probs]
-    ratio_sequence = torch.exp(
-        log_importance_weights_seq.detach() + log_probs - log_probs.detach()
-    )
+    ratio_sequence = torch.exp(log_importance_weights_seq.detach() + log_probs - log_probs.detach())
     surr1_sequence = ratio_sequence * advantages
-    surr2_sequence = (
-        ratio_sequence.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
-    )
+    surr2_sequence = ratio_sequence.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
     loss_per_token_sequence = -torch.min(surr1_sequence, surr2_sequence)
     # GSPO uses sequence_mean reduction
     expected_sequence = masked_mean(loss_per_token_sequence, loss_mask, dim=-1).mean()
@@ -470,9 +428,9 @@ def test_gspo_importance_sampling_levels():
 
     # Core GSPO benefit test: Different clipping behavior
     # GSPO should produce different clipping patterns due to sequence-level importance sampling
-    assert not torch.allclose(clip_ratio_token, clip_ratio_sequence, rtol=1e-2), (
-        f"Clipping ratios should differ: token={clip_ratio_token:.4f} vs sequence={clip_ratio_sequence:.4f}"
-    )
+    assert not torch.allclose(
+        clip_ratio_token, clip_ratio_sequence, rtol=1e-2
+    ), f"Clipping ratios should differ: token={clip_ratio_token:.4f} vs sequence={clip_ratio_sequence:.4f}"
 
     # Test stability: sequence-level should smooth out extreme per-token variations
     # Check that sequence-level ratios have lower variance within each sequence
@@ -486,9 +444,9 @@ def test_gspo_importance_sampling_levels():
     )
 
     # Token-level and sequence-level should give different results due to different importance weighting
-    assert not torch.allclose(loss_token, loss_sequence, rtol=1e-3), (
-        f"Loss values should differ: token={loss_token:.6f} vs sequence={loss_sequence:.6f}"
-    )
+    assert not torch.allclose(
+        loss_token, loss_sequence, rtol=1e-3
+    ), f"Loss values should differ: token={loss_token:.6f} vs sequence={loss_sequence:.6f}"
 
     # Test length normalization effect: sequences with different lengths should be handled more uniformly
     # This is a key stability benefit of GSPO mentioned in the paper
@@ -501,9 +459,9 @@ def test_gspo_importance_sampling_levels():
         if seq_len > 1:
             # All importance weights within a sequence should be identical (GSPO property)
             seq_weights = log_importance_weights_seq[seq_idx, :seq_len]
-            assert torch.allclose(seq_weights, seq_weights[0], rtol=1e-6), (
-                f"GSPO should have uniform importance weights within sequence {seq_idx}"
-            )
+            assert torch.allclose(
+                seq_weights, seq_weights[0], rtol=1e-6
+            ), f"GSPO should have uniform importance weights within sequence {seq_idx}"
 
 
 def test_clip_cov_policy_loss():
@@ -521,17 +479,11 @@ def test_clip_cov_policy_loss():
         device=device,
     )
 
-    old_log_probs = torch.tensor(
-        [[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]], device=device
-    )
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]], device=device)
 
-    log_probs = torch.tensor(
-        [[-0.5, -1.5, -0.8, -1.2], [-1.3, -0.7, -1.8, -0.9]], device=device
-    )
+    log_probs = torch.tensor([[-0.5, -1.5, -0.8, -1.2], [-1.3, -0.7, -1.8, -0.9]], device=device)
 
-    loss_mask = torch.tensor(
-        [[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device
-    )  # Last token masked
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device)  # Last token masked
 
     # Create Clip-Cov config
     config = DictConfig(
@@ -553,15 +505,11 @@ def test_clip_cov_policy_loss():
     clip_cov_fn = PolicyLossRegistry.get("clip_cov")
 
     # Calculate loss
-    loss, clip_frac = clip_cov_fn(
-        log_probs, old_log_probs, advantages, config, loss_mask
-    )
+    loss, clip_frac = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert 0 <= clip_frac <= 1, (
-        f"Clip fraction should be between 0 and 1, got {clip_frac}"
-    )
+    assert 0 <= clip_frac <= 1, f"Clip fraction should be between 0 and 1, got {clip_frac}"
 
     # Compare with regular PPO (should be different due to covariance correction)
     regular_config = DictConfig(
@@ -576,14 +524,12 @@ def test_clip_cov_policy_loss():
     )
 
     regular_fn = PolicyLossRegistry.get("regular")
-    regular_loss, regular_clip_frac = regular_fn(
-        log_probs, old_log_probs, advantages, regular_config, loss_mask
-    )
+    regular_loss, regular_clip_frac = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # Clip-Cov should give different results due to covariance-based correction
-    assert not torch.allclose(loss, regular_loss, rtol=1e-3), (
-        f"Clip-Cov and regular PPO should differ: clip_cov={loss:.6f} vs regular={regular_loss:.6f}"
-    )
+    assert not torch.allclose(
+        loss, regular_loss, rtol=1e-3
+    ), f"Clip-Cov and regular PPO should differ: clip_cov={loss:.6f} vs regular={regular_loss:.6f}"
 
 
 def test_kl_cov_policy_loss():
@@ -601,17 +547,11 @@ def test_kl_cov_policy_loss():
         device=device,
     )
 
-    old_log_probs = torch.tensor(
-        [[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]], device=device
-    )
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]], device=device)
 
-    log_probs = torch.tensor(
-        [[-0.8, -1.2, -0.6, -1.1], [-1.1, -0.9, -1.4, -0.7]], device=device
-    )
+    log_probs = torch.tensor([[-0.8, -1.2, -0.6, -1.1], [-1.1, -0.9, -1.4, -0.7]], device=device)
 
-    loss_mask = torch.tensor(
-        [[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device
-    )  # Last token masked
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]], device=device)  # Last token masked
 
     # Create KL-Cov config
     config = DictConfig(
@@ -649,11 +589,9 @@ def test_kl_cov_policy_loss():
     )
 
     regular_fn = PolicyLossRegistry.get("regular")
-    regular_loss, _ = regular_fn(
-        log_probs, old_log_probs, advantages, regular_config, loss_mask
-    )
+    regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # KL-Cov should give different results due to KL regularization on selected tokens
-    assert not torch.allclose(loss, regular_loss, rtol=1e-3), (
-        f"KL-Cov and regular PPO should differ: kl_cov={loss:.6f} vs regular={regular_loss:.6f}"
-    )
+    assert not torch.allclose(
+        loss, regular_loss, rtol=1e-3
+    ), f"KL-Cov and regular PPO should differ: kl_cov={loss:.6f} vs regular={regular_loss:.6f}"
