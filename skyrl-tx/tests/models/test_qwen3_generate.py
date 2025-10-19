@@ -3,6 +3,7 @@ import tempfile
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -16,7 +17,7 @@ def test_qwen3_generate():
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
-    inputs = ["The capital of France is ", "The future of AI is "]
+    inputs = ["Hello", "The capital of France is a beautiful city with a rich history and"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     # Generate with HuggingFace (reference)
@@ -26,6 +27,8 @@ def test_qwen3_generate():
             attention_mask=batch.attention_mask,
             max_new_tokens=10,
             do_sample=False,
+            return_dict_in_generate=True,
+            output_scores=True,
         )
 
     # Generate with our implementation
@@ -38,8 +41,19 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        output = model.generate(
-            batch.input_ids.numpy(), batch.attention_mask.numpy(), max_new_tokens=10, temperature=0.0, seed=42
+        output, our_scores = model.generate(
+            batch.input_ids.numpy(),
+            batch.attention_mask.numpy(),
+            max_new_tokens=10,
+            temperature=0.0,
+            seed=42,
+            return_scores=True,
         )
 
-        assert jnp.array_equal(output, hf_output.numpy()), "Generated tokens don't match HuggingFace"
+        assert jnp.array_equal(output, hf_output.sequences.numpy()), "Generated tokens don't match HuggingFace"
+
+        # Compare scores (logits) for each generated token
+        for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, our_scores)):
+            assert np.allclose(
+                hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3
+            ), f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"
