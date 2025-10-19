@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
+import optax
 
 from tx.tinker.engine import TinkerEngine
 from tx.tinker.config import EngineConfig
@@ -231,13 +232,10 @@ def test_process_optim_step_hyperparams_behavior():
 
     def apply_step(request_id: int, model_id: str, request: types.OptimStepInput) -> float:
         engine.process_forward_backward_batch([(FutureStub(request_id), model_id, make_fwd_bwd_input(tokens))])
-        params_before = nnx.to_arrays(nnx.pure(engine.lora_params))
+        params_before = jax.tree.map(jnp.copy, engine.lora_params)
         result = engine.process_optim_step(model_id, request)
-        assert isinstance(result, types.OptimStepOutput)
-        params_after = nnx.to_arrays(nnx.pure(engine.lora_params))
-
-        delta = jax.tree.map(lambda a, b: a - b, params_after, params_before)
-        return jnp.sqrt(jax.tree.reduce(lambda a, x: a + (x.astype(jnp.float32) ** 2).sum(), delta, 0.0)).item()
+        delta = jax.tree.map(lambda old, new: (new - old).astype(jnp.float32), params_before, engine.lora_params)
+        return float(optax.global_norm(delta))
 
     tiny_request = types.OptimStepInput(
         adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9)

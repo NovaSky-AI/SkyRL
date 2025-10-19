@@ -186,12 +186,7 @@ class AdamParams(BaseModel):
     eps: float = Field(default=1e-12, gt=0.0, lt=1.0)
 
     def to_adam_params(self) -> types.AdamParams:
-        return types.AdamParams(
-            learning_rate=self.learning_rate,
-            beta1=self.beta1,
-            beta2=self.beta2,
-            eps=self.eps
-        )
+        return types.AdamParams(learning_rate=self.learning_rate, beta1=self.beta1, beta2=self.beta2, eps=self.eps)
 
 
 class OptimStepRequest(BaseModel):
