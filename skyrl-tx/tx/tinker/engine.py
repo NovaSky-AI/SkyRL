@@ -58,12 +58,15 @@ def round_up_seq_len(seq_len: int) -> int:
 
     return result
 
+
 def _cross_entropy_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
     return -target_logprobs * loss_mask
+
 
 def _importance_sampling_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     return -(prob_ratio * advantages * loss_mask)
+
 
 def _ppo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
@@ -71,6 +74,7 @@ def _ppo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
     unclipped = prob_ratio * advantages
     clipped = clipped_ratio * advantages
     return -jnp.minimum(unclipped, clipped) * loss_mask
+
 
 @dataclass
 class AccumulatedGradients:
@@ -204,16 +208,19 @@ class TinkerEngine:
                 return jax.lax.switch(
                     loss_fn_type,
                     [_cross_entropy_loss, _importance_sampling_loss, _ppo_loss],
-                    target_logprobs, loss_mask, sampling_logprobs, advantages,
-            )
+                    target_logprobs,
+                    loss_mask,
+                    sampling_logprobs,
+                    advantages,
+                )
 
             per_token_losses = jax.vmap(compute_loss_per_example)(
                 loss_fn_types,
                 target_logprobs,
                 loss_mask,
                 sampling_logprobs,
-                advantages, 
-            ) 
+                advantages,
+            )
 
             per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
@@ -268,7 +275,7 @@ class TinkerEngine:
         adapter_indices: jax.Array,
         target_ids: jax.Array,
         loss_mask: jax.Array,
-        loss_fn_types: jax.Array, 
+        loss_fn_types: jax.Array,
         sampling_logprobs: jax.Array,
         advantages: jax.Array,
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
@@ -431,7 +438,7 @@ class TinkerEngine:
             loss_fn_str = forward_backward_input["loss_fn"]
             loss_fn_type = loss_fn_map[loss_fn_str]
             request_start = current_batch_idx
-            
+
             for item in data:
                 tokens = [t for chunk in item["model_input"]["chunks"] for t in chunk["tokens"]]
                 all_input_ids.append(tokens)
@@ -478,13 +485,9 @@ class TinkerEngine:
             dtype=jnp.bool_,
         )
         sampling_logprobs = jnp.array(
-            [seq + [0.0] * (max_len - len(seq)) for seq in all_sampling_logprobs],
-            dtype=jnp.float32
+            [seq + [0.0] * (max_len - len(seq)) for seq in all_sampling_logprobs], dtype=jnp.float32
         )
-        advantages = jnp.array(
-            [seq + [0.0] * (max_len - len(seq)) for seq in all_advantages],
-            dtype=jnp.float32
-        )
+        advantages = jnp.array([seq + [0.0] * (max_len - len(seq)) for seq in all_advantages], dtype=jnp.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
@@ -504,7 +507,7 @@ class TinkerEngine:
                 loss_mask[mb_start:mb_end],
                 loss_fn_types[mb_start:mb_end],
                 sampling_logprobs[mb_start:mb_end],
-                advantages[mb_start:mb_end]
+                advantages[mb_start:mb_end],
             )
             for i_local, i_global in enumerate(range(mb_start, mb_end)):
                 L = seq_lens[i_global]
