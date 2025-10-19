@@ -33,9 +33,10 @@ def test_lora_training():
         target_ids = batch[:, 1:]
         input_ids = batch[:, :-1]
         adapter_indices = jnp.array([0, 1], dtype=jnp.int32)
+        attention_mask = jnp.ones_like(input_ids)
 
-        def loss_fn(model, input_ids, target_ids):
-            outputs = model(input_ids, adapter_indices=adapter_indices)
+        def loss_fn(model, input_ids, target_ids, attention_mask):
+            outputs = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
             logits = outputs["logits"]
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
@@ -68,7 +69,7 @@ def test_lora_training():
 
             def loss_for_lora(lora_params):
                 merged_model = nnx.merge(graphdef, lora_params, non_lora_params)
-                return loss_fn(merged_model, input_ids, target_ids)
+                return loss_fn(merged_model, input_ids, target_ids, attention_mask)
 
             loss_and_grad_fn = nnx.value_and_grad(loss_for_lora)
             loss, lora_grads = loss_and_grad_fn(lora_params)
