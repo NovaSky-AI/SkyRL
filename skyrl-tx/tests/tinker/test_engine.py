@@ -242,7 +242,7 @@ def test_process_optim_step_hyperparams_behavior():
     tiny_request = types.OptimStepInput(
         adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9)
     )
-    default_request = types.OptimStepInput(adam_params=api.AdamParams().model_dump())
+    default_request = types.OptimStepInput(adam_params=api.AdamParams().to_adam_params())
 
     # Apply override step on the first adapter.
     tiny_norm = apply_step(1, low_adapter, tiny_request)

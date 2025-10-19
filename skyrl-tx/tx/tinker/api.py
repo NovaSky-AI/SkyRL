@@ -185,6 +185,14 @@ class AdamParams(BaseModel):
     beta2: float = Field(default=0.95, ge=0.0, lt=1.0)
     eps: float = Field(default=1e-12, gt=0.0, lt=1.0)
 
+    def to_adam_params(self) -> types.AdamParams:
+        return types.AdamParams(
+            learning_rate=self.learning_rate,
+            beta1=self.beta1,
+            beta2=self.beta2,
+            eps=self.eps
+        )
+
 
 class OptimStepRequest(BaseModel):
     model_id: str
@@ -356,7 +364,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         session=session,
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=types.OptimStepInput(adam_params=request.adam_params.model_dump()),
+        request_data=types.OptimStepInput(adam_params=request.adam_params.to_adam_params()),
     )
 
     await session.commit()
