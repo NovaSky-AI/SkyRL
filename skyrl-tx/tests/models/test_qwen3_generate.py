@@ -17,7 +17,7 @@ def test_qwen3_generate():
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
-    inputs = ["Hello", "The capital of France is a beautiful city with a rich history and"]
+    inputs = ["My name is", "The capital of France is"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     # Generate with HuggingFace (reference)
