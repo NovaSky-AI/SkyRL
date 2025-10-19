@@ -180,10 +180,10 @@ class ForwardBackwardInput(BaseModel):
 
 
 class AdamParams(BaseModel):
-    learning_rate: float = Field(default=1e-4, ge=0.0, lt=1.0)
+    learning_rate: float = Field(default=1e-4, ge=0.0)
     beta1: float = Field(default=0.9, ge=0.0, lt=1.0)
     beta2: float = Field(default=0.95, ge=0.0, lt=1.0)
-    eps: float = Field(default=1e-12, gt=0.0, lt=1.0)
+    eps: float = Field(default=1e-12, gt=0.0)
 
     def to_adam_params(self) -> types.AdamParams:
         return types.AdamParams(learning_rate=self.learning_rate, beta1=self.beta1, beta2=self.beta2, eps=self.eps)
