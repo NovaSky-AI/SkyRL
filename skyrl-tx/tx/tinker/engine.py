@@ -1,8 +1,8 @@
 """Background engine for processing training requests."""
 
 import argparse
-import time
 import logging
+import time
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,8 +34,6 @@ from tx.utils.models import (
 from tx.layers.lora import update_adapter_config
 
 logger = logging.getLogger(__name__)
-
-LEARNING_RATE = 1e-4
 
 
 def round_up_seq_len(seq_len: int) -> int:
@@ -107,6 +105,8 @@ class TinkerEngine:
         self.models: dict[str, types.ModelMetadata] = {}
         # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
         self.accumulated_grads: dict[str, AccumulatedGradients] = {}
+        # Store optimizer instances per LoRA adapter (model_id -> optimizer)
+        self.optimizers: dict[str, nnx.Optimizer] = {}
         # Metrics recorded in the engine
         self.metrics = types.EngineMetrics()
 
@@ -129,14 +129,8 @@ class TinkerEngine:
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
-            # Create optimizer that only targets LoRA A and B parameters
-            def is_lora_param(path, value):
-                return any(name in path for name in ["lora_A", "lora_B"])
-
-            self.optimizer = nnx.Optimizer(self.model, optax.adamw(LEARNING_RATE), wrt=is_lora_param)
-
             # Split model into LoRA and non-LoRA parameters
-            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, is_lora_param, ...)
+            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -329,6 +323,11 @@ class TinkerEngine:
         )
         self.accumulated_grads[model_id] = AccumulatedGradients(grad_sum=None, denominator=0)
 
+        with jax.set_mesh(self.mesh):
+            # These values are always overridden by the hyperparams in the optim_step request.
+            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
+            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
+
         # Update the adapter's rank and scaling in all LoRA layers
         update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
 
@@ -495,10 +494,13 @@ class TinkerEngine:
 
         full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
 
-        # Apply optimizer update -- going forward we need to figure out how to use different learning rates per adapter
-        adam_params = request_data.adam_params
-        assert adam_params.lr == LEARNING_RATE, f"Currently we only support a fixed learning rate {LEARNING_RATE}"
-        self.optimizer.update(self.lora_params, full_lora_grads)
+        # Apply optimizer update with hyperparameters from the request
+        hp = self.optimizers[model_id].opt_state.hyperparams
+        hp["learning_rate"][...] = request_data.adam_params.learning_rate
+        hp["b1"][...] = request_data.adam_params.beta1
+        hp["b2"][...] = request_data.adam_params.beta2
+        hp["eps"][...] = request_data.adam_params.eps
+        self.optimizers[model_id].update(self.lora_params, full_lora_grads)
 
         # Clear accumulated gradients
         self.accumulated_grads[model_id].reset()
@@ -532,7 +534,7 @@ class TinkerEngine:
         # Update both LoRA weights and optimizer state
         insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
         insert_adapter_state(
-            adapter_index, nnx.state(self.optimizer), self.non_lora_params, restored_data["optimizer_state"]
+            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"]
         )
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
@@ -552,7 +554,9 @@ class TinkerEngine:
 
         with self._checkpoint_status_context(model_id, checkpoint_id):
             adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
-            optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizer), self.non_lora_params)
+            optimizer_params = extract_adapter_state(
+                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
+            )
 
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
