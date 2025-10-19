@@ -25,10 +25,10 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     """Compute positions from attention mask.
 
     Positions start at 0 from the first non-zero value in the attention mask
-    and increment sequentially. Padding tokens (before the first real token) get position 0.
+    and increment sequentially.
     """
     first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
-    return jnp.maximum(jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx, 0)
+    return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
 class GeneratorMixin:
