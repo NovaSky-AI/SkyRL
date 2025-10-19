@@ -671,8 +671,8 @@ def compute_policy_loss_cispo(
 
     Instead of clipping the importance sampling ratio in the loss directly, as done
     in PPO loss, CISPO clips the importance sampling ratio in the policy gradient
-    update step. This means the model can still learn from samples whose importance sampling
-    ratio is clipped in CISPO, as opposed to GRPO and PPO where these samples have zero
+    update. This means the model can still learn from samples whose importance sampling
+    ratio is clipped in CISPO, as opposed to PPO where these samples have zero
     gradient and are essentially ignored.
     """
     ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
@@ -682,7 +682,6 @@ def compute_policy_loss_cispo(
     is_clipped = (ratio > 1 - config.eps_clip_low) | (ratio < 1 + config.eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
-    # CISPO paper uses
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
     return loss, clip_ratio
 
