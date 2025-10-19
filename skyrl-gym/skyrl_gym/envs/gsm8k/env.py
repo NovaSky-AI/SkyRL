@@ -22,6 +22,5 @@ class GSM8kEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step
         reward = self._get_reward(action)
-
         # No observation in gsm8k, and no tool call
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})

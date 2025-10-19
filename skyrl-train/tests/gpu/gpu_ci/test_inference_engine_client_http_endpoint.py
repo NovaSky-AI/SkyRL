@@ -35,7 +35,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     shutdown_server,
 )
 from tests.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from tests.gpu.utils import init_inference_engines, initialize_ray
+from tests.gpu.utils import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
 
 from transformers import AutoTokenizer
@@ -429,7 +429,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     # ids=["vllm", "sglang"],
     ids=["vllm"],
 )
-def test_http_endpoint_with_remote_servers(backend, tp_size, ray_init_fixture):
+def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
@@ -448,7 +448,6 @@ def test_http_endpoint_with_remote_servers(backend, tp_size, ray_init_fixture):
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1)
         cfg.generator.backend = backend
-        initialize_ray(cfg)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)

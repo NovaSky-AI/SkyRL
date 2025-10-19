@@ -1,6 +1,9 @@
 """Tests for the Tinker API mock server using the real tinker client."""
 
+import os
 import subprocess
+import tempfile
+import urllib.request
 from urllib.parse import urlparse
 
 import pytest
@@ -28,6 +31,7 @@ def api_server():
             "8000",
             "--base-model",
             BASE_MODEL,
+            "--enable-dummy-sample",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -96,6 +100,9 @@ def test_training_workflow(service_client):
 
     # Save the optimizer state
     resume_path = training_client.save_state(name="0000").result().path
+    # Get the training run ID from the first save
+    parsed_resume = urlparse(resume_path)
+    original_training_run_id = parsed_resume.netloc
 
     # Run training step
     fwdbwd_future = training_client.forward_backward(processed_examples, "cross_entropy")
@@ -118,13 +125,52 @@ def test_training_workflow(service_client):
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
-    # Get a checkpoint
-    sampling_path = training_client.save_weights_for_sampler(name="final").result().path
-    assert sampling_path is not None
+    # Test that we can restore the training run
+    training_client = service_client.create_training_client_from_state(resume_path)
+    # Verify the restored client has the same state by running forward_backward again
+    fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    assert fwdbwd_result3.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
-    # Download the checkpoint
+    sampling_path = training_client.save_weights_for_sampler(name="final").result().path
+    parsed = urlparse(sampling_path)
+    training_run_id = parsed.netloc
+    checkpoint_id = parsed.path.lstrip("/")
     rest_client = service_client.create_rest_client()
-    parsed_url = urlparse(sampling_path)
-    tinker_path = "tinker://" + parsed_url.netloc + "/sampler_weights/" + parsed_url.path.lstrip("/")
-    future = rest_client.download_checkpoint_archive_from_tinker_path(tinker_path)
-    assert len(future.result()) > 0
+    # Download the checkpoint
+    checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
+    with tempfile.NamedTemporaryFile() as tmp_archive:
+        urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
+        assert os.path.getsize(tmp_archive.name) > 0
+
+    # List all checkpoints for the original training run
+    checkpoints_response = rest_client.list_checkpoints(original_training_run_id).result()
+    assert checkpoints_response is not None
+    assert len(checkpoints_response.checkpoints) > 0
+    # Verify that the checkpoint we created is in the list
+    checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
+    assert "0000" in checkpoint_ids
+
+
+def test_sample(service_client):
+    """Test the sample endpoint."""
+    # Create a training client and save weights to get a valid model
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+    tokenizer = training_client.get_tokenizer()
+
+    # Save weights to get a valid model path
+    save_future = training_client.save_weights_for_sampler(name="test_sample")
+    model_path = save_future.result().path
+
+    # Create a sampling client from the saved model path and get a sample
+    sampling_client = service_client.create_sampling_client(model_path)
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    sample_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
+        num_samples=1,
+    ).result()
+
+    # Verify we got sequences back
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 1
+    assert len(sample_result.sequences[0].tokens) > 0

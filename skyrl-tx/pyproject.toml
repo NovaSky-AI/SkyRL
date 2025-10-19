@@ -33,7 +33,7 @@ tpu = [
 ]
 
 tinker = [
-    "tinker",
+    "tinker>=0.2.1",
     "fastapi[standard]",
     "sqlmodel",
     "sqlalchemy[asyncio]",

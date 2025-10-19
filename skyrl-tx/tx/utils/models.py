@@ -115,11 +115,7 @@ def save_lora_checkpoint(
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
     """
-
-    def is_lora_param(path, value):
-        return any(name in path for name in ["lora_A", "lora_B"])
-
-    _, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
+    _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
     adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
 
