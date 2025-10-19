@@ -27,10 +27,7 @@ def test_lora_training():
         update_adapter_config(model, adapter_index=1, lora_rank=8, lora_alpha=8)
 
         # Create optimizer that only targets LoRA A and B parameters
-        def is_lora_param(path, value):
-            return any(name in path for name in ["lora_A", "lora_B"])
-
-        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=is_lora_param)
+        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
 
         batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
         target_ids = batch[:, 1:]
@@ -44,7 +41,7 @@ def test_lora_training():
 
         # Compute gradients - we need to use nnx.split to separate parameters
         # that we want to compute gradients for
-        graphdef, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
+        graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
         # Helper to extract adapter params at specific index
         def get_adapter_params(params, adapter_idx):

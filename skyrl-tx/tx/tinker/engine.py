@@ -130,7 +130,7 @@ class TinkerEngine:
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
-            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self._is_lora_param, ...)
+            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -209,11 +209,6 @@ class TinkerEngine:
                 # One output sharding parameter for each return value of loss_for_lora
                 out_shardings=((scalar, (replicated, replicated)), lora_shardings),
             )
-
-    @staticmethod
-    def _is_lora_param(path, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -331,7 +326,7 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
             tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0, b1=0.0, b2=0.0, eps=0.0)
-            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self._is_lora_param)
+            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Update the adapter's rank and scaling in all LoRA layers
         update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
