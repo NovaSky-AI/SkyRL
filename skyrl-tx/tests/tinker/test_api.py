@@ -11,7 +11,7 @@ import tinker
 from tinker import types
 
 
-BASE_MODEL = "Qwen/Qwen3-0.6B"
+BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
 @pytest.fixture(scope="module")
