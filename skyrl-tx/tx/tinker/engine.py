@@ -330,7 +330,7 @@ class TinkerEngine:
 
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
-            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=1e-4, b1=0.9, b2=0.95, eps=1e-12)
+            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0, b1=0.0, b2=0.0, eps=0.0)
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self._is_lora_param)
 
         # Update the adapter's rank and scaling in all LoRA layers
