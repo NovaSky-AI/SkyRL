@@ -200,7 +200,7 @@ class Datum(BaseModel):
     model_input: ModelInput
 
     def to_types(self) -> types.Datum:
-        inp = self.loss_fn_input
+        inp = self.loss_fn_inputs
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
