@@ -105,11 +105,11 @@ After following the installation instructions, set the following environment var
 Flash Attention
 ~~~~~~~~~~~~~~~
 Next, in order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.5.0``.
-You can replace the ``flash-attn`` wheel in the ``pyproject.toml`` file with the following to use the ``2.7.4.post1`` release, and you can find wheels for other versions `here <https://github.com/Dao-AILab/flash-attention/releases>`_.
+This is handled in the ``pyproject.toml`` file for the ``mcore`` extra, and you can find wheels for other versions `here <https://github.com/Dao-AILab/flash-attention/releases>`_.
 
 .. code-block:: bash
 
-    flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
+    flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "extra == 'mcore'" }
 
 
 Configuration
