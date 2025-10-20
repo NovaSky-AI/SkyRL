@@ -87,6 +87,8 @@ class TensorData(BaseModel):
 class LossFnInputs(BaseModel):
     target_tokens: TensorData
     weights: TensorData
+    advantages: TensorData
+    logprobs: TensorData
 
 
 class Datum(BaseModel):

@@ -22,7 +22,7 @@ class FutureStub:
         self.request_id = request_id
 
 
-def make_fwd_bwd_input(token_lists: list[list[int]]):
+def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
     samples = []
     for tokens in token_lists:
         targets = tokens[1:] + [0]
@@ -33,6 +33,8 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
                 loss_fn_inputs=types.LossFnInputs(
                     target_tokens=types.TensorData(data=targets),
                     weights=types.TensorData(data=weights),
+                    advantages=types.TensorData(data=[]),
+                    logprobs=types.TensorData(data=[]),
                 ),
             )
         )

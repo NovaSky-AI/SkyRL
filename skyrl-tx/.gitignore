@@ -75,3 +75,4 @@ Thumbs.db
 
 # Local artifacts
 tinker.db
+uv.lock

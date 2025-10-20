@@ -22,6 +22,7 @@ from huggingface_hub import snapshot_download
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
+from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
     get_dtype,
@@ -174,15 +175,36 @@ class TinkerEngine:
             adapter_indices: jax.Array,
             target_ids: jax.Array,
             loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
-            per_token_losses = optax.softmax_cross_entropy_with_integer_labels(
-                logits=logits, labels=target_ids, where=loss_mask
-            )  # [B, T]
-            per_seq_loss = (per_token_losses * loss_mask).sum(axis=-1) / loss_mask.sum(axis=-1)
+            logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
+            target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
+
+            def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
+                return jax.lax.switch(
+                    loss_fn_type,
+                    LOSS_FUNCTIONS,
+                    target_logprobs,
+                    loss_mask,
+                    sampling_logprobs,
+                    advantages,
+                )
+
+            per_token_losses = jax.vmap(compute_loss_per_example)(
+                loss_fn_types,
+                target_logprobs,
+                loss_mask,
+                sampling_logprobs,
+                advantages,
+            )
+
+            per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (logits, per_token_losses)
 
@@ -205,7 +227,7 @@ class TinkerEngine:
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
                 # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 5,
+                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
                 # One output sharding parameter for each return value of loss_for_lora
                 out_shardings=((scalar, (replicated, replicated)), lora_shardings),
             )
@@ -235,6 +257,9 @@ class TinkerEngine:
         adapter_indices: jax.Array,
         target_ids: jax.Array,
         loss_mask: jax.Array,
+        loss_fn_types: jax.Array,
+        sampling_logprobs: jax.Array,
+        advantages: jax.Array,
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
@@ -247,6 +272,9 @@ class TinkerEngine:
                 adapter_indices,
                 target_ids,
                 loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
             )
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
@@ -378,23 +406,27 @@ class TinkerEngine:
         all_adapter_indices = []
         example_model_ids = []  # map each example to its model_id
         request_batch_slices = []  # Track which examples belong to which request
+        all_sampling_logprobs = []
+        all_advantages = []
+        all_loss_fn_types = []
 
         current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
             adapter_index = self.models[model_id].adapter_index
-            forward_backward_input = request_data
-            data = forward_backward_input.data
+            loss_fn_type = LOSS_TYPES[request_data.loss_fn]
 
             request_start = current_batch_idx
-            for item in data:
+            for item in request_data.data:
                 tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
                 all_input_ids.append(tokens)
-                target_tokens = item.loss_fn_inputs.target_tokens.data
-                all_targets.append(target_tokens)
-                weights = item.loss_fn_inputs.weights.data
-                all_token_weights.append(weights)
+                loss_fn_inputs = item.loss_fn_inputs
+                all_targets.append(loss_fn_inputs.target_tokens.data)
+                all_token_weights.append(loss_fn_inputs.weights.data)
+                all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
+                all_advantages.append(loss_fn_inputs.advantages.data)
                 all_adapter_indices.append(adapter_index)
                 example_model_ids.append(model_id)
+                all_loss_fn_types.append(loss_fn_type)
                 current_batch_idx += 1
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
@@ -405,6 +437,7 @@ class TinkerEngine:
         input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
         target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
+        loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = jnp.array(
@@ -412,8 +445,12 @@ class TinkerEngine:
         )
         loss_mask = jnp.array(
             [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
-            dtype=jnp.bool_,
+            dtype=jnp.float32,
         )
+        sampling_logprobs = jnp.array(
+            [seq + [0.0] * (max_len - len(seq)) for seq in all_sampling_logprobs], dtype=jnp.float32
+        )
+        advantages = jnp.array([seq + [0.0] * (max_len - len(seq)) for seq in all_advantages], dtype=jnp.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
@@ -431,6 +468,9 @@ class TinkerEngine:
                 adapter_indices[mb_start:mb_end],
                 target_ids[mb_start:mb_end],
                 loss_mask[mb_start:mb_end],
+                loss_fn_types[mb_start:mb_end],
+                sampling_logprobs[mb_start:mb_end],
+                advantages[mb_start:mb_end],
             )
             for i_local, i_global in enumerate(range(mb_start, mb_end)):
                 L = seq_lens[i_global]
