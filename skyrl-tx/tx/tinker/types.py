@@ -148,6 +148,7 @@ class LoadWeightsOutput(BaseModel):
 class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
+    seed: int
 
 
 class ModelMetadata(BaseModel):

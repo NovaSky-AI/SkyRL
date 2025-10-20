@@ -629,7 +629,7 @@ class TinkerEngine:
 
             for sample_idx in range(request_data.num_samples):
                 # Generate with different seeds for each sample
-                seed = sample_idx
+                seed = request_data.sampling_params.seed + sample_idx
 
                 # Call the model's generate method (no adapter, base model only)
                 generated_ids, scores = model.generate(

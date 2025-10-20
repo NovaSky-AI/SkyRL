@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
 import subprocess
+import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -253,9 +254,14 @@ class SamplingParams(BaseModel):
     def to_types(self) -> types.SamplingParams:
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
+
+        # Generate a random seed if not provided
+        seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
+
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            seed=seed,
         )
 
 
