@@ -1,31 +1,37 @@
 """Loss functions for training."""
 
+import jax
 import jax.numpy as jnp
 
 
-def _cross_entropy_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
-    return -target_logprobs * loss_mask
+def safe_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
+    "Mask that strongly sets the output to 0.0 if the mask is zero."
+    return jnp.where(loss_mask != 0.0, loss_mask * loss_output, jnp.zeros_like(loss_output))
 
 
-def _importance_sampling_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
+def cross_entropy_loss(target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array) -> jax.Array:
+    return -safe_mask(target_logprobs, loss_mask)
+
+
+def importance_sampling_loss(target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array) -> jax.Array:
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    return -(prob_ratio * advantages * loss_mask)
+    return -safe_mask(prob_ratio * advantages, loss_mask)
 
 
-def _ppo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
+def ppo_loss(target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array) -> jax.Array:
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     clipped_ratio = jnp.clip(prob_ratio, 0.8, 1.2)
     unclipped = prob_ratio * advantages
     clipped = clipped_ratio * advantages
-    return -jnp.minimum(unclipped, clipped) * loss_mask
+    return -safe_mask(jnp.minimum(unclipped, clipped), loss_mask)
 
 
 # Map from string names to loss functions
 # The ordering of this map determines the indices used in jax.lax.switch
 LOSS_FUNCTION_MAP = {
-    "cross_entropy": _cross_entropy_loss,
-    "importance_sampling": _importance_sampling_loss,
-    "ppo": _ppo_loss,
+    "cross_entropy": cross_entropy_loss,
+    "importance_sampling": importance_sampling_loss,
+    "ppo": ppo_loss,
 }
 
 # Map from loss function name to index (for jax.lax.switch)
