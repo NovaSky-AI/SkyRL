@@ -435,8 +435,6 @@ class TinkerEngine:
             forward_backward_input = request_data
             data = forward_backward_input.data
 
-            loss_fn_str = forward_backward_input["loss_fn"]
-            loss_fn_type = loss_fn_map[loss_fn_str]
             request_start = current_batch_idx
 
             for item in data:
@@ -449,7 +447,7 @@ class TinkerEngine:
                 all_advantages.append(loss_fn_inputs.advantages.data)
                 all_adapter_indices.append(adapter_index)
                 example_model_ids.append(model_id)
-                all_loss_fn_types.append(loss_fn_type)
+                all_loss_fn_types.append(loss_fn_map[forward_backward_input.loss_fn])
                 current_batch_idx += 1
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
