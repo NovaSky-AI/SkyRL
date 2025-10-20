@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator
+from typing import Literal, Any, AsyncGenerator, Sequence
 from datetime import datetime, timedelta
 from uuid import uuid4
 from contextlib import asynccontextmanager
@@ -242,11 +242,28 @@ class SaveWeightsForSamplerRequest(BaseModel):
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
 
 
+class SamplingParams(BaseModel):
+    max_tokens: int | None = None
+    seed: int | None = None
+    stop: str | Sequence[str] | Sequence[int] | None = None
+    temperature: float = 1
+    top_k: int = -1
+    top_p: float = 1
+
+    def to_types(self) -> types.SamplingParams:
+        if self.max_tokens is None:
+            raise HTTPException(status_code=400, detail="max_tokens is currently required")
+        return types.SamplingParams(
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+
 class SampleRequest(BaseModel):
     base_model: str | None = None
     model_path: str | None = None
     prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
+    sampling_params: SamplingParams
     num_samples: int
     prompt_logprobs: bool = False
 
@@ -510,7 +527,7 @@ async def asample(request: SampleRequest, session: AsyncSession = Depends(get_se
         request_data=types.SampleInput(
             base_model=request.base_model,
             prompt=request.prompt,
-            sampling_params=request.sampling_params,
+            sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
         ),

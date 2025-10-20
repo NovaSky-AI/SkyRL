@@ -620,8 +620,8 @@ class TinkerEngine:
 
         # Get sampling parameters
         sampling_params = request_data.sampling_params
-        temperature = sampling_params.get("temperature", 1.0)
-        max_tokens = sampling_params.get("max_tokens", 100)
+        temperature = sampling_params.temperature
+        max_tokens = sampling_params.max_tokens
 
         # Prepare input for generation
         input_ids = jnp.array([prompt_tokens], dtype=jnp.int32)

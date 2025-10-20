@@ -145,6 +145,11 @@ class LoadWeightsOutput(BaseModel):
     type: str
 
 
+class SamplingParams(BaseModel):
+    temperature: float
+    max_tokens: int
+
+
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
@@ -153,7 +158,7 @@ class ModelMetadata(BaseModel):
 class SampleInput(BaseModel):
     base_model: str | None = None
     prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
+    sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
 
