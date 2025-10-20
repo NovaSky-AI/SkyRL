@@ -30,7 +30,6 @@ class EngineConfig(BaseModel):
         default=True,
         description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
     )
-    enable_dummy_sample: bool = Field(default=False, description="Enable dummy sampling for testing")
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:

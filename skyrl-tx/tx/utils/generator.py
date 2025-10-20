@@ -43,6 +43,7 @@ class GeneratorMixin:
         temperature: float,
         seed: int,
         return_scores: bool = False,
+        adapter_indices: jax.Array | None = None,
     ) -> jax.Array | tuple[jax.Array, list[jax.Array]]:
         """Generate text autoregressively with KV caching."""
         rng = jax.random.PRNGKey(seed)
@@ -51,7 +52,7 @@ class GeneratorMixin:
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
-        outputs = self(input_ids, attention_mask=attention_mask, positions=positions)
+        outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
@@ -72,7 +73,11 @@ class GeneratorMixin:
                 # Increment position for the new token
                 last_positions = last_positions + 1
                 outputs = self(
-                    next_token, attention_mask=attention_mask, positions=last_positions, kv_cache=outputs["kv_cache"]
+                    next_token,
+                    attention_mask=attention_mask,
+                    positions=last_positions,
+                    kv_cache=outputs["kv_cache"],
+                    adapter_indices=adapter_indices,
                 )
 
         if return_scores:

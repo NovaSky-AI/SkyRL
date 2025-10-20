@@ -1,8 +1,8 @@
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel, Field
-from typing import Literal, Any, AsyncGenerator
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal, Any, AsyncGenerator, Sequence
 from datetime import datetime, timedelta
 from uuid import uuid4
 from contextlib import asynccontextmanager
@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
 import subprocess
+import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -255,15 +256,49 @@ class SaveWeightsForSamplerRequest(BaseModel):
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
 
 
+class SamplingParams(BaseModel):
+    max_tokens: int | None = None
+    seed: int | None = None
+    stop: str | Sequence[str] | Sequence[int] | None = None
+    temperature: float = 1
+    top_k: int = -1
+    top_p: float = 1
+
+    def to_types(self) -> types.SamplingParams:
+        if self.max_tokens is None:
+            raise HTTPException(status_code=400, detail="max_tokens is currently required")
+
+        if self.stop is not None:
+            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
+        if self.top_k != -1:
+            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
+        if self.top_p != 1.0:
+            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
+
+        # Generate a random seed if not provided
+        seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
+
+        return types.SamplingParams(
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            seed=seed,
+        )
+
+
 class SampleRequest(BaseModel):
-    # For now we require model_path, in the official SDK there can actually be
-    # either model_path or base_model, the latter to sample from the base model:
-    # https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/sample_request.py
-    model_path: str
-    prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
+    base_model: str | None = None
+    model_path: str | None = None
+    prompt: ModelInput
+    sampling_params: SamplingParams
     num_samples: int
     prompt_logprobs: bool = False
+
+    @model_validator(mode="after")
+    def validate_model_source(self):
+        """Ensure exactly one of base_model or model_path is set."""
+        if (self.base_model is None) == (self.model_path is None):
+            raise ValueError("Exactly one of 'base_model' or 'model_path' must be provided")
+        return self
 
 
 class SaveWeightsRequest(BaseModel):
@@ -502,19 +537,23 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    path = types.TinkerPath.parse(request.model_path)
-    if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
-        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
-
-    await get_model(session, model_id)
+    if request.base_model:
+        model_id = checkpoint_id = ""
+    else:
+        assert request.model_path is not None
+        path = types.TinkerPath.parse(request.model_path)
+        if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
+            raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
+        await get_model(session, model_id)
 
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.SAMPLE,
         model_id=model_id,
         request_data=types.SampleInput(
-            prompt=request.prompt,
-            sampling_params=request.sampling_params,
+            base_model=request.base_model,
+            prompt=request.prompt.to_types(),
+            sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
         ),

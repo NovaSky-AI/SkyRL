@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import pytest
 import tinker
 from tinker import types
+from transformers import AutoTokenizer
 
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -31,7 +32,6 @@ def api_server():
             "8000",
             "--base-model",
             BASE_MODEL,
-            "--enable-dummy-sample",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -153,20 +153,16 @@ def test_training_workflow(service_client):
 
 def test_sample(service_client):
     """Test the sample endpoint."""
-    # Create a training client and save weights to get a valid model
-    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
-    tokenizer = training_client.get_tokenizer()
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-    # Save weights to get a valid model path
-    save_future = training_client.save_weights_for_sampler(name="test_sample")
-    model_path = save_future.result().path
+    # Create a sampling client from the base model
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
 
-    # Create a sampling client from the saved model path and get a sample
-    sampling_client = service_client.create_sampling_client(model_path)
-    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    # Sample from the base model
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
     sample_result = sampling_client.sample(
         prompt=prompt,
-        sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10),
         num_samples=1,
     ).result()
 
