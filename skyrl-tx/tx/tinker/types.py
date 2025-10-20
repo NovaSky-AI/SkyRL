@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -147,14 +147,21 @@ class LoadWeightsOutput(BaseModel):
     type: str
 
 
+class SamplingParams(BaseModel):
+    temperature: float
+    max_tokens: int
+    seed: int
+
+
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
 
 
 class SampleInput(BaseModel):
-    prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
+    base_model: str | None = None
+    prompt: ModelInput
+    sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
 
