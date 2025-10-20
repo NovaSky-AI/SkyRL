@@ -608,7 +608,8 @@ class TinkerEngine:
         """Generate text samples from the base model."""
         logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
 
-        assert request_data.base_model is not None, "Currently only sampling from the base_model is supported"
+        if request_data.base_model is None:
+            raise NotImplementedError("Currently only sampling from the base_model is supported")
         if request_data.base_model != self.config.base_model:
             raise ValueError(
                 f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
