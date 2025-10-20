@@ -1,7 +1,7 @@
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -243,14 +243,19 @@ class SaveWeightsForSamplerRequest(BaseModel):
 
 
 class SampleRequest(BaseModel):
-    # For now we require model_path, in the official SDK there can actually be
-    # either model_path or base_model, the latter to sample from the base model:
-    # https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/sample_request.py
-    model_path: str
+    base_model: str | None = None
+    model_path: str | None = None
     prompt: dict[str, Any]
     sampling_params: dict[str, Any]
     num_samples: int
     prompt_logprobs: bool = False
+
+    @model_validator(mode="after")
+    def validate_model_source(self):
+        """Ensure exactly one of base_model or model_path is set."""
+        if (self.base_model is None) == (self.model_path is None):
+            raise ValueError("Exactly one of 'base_model' or 'model_path' must be provided")
+        return self
 
 
 class SaveWeightsRequest(BaseModel):
@@ -489,17 +494,23 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    path = types.TinkerPath.parse(request.model_path)
-    if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
-        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
-
-    await get_model(session, model_id)
+    if request.base_model:
+        # Sample from base model
+        model_id = None
+        checkpoint_id = ""
+    else:
+        # Sample from LoRA adapter (not yet implemented)
+        path = types.TinkerPath.parse(request.model_path)
+        if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
+            raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
+        await get_model(session, model_id)
 
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.SAMPLE,
         model_id=model_id,
         request_data=types.SampleInput(
+            base_model=request.base_model,
             prompt=request.prompt,
             sampling_params=request.sampling_params,
             num_samples=request.num_samples,

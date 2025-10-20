@@ -605,21 +605,82 @@ class TinkerEngine:
         )
 
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the model."""
-        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
-        if self.config.enable_dummy_sample:
-            num_samples = request_data.num_samples
-            sequences = [
-                types.GeneratedSequence(stop_reason="length", tokens=[100, 200, 300], logprobs=[-0.1, -0.2, -0.3])
-                for _ in range(num_samples)
-            ]
+        """Generate text samples from the base model."""
+        logger.info(f"Sampling from base model, checkpoint_id={request_data.checkpoint_id}")
 
-            return types.SampleOutput(
-                sequences=sequences,
-                prompt_logprobs=[-0.05, -0.15, -0.25],
+        # Validate that base_model matches the engine's base model
+        if request_data.base_model != self.config.base_model:
+            raise ValueError(
+                f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
             )
 
-        raise NotImplementedError("sample endpoint not yet fully implemented")
+        # Extract prompt tokens from the request
+        prompt = types.ModelInput.model_validate(request_data.prompt)
+        prompt_tokens = [token for chunk in prompt.chunks for token in chunk.tokens]
+
+        # Get sampling parameters
+        sampling_params = request_data.sampling_params
+        temperature = sampling_params.get("temperature", 1.0)
+        max_tokens = sampling_params.get("max_tokens", 100)
+
+        # Prepare input for generation
+        input_ids = jnp.array([prompt_tokens], dtype=jnp.int32)
+        attention_mask = jnp.ones_like(input_ids, dtype=jnp.int32)
+
+        # Generate samples
+        sequences = []
+        with jax.set_mesh(self.mesh):
+            # Merge the model for inference using the current adapter state
+            model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
+
+            for sample_idx in range(request_data.num_samples):
+                # Generate with different seeds for each sample
+                seed = sample_idx
+
+                # Call the model's generate method (no adapter, base model only)
+                generated_ids, scores = model.generate(
+                    input_ids,
+                    attention_mask,
+                    max_new_tokens=max_tokens,
+                    temperature=temperature,
+                    seed=seed,
+                    return_scores=True,
+                )
+
+                # Extract the generated tokens (excluding the prompt)
+                prompt_len = len(prompt_tokens)
+                generated_tokens = generated_ids[0, prompt_len:].tolist()
+
+                # Compute logprobs from the scores
+                logprobs = []
+                for score in scores:
+                    log_probs = jax.nn.log_softmax(score[0], axis=-1)
+                    # Get the logprob of the selected token
+                    # The token at position i in generated_tokens corresponds to scores[i]
+                    if len(logprobs) < len(generated_tokens):
+                        token_idx = generated_tokens[len(logprobs)]
+                        logprobs.append(float(log_probs[token_idx]))
+
+                # For now, assume all sequences hit the length limit
+                stop_reason = "length"
+
+                sequences.append(
+                    types.GeneratedSequence(
+                        stop_reason=stop_reason,
+                        tokens=generated_tokens,
+                        logprobs=logprobs,
+                    )
+                )
+
+        # Compute prompt logprobs if needed (for now, return empty list)
+        prompt_logprobs = []
+
+        logger.info(f"Generated {len(sequences)} samples for model {model_id}")
+
+        return types.SampleOutput(
+            sequences=sequences,
+            prompt_logprobs=prompt_logprobs,
+        )
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:

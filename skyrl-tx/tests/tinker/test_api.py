@@ -153,17 +153,16 @@ def test_training_workflow(service_client):
 
 def test_sample(service_client):
     """Test the sample endpoint."""
-    # Create a training client and save weights to get a valid model
-    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
-    tokenizer = training_client.get_tokenizer()
+    # Get tokenizer from a training client
+    from transformers import AutoTokenizer
 
-    # Save weights to get a valid model path
-    save_future = training_client.save_weights_for_sampler(name="test_sample")
-    model_path = save_future.result().path
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-    # Create a sampling client from the saved model path and get a sample
-    sampling_client = service_client.create_sampling_client(model_path)
-    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    # Create a sampling client from the base model
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+
+    # Sample from the base model
+    prompt = types.ModelInput.from_ints(tokenizer.encode("The capital of france is ", add_special_tokens=True))
     sample_result = sampling_client.sample(
         prompt=prompt,
         sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
@@ -174,3 +173,5 @@ def test_sample(service_client):
     assert sample_result is not None
     assert len(sample_result.sequences) == 1
     assert len(sample_result.sequences[0].tokens) > 0
+
+    print("result", tokenizer.decode(sample_result.sequences[0].tokens))

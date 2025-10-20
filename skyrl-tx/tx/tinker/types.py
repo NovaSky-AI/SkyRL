@@ -151,6 +151,7 @@ class ModelMetadata(BaseModel):
 
 
 class SampleInput(BaseModel):
+    base_model: str
     prompt: dict[str, Any]
     sampling_params: dict[str, Any]
     num_samples: int
