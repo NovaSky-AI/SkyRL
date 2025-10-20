@@ -679,7 +679,7 @@ def compute_policy_loss_cispo(
     clamped_ratio = torch.clamp(ratio, 1 - config.eps_clip_low, 1 + config.eps_clip_high)
     loss = -advantages * clamped_ratio.detach() * log_probs
 
-    is_clipped = (ratio > 1 - config.eps_clip_low) | (ratio < 1 + config.eps_clip_high)
+    is_clipped = (ratio < 1 - config.eps_clip_low) | (ratio > 1 + config.eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
