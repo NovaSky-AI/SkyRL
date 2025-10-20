@@ -29,9 +29,7 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
         weights = [1] * len(tokens)
         samples.append(
             types.Datum(
-                model_input=types.ModelInput(
-                    chunks=[types.ModelInputChunk(tokens=tokens)]
-                ),
+                model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
                 loss_fn_inputs={
                     "target_tokens": types.TensorData(data=targets),
                     "weights": types.TensorData(data=weights),
@@ -243,7 +241,7 @@ def test_process_optim_step_hyperparams_behavior():
     tiny_request = types.OptimStepInput(
         adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9)
     )
-    default_request = types.OptimStepInput(adam_params=api.AdamParams().to_adam_params())
+    default_request = types.OptimStepInput(adam_params=api.AdamParams().to_types())
 
     # Apply override step on the first adapter.
     tiny_norm = apply_step(1, low_adapter, tiny_request)
