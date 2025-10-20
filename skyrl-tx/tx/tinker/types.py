@@ -157,7 +157,7 @@ class ModelMetadata(BaseModel):
 
 class SampleInput(BaseModel):
     base_model: str | None = None
-    prompt: dict[str, Any]
+    prompt: ModelInput
     sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str

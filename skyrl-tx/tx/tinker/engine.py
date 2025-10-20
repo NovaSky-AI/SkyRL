@@ -614,14 +614,7 @@ class TinkerEngine:
                 f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
             )
 
-        # Extract prompt tokens from the request
-        prompt = types.ModelInput.model_validate(request_data.prompt)
-        prompt_tokens = [token for chunk in prompt.chunks for token in chunk.tokens]
-
-        # Get sampling parameters
-        sampling_params = request_data.sampling_params
-        temperature = sampling_params.temperature
-        max_tokens = sampling_params.max_tokens
+        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
         # Prepare input for generation
         input_ids = jnp.array([prompt_tokens], dtype=jnp.int32)
@@ -641,8 +634,8 @@ class TinkerEngine:
                 generated_ids, scores = model.generate(
                     input_ids,
                     attention_mask,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
+                    max_new_tokens=request_data.sampling_params.max_tokens,
+                    temperature=request_data.sampling_params.temperature,
                     seed=seed,
                     return_scores=True,
                 )
