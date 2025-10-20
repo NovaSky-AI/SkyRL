@@ -98,7 +98,7 @@ uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --wit
   trainer.policy_mini_batch_size=1 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=-1 \
+  trainer.ckpt_interval=25 \
   trainer.max_prompt_length=16000 \
   generator.sampling_params.max_generate_length=16000 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
