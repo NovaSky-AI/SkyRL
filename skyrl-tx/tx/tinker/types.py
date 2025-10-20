@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
