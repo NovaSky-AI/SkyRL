@@ -59,12 +59,7 @@ def test_policy_loss_dual_clip():
     expected_loss = final_loss.mean()  # -(-12.5/3) = 4.1667
 
     # Calculate actual loss
-    actual_loss, _ = loss_fn(
-        log_probs=log_probs,
-        old_log_probs=old_log_probs,
-        advantages=advantages,
-        config=config,
-    )
+    actual_loss, _ = loss_fn(log_probs=log_probs, old_log_probs=old_log_probs, advantages=advantages, config=config)
 
     # Verify results
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
@@ -72,7 +67,6 @@ def test_policy_loss_dual_clip():
     assert actual_loss.item() == pytest.approx(4.1667, abs=1e-4)
 
 
-# Adapted a good test from NeMO-RL
 def test_policy_loss_cispo():
     """Tests CISPO in PolicyLoss function."""
 
@@ -85,7 +79,7 @@ def test_policy_loss_cispo():
     old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
     log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)  # approx log(0.5)-1, log(1)-1, log(10)-3
 
-    # Create config for dual clipping
+    # Create config for cispo
     config = DictConfig(
         {
             "cispo": {"clip_low": 0.2, "clip_high": 0.2},
@@ -96,7 +90,7 @@ def test_policy_loss_cispo():
         }
     )
 
-    # Create loss function with dual clipping
+    # Create loss function with cispo
     loss_fn = PolicyLossRegistry.get("cispo")
 
     # Calculate expected values
@@ -154,10 +148,7 @@ def test_policy_loss_reduction_modes():
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
 
     log_probs = torch.tensor(
-        [
-            [-1.5, -0.5, -1.2],
-            [-0.8, -1.3, -0.9],
-        ],  # ratios ≈ [[0.61, 1.65, 0.83],[1.22, 0.74, 1.11]]
+        [[-1.5, -0.5, -1.2], [-0.8, -1.3, -0.9]],  # ratios ≈ [[0.61, 1.65, 0.83],[1.22, 0.74, 1.11]]
         device=device,
     )
 
@@ -330,26 +321,8 @@ def test_gspo_importance_sampling_levels():
     # This tests GSPO's stability benefits under conditions that would cause unstable clipping
     log_probs = torch.tensor(
         [
-            [
-                0.2,
-                -2.5,
-                -0.3,
-                0.1,
-                -1.8,
-                -1.0,
-                -1.0,
-                -1.0,
-            ],  # high variance within sequence
-            [
-                0.8,
-                -0.2,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-                -1.0,
-            ],  # extreme ratios (exp(1.8)≈6.0, exp(0.8)≈2.2)
+            [0.2, -2.5, -0.3, 0.1, -1.8, -1.0, -1.0, -1.0],  # high variance within sequence
+            [0.8, -0.2, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],  # extreme ratios (exp(1.8)≈6.0, exp(0.8)≈2.2)
             [-0.5, 0.3, -1.7, 0.4, -1.0, -1.0, -1.0, -1.0],  # mixed extreme values
         ],
         device=device,
@@ -495,11 +468,7 @@ def test_clip_cov_policy_loss():
             "policy_loss_type": "clip_cov",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "clip_cov": {
-                "clip_ratio": 0.5,
-                "clip_cov_lb": -5.0,
-                "clip_cov_ub": 5.0,
-            },  # Large ratio for testing
+            "clip_cov": {"clip_ratio": 0.5, "clip_cov_lb": -5.0, "clip_cov_ub": 5.0},  # Large ratio for testing
         }
     )
 
@@ -561,10 +530,7 @@ def test_kl_cov_policy_loss():
             "policy_loss_type": "kl_cov",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "kl_cov": {
-                "kl_cov_frac": 0.5,
-                "ppo_kl_coef": 1.0,
-            },  # Apply KL to 50% of tokens
+            "kl_cov": {"kl_cov_frac": 0.5, "ppo_kl_coef": 1.0},  # Apply KL to 50% of tokens
         }
     )
 

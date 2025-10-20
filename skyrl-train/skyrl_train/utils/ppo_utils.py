@@ -455,10 +455,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage],
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
-            "reinforce++": [
-                AdvantageEstimator.REINFORCE_PP,
-                compute_reinforce_plus_plus_outcome_advantage,
-            ],
+            "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -622,9 +619,7 @@ def gspo_policy_loss(
         # The GSPO paper uses sequence_mean reduction; there's no reason
         # why a user couldn't use token_mean reduction, but
         # it's not clear whether it would be stable or not.
-        from loguru import (
-            logger as logger_,  # have to do lazy import to avoid pickling error
-        )
+        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
 
         logger_.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 
