@@ -26,7 +26,8 @@ class EngineConfig(BaseModel):
         default=True,
         description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
     )
-    enable_dummy_sample: bool = Field(default=False, description="Enable dummy sampling for testing")
+    enable_dummy_sample: bool = Field(default=False, description="Enable dummy sampling for testing"),
+    loss_computation_dtype: str = Field(default="", description="The dtype to use for the loss computation, if it is "" it will use the native dtype of the model")
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:

@@ -182,7 +182,9 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
-            ].astype(jnp.float32)  # [B, T, V]
+            ]  # [B, T, V]
+            if self.config.loss_computation_dtype:
+                logits = logits.astype(self.config.loss_computation_dtype)
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
 
