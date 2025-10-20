@@ -255,6 +255,13 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
+        if self.stop is not None:
+            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
+        if self.top_k != -1:
+            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
+        if self.top_p != 1.0:
+            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
+
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
