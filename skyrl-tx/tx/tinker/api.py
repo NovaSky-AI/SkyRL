@@ -262,7 +262,7 @@ class SamplingParams(BaseModel):
 class SampleRequest(BaseModel):
     base_model: str | None = None
     model_path: str | None = None
-    prompt: dict[str, Any]
+    prompt: ModelInput
     sampling_params: SamplingParams
     num_samples: int
     prompt_logprobs: bool = False
@@ -526,7 +526,7 @@ async def asample(request: SampleRequest, session: AsyncSession = Depends(get_se
         model_id=model_id,
         request_data=types.SampleInput(
             base_model=request.base_model,
-            prompt=types.ModelInput.model_validate(request.prompt),
+            prompt=request.prompt.to_types(),
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
