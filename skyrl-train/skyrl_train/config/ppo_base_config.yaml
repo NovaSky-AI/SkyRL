@@ -124,6 +124,11 @@ trainer:
     kl_cov:
       kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
       ppo_kl_coef: 1.0
+    
+    cispo:
+        clip_low: 0.2
+        clip_high: 0.2
+
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

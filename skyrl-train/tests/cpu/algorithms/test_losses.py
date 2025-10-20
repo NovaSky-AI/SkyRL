@@ -88,8 +88,7 @@ def test_policy_loss_cispo():
     # Create config for dual clipping
     config = DictConfig(
         {
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
+            "cispo": {"clip_low": 0.2, "clip_high": 0.2},
             "policy_loss_type": "cispo",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
