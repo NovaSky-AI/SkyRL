@@ -415,12 +415,10 @@ class TinkerEngine:
         current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
             adapter_index = self.models[model_id].adapter_index
-            forward_backward_input = request_data
-            data = forward_backward_input.data
-            loss_fn_type = LOSS_TYPES[forward_backward_input.loss_fn]
+            loss_fn_type = LOSS_TYPES[request_data.loss_fn]
 
             request_start = current_batch_idx
-            for item in data:
+            for item in request_data.data:
                 tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
                 all_input_ids.append(tokens)
                 loss_fn_inputs = item.loss_fn_inputs
