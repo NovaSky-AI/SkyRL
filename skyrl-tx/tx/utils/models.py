@@ -63,7 +63,11 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
 
 
 def load_safetensors(
-    checkpoint_dir: str | os.PathLike, config: PretrainedConfig, model: nnx.Module, skip_lora: bool = True, prefix: str = ""
+    checkpoint_dir: str | os.PathLike,
+    config: PretrainedConfig,
+    model: nnx.Module,
+    skip_lora: bool = True,
+    prefix: str = "",
 ) -> None:
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
@@ -71,7 +75,7 @@ def load_safetensors(
 
     # Strip prefix from tensor keys if provided
     if prefix:
-        tensors = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in tensors.items()}
+        tensors = {k[len(prefix) :] if k.startswith(prefix) else k: v for k, v in tensors.items()}
 
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
