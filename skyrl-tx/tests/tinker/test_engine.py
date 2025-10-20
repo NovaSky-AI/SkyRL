@@ -28,16 +28,15 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
         targets = tokens[1:] + [0]
         weights = [1] * len(tokens)
         samples.append(
-            {
-                "model_input": {"chunks": [{"tokens": tokens}]},
-                "loss_fn_inputs": {
-                    "target_tokens": {"data": targets},
-                    "weights": {"data": weights},
-                },
-            }
+            types.Datum(
+                model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+                loss_fn_inputs=types.LossFnInputs(
+                    target_tokens=types.TensorData(data=targets),
+                    weights=types.TensorData(data=weights),
+                ),
+            )
         )
-    payload = {"forward_backward_input": {"data": samples}}
-    return types.ForwardBackwardInput.model_validate(payload)
+    return types.ForwardBackwardInput(data=samples, loss_fn="cross_entropy")
 
 
 def _assert_tree_allclose(t1, t2, rtol=1e-3, atol=1e-3, min_match_pct=99.0):
@@ -242,7 +241,7 @@ def test_process_optim_step_hyperparams_behavior():
     tiny_request = types.OptimStepInput(
         adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9)
     )
-    default_request = types.OptimStepInput(adam_params=api.AdamParams().to_adam_params())
+    default_request = types.OptimStepInput(adam_params=api.AdamParams().to_types())
 
     # Apply override step on the first adapter.
     tiny_norm = apply_step(1, low_adapter, tiny_request)
