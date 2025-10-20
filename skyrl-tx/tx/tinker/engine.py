@@ -443,14 +443,10 @@ class TinkerEngine:
                 tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
                 all_input_ids.append(tokens)
                 loss_fn_inputs = item.loss_fn_inputs
-                target_tokens = loss_fn_inputs.target_tokens.data
-                all_targets.append(target_tokens)
-                weights = loss_fn_inputs.weights.data
-                sampling_lps = loss_fn_inputs.logprobs.data
-                advs = loss_fn_inputs.advantages.data
-                all_token_weights.append(weights)
-                all_sampling_logprobs.append(sampling_lps)
-                all_advantages.append(advs)
+                all_targets.append(loss_fn_inputs.target_tokens.data)
+                all_token_weights.append(loss_fn_inputs.weights.data)
+                all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
+                all_advantages.append(loss_fn_inputs.advantages.data)
                 all_adapter_indices.append(adapter_index)
                 example_model_ids.append(model_id)
                 all_loss_fn_types.append(loss_fn_type)
