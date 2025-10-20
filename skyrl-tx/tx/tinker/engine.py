@@ -183,8 +183,6 @@ class TinkerEngine:
             logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
                 "logits"
             ]  # [B, T, V]
-            if self.config.loss_computation_dtype:
-                logits = logits.astype(self.config.loss_computation_dtype)
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
 
