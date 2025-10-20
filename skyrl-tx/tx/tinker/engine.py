@@ -606,9 +606,9 @@ class TinkerEngine:
 
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
         """Generate text samples from the base model."""
-        logger.info(f"Sampling from base model, checkpoint_id={request_data.checkpoint_id}")
+        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
 
-        # Validate that base_model matches the engine's base model
+        assert request_data.base_model is not None, "Currently only sampling from the base_model is supported"
         if request_data.base_model != self.config.base_model:
             raise ValueError(
                 f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"

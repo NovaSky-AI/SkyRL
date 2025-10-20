@@ -170,5 +170,3 @@ def test_sample(service_client):
     assert sample_result is not None
     assert len(sample_result.sequences) == 1
     assert len(sample_result.sequences[0].tokens) > 0
-
-    print("result", tokenizer.decode(sample_result.sequences[0].tokens))
