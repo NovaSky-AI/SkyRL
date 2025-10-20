@@ -22,6 +22,7 @@ from huggingface_hub import snapshot_download
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
+from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
     get_dtype,
@@ -57,23 +58,6 @@ def round_up_seq_len(seq_len: int) -> int:
         result += 1 << (msb_pos - 1)
 
     return result
-
-
-def _cross_entropy_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
-    return -target_logprobs * loss_mask
-
-
-def _importance_sampling_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
-    prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    return -(prob_ratio * advantages * loss_mask)
-
-
-def _ppo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages):
-    prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    clipped_ratio = jnp.clip(prob_ratio, 0.8, 1.2)
-    unclipped = prob_ratio * advantages
-    clipped = clipped_ratio * advantages
-    return -jnp.minimum(unclipped, clipped) * loss_mask
 
 
 @dataclass
@@ -207,7 +191,7 @@ class TinkerEngine:
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
                 return jax.lax.switch(
                     loss_fn_type,
-                    [_cross_entropy_loss, _importance_sampling_loss, _ppo_loss],
+                    LOSS_FUNCTIONS,
                     target_logprobs,
                     loss_mask,
                     sampling_logprobs,
@@ -426,7 +410,6 @@ class TinkerEngine:
         request_batch_slices = []  # Track which examples belong to which request
         all_sampling_logprobs = []
         all_advantages = []
-        loss_fn_map = {"cross_entropy": 0, "importance_sampling": 1, "ppo": 2}
         all_loss_fn_types = []
 
         current_batch_idx = 0
@@ -434,7 +417,7 @@ class TinkerEngine:
             adapter_index = self.models[model_id].adapter_index
             forward_backward_input = request_data
             data = forward_backward_input.data
-            loss_fn_type = loss_fn_map[forward_backward_input.loss_fn]
+            loss_fn_type = LOSS_TYPES[forward_backward_input.loss_fn]
 
             request_start = current_batch_idx
             for item in data:
