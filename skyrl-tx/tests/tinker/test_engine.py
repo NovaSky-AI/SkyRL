@@ -33,6 +33,8 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
                 loss_fn_inputs=types.LossFnInputs(
                     target_tokens=types.TensorData(data=targets),
                     weights=types.TensorData(data=weights),
+                    advantages=types.TensorData(data=[]),
+                    logprobs=types.TensorData(data=[]),
                 ),
             )
         )

@@ -200,19 +200,15 @@ class Datum(BaseModel):
     model_input: ModelInput
 
     def to_types(self) -> types.Datum:
-        if "advantages" in self.loss_fn_inputs:
-            advantages = self.loss_fn_inputs["advantages"].to_types()
-        else:
-            advantages = types.TensorData(data=[])
-
-        if "logprobs" in self.loss_fn_inputs:
-            logprobs = self.loss_fn_inputs["logprobs"].to_types()
-        else:
-            logprobs = types.TensorData(data=[])
+        inp = self.loss_fn_input
+        target_tokens = inp["target_tokens"].to_types()
+        weights = inp["weights"].to_types()
+        advantages = inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[])
+        logprobs = inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[])
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
-                target_tokens=self.loss_fn_inputs["target_tokens"].to_types(),
-                weights=self.loss_fn_inputs["weights"].to_types(),
+                target_tokens=target_tokens,
+                weights=weights,
                 advantages=advantages,
                 logprobs=logprobs,
             ),
