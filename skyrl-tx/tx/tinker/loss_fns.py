@@ -9,16 +9,22 @@ def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
     return jnp.where(loss_mask != 0.0, loss_mask * loss_output, jnp.zeros_like(loss_output))
 
 
-def cross_entropy_loss(target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array) -> jax.Array:
+def cross_entropy_loss(
+    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+) -> jax.Array:
     return -safe_loss_mask(target_logprobs, loss_mask)
 
 
-def importance_sampling_loss(target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array) -> jax.Array:
+def importance_sampling_loss(
+    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+) -> jax.Array:
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     return -safe_loss_mask(prob_ratio * advantages, loss_mask)
 
 
-def ppo_loss(target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array) -> jax.Array:
+def ppo_loss(
+    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+) -> jax.Array:
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     clipped_ratio = jnp.clip(prob_ratio, 0.8, 1.2)
     unclipped = prob_ratio * advantages
