@@ -72,8 +72,31 @@ class CreateModelOutput(BaseModel):
     lora_config: LoraConfig
 
 
+class ModelInputChunk(BaseModel):
+    tokens: list[int]
+
+
+class ModelInput(BaseModel):
+    chunks: list[ModelInputChunk]
+
+
+class TensorData(BaseModel):
+    data: list[int] | list[float]
+
+
+class LossFnInputs(BaseModel):
+    target_tokens: TensorData
+    weights: TensorData
+
+
+class Datum(BaseModel):
+    loss_fn_inputs: LossFnInputs
+    model_input: ModelInput
+
+
 class ForwardBackwardInput(BaseModel):
-    forward_backward_input: dict[str, Any]
+    data: list[Datum]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
 
 
 class ForwardBackwardOutput(BaseModel):

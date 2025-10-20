@@ -432,32 +432,22 @@ class TinkerEngine:
         current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
             adapter_index = self.models[model_id].adapter_index
-            forward_backward_input = request_data.forward_backward_input
-            data = forward_backward_input["data"]
+            forward_backward_input = request_data
+            data = forward_backward_input.data
 
             loss_fn_str = forward_backward_input["loss_fn"]
             loss_fn_type = loss_fn_map[loss_fn_str]
             request_start = current_batch_idx
 
             for item in data:
-                tokens = [t for chunk in item["model_input"]["chunks"] for t in chunk["tokens"]]
+                tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
                 all_input_ids.append(tokens)
-                loss_fn_inputs = item["loss_fn_inputs"]
-                target_tokens = loss_fn_inputs["target_tokens"]["data"]
+                loss_fn_inputs = item.loss_fn_inputs
+                target_tokens = loss_fn_inputs.target_tokens.data
                 all_targets.append(target_tokens)
-
-                weights, sampling_lps, advs = (
-                    [1.0] * len(target_tokens),
-                    [0.0] * len(target_tokens),
-                    [0.0] * len(target_tokens),
-                )
-                if "weights" in loss_fn_inputs:
-                    weights = loss_fn_inputs["weights"]["data"]
-                if "logprobs" in loss_fn_inputs:
-                    sampling_lps = loss_fn_inputs["logprobs"]["data"]
-                if "advantages" in loss_fn_inputs:
-                    advs = loss_fn_inputs["advantages"]["data"]
-
+                weights = loss_fn_inputs.weights.data
+                sampling_lps = loss_fn_inputs.logprobs.data
+                advs = loss_fn_inputs.advantages.data
                 all_token_weights.append(weights)
                 all_sampling_logprobs.append(sampling_lps)
                 all_advantages.append(advs)

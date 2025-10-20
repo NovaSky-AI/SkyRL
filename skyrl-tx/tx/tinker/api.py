@@ -174,9 +174,52 @@ class TrainingRun(BaseModel):
     user_metadata: dict[str, str] | None = None
 
 
+class ModelInputChunk(BaseModel):
+    tokens: list[int]
+
+    def to_types(self) -> types.ModelInputChunk:
+        return types.ModelInputChunk(tokens=self.tokens)
+
+
+class ModelInput(BaseModel):
+    chunks: list[ModelInputChunk]
+
+    def to_types(self) -> types.ModelInput:
+        return types.ModelInput(chunks=[chunk.to_types() for chunk in self.chunks])
+
+
+class TensorData(BaseModel):
+    data: list[int] | list[float]
+
+    def to_types(self) -> types.TensorData:
+        return types.TensorData(data=self.data)
+
+
+class Datum(BaseModel):
+    loss_fn_inputs: dict[str, TensorData]
+    model_input: ModelInput
+
+    def to_types(self) -> types.Datum:
+        return types.Datum(
+            loss_fn_inputs=types.LossFnInputs(
+                target_tokens=self.loss_fn_inputs["target_tokens"].to_types(),
+                weights=self.loss_fn_inputs["weights"].to_types(),
+            ),
+            model_input=self.model_input.to_types(),
+        )
+
+
+class ForwardBackwardInput(BaseModel):
+    data: list[Datum]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
+
+    def to_types(self) -> types.ForwardBackwardInput:
+        return types.ForwardBackwardInput(data=[datum.to_types() for datum in self.data], loss_fn=self.loss_fn)
+
+
 class ForwardBackwardRequest(BaseModel):
     model_id: str
-    forward_backward_input: dict[str, Any]
+    forward_backward_input: ForwardBackwardInput
 
 
 class AdamParams(BaseModel):
@@ -185,7 +228,7 @@ class AdamParams(BaseModel):
     beta2: float = Field(default=0.95, ge=0.0, lt=1.0)
     eps: float = Field(default=1e-12, gt=0.0)
 
-    def to_adam_params(self) -> types.AdamParams:
+    def to_types(self) -> types.AdamParams:
         return types.AdamParams(learning_rate=self.learning_rate, beta1=self.beta1, beta2=self.beta2, eps=self.eps)
 
 
@@ -342,7 +385,7 @@ async def forward_backward(request: ForwardBackwardRequest, session: AsyncSessio
         session=session,
         request_type=types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=types.ForwardBackwardInput(forward_backward_input=request.forward_backward_input),
+        request_data=request.forward_backward_input.to_types(),
     )
 
     await session.commit()
@@ -359,7 +402,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         session=session,
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=types.OptimStepInput(adam_params=request.adam_params.to_adam_params()),
+        request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
     )
 
     await session.commit()
