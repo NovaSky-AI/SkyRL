@@ -28,6 +28,7 @@ from tx.utils.models import (
     get_dtype,
     get_model_class,
     save_lora_checkpoint,
+    load_lora_checkpoint,
     load_safetensors,
     extract_adapter_state,
     insert_adapter_state,
@@ -644,16 +645,47 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
+    def load_sampler_weights(self, model_id: str, checkpoint_id: str) -> int:
+        """Load LoRA adapter weights from a sampler checkpoint into the model.
+
+        Args:
+            model_id: The model ID
+            checkpoint_id: The checkpoint ID
+
+        Returns:
+            The adapter index where the weights were loaded
+        """
+        assert checkpoint_id != "", "checkpoint_id must not be empty"
+
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not loaded")
+
+        lora_model = self.models[model_id]
+        checkpoint_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+
+        # Load checkpoint using load_lora_checkpoint
+        load_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, checkpoint_path)
+
+        logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {lora_model.adapter_index}")
+        return lora_model.adapter_index
+
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the base model."""
+        """Generate text samples from the base model or LoRA adapter."""
         logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
 
+        # Determine if we're sampling from base model or LoRA
         if request_data.base_model is None:
-            raise NotImplementedError("Currently only sampling from the base_model is supported")
-        if request_data.base_model != self.config.base_model:
-            raise ValueError(
-                f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
-            )
+            # LoRA sampling mode
+            adapter_index = self.load_sampler_weights(model_id, request_data.checkpoint_id)
+            adapter_indices = jnp.array([[adapter_index]], dtype=jnp.int32)
+        else:
+            # Base model sampling mode
+            if request_data.base_model != self.config.base_model:
+                raise ValueError(
+                    f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                )
+            adapter_indices = None
 
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
@@ -664,14 +696,14 @@ class TinkerEngine:
         # Generate samples
         sequences = []
         with jax.set_mesh(self.mesh):
-            # Merge the model for inference using the current adapter state
+            # Merge the model for inference
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
             for sample_idx in range(request_data.num_samples):
                 # Generate with different seeds for each sample
                 seed = request_data.sampling_params.seed + sample_idx
 
-                # Call the model's generate method (no adapter, base model only)
+                # Call the model's generate method
                 generated_ids, scores = model.generate(
                     input_ids,
                     attention_mask,
@@ -679,6 +711,7 @@ class TinkerEngine:
                     temperature=request_data.sampling_params.temperature,
                     seed=seed,
                     return_scores=True,
+                    adapter_indices=adapter_indices,
                 )
 
                 # Extract the generated tokens (excluding the prompt)
