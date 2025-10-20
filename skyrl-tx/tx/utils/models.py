@@ -16,7 +16,7 @@ from transformers import PretrainedConfig
 import peft
 
 from tx import models
-from tx.utils.storage import pack_and_upload
+from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
 
 if TYPE_CHECKING:
@@ -126,8 +126,6 @@ def load_lora_checkpoint(
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """
-    from tx.utils.storage import download_and_unpack
-
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
     lora_state = extract_adapter_state(adapter_index, lora_params, non_lora_params)
