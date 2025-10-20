@@ -12,12 +12,14 @@ def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
 def cross_entropy_loss(
     target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
 ) -> jax.Array:
+    "Standard cross-entropy loss (i.e., negative log-likelihood)."
     return -safe_loss_mask(target_logprobs, loss_mask)
 
 
 def importance_sampling_loss(
     target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
 ) -> jax.Array:
+    "Importance sampling loss with target_logprobs from learner policy and sampling_logprobs from sampling policy."
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     return -safe_loss_mask(prob_ratio * advantages, loss_mask)
 
@@ -25,6 +27,7 @@ def importance_sampling_loss(
 def ppo_loss(
     target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
 ) -> jax.Array:
+    "PPO style clipped version of the importance sampling loss."
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     clipped_ratio = jnp.clip(prob_ratio, 0.8, 1.2)
     unclipped = prob_ratio * advantages
