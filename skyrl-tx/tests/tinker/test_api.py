@@ -162,7 +162,7 @@ def test_sample(service_client):
     prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
     sample_result = sampling_client.sample(
         prompt=prompt,
-        sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10),
         num_samples=1,
     ).result()
 
