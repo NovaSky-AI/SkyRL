@@ -84,8 +84,13 @@ class TensorData(BaseModel):
     data: list[int] | list[float]
 
 
+class LossFnInputs(BaseModel):
+    target_tokens: TensorData
+    weights: TensorData
+
+
 class Datum(BaseModel):
-    loss_fn_inputs: dict[str, TensorData]
+    loss_fn_inputs: LossFnInputs
     model_input: ModelInput
 
 

@@ -389,9 +389,9 @@ class TinkerEngine:
             for item in data:
                 tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
                 all_input_ids.append(tokens)
-                target_tokens = item.loss_fn_inputs["target_tokens"].data
+                target_tokens = item.loss_fn_inputs.target_tokens.data
                 all_targets.append(target_tokens)
-                weights = item.loss_fn_inputs["weights"].data
+                weights = item.loss_fn_inputs.weights.data
                 all_token_weights.append(weights)
                 all_adapter_indices.append(adapter_index)
                 example_model_ids.append(model_id)

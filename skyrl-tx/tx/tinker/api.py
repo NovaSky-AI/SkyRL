@@ -201,7 +201,10 @@ class Datum(BaseModel):
 
     def to_types(self) -> types.Datum:
         return types.Datum(
-            loss_fn_inputs={key: value.to_types() for key, value in self.loss_fn_inputs.items()},
+            loss_fn_inputs=types.LossFnInputs(
+                target_tokens=self.loss_fn_inputs["target_tokens"].to_types(),
+                weights=self.loss_fn_inputs["weights"].to_types(),
+            ),
             model_input=self.model_input.to_types(),
         )
 

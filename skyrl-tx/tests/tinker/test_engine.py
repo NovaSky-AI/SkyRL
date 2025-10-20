@@ -30,10 +30,10 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
         samples.append(
             types.Datum(
                 model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
-                loss_fn_inputs={
-                    "target_tokens": types.TensorData(data=targets),
-                    "weights": types.TensorData(data=weights),
-                },
+                loss_fn_inputs=types.LossFnInputs(
+                    target_tokens=types.TensorData(data=targets),
+                    weights=types.TensorData(data=weights),
+                ),
             )
         )
     return types.ForwardBackwardInput(data=samples, loss_fn="cross_entropy")
