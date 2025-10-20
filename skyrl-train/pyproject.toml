@@ -45,6 +45,7 @@ dependencies = [
 ]
 
 [tool.uv]
+required-version = ">=0.5.0"
 conflicts = [
     [
         { extra = "vllm" },
@@ -67,15 +68,16 @@ conflicts = [
     ]
 ]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = [{requirement = "torch", match-runtime = true}]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
-flash-attn = [
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" , marker = "extra == 'mcore'"},
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "extra != 'mcore' and extra == 'vllm'" },
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "extra != 'mcore' and extra != 'vllm'" },
-]
 # We use `flashinfer-jit-cache` to avoid slow JIT compilation on first run.
 # Different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm'" }
@@ -110,6 +112,7 @@ sandboxes = [
 ]
 vllm = [
     "vllm==0.11.0",
+    "flash-attn==2.8.3",
     "torch==2.8.0",
     "flashinfer-python",
     "flashinfer-jit-cache",
@@ -118,6 +121,7 @@ vllm = [
 sglang = [
     "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
     "flashinfer-python",
+    "flash-attn==2.8.3",
     "torch==2.7.1",
     "torchvision",
 ]
@@ -132,6 +136,7 @@ mcore = [
   # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
   # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
   # "transformer-engine[pytorch]==2.5.0",
+  "flash-attn==2.7.4.post1",
   "vllm==0.10.1.1",
   "torch==2.7.1",
   "flashinfer-python",
@@ -142,6 +147,7 @@ mcore = [
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
     # See examples/flash_rl/README.md for installation instructions.
+    "flash-attn==2.8.3",
     "torch==2.7.0",
     "flashinfer-python",
     "torchvision",
