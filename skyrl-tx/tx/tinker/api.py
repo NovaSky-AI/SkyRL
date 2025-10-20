@@ -174,9 +174,49 @@ class TrainingRun(BaseModel):
     user_metadata: dict[str, str] | None = None
 
 
+class ModelInputChunk(BaseModel):
+    tokens: list[int]
+
+    def to_types(self) -> types.ModelInputChunk:
+        return types.ModelInputChunk(tokens=self.tokens)
+
+
+class ModelInput(BaseModel):
+    chunks: list[ModelInputChunk]
+
+    def to_types(self) -> types.ModelInput:
+        return types.ModelInput(chunks=[chunk.to_types() for chunk in self.chunks])
+
+
+class TensorData(BaseModel):
+    data: list[int] | list[float]
+
+    def to_types(self) -> types.TensorData:
+        return types.TensorData(data=self.data)
+
+
+class Datum(BaseModel):
+    loss_fn_inputs: dict[str, TensorData]
+    model_input: ModelInput
+
+    def to_types(self) -> types.Datum:
+        return types.Datum(
+            loss_fn_inputs={key: value.to_types() for key, value in self.loss_fn_inputs.items()},
+            model_input=self.model_input.to_types(),
+        )
+
+
 class ForwardBackwardInput(BaseModel):
+    data: list[Datum]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
+
+    def to_types(self) -> types.ForwardBackwardInput:
+        return types.ForwardBackwardInput(data=[datum.to_types() for datum in self.data], loss_fn=self.loss_fn)
+
+
+class ForwardBackwardRequest(BaseModel):
     model_id: str
-    forward_backward_input: dict[str, Any]
+    forward_backward_input: ForwardBackwardInput
 
 
 class AdamParams(BaseModel):
@@ -334,7 +374,7 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
 
 
 @app.post("/api/v1/forward_backward", response_model=FutureResponse)
-async def forward_backward(request: ForwardBackwardInput, session: AsyncSession = Depends(get_session)):
+async def forward_backward(request: ForwardBackwardRequest, session: AsyncSession = Depends(get_session)):
     """Compute and accumulate gradients."""
     await get_model(session, request.model_id)
 
@@ -342,7 +382,7 @@ async def forward_backward(request: ForwardBackwardInput, session: AsyncSession 
         session=session,
         request_type=types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
-        request_data=types.ForwardBackwardInput(forward_backward_input=request.forward_backward_input),
+        request_data=request.forward_backward_input.to_types(),
     )
 
     await session.commit()

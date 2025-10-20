@@ -28,16 +28,17 @@ def make_fwd_bwd_input(token_lists: list[list[int]]):
         targets = tokens[1:] + [0]
         weights = [1] * len(tokens)
         samples.append(
-            {
-                "model_input": {"chunks": [{"tokens": tokens}]},
-                "loss_fn_inputs": {
-                    "target_tokens": {"data": targets},
-                    "weights": {"data": weights},
+            types.Datum(
+                model_input=types.ModelInput(
+                    chunks=[types.ModelInputChunk(tokens=tokens)]
+                ),
+                loss_fn_inputs={
+                    "target_tokens": types.TensorData(data=targets),
+                    "weights": types.TensorData(data=weights),
                 },
-            }
+            )
         )
-    payload = {"forward_backward_input": {"data": samples}}
-    return types.ForwardBackwardInput.model_validate(payload)
+    return types.ForwardBackwardInput(data=samples, loss_fn="cross_entropy")
 
 
 def _assert_tree_allclose(t1, t2, rtol=1e-3, atol=1e-3, min_match_pct=99.0):
