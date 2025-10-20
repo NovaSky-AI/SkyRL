@@ -106,11 +106,14 @@ def test_policy_loss_cispo():
 
     # Hand-calculation for expected loss:
     # ratio = [0.5, 1.0, 10.0]
-    # ratio.clamp(0.8, 1.2) = [0.8, 1.0, 1.2]
+    # clamped_ratio = ratio.clamp(0.8, 1.2) = [0.8, 1.0, 1.2]
     # advantages = [1.0, -1.0, -4.0]
     # log_probs = [-1.69315, -1.0, -0.69741]
-    # loss = [0.8 * 1.0 * -1.69315, 1.0 * -1.0 * -1.0, -1.2 * -4.0 * -0.69741] = [-1.35452, 1.0, 3.347568]
-    # mean(loss) = (-1.35452 + 1.0 + 3.347568) / 3 = 0.99768266666
+    # loss_per_token = -advantages * clamped_ratio * log_probs
+    # loss_per_token[0] = -(1.0 * 0.8 * -1.69315) = 1.35452
+    # loss_per_token[1] = -(-1.0 * 1.0 * -1.0) = -1.0
+    # loss_per_token[2] = -(-4.0 * 1.2 * -0.69741) = -3.347568
+    # mean(loss) = (1.35452 - 1.0 - 3.347568) / 3 = -0.99768266666
     loss = -ratio.clamp(1 - 0.2, 1 + 0.2) * advantages * log_probs
     expected_loss = loss.mean()
 
