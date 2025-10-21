@@ -663,15 +663,15 @@ class TinkerEngine:
             if model_id not in self.models:
                 raise ValueError(f"Model {model_id} not loaded")
 
-            lora_model = self.models[model_id]
+            adapter_index = self.models[model_id].adapter_index
             checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
             logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
 
             # Load checkpoint using load_lora_checkpoint
-            load_lora_checkpoint(self.model, lora_model.adapter_index, checkpoint_path)
+            load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
 
-            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {lora_model.adapter_index}")
-            return jnp.array([[lora_model.adapter_index]], dtype=jnp.int32)
+            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+            return jnp.array([[adapter_index]], dtype=jnp.int32)
         else:
             # Base model sampling mode
             if request_data.base_model != self.config.base_model:
