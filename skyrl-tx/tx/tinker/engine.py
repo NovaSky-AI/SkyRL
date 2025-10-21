@@ -717,7 +717,7 @@ class TinkerEngine:
                 seed = request_data.sampling_params.seed + sample_idx
 
                 # Call the model's generate method
-                generated_ids, scores, stop_reasons = model.generate(
+                result = model.generate(
                     input_ids,
                     attention_mask,
                     max_new_tokens=request_data.sampling_params.max_tokens,
@@ -730,11 +730,11 @@ class TinkerEngine:
 
                 # Extract the generated tokens (excluding the prompt)
                 prompt_len = len(prompt_tokens)
-                generated_tokens = generated_ids[0, prompt_len:].tolist()
+                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
 
                 # Compute logprobs from the scores
                 logprobs = []
-                for score in scores:
+                for score in result.scores:
                     log_probs = jax.nn.log_softmax(score[0], axis=-1)
                     # Get the logprob of the selected token
                     # The token at position i in generated_tokens corresponds to scores[i]
@@ -743,7 +743,7 @@ class TinkerEngine:
                         logprobs.append(float(log_probs[token_idx]))
 
                 # Get stop reason for this sequence (batch size is 1, so index 0)
-                stop_reason = stop_reasons[0]
+                stop_reason = result.stop_reasons[0]
 
                 sequences.append(
                     types.GeneratedSequence(
