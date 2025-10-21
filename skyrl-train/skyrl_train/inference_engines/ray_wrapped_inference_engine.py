@@ -59,6 +59,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)
 
+    async def abort_generation(self) -> None:
+        return await self.inference_engine_actor.abort_generation.remote()
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
