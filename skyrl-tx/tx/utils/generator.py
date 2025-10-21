@@ -69,8 +69,7 @@ class GeneratorMixin:
         rng = jax.random.PRNGKey(seed)
         generated_ids = input_ids
         scores = [] if return_scores else None
-        batch_size = input_ids.shape[0]
-        stop_reasons = ["length"] * batch_size
+        stop_reasons = ["length"] * input_ids.shape[0]
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
