@@ -689,16 +689,13 @@ class TinkerEngine:
             adapter_indices = None
 
         # Process stop tokens (tokenize strings if needed)
-        stop_tokens = None
-        if request_data.sampling_params.stop:
-            if isinstance(request_data.sampling_params.stop[0], str):
-                stop_tokens = {
-                    token
-                    for stop_str in request_data.sampling_params.stop
-                    for token in self.tokenizer.encode(stop_str, add_special_tokens=False)
-                }
-            else:
-                stop_tokens = set(request_data.sampling_params.stop)
+        match request_data.sampling_params.stop:
+            case list(elements) if isinstance(elements[0], str):
+                stop_tokens = {token for s in elements for token in self.tokenizer.encode(s, add_special_tokens=False)}
+            case list(elements):
+                stop_tokens = set(elements)
+            case _:
+                stop_tokens = None
 
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
