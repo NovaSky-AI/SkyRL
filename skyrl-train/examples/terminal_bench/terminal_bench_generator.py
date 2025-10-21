@@ -60,6 +60,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
 
         all_outputs = await asyncio.gather(*tasks)
+        
+        all_outputs = [output for output in all_outputs if output is not None]
 
         responses = [output.response_ids for output in all_outputs]
         rewards = [output.reward for output in all_outputs]
@@ -110,7 +112,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         trial = Trial(trial_config)
         # Run the trial
-        while True:
+        for retry in range(3):
             try:
                 results = await trial.run()
                 print(f"Results: {results}")
@@ -126,6 +128,9 @@ class TerminalBenchGenerator(GeneratorInterface):
             except Exception as e:
                 print(f"Error running trial: {e}")
                 continue
+        
+        if retry == 2:
+            return None
 
         # Use the first message as the prompt
         prompt = [chat_history[0]]
