@@ -91,17 +91,29 @@ def test_qwen3_generate_speed():
         import time
         start = time.perf_counter()
 
-        output, our_scores, _, _ = model.generate(
-            batch.input_ids.numpy(),
-            batch.attention_mask.numpy(),
-            max_new_tokens=10,
-            temperature=0.0,
-            seed=42,
-            return_scores=True,
-            prompt_logprobs=False
-        )
-        output.block_until_ready()
-        elapsed = time.perf_counter() - start
+        runs = 5
+        times = []
 
-    print(f"Generation time: {elapsed*1000:.2f} ms")
-    print(f"Tokens/sec: {(2 * 10) / elapsed:.1f}")
+        for i in range(runs):
+            start = time.perf_counter()
+            output, our_scores, _, _ = model.generate(
+                batch.input_ids.numpy(),
+                batch.attention_mask.numpy(),
+                max_new_tokens=50, 
+                temperature=0.0,
+                seed=42 + i, # Different seed every run
+                return_scores=True,
+                prompt_logprobs=False
+            )
+            output.block_until_ready()
+            elapsed = time.perf_counter() - start
+            times.append(elapsed)
+
+        times = np.array(times)
+        mean_time = times.mean()
+        std_time = times.std()
+
+    print(f"Generation stats (50 tokens, 5 runs):")
+    print(f"Mean time: {mean_time*1000:.2f} ± {std_time*1000:.2f} ms")
+    print(f"Min/Max: {times.min()*1000:.2f} / {times.max()*1000:.2f} ms")
+    print(f"Tokens/sec: {(2 * 50) / mean_time:.2f}")
