@@ -1,5 +1,6 @@
 """Database models for the Tinker API."""
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
@@ -9,6 +10,11 @@ from tx.tinker import types
 
 # SQLite database path
 DB_PATH = Path(__file__).parent / "tinker.db"
+
+
+def get_database_url() -> str:
+    """Get database URL from environment or default to SQLite."""
+    return os.environ.get("TINKER_DATABASE_URL", f"sqlite:///{DB_PATH.absolute()}")
 
 
 class RequestStatus(str, Enum):

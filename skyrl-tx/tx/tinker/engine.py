@@ -19,10 +19,11 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
+from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus, get_database_url
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
+from tx.tinker.migrate import run_migrations_on_startup
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
     get_dtype,
@@ -102,7 +103,20 @@ class TinkerEngine:
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
-        self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
+        
+        # Get database URL from config or environment
+        if config.database_url:
+            db_url = config.database_url
+        else:
+            db_url = get_database_url()
+        
+        # Ensure it's a sync URL (strip async drivers)
+        if "+aiosqlite" in db_url:
+            db_url = db_url.replace("+aiosqlite", "")
+        elif "+asyncpg" in db_url:
+            db_url = db_url.replace("+asyncpg", "")
+        
+        self.db_engine = create_engine(db_url, echo=False)
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
         # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
@@ -852,6 +866,20 @@ class TinkerEngine:
 def main():
     """Entry point for the background engine."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
+
+    # Load .env file if it exists
+    from pathlib import Path
+    from dotenv import load_dotenv
+    
+    env_file = Path(__file__).parent.parent.parent / ".env"
+    if env_file.exists():
+        logger.info(f"Loading environment variables from {env_file}")
+        load_dotenv(env_file)
+
+    # Run database migrations
+    logger.info("Running database migrations...")
+    run_migrations_on_startup()
+    logger.info("Database migrations completed")
 
     # Create argument parser and add Pydantic model fields
     parser = argparse.ArgumentParser(description="SkyRL tx tinker engine for processing requests")

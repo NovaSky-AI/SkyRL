@@ -17,7 +17,8 @@ import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus
+from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus, get_database_url
+from tx.tinker.migrate import run_migrations_on_startup
 from tx.utils.storage import download_file
 
 
@@ -33,7 +34,23 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    app.state.db_engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
+    # Run database migrations
+    logger.info("Running database migrations...")
+    run_migrations_on_startup()
+    logger.info("Database migrations completed")
+
+    # Get database URL from config or environment
+    db_url = get_database_url()
+    if app.state.engine_config.database_url:
+        db_url = app.state.engine_config.database_url
+    
+    # Convert to async URL
+    if db_url.startswith("sqlite://"):
+        db_url = db_url.replace("sqlite://", "sqlite+aiosqlite://")
+    elif db_url.startswith("postgresql://"):
+        db_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+    
+    app.state.db_engine = create_async_engine(db_url, echo=False)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
@@ -718,6 +735,14 @@ async def root():
 if __name__ == "__main__":
     import argparse
     import uvicorn
+    from pathlib import Path
+    from dotenv import load_dotenv
+
+    # Load environment variables from .env file if it exists
+    env_file = Path(__file__).parent.parent.parent / ".env"
+    if env_file.exists():
+        logger.info(f"Loading environment variables from {env_file}")
+        load_dotenv(env_file)
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")
