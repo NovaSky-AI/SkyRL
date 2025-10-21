@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
+import numpy as np
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
@@ -192,12 +193,16 @@ class RayPPOTrainer:
                             pbar.update(1)
                             continue
 
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
-
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
+                        # since postprocess_generator_output might modify loss masks, check here
+                        if np.concatenate(generator_output["loss_masks"]).sum() == 0:
+                            logger.warning("All outputs are loss masked, skipping this batch and resuming sampling")
+                            continue
+
+                    # if we are not continuing sampling, we sleep the inference engine
+                    asyncio.run(self.inference_engine_client.sleep())
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
