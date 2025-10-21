@@ -563,7 +563,6 @@ def get_llm_for_sequence_regression(
     if lora_rank > 0:
         model.enable_input_require_grads()
         lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
             r=lora_rank,
             lora_alpha=lora_alpha,
             target_modules=target_modules,
