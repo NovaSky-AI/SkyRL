@@ -151,14 +151,19 @@ def test_training_workflow(service_client):
     assert "0000" in checkpoint_ids
 
 
-def test_sample(service_client):
-    """Test the sample endpoint."""
+@pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
+def test_sample(service_client, use_lora):
+    """Test the sample endpoint with base model or LoRA adapter."""
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-    # Create a sampling client from the base model
-    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    if use_lora:
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        sampling_path = training_client.save_weights_for_sampler(name="test_sample").result().path
+        sampling_client = service_client.create_sampling_client(sampling_path)
+    else:
+        sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
 
-    # Sample from the base model
+    # Sample from the model (base or LoRA)
     prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
     sample_result = sampling_client.sample(
         prompt=prompt,

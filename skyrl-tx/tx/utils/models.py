@@ -16,7 +16,7 @@ from transformers import PretrainedConfig
 import peft
 
 from tx import models
-from tx.utils.storage import pack_and_upload
+from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
 
 if TYPE_CHECKING:
@@ -62,16 +62,24 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
     return ".".join(map(str, path))
 
 
-def load_safetensors(checkpoint_dir: str | os.PathLike, config: PretrainedConfig, model: nnx.Module) -> None:
+def load_safetensors(
+    checkpoint_dir: str | os.PathLike,
+    config: PretrainedConfig,
+    model: nnx.Module,
+    skip_lora: bool = True,
+    prefix: str = "",
+) -> None:
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
+    tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
+
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
     for path, param in model_params:
         key = get_param_key(path)
-        # Skip LoRA parameters that are not in the checkpoint
-        if "lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path:
+        # Skip LoRA parameters if requested
+        if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         if "experts" in path:
             experts_tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
@@ -102,6 +110,23 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
             param = param.reshape(-1, param.shape[-1])
         tensors[key] = param if "embed_tokens" in path else param.T
     safetensors.numpy.save_file(tensors, filename)
+
+
+def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath):
+    """Load LoRA adapter weights from a sampling checkpoint into the model.
+
+    Args:
+        model: The Qwen3ForCausalLM model to load the adapter into
+        adapter_index: Index of the adapter to load into
+        checkpoint_path: Path to the checkpoint tar.gz file
+    """
+    _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
+
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+
+    with download_and_unpack(checkpoint_path) as temp_dir:
+        load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params))
 
 
 def save_lora_checkpoint(

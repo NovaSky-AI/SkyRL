@@ -28,6 +28,7 @@ from tx.utils.models import (
     get_dtype,
     get_model_class,
     save_lora_checkpoint,
+    load_lora_checkpoint,
     load_safetensors,
     extract_adapter_state,
     insert_adapter_state,
@@ -649,16 +650,47 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
+    def load_sampler_weights(self, model_id: str, request_data: types.SampleInput) -> jax.Array | None:
+        """Load sampler weights and determine adapter indices.
+
+        Args:
+            model_id: The model ID
+            request_data: The sample input request data
+
+        Returns:
+            The adapter_indices array for LoRA sampling, or None for base model sampling
+        """
+        # Determine if we're sampling from base model or LoRA
+        if request_data.base_model is None:
+            # LoRA sampling mode
+            assert request_data.checkpoint_id != "", "checkpoint_id must not be empty"
+
+            if model_id not in self.models:
+                raise ValueError(f"Model {model_id} not loaded")
+
+            adapter_index = self.models[model_id].adapter_index
+            checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+            logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+
+            # Load checkpoint using load_lora_checkpoint
+            load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+
+            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+            return jnp.array([[adapter_index]], dtype=jnp.int32)
+        else:
+            # Base model sampling mode
+            if request_data.base_model != self.config.base_model:
+                raise ValueError(
+                    f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                )
+            return None
+
     def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the base model."""
+        """Generate text samples from the base model or LoRA adapter."""
         logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
 
-        if request_data.base_model is None:
-            raise NotImplementedError("Currently only sampling from the base_model is supported")
-        if request_data.base_model != self.config.base_model:
-            raise ValueError(
-                f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
-            )
+        # Load sampler weights and determine adapter indices
+        adapter_indices = self.load_sampler_weights(model_id, request_data)
 
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
@@ -669,30 +701,31 @@ class TinkerEngine:
         # Generate samples
         sequences = []
         with jax.set_mesh(self.mesh):
-            # Merge the model for inference using the current adapter state
+            # Merge the model for inference
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
             for sample_idx in range(request_data.num_samples):
                 # Generate with different seeds for each sample
                 seed = request_data.sampling_params.seed + sample_idx
 
-                # Call the model's generate method (no adapter, base model only)
-                generated_ids, scores = model.generate(
+                # Call the model's generate method
+                result = model.generate(
                     input_ids,
                     attention_mask,
                     max_new_tokens=request_data.sampling_params.max_tokens,
                     temperature=request_data.sampling_params.temperature,
                     seed=seed,
                     return_scores=True,
+                    adapter_indices=adapter_indices,
                 )
 
                 # Extract the generated tokens (excluding the prompt)
                 prompt_len = len(prompt_tokens)
-                generated_tokens = generated_ids[0, prompt_len:].tolist()
+                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
 
                 # Compute logprobs from the scores
                 logprobs = []
-                for score in scores:
+                for score in result.scores:
                     log_probs = jax.nn.log_softmax(score[0], axis=-1)
                     # Get the logprob of the selected token
                     # The token at position i in generated_tokens corresponds to scores[i]
@@ -700,8 +733,8 @@ class TinkerEngine:
                         token_idx = generated_tokens[len(logprobs)]
                         logprobs.append(float(log_probs[token_idx]))
 
-                # For now, assume all sequences hit the length limit
-                stop_reason = "length"
+                # Get stop reason for this sequence (batch size is 1, so index 0)
+                stop_reason = result.stop_reasons[0]
 
                 sequences.append(
                     types.GeneratedSequence(
