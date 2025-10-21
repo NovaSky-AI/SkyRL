@@ -47,9 +47,10 @@ def example_question(env_name: str) -> List[str]:
             "Define a variable x = 5 + 3 and print its value.",
             "Use a loop to print numbers 1 to 3 and their squares.",
         ]
-        instruction.append(
+        instruction += (
             "Write the python code inside <action>...</action> tags. Example: <action>print('Hello, World!')</action>"
         )
+
         return [f"{ex}\n\n{instruction}" for ex in examples]
 
     elif env_name == "openspiel-env":

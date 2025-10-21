@@ -67,6 +67,9 @@ class OpenEnv(BaseTextEnv):
 
         action = match.group(1) if match else None
 
+        if not action:
+            raise ValueError(f"No action found in action string: {action}")
+
         if env_name == "echo_env":
             return EchoAction(message=action)
         elif env_name == "coding_env":
@@ -106,6 +109,7 @@ class OpenEnv(BaseTextEnv):
             error = str(e)
             observation = None
             reward = -1
+            print(f"Error during step: {error}")
 
         if observation:
             new_obs = {"role": "user", "content": observation}
