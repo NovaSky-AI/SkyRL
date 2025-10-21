@@ -10,7 +10,8 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 import asyncio
 import logging
 import subprocess
@@ -37,11 +38,17 @@ async def lifespan(app: FastAPI):
     app.state.db_engine = create_async_engine(
         f"sqlite+aiosqlite:///{DB_PATH}",
         echo=False,
-        poolclass=NullPool  # No connection pooling for SQLite
+        poolclass=StaticPool,  # Single persistent connection
+        connect_args={
+            "timeout": 30.0,  # Wait up to 30s for locks
+            "check_same_thread": False,  # Allow connection sharing
+        }
     )
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        # Enable WAL mode for better concurrency
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
 
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]

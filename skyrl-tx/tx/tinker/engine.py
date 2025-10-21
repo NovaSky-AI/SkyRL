@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import create_engine, Session, select, func
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 
 import jax
 import jax.numpy as jnp
@@ -106,8 +107,17 @@ class TinkerEngine:
         self.db_engine = create_engine(
             f"sqlite:///{db_path}",
             echo=False,
-            poolclass=NullPool  # No connection pooling for SQLite
+            poolclass=StaticPool,  # Single persistent connection
+            connect_args={
+                "timeout": 30.0,  # Wait up to 30s for locks
+                "check_same_thread": False,  # Allow connection sharing
+            }
         )
+
+        # Enable WAL mode for better concurrency
+        with self.db_engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
         # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
