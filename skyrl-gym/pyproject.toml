@@ -19,6 +19,7 @@ dependencies = [
     "pandas", 
     "requests",
     "omegaconf",
+    "openenv @ git+https://github.com/meta-pytorch/OpenEnv.git",
 ]
 
 [project.urls]
