@@ -259,14 +259,13 @@ class SamplingParams(BaseModel):
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
         # Normalize stop parameter to list format
-        stop: list[str] | list[int] = []
-        if self.stop is not None:
-            if isinstance(self.stop, str):
+        match self.stop:
+            case None:
+                stop = []
+            case str():
                 stop = [self.stop]
-            elif isinstance(self.stop, (list, tuple)):
+            case _:
                 stop = list(self.stop)
-            else:
-                raise HTTPException(status_code=400, detail="'stop' parameter must be string(s) or int(s)")
 
         if self.top_k != -1:
             raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
