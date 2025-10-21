@@ -39,7 +39,8 @@ MAX_RESPONSE_LENGTH=$((1024 * 8))
 TRAIN_BATCH_SIZE=512
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
-EVAL_N_SAMPLES_PER_PROMPT=16
+EVAL_N_SAMPLES_PER_PROMPT=32
+ENFORCE_EAGER=true # cuda graphs can cause some instability
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -53,10 +54,12 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
   trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  generator.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.temperature=$TEMPERATURE \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
@@ -67,7 +70,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
+  trainer.eval_before_train=true \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
@@ -92,8 +95,8 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="aime" \
-  trainer.run_name="aime_dapo" \
+  trainer.run_name="qwen_2_5_math_7b_aime_eval_fixed_no_cuda_graphs" \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/aime_1.5B_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/qwen_2.5_math_7b_aime_ckpt_eval_fixed_no_cuda_graphs" \
   $@
