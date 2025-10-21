@@ -41,7 +41,7 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        output, our_scores, _ = model.generate(
+        output, our_scores, _, _ = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
             max_new_tokens=10,
