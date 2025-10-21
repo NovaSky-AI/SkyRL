@@ -1,7 +1,8 @@
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from litellm.utils import get_max_tokens
+from litellm.utils import get_model_info
 from tenacity import retry, stop_after_attempt
 
 from sandboxes.agents.base import BaseAgent
@@ -19,8 +20,8 @@ from sandboxes.llms.base import (
 )
 from sandboxes.llms.chat import Chat
 from sandboxes.llms.lite_llm import LiteLLM
+from sandboxes.models.agent.context import AgentContext
 from sandboxes.models.agent.name import AgentName
-from sandboxes.models.agent.result import AgentResult
 from sandboxes.models.trial.paths import EnvironmentPaths
 from sandboxes.utils.logger import logger
 
@@ -40,16 +41,27 @@ class Terminus2(BaseAgent):
         parser_name: str = "json",
         api_base: str | None = None,
         temperature: float = 0.7,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+        session_id: str | None = None,
+        *args,
         **kwargs,
     ):
-        super().__init__(logs_dir, model_name, **kwargs)
+        super().__init__(logs_dir, model_name, *args, **kwargs)
 
         if model_name is None:
             raise ValueError("model_name is required for Terminus 2")
+
         self._model_name = model_name
         self._parser_name = parser_name
+        self._logprobs = logprobs
         self._llm = LiteLLM(
-            model_name=model_name, api_base=api_base, temperature=temperature
+            model_name=model_name,
+            api_base=api_base,
+            temperature=temperature,
+            logprobs=logprobs,
+            top_logprobs=top_logprobs,
+            session_id=session_id,
         )
         self._parser = self._get_parser()
         self._prompt_template = self._get_prompt_template_path().read_text()
@@ -66,18 +78,18 @@ class Terminus2(BaseAgent):
         else:
             self._max_episodes = 1000000
         self._chat: Chat | None = None
+        self._context: AgentContext | None = None
         self._timestamped_markers: list[tuple[float, str]] = []
         self._pending_completion = False
         self._session: TmuxSession | None = None
+        self._api_request_times: list[float] = []
+        self._n_episodes: int = 0
 
     @staticmethod
     def name() -> str:
         return AgentName.TERMINUS_2.value
 
     def version(self) -> str | None:
-        """Terminus 2 version is always '2.0.0'."""
-        if self._version is not None and self._version != "2.0.0":
-            raise ValueError(f"Terminus 2 version must be '2.0.0', got '{self._version}'")
         return "2.0.0"
 
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -91,7 +103,6 @@ class Terminus2(BaseAgent):
             / "recording.cast",
         )
         await self._session.start()
-
 
     def _get_parser(self):
         """Return the appropriate parser instance for this format."""
@@ -178,11 +189,19 @@ class Terminus2(BaseAgent):
         return token_counter(model=self._model_name, messages=chat._messages)
 
     def _get_model_context_limit(self) -> int:
-        """Get the context limit for the current model."""
+        """Get the context limit (max input tokens) for the current model."""
+
+        # return 100000
         fallback_context_limit = 1000000
         try:
-            max_tokens = get_max_tokens(self._model_name) or fallback_context_limit
-            return max_tokens
+            model_info = get_model_info(self._model_name)
+            max_input_tokens = model_info.get("max_input_tokens")
+
+            # Fallback to max_tokens if max_input_tokens not available
+            if max_input_tokens is None:
+                max_input_tokens = model_info.get("max_tokens")
+
+            return max_input_tokens or fallback_context_limit
         except Exception:
             return fallback_context_limit
 
@@ -271,18 +290,22 @@ Based on the conversation history, please provide a detailed summary covering:
             encountered and how you resolved them.
 4. **Current Status** - Exactly where you are in the task completion process.
 
+
 Be comprehensive and detailed. The next agent needs to understand everything 
             that has happened so far in order to continue."""
         # Get the summary message
         try:
+            start_time = time.time()
             summary_response = await self._llm.call(prompt=summary_prompt)
+            end_time = time.time()
+            request_time_ms = (end_time - start_time) * 1000
+            self._api_request_times.append(request_time_ms)
         except Exception as e:
             self._logger.error(f"Error in summarizing: {e}")
             return original_instruction
         current_screen = await session.capture_pane(capture_entire=False)
 
-
-        question_prompt = f"""You are picking up work from a previous AI agent on this task:
+        question_prompt = (f"""You are picking up work from a previous AI agent on this task:
 
 **Original Task:** {original_instruction}
 
@@ -292,20 +315,33 @@ Be comprehensive and detailed. The next agent needs to understand everything
 **Current Terminal Screen:**
 {current_screen}
 
-Please begin by asking several questions (at least five, more if necessary) "
-            f"about the current state of the solution that are not answered in the "
-            f"summary from the prior agent. After you ask these questions you will "
-            f"be on your own, so ask everything you need to know.
-"""  # noqa: E501
-        # Create a temporary chat to get questions without affecting main chat history
-        temp_chat = Chat(chat._model)
-
+Please begin by asking several questions (at least five, more if necessary)
+about the current state of the solution that are not answered in the summary
+from the prior agent. After you ask these questions you will be on your own,
+so ask everything you need to know."""
+)
         try:
+            # Create a temporary chat to get questions without affecting main chat history
+            temp_chat = Chat(chat._model)
+            start_time = time.time()
             model_questions = await temp_chat.chat(question_prompt)
+            end_time = time.time()
+            request_time_ms = (end_time - start_time) * 1000
+            self._api_request_times.append(request_time_ms)
+
+            # Add the tokens from temp_chat to main chat's cumulative totals
+            chat._cumulative_input_tokens += temp_chat.total_input_tokens
+            chat._cumulative_output_tokens += temp_chat.total_output_tokens
+
+            start_time = time.time()
             model_answers = await chat.chat(
                 "The next agent has a few questions for you, please answer each "
                 "of them one by one in detail:\n\n" + model_questions
             )
+            end_time = time.time()
+            request_time_ms = (end_time - start_time) * 1000
+            self._api_request_times.append(request_time_ms)
+
         except Exception as e:
             self._logger.error(f"Error in asking questions: {e}")
             return original_instruction
@@ -354,17 +390,28 @@ Please begin by asking several questions (at least five, more if necessary) "
         session: TmuxSession | None = None,
     ) -> str:
         logging_path, prompt_path, response_path = logging_paths
+
         if prompt_path is not None:
             prompt_path.write_text(prompt)
 
         try:
-            response = await chat.chat(prompt, logging_path=logging_path)
+            start_time = time.time()
+            response = await chat.chat(
+                prompt,
+                logging_path=logging_path,
+            )
+            end_time = time.time()
+            request_time_ms = (end_time - start_time) * 1000
+            self._api_request_times.append(request_time_ms)
+
             if response_path is not None:
                 response_path.write_text(response)
             return response
 
         except ContextLengthExceededError:
-            self._logger.info("Context length exceeded. Using fallback summarization.")
+            self._logger.info(
+                "Context length exceeded. Using fallback summarization."
+            )
 
             if session is None:
                 raise RuntimeError("Cannot handle context length error without session")
@@ -407,7 +454,15 @@ Please begin by asking several questions (at least five, more if necessary) "
                 prompt_path.write_text(summary_prompt)
 
             try:
-                response = await chat.chat(summary_prompt, logging_path=logging_path)
+                start_time = time.time()
+                response = await chat.chat(
+                    summary_prompt,
+                    logging_path=logging_path,
+                )
+                end_time = time.time()
+                request_time_ms = (end_time - start_time) * 1000
+                self._api_request_times.append(request_time_ms)
+
             except Exception as e:
                 self._logger.error(f"Even fallback chat failed: {e}")
                 response = "Technical difficulties. Please continue with the task."
@@ -560,16 +615,33 @@ Please begin by asking several questions (at least five, more if necessary) "
         chat: Chat,
         logging_dir: Path | None = None,
         original_instruction: str = "",
-    ) -> None:
+    ) -> int:
+
+        if self._context is None:
+            raise RuntimeError("Agent context is not set. This should never happen.")
+
         prompt = initial_prompt
+
+        self._context.n_input_tokens = 0
+        self._context.n_output_tokens = 0
 
         if self._session is None:
             raise RuntimeError("Session is not set. This should never happen.")
+        
+
+        from time import strftime, localtime
+
+        home_dir = Path.home()
+        log_dir = home_dir / "terminus_log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = strftime("%Y%m%d_%H%M%S", localtime())
+        log_file = log_dir / f"timing_log_{timestamp}.txt"
 
         for episode in range(self._max_episodes):
+            self._n_episodes = episode + 1
             if not await self._session.is_session_alive():
                 self._logger.info("Session has ended, breaking out of agent loop")
-                break
+                return episode + 1
 
             if original_instruction:
                 proactive_summary = await self._check_proactive_summarization(
@@ -582,9 +654,15 @@ Please begin by asking several questions (at least five, more if necessary) "
 
             logging_paths = self._setup_episode_logging(logging_dir, episode)
 
+            llm_start = time.perf_counter()
             commands, is_task_complete, feedback = await self._handle_llm_interaction(
                 chat, prompt, logging_paths, original_instruction, self._session
             )
+            llm_end = time.perf_counter()
+            llm_time = llm_end - llm_start
+
+            self._context.n_input_tokens += chat.total_input_tokens
+            self._context.n_output_tokens += chat.total_output_tokens
 
             self._record_asciinema_marker(
                 f"Episode {episode}: {len(commands)} commands",
@@ -598,14 +676,24 @@ Please begin by asking several questions (at least five, more if necessary) "
                 )
                 continue
 
+            exec_start = time.perf_counter()
             timeout_occurred, terminal_output = await self._execute_commands(
                 commands,
                 self._session,
             )
+            exec_end = time.perf_counter()
+            exec_time = exec_end - exec_start
+
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(
+                    f"Episode {episode}: "
+                    f"LLM interaction = {llm_time:.3f}s, "
+                    f"Command execution = {exec_time:.3f}s\n"
+                )
 
             if is_task_complete:
                 if self._pending_completion:
-                    break
+                    return episode + 1
                 else:
                     self._pending_completion = True
                     prompt = self._get_completion_confirmation_message(terminal_output)
@@ -621,8 +709,13 @@ Please begin by asking several questions (at least five, more if necessary) "
             else:
                 prompt = self._limit_output_length(terminal_output)
 
-    async def run(self, instruction: str, environment: BaseEnvironment) -> AgentResult:
-        chat = Chat(self._llm)
+        return self._n_episodes
+
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        self._chat = Chat(self._llm)
+        self._context = context
 
         if self._session is None:
             raise RuntimeError("Session is not set")
@@ -634,18 +727,21 @@ Please begin by asking several questions (at least five, more if necessary) "
             ),
         )
 
-        await self._run_agent_loop(
+        actual_episodes = await self._run_agent_loop(
             initial_prompt=initial_prompt,
-            chat=chat,
+            chat=self._chat,
             logging_dir=self.logs_dir,
             original_instruction=instruction,
         )
 
-        return AgentResult(
-            n_input_tokens=chat.total_input_tokens,
-            n_output_tokens=chat.total_output_tokens,
-            all_messages=chat._messages,
-        )
+        context.output_logprobs = self._chat.get_all_logprobs() if self._logprobs else None
+        context.n_input_tokens = self._chat.total_input_tokens
+        context.n_output_tokens = self._chat.total_output_tokens
+        context.metadata = {
+            "n_episodes": actual_episodes,
+            "api_request_times_msec": self._api_request_times,
+            "all_messages": self._chat._messages,
+        }
 
     # TODO: Add asciinema logging
     def _record_asciinema_marker(self, marker_text: str) -> None:

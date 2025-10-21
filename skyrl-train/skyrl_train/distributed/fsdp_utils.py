@@ -28,8 +28,10 @@ from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 from transformers.trainer_pt_utils import get_module_class_from_name
 from torch.distributed.device_mesh import init_device_mesh
+from collections import OrderedDict
 
 from packaging import version
+from peft.utils.save_and_load import get_peft_model_state_dict
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -481,3 +483,68 @@ class PrecisionType:
             return "bf16"
         else:
             raise RuntimeError(f"unexpected precision: {precision}")
+
+
+# Reference: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
+def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+
+    def __prefix_submodules(module, prefix):
+        for name, submodule in module.named_modules():
+            if name.startswith(prefix) and "." not in name[len(prefix) :]:
+                yield name, submodule
+
+    lora_params = OrderedDict()
+    prefix_list = [
+        # fsdp
+        "_fsdp_wrapped_module.base_model.model.",
+        "_fsdp_wrapped_module.base_model.model.model.",
+        "_fsdp_wrapped_module.base_model.model.model.layers.",
+        "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
+        # fsdp2
+        "base_model.model.",
+        "base_model.model.model.",
+        "base_model.model.model.layers.",
+        "base_model.model.model.language_model.layers.",
+    ]
+    peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+    for prefix in prefix_list:
+        for name, submodule in __prefix_submodules(fsdp_module, prefix):
+            prefix = name.replace("_fsdp_wrapped_module.base_model.model.", "base_model.model.")
+            if name.endswith(".model") or name.endswith(".layers"):
+                continue
+            if fsdp_version(submodule) > 0:
+                with FSDP.summon_full_params(submodule, writeback=False):
+                    sub_lora_params = get_peft_model_state_dict(peft_model, state_dict=submodule.state_dict())
+                    sub_lora_params = {
+                        f"{prefix}.{name}": (
+                            param.full_tensor().detach().cpu()
+                            if hasattr(param, "full_tensor")
+                            else param.detach().cpu()
+                        )
+                        for name, param in sub_lora_params.items()
+                    }
+                    lora_params.update(sub_lora_params)
+                    submodule._is_root = False
+                torch.cuda.empty_cache()
+    return lora_params
+
+
+def collect_lora_params(module: FSDP) -> OrderedDict:
+    """
+    collect lora params or full params if base model is not ready in vllm
+    requires `module._fsdp_wrapped_module` to be a `PeftModel`
+    """
+    lora_params = OrderedDict()
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+    if fsdp_version(module) > 0:
+        with FSDP.summon_full_params(module, writeback=False):
+            # If base model is synced, we can get the full state dict from peft model
+            lora_params = get_peft_model_state_dict(peft_model)
+            lora_params = {
+                name: param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                for name, param in lora_params.items()
+            }
+        torch.cuda.empty_cache()
+    else:
+        lora_params = get_peft_model_state_dict(peft_model)
+    return lora_params

@@ -1,0 +1,11 @@
+__pycache__/
+*.txt
+*.pyc
+outputs/*
+**/*.egg-info/
+*.py[cod]
+*.pyo
+.venv
+*.log
+*.wandb
+.env

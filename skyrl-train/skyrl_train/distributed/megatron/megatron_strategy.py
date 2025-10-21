@@ -12,8 +12,8 @@ from torch import distributed as dist
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl_train.utils import io
-from skyrl_train.workers.megatron.megatron_policy import MegatronPPOPolicy
+from skyrl_train.utils.io import io
+from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 import megatron.core.parallel_state as mpu
 from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
@@ -21,6 +21,10 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_optimizer,
     load_megatron_optimizer,
 )
+
+from megatron.core.dist_checkpointing.strategies import base as ckpt_base
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
+
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
@@ -52,6 +56,10 @@ class MegatronStrategy(DistributedStrategy):
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
 
+        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
+        # short-lived background workers, which does not work well with Ray.
+        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
         np.random.seed(seed)
@@ -80,20 +88,24 @@ class MegatronStrategy(DistributedStrategy):
         self.set_seed(self.seed)
         self.world_size = dist.get_world_size()
 
-    def offload_to_cpu(self, model, optimizer, pin_memory=True, non_blocking=True):
+    def offload_to_cpu(
+        self, model, optimizer, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True
+    ):
         """
         Offload model weights and optimizer to CPU memory.
         """
-        offload_megatron_model_to_cpu(model)
-        if optimizer:
+        if offload_model:
+            offload_megatron_model_to_cpu(model)
+        if optimizer and offload_optimizer:
             offload_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-    def backload_to_gpu(self, model, optimizer, non_blocking=True):
+    def backload_to_gpu(self, model, optimizer, non_blocking=True, backload_optimizer=True, backload_model=True):
         """Reload model weights back to GPU."""
-        load_megatron_model_to_gpu(model)
-        if optimizer:
+        if backload_model:
+            load_megatron_model_to_gpu(model)
+        if optimizer and backload_optimizer:
             load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 
@@ -121,7 +133,7 @@ class MegatronStrategy(DistributedStrategy):
 
     def save_checkpoint(
         self,
-        model: MegatronPPOPolicy,
+        model: MegatronModelWrapper,
         ckpt_dir: str,
         node_local_rank: int,
         optimizer: Optional[DistributedOptimizer] = None,
@@ -159,27 +171,29 @@ class MegatronStrategy(DistributedStrategy):
         save_strategy = FullyParallelSaveStrategyWrapper(
             save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
         )
-        # TODO(tgriggs): Support configurable async saves.
-        async_save_request = dist_checkpointing.save(
-            sharded_state_dict=sharded_state_dict,
-            checkpoint_dir=ckpt_dir,
-            sharded_strategy=save_strategy,
-            async_sharded_save=False,
-            validate_access_integrity=True,
-        )
-        assert async_save_request is None, "Async save is not yet supported for Megatron"
 
-        # Only global rank 0 saves the Huggingface config and tokenizer.
-        if self.is_rank_0():
-            hf_dir = os.path.join(ckpt_dir, "huggingface")
-            self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
+        with io.local_work_dir(ckpt_dir) as work_dir:
+            # TODO(tgriggs): Support configurable async saves.
+            async_save_request = dist_checkpointing.save(
+                sharded_state_dict=sharded_state_dict,
+                checkpoint_dir=work_dir,
+                sharded_strategy=save_strategy,
+                async_sharded_save=False,
+                validate_access_integrity=True,
+            )
+            assert async_save_request is None, "Async save is not yet supported for Megatron"
+
+            # Only global rank 0 saves the Huggingface config and tokenizer.
+            if self.is_rank_0():
+                hf_dir = os.path.join(work_dir, "huggingface")
+                self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
         dist.barrier()
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
         self,
-        model: MegatronPPOPolicy,
+        model: MegatronModelWrapper,
         ckpt_dir: str,
         optimizer: Optional[DistributedOptimizer] = None,
         scheduler: Optional[OptimizerParamScheduler] = None,
@@ -206,14 +220,15 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        # Load the checkpoint in parallel.
-        load_strategy = get_default_load_sharded_strategy(ckpt_dir)
-        load_strategy = FullyParallelLoadStrategyWrapper(
-            load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-        )
-        state_dict = dist_checkpointing.load(
-            sharded_state_dict=sharded_state_dict, checkpoint_dir=ckpt_dir, sharded_strategy=load_strategy
-        )
+        with io.local_read_dir(ckpt_dir) as read_dir:
+            # Load the checkpoint in parallel.
+            load_strategy = get_default_load_sharded_strategy(read_dir)
+            load_strategy = FullyParallelLoadStrategyWrapper(
+                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+            )
+            state_dict = dist_checkpointing.load(
+                sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
+            )
 
         # Load the model, optimizer, and scheduler state dicts.
         assert (
@@ -242,7 +257,7 @@ class MegatronStrategy(DistributedStrategy):
 
         return ckpt_dir, {}
 
-    def save_hf_model(self, bridge, model: MegatronPPOPolicy, output_dir: str, tokenizer=None, **kwargs) -> None:
+    def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
         # Create checkpoint directory if it doesn't exist.
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)

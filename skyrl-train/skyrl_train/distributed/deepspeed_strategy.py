@@ -21,9 +21,9 @@ from torch.optim import Optimizer
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 
 from skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl_train.models import Actor
+from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import get_optimizer_grouped_parameters, ModelOrModelOptimPair
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 
 from safetensors.torch import save_file
 
@@ -76,7 +76,7 @@ class DeepspeedStrategy(DistributedStrategy):
         self.accumulated_gradient = self.train_batch_size // self.micro_train_batch_size_per_gpu // self.world_size
 
     def create_optimizer(self, model, offload_after_step=True, **kwargs) -> Optimizer:
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         # TODO (sumanthrh): Support this
         if not offload_after_step:
@@ -90,7 +90,7 @@ class DeepspeedStrategy(DistributedStrategy):
 
     def offload_to_cpu(self, model, pin_memory=True, non_blocking=True):
         """This function guaratees the memory are all released (only torch context cache <100M will remain)."""
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
 
         if model.config["zero_optimization"]["offload_optimizer"]["device"] == "cpu":
@@ -119,7 +119,7 @@ class DeepspeedStrategy(DistributedStrategy):
 
     def backload_to_gpu(self, model, non_blocking=True):
         # NOTE: this function reloads the weights, ensuring the calculation
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         else:
             model = model
@@ -135,7 +135,7 @@ class DeepspeedStrategy(DistributedStrategy):
         raise NotImplementedError("Zero stage < 3 is not supported")
 
     def backward(self, loss: torch.Tensor, model: nn.Module, optimizer: optim.Optimizer, **kwargs) -> None:
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         model.backward(loss)
 
@@ -148,7 +148,7 @@ class DeepspeedStrategy(DistributedStrategy):
         name="model",
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
         model.step()
 
@@ -166,17 +166,17 @@ class DeepspeedStrategy(DistributedStrategy):
         return ret[0] if len(ret) == 1 else ret
 
     def _ds_init_train_model(self, model, optim, scheduler):
-        is_actor = isinstance(model, Actor)
+        is_wrapped = isinstance(model, HFModelWrapper)
         ds_config = self.get_ds_train_config()
 
         engine, optim, _, scheduler = deepspeed.initialize(
-            model=model.model if is_actor else model,
+            model=model.model if is_wrapped else model,
             optimizer=optim,
             lr_scheduler=scheduler,
             config=ds_config,
             dist_init_required=True,
         )
-        if is_actor:
+        if is_wrapped:
             model.model = engine
         else:
             model = engine
@@ -186,22 +186,22 @@ class DeepspeedStrategy(DistributedStrategy):
     def _ds_init_eval_model(self, model):
         if not model:
             return model
-        is_actor = isinstance(model, Actor)
+        is_wrapped = isinstance(model, HFModelWrapper)
         ds_config = self.get_ds_eval_config()
 
         engine, *_ = deepspeed.initialize(
-            model=model.model if is_actor else model,
+            model=model.model if is_wrapped else model,
             config=ds_config,
             dist_init_required=True,
         )
-        if is_actor:
+        if is_wrapped:
             model.model = engine
         else:
             model = engine
         return model
 
     def _unwrap_model(self, model) -> nn.Module:
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             return self._unwrap_model(model.model)
         elif hasattr(model, "module"):
             return model.module
@@ -219,7 +219,7 @@ class DeepspeedStrategy(DistributedStrategy):
         tag=None,
         tokenizer=None,
     ):
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
 
         assert isinstance(model, deepspeed.DeepSpeedEngine)
@@ -256,7 +256,7 @@ class DeepspeedStrategy(DistributedStrategy):
         load_optimizer_states=True,
         load_lr_scheduler_states=True,
     ):
-        if isinstance(model, Actor):
+        if isinstance(model, HFModelWrapper):
             model = model.model
 
         assert isinstance(model, deepspeed.DeepSpeedEngine)
@@ -287,8 +287,8 @@ class DeepspeedStrategy(DistributedStrategy):
         Multi-node safe: gather full FP32 state dict on rank 0 via ZeRO collectives,
         then write a single model.safetensors alongside config/tokenizer.
         """
-        # Unwrap Actor and assert DS engine
-        if isinstance(model, Actor):
+        # Unwrap model and assert DS engine
+        if isinstance(model, HFModelWrapper):
             engine = model.model
         else:
             engine = model
@@ -334,6 +334,12 @@ class DeepspeedStrategy(DistributedStrategy):
         if is_dist:
             dist.barrier()
 
+    def _set_bf16_config(self, ds_config):
+        # torch_autocast.enabled should be set in the config file
+        # Set DeepSpeed's bf16 config only if torch_autocast is disabled.
+        if not ds_config["torch_autocast"]["enabled"]:
+            ds_config["bf16"] = {"enabled": self.bf16}
+
     def get_ds_train_config(self):
         ds_config = OmegaConf.to_container(self.deepspeed_config)
         disable_trace_cache = ds_config.pop("disable_trace_cache", False)
@@ -342,7 +348,7 @@ class DeepspeedStrategy(DistributedStrategy):
             ds_config["zero_optimization"]["stage3_max_live_parameters"] = 0
             ds_config["zero_optimization"]["stage3_max_reuse_distance"] = 0
         ds_config["steps_per_print"] = 100
-        ds_config["bf16"] = {"enabled": self.bf16}
+        self._set_bf16_config(ds_config)
 
         # these need to be specified for deepspeed setup, but we manually handle
         # gradient accumulation in the training loop
@@ -354,7 +360,7 @@ class DeepspeedStrategy(DistributedStrategy):
     def get_ds_eval_config(self):
         ds_config = OmegaConf.to_container(self.deepspeed_config)
         ds_config["steps_per_print"] = 100
-        ds_config["bf16"] = {"enabled": self.bf16}
+        self._set_bf16_config(ds_config)
         ds_config["train_micro_batch_size_per_gpu"] = self.micro_train_batch_size_per_gpu
         ds_config["gradient_accumulation_steps"] = 1
 

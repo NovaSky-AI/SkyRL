@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])

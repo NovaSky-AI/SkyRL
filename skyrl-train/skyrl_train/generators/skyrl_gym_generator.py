@@ -62,9 +62,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
-        self.custom_chat_template = get_custom_chat_template(model_name)
+        self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:
@@ -77,18 +76,23 @@ class SkyRLGymGenerator(GeneratorInterface):
         if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
             raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
+        if len(self.generator_cfg.chat_template_kwargs) and self.generator_cfg.batched:
+            raise ValueError(
+                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
+            )
+
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
         # correctly format and tokenize observations into `observation_ids`.
         # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "I am a user."},
-            {"role": "assistant", "content": "I am an assistant."},
         ]
         self.base_conversation_token_ids = tokenizer.apply_chat_template(
             self.base_conversation,
             add_generation_prompt=False,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
         # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
@@ -169,6 +173,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             add_generation_prompt=not retokenize_chat_history,
             chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
 
         initial_prompt_length = len(input_ids)
@@ -262,6 +267,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 return_dict=True,
                 return_assistant_tokens_mask=True,
                 tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
             )
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
@@ -543,6 +549,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_template=self.custom_chat_template,
             add_generation_prompt=False,
             tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
         )
         return chat_history, chat_end_index, input_ids
 
@@ -610,6 +617,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,
                 tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)

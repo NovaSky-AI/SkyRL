@@ -263,7 +263,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     override_existing=override_existing,
                 )
             )
-            rank_offset_count += engine.tp_size() * engine.dp_size()
+            rank_offset_count += engine.tp_size()
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

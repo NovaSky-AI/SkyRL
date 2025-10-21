@@ -40,12 +40,13 @@ def get_test_actor_config() -> DictConfig:
         return cfg
 
 
-def init_ray_inference_engines(backend: str, tp_size: int, config: DictConfig) -> InferenceEngineClient:
+def init_ray_inference_engines(backend: str, tp_size: int, dp_size: int, config: DictConfig) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engine = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
+        data_parallel_size=dp_size,
         model_dtype="bfloat16",
         pretrain=MODEL,
         seed=42,
@@ -114,15 +115,16 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
 
 
 @pytest.mark.parametrize(
-    "backend,tp_size",
+    "backend,tp_size,dp_size",
     [
-        pytest.param("vllm", 2, marks=pytest.mark.vllm),
+        pytest.param("vllm", 2, 1, marks=pytest.mark.vllm),
+        pytest.param("vllm", 2, 2, marks=pytest.mark.vllm),
         # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 1, marks=pytest.mark.sglang),
+        pytest.param("sglang", 1, 1, marks=pytest.mark.sglang),
     ],
-    ids=["vllm", "sglang"],
+    ids=["vllm", "vllm_dp2", "sglang"],
 )
-def test_inference_engines_generation(backend: str, tp_size: int):
+def test_inference_engines_generation(backend: str, tp_size: int, dp_size: int):
     """
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
@@ -173,7 +175,7 @@ def test_inference_engines_generation(backend: str, tp_size: int):
                 remote_server_process.wait()
 
         # Get responses from Ray engine
-        llm_client = init_ray_inference_engines(backend, tp_size, cfg)
+        llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Batched generation
@@ -217,15 +219,15 @@ def test_inference_engines_generation(backend: str, tp_size: int):
 
 
 @pytest.mark.parametrize(
-    "backend,tp_size",
+    "backend,tp_size,dp_size",
     [
-        pytest.param("vllm", 2, marks=pytest.mark.vllm),
+        pytest.param("vllm", 2, 2, marks=pytest.mark.vllm),
         # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 1, marks=pytest.mark.sglang),
+        pytest.param("sglang", 1, 1, marks=pytest.mark.sglang),
     ],
-    ids=["vllm", "sglang"],
+    ids=["vllm_dp2", "sglang"],
 )
-def test_token_based_generation(backend: str, tp_size: int):
+def test_token_based_generation(backend: str, tp_size: int, dp_size: int):
     """Test generation using prompt_token_ids for the specified backend."""
 
     try:
@@ -239,7 +241,7 @@ def test_token_based_generation(backend: str, tp_size: int):
             prompts, add_generation_prompt=True, tokenize=True, return_dict=True
         )["input_ids"]
 
-        llm_client = init_ray_inference_engines(backend, tp_size, cfg)
+        llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Test batch generation with tokens

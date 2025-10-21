@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import List
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl_train.generators.utils import get_rollout_metrics
+from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -46,6 +46,9 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.trials_dir = terminal_bench_cfg.trials_dir
         self.agent_name = terminal_bench_cfg.agent_name
         self.max_episodes = terminal_bench_cfg.max_episodes
+
+        if self.generator_cfg.chat_template.name_or_path is not None:
+            raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
@@ -115,7 +118,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     print(f"[WARNING] Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
-                chat_history = results.agent_result.all_messages
+                chat_history = results.agent_result.metadata["all_messages"]
                 if len(chat_history) > 0:
                     break
                 else:
@@ -141,7 +144,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         for message in response_messages:
             # Apply chat template and tokenize each message
-            msg_encoding = self.tokenizer.apply_chat_template([message], add_generation_prompt=False, tokenize=True)
+            msg_encoding = encode_messages_subset([message], self.tokenizer)
 
             # Extend response_ids with the tokens
             response_ids.extend(msg_encoding)
@@ -158,7 +161,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!", len(response_ids))
+        print("number of reponse tokens", len(response_ids))
         # import pdb; pdb.set_trace()
 
         stop_reason = "complete"  # Default for trial completion

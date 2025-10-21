@@ -381,11 +381,13 @@ def init_inference_engines(
     backend,
     gpu_memory_utilization=0.6,
     num_inference_engines=1,
-    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights
+    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
+    enable_lora=False,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
-    initialize_ray(cfg)
+    if not ray.is_initialized():
+        initialize_ray(cfg)
     if colocate_all:
         pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
@@ -412,6 +414,7 @@ def init_inference_engines(
         tokenizer=tokenizer,
         backend=backend,
         sleep_level=sleep_level,
+        enable_lora=enable_lora,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:
@@ -519,6 +522,8 @@ def init_remote_inference_servers(
         tokenizer=tokenizer,
         engine_backend=backend,
         tensor_parallel_size=tp_size,
+        data_parallel_size=1,
+        expert_parallel_size=1,
     )
 
     client = InferenceEngineClient(engines, tokenizer, config)

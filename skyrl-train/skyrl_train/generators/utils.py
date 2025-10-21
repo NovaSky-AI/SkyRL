@@ -1,12 +1,27 @@
 import torch
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.inference_engines.base import ConversationType
+from omegaconf import DictConfig
 
 CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
-    "qwen3_thinking": (
+    # chat template for qwen3 that preserves thinking tokens
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
@@ -28,11 +43,44 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(model_name: str) -> str:
-    if "Qwen3" in model_name:
-        return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
-    else:
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
+    """
+    Get custom chat template based on the new config structure.
+
+    Args:
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
+
+    Returns:
+        Chat template string or None
+    """
+    if chat_template_config is None:
         return None
+
+    source = chat_template_config.get("source")
+    if not source:
+        raise ValueError("'source' is required in chat_template_config")
+
+    name_or_path = chat_template_config.get("name_or_path")
+    if not name_or_path:
+        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
+
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
+        else:
+            raise ValueError(
+                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
+            )
+    elif source == "file":
+        try:
+            with open(name_or_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError as e:
+            raise ValueError(f"Template file '{name_or_path}' not found") from e
+        except OSError as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def get_generation_prompt_ids(tokenizer) -> List[int]:
@@ -220,3 +268,50 @@ def prepare_generator_input(
     }
 
     return generator_input, uids
+
+
+def encode_messages_subset(messages: ConversationType, tokenizer):
+    """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
+
+    This function tokenizes messages as if they are part of a larger conversation, ensuring
+    no additional default system messages are prepended by the tokenizer's chat template
+
+    The "fixed base approach" works by:
+    - Creating a dummy base conversation to establish context
+    - Appending the target messages to this base
+    - Tokenizing the full conversation and extracting only the tokens for the target messages
+
+    For simple chat templates without complex token splitting behavior, this produces the same
+    result as directly tokenizing the messages. For templates like Qwen's ChatML format where
+    a default system prompt can be appended, this ensures correct tokenization
+
+    Reference: https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys. Must contain at least
+                 one message. These are assumed to be a subset from a larger conversation.
+        tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+
+    Returns:
+        List[int]: Token IDs for the given messages, with proper multi-turn context handling.
+    """
+    assert len(messages), "messages list cannot be empty"
+    # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+    base_conversation = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "I am a user."},
+    ]
+    base_conversation_token_ids = tokenizer.apply_chat_template(
+        base_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+
+    full_conversation = base_conversation + messages
+    full_conversation_token_ids = tokenizer.apply_chat_template(
+        full_conversation,
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+    conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
+    return conversation_token_ids

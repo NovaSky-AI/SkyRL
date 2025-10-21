@@ -16,7 +16,7 @@ from loguru import logger
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--num-nodes", type=int, default=2)
+parser.add_argument("--num-nodes", type=int, default=4)
 parser.add_argument("--master-port", type=int, default=12355)
 args = parser.parse_args()
 
