@@ -56,3 +56,88 @@ $ tx version [OPTIONS]
 **Options**:
 
 * `--help`: Show this message and exit.
+
+## Tinker API
+
+The Tinker API provides REST endpoints for model training and inference. The API supports both base model and LoRA adapter sampling with advanced text generation parameters.
+
+### Sampling Parameters
+
+The sampling API supports the following parameters for controlling text generation:
+
+#### Basic Parameters
+
+* **`temperature`** (float, default: 1.0): Controls randomness in generation. Lower values make output more deterministic.
+  - `temperature=0.0`: Deterministic (always selects highest probability token)
+  - `temperature=1.0`: Standard sampling
+  - `temperature>1.0`: More random/creative output
+
+* **`max_tokens`** (int, required): Maximum number of tokens to generate.
+
+* **`seed`** (int, optional): Random seed for reproducible generation. If not provided, a random seed is generated.
+
+#### Advanced Sampling Parameters
+
+* **`top_k`** (int, default: -1): Limits sampling to the top-k most likely tokens.
+  - `top_k=-1`: No filtering (default)
+  - `top_k=50`: Only consider the 50 most likely tokens
+  - `top_k=1`: Greedy decoding (always select most likely token)
+
+* **`top_p`** (float, default: 1.0): Nucleus sampling - only sample from tokens that make up the top-p probability mass.
+  - `top_p=1.0`: No filtering (default)
+  - `top_p=0.9`: Sample from tokens that make up 90% of probability mass
+  - `top_p=0.1`: Very focused sampling
+
+* **`stop`** (list of int, optional): Stop generation when encountering these token IDs.
+  - Example: `stop=[2, 13]` - Stop at tokens 2 and 13
+  - Note: Requires token IDs (integers). Use your tokenizer to convert strings to token IDs.
+
+#### Parameter Validation
+
+* `top_k` must be >= -1
+* `top_p` must be between 0 and 1 (exclusive)
+* `temperature` must be >= 0
+* `top_k` and `top_p` cannot both be set to non-default values simultaneously
+
+### Example API Request
+
+```json
+{
+  "base_model": "microsoft/DialoGPT-medium",
+  "prompt": {
+    "chunks": [
+      {
+        "tokens": [1, 2, 3, 4, 5]
+      }
+    ]
+  },
+  "sampling_params": {
+    "temperature": 0.8,
+    "max_tokens": 50,
+    "top_p": 0.9,
+    "stop": [2],
+    "seed": 42
+  },
+  "num_samples": 1
+}
+```
+
+### Example API Response
+
+```json
+{
+  "sequences": [
+    {
+      "stop_reason": "stop",
+      "tokens": [6, 7, 8, 2],
+      "logprobs": [-0.5, -0.3, -0.8, -0.2]
+    }
+  ],
+  "prompt_logprobs": []
+}
+```
+
+### Stop Reasons
+
+* **`"length"`**: Generation stopped because `max_tokens` was reached
+* **`"stop"`**: Generation stopped because a stop token was encountered

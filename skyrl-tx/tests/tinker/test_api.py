@@ -175,3 +175,159 @@ def test_sample(service_client, use_lora):
     assert sample_result is not None
     assert len(sample_result.sequences) == 1
     assert len(sample_result.sequences[0].tokens) > 0
+
+
+def test_sampling_params_validation(service_client):
+    """Test parameter validation for sampling parameters."""
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    
+    # Test invalid top_k
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, top_k=-2),
+            num_samples=1,
+        )
+    assert "top_k must be >= -1" in str(exc_info.value.detail)
+    
+    # Test invalid top_p
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, top_p=1.5),
+            num_samples=1,
+        )
+    assert "top_p must be between 0 and 1" in str(exc_info.value.detail)
+    
+    # Test negative temperature
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=-0.1, max_tokens=10),
+            num_samples=1,
+        )
+    assert "temperature must be >= 0" in str(exc_info.value.detail)
+    
+    # Test both top_k and top_p set
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, top_k=50, top_p=0.9),
+            num_samples=1,
+        )
+    assert "Cannot use both top_k and top_p simultaneously" in str(exc_info.value.detail)
+
+
+@pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
+def test_top_k_sampling(service_client, use_lora):
+    """Test top_k sampling parameter."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    
+    if use_lora:
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        sampling_path = training_client.save_weights_for_sampler(name="test_top_k").result().path
+        sampling_client = service_client.create_sampling_client(sampling_path)
+    else:
+        sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    
+    prompt = types.ModelInput.from_ints(tokenizer.encode("The weather today is", add_special_tokens=True))
+    
+    # Test with top_k=10
+    sample_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=5, top_k=10),
+        num_samples=1,
+    ).result()
+    
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 1
+    assert len(sample_result.sequences[0].tokens) > 0
+
+
+@pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
+def test_top_p_sampling(service_client, use_lora):
+    """Test top_p (nucleus) sampling parameter."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    
+    if use_lora:
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        sampling_path = training_client.save_weights_for_sampler(name="test_top_p").result().path
+        sampling_client = service_client.create_sampling_client(sampling_path)
+    else:
+        sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    
+    prompt = types.ModelInput.from_ints(tokenizer.encode("The weather today is", add_special_tokens=True))
+    
+    # Test with top_p=0.9
+    sample_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=5, top_p=0.9),
+        num_samples=1,
+    ).result()
+    
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 1
+    assert len(sample_result.sequences[0].tokens) > 0
+
+
+@pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
+def test_stop_tokens(service_client, use_lora):
+    """Test stop token functionality."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    
+    if use_lora:
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        sampling_path = training_client.save_weights_for_sampler(name="test_stop").result().path
+        sampling_client = service_client.create_sampling_client(sampling_path)
+    else:
+        sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    
+    # Test with stop tokens (using EOS token as example)
+    eos_token_id = tokenizer.eos_token_id
+    sample_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(
+            temperature=1.0, 
+            max_tokens=20, 
+            stop=[eos_token_id]  # Stop at EOS token
+        ),
+        num_samples=1,
+    ).result()
+    
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 1
+    # The sequence should either stop due to length or due to stop token
+    assert sample_result.sequences[0].stop_reason in ["length", "stop"]
+
+
+def test_sampling_parameter_combinations(service_client):
+    """Test various combinations of sampling parameters."""
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Test", add_special_tokens=True))
+    
+    # Test temperature=0 (deterministic)
+    sample_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=3),
+        num_samples=1,
+    ).result()
+    
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 1
+    
+    # Test with multiple samples
+    sample_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=3, top_k=50),
+        num_samples=3,
+    ).result()
+    
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 3
+    for sequence in sample_result.sequences:
+        assert len(sequence.tokens) > 0

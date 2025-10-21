@@ -703,6 +703,15 @@ class TinkerEngine:
                 # Generate with different seeds for each sample
                 seed = request_data.sampling_params.seed + sample_idx
 
+                # Convert stop parameter to token IDs if needed
+                stop_tokens = None
+                if request_data.sampling_params.stop is not None:
+                    # Expect stop tokens as token IDs (integers)
+                    if isinstance(request_data.sampling_params.stop, (list, tuple)):
+                        stop_tokens = list(request_data.sampling_params.stop)
+                    else:
+                        stop_tokens = [request_data.sampling_params.stop]
+
                 # Call the model's generate method
                 result = model.generate(
                     input_ids,
@@ -712,6 +721,9 @@ class TinkerEngine:
                     seed=seed,
                     return_scores=True,
                     adapter_indices=adapter_indices,
+                    stop_tokens=stop_tokens,
+                    top_k=request_data.sampling_params.top_k,
+                    top_p=request_data.sampling_params.top_p,
                 )
 
                 # Extract the generated tokens (excluding the prompt)

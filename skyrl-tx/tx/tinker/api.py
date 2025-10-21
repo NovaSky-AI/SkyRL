@@ -258,12 +258,17 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        if self.stop is not None:
-            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
-        if self.top_k != -1:
-            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
-        if self.top_p != 1.0:
-            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
+        # Validate parameter ranges
+        if self.top_k < -1:
+            raise HTTPException(status_code=400, detail="top_k must be >= -1")
+        if self.top_p <= 0 or self.top_p > 1:
+            raise HTTPException(status_code=400, detail="top_p must be between 0 and 1")
+        if self.temperature < 0:
+            raise HTTPException(status_code=400, detail="temperature must be >= 0")
+        
+        # Validate that top_k and top_p are not both set to non-default values
+        if self.top_k != -1 and self.top_p != 1.0:
+            raise HTTPException(status_code=400, detail="Cannot use both top_k and top_p simultaneously")
 
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
@@ -272,6 +277,9 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
+            stop=self.stop,
+            top_k=self.top_k,
+            top_p=self.top_p,
         )
 
 
