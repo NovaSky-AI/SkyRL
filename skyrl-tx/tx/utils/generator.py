@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 
 
+@jax.tree_util.register_dataclass
 @dataclass
 class KVCache:
     """Key-value cache for all layers, each entry in the list corresponds to one layer."""
@@ -49,6 +50,23 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
+    def _create_decoder_step(self):
+        """Create a jitted decoder step function."""
+
+        @jax.jit
+        def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices):
+            """Single decoder step with KV caching."""
+            outputs = model_fn(
+                next_token,
+                attention_mask=attention_mask,
+                positions=last_positions,
+                kv_cache=kv_cache,
+                adapter_indices=adapter_indices,
+            )
+            return outputs
+
+        return decoder_step
+
     def generate(
         self,
         input_ids: jax.Array,
@@ -77,6 +95,9 @@ class GeneratorMixin:
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
 
+        # Create jitted decoder step
+        decoder_step = self._create_decoder_step()
+
         # Decode: generate tokens one at a time
         for step in range(max_new_tokens):
             rng, sample_key = jax.random.split(rng)
@@ -92,12 +113,13 @@ class GeneratorMixin:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
                 # Increment position for the new token
                 last_positions = last_positions + 1
-                outputs = self(
+                outputs = decoder_step(
+                    self,
                     next_token,
-                    attention_mask=attention_mask,
-                    positions=last_positions,
-                    kv_cache=outputs["kv_cache"],
-                    adapter_indices=adapter_indices,
+                    attention_mask,
+                    last_positions,
+                    outputs["kv_cache"],
+                    adapter_indices,
                 )
 
         return GenerateResult(
