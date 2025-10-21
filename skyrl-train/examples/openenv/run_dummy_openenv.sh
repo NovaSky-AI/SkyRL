@@ -53,7 +53,7 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
   generator.batched=true \
-  environment.env_class=gsm8k \
+  environment.env_class=openenv \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
