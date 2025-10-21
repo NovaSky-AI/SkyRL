@@ -688,15 +688,6 @@ class TinkerEngine:
         # Load sampler weights and determine adapter indices
         adapter_indices = self.load_sampler_weights(model_id, request_data)
 
-        # Process stop tokens (tokenize strings if needed)
-        match request_data.sampling_params.stop:
-            case []:
-                stop_tokens = None
-            case list(elements) if isinstance(elements[0], str):
-                stop_tokens = {token for s in elements for token in self.tokenizer.encode(s, add_special_tokens=False)}
-            case list(elements):
-                stop_tokens = set(elements)
-
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
         # Prepare input for generation
@@ -722,7 +713,6 @@ class TinkerEngine:
                     seed=seed,
                     return_scores=True,
                     adapter_indices=adapter_indices,
-                    stop_tokens=stop_tokens,
                 )
 
                 # Extract the generated tokens (excluding the prompt)

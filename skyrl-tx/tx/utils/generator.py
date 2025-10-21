@@ -59,7 +59,6 @@ class GeneratorMixin:
         seed: int,
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
-        stop_tokens: set[int] | None = None,
     ) -> GenerateResult:
         """Generate text autoregressively with KV caching.
 
@@ -88,16 +87,6 @@ class GeneratorMixin:
 
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
             generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
-
-            # Check if any sequence hit a stop token
-            if stop_tokens is not None:
-                for i, reason in enumerate(stop_reasons):
-                    if reason == "length" and int(next_token[i, 0]) in stop_tokens:
-                        stop_reasons[i] = "stop"
-
-            # Early exit if all sequences are finished
-            if all(reason == "stop" for reason in stop_reasons):
-                break
 
             if step < max_new_tokens - 1:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)

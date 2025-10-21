@@ -258,15 +258,8 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        # Normalize stop parameter to list format
-        match self.stop:
-            case None:
-                stop = []
-            case str():
-                stop = [self.stop]
-            case _:
-                stop = list(self.stop)
-
+        if self.stop is not None:
+            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
         if self.top_k != -1:
             raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
         if self.top_p != 1.0:
@@ -279,7 +272,6 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=stop,
         )
 
 
