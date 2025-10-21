@@ -87,7 +87,7 @@ def test_qwen3_generate_speed():
             temperature=0.0,
             seed=42,
         )
-        warmup.block_until_ready()
+        warmup.generated_ids.block_until_ready()
 
         import time
         start = time.perf_counter()
@@ -97,16 +97,15 @@ def test_qwen3_generate_speed():
 
         for i in range(runs):
             start = time.perf_counter()
-            output, our_scores, _, _ = model.generate(
+            result = model.generate(
                 batch.input_ids.numpy(),
                 batch.attention_mask.numpy(),
                 max_new_tokens=50, 
                 temperature=0.0,
                 seed=42 + i, # Different seed every run
                 return_scores=True,
-                prompt_logprobs=False
             )
-            output.block_until_ready()
+            result.generated_ids.block_until_ready()
             elapsed = time.perf_counter() - start
             times.append(elapsed)
 
