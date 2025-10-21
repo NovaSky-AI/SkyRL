@@ -7,6 +7,7 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
 import pytest
 import torch
 from omegaconf import DictConfig
+
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
 
 
@@ -64,6 +65,63 @@ def test_policy_loss_dual_clip():
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
     # close to hand calculated value
     assert actual_loss.item() == pytest.approx(4.1667, abs=1e-4)
+
+
+def test_policy_loss_cispo():
+    """Tests CISPO in PolicyLoss function."""
+
+    device = "cpu"
+
+    # Create test data with a mix of advantages: positive, slightly negative, strongly negative
+    advantages = torch.tensor([[1.0, -1.0, -4.0]], device=device)
+
+    # Set up logprobs to test different probability ratios
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]], device=device)
+    log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)  # approx log(0.5)-1, log(1)-1, log(10)-3
+
+    # Create config for cispo
+    config = DictConfig(
+        {
+            "cispo": {"clip_low": 0.2, "clip_high": 0.2},
+            "policy_loss_type": "cispo",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    # Create loss function with cispo
+    loss_fn = PolicyLossRegistry.get("cispo")
+
+    # Calculate expected values
+    ratio = torch.exp(log_probs - old_log_probs)  # approx [0.5, 1.0, 10.0]
+    assert torch.allclose(ratio, torch.tensor([[0.5, 1.0, 10.0]], device=device), rtol=1e-3)
+
+    # Hand-calculation for expected loss:
+    # ratio = [0.5, 1.0, 10.0]
+    # clamped_ratio = ratio.clamp(0.8, 1.2) = [0.8, 1.0, 1.2]
+    # advantages = [1.0, -1.0, -4.0]
+    # log_probs = [-1.69315, -1.0, -0.69741]
+    # loss_per_token = -advantages * clamped_ratio * log_probs
+    # loss_per_token[0] = -(1.0 * 0.8 * -1.69315) = 1.35452
+    # loss_per_token[1] = -(-1.0 * 1.0 * -1.0) = -1.0
+    # loss_per_token[2] = -(-4.0 * 1.2 * -0.69741) = -3.347568
+    # mean(loss) = (1.35452 - 1.0 - 3.347568) / 3 = -0.99768266666
+    loss = -ratio.clamp(1 - 0.2, 1 + 0.2) * advantages * log_probs
+    expected_loss = loss.mean()
+
+    # Calculate actual loss
+    actual_loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+    )
+
+    # Verify results
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-3, atol=1e-8)
+    # close to hand calculated value
+    assert actual_loss.item() == pytest.approx(-0.99768266666, abs=1e-4)
 
 
 def test_policy_loss_reduction_modes():

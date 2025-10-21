@@ -121,9 +121,16 @@ trainer:
       clip_cov_lb: 1.0 # lower bound for covariance clipping
       clip_cov_ub: 5.0 # upper bound for covariance clipping
     
+    # kl-cov parameters (only used when policy_loss_type: "kl_cov")
     kl_cov:
       kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
       ppo_kl_coef: 1.0
+    
+    # cispo parameters (only used when policy_loss_type: "cispo")
+    cispo:
+      clip_low: 0.2 # lower bound for importance sampling ratio clipping
+      clip_high: 0.2 # upper bound for importance sampling ratio clipping
+
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
