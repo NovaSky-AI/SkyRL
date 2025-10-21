@@ -303,6 +303,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
 
+        Currently only supported for `/chat/completions` and not `/completions` or `generate()`.
+
         Both in-flight and incoming requests will be blocked until `resume_generation` is called.
         1. We first set the paused event to avoid new requests from being submitted while aborting requests.
         2. Then we add a grace period to ensure all in-flight requests have entered the engine's
