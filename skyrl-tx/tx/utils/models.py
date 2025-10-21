@@ -116,13 +116,12 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
 
 
 def load_lora_checkpoint(
-    model: models.Qwen3ForCausalLM, adapter_config: LoraConfig, adapter_index: int, checkpoint_path: Path | CloudPath
+    model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath
 ):
-    """Load LoRA adapter weights from a checkpoint into the model.
+    """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
         model: The Qwen3ForCausalLM model to load the adapter into
-        adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """

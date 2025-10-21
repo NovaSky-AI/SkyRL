@@ -103,7 +103,6 @@ class TinkerEngine:
         """Initialize the engine with a database connection and base model."""
         self.config = config
         self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
         # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
@@ -667,7 +666,7 @@ class TinkerEngine:
         logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
 
         # Load checkpoint using load_lora_checkpoint
-        load_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, checkpoint_path)
+        load_lora_checkpoint(self.model, lora_model.adapter_index, checkpoint_path)
 
         logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {lora_model.adapter_index}")
         return lora_model.adapter_index
