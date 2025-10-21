@@ -1,5 +1,6 @@
 """Database models for the Tinker API."""
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
@@ -7,8 +8,58 @@ from sqlmodel import SQLModel, Field, JSON
 
 from tx.tinker import types
 
-# SQLite database path
+# SQLite database path (default)
 DB_PATH = Path(__file__).parent / "tinker.db"
+
+
+def get_database_url(db_url: str | None = None) -> str:
+    """Get the database URL from environment variable or parameter.
+    
+    Args:
+        db_url: Optional database URL to use. If None, uses environment variable
+                or defaults to SQLite.
+    
+    Returns:
+        Database URL string for SQLAlchemy.
+    
+    Examples:
+        SQLite: sqlite:///path/to/tinker.db
+        PostgreSQL: postgresql://user:password@localhost:5432/tinker
+        PostgreSQL (async): postgresql+asyncpg://user:password@localhost:5432/tinker
+    """
+    if db_url:
+        return db_url
+    
+    # Check environment variable
+    env_url = os.environ.get("TINKER_DATABASE_URL")
+    if env_url:
+        return env_url
+    
+    # Default to SQLite
+    return f"sqlite:///{DB_PATH}"
+
+
+def get_async_database_url(db_url: str | None = None) -> str:
+    """Get the async database URL.
+    
+    Args:
+        db_url: Optional database URL to use.
+    
+    Returns:
+        Async database URL string for SQLAlchemy.
+    """
+    url = get_database_url(db_url)
+    
+    # Convert to async driver if needed
+    if url.startswith("sqlite://"):
+        # Use aiosqlite for async SQLite
+        return url.replace("sqlite://", "sqlite+aiosqlite://")
+    elif url.startswith("postgresql://"):
+        # Use asyncpg for async PostgreSQL
+        return url.replace("postgresql://", "postgresql+asyncpg://")
+    
+    # Already has async driver or unknown driver
+    return url
 
 
 class RequestStatus(str, Enum):

@@ -1,10 +1,9 @@
 # SkyRL tx: Unified API for training and inference
 
-> ⚠️  The project is currently very early with lots of missing features
+> ⚠️ The project is currently very early with lots of missing features
 > (e.g. currently LoRA is only supported for the MLP layer, pure inference
 > is not supported, model sharding is in a very early state). Many of
 > these are easy to implement and we welcome contributions! ⚠️
-
 
 SkyRL tx is an open-source cross-platform library that allows users to
 set up their own service exposing a
@@ -17,7 +16,8 @@ The `t` in `tx` stands for transformers, training, or tinker, and the `x`
 stands for "cross-platform".
 
 ## Getting Started
-See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-project-to-implement-the-Tinker-API-2848f0016b9d80fe9873eea1e38815ca?source=copy_link#2848f0016b9d80bc8a4bebeedac69f6e) for a quickstart example. 
+
+See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-project-to-implement-the-Tinker-API-2848f0016b9d80fe9873eea1e38815ca?source=copy_link#2848f0016b9d80bc8a4bebeedac69f6e) for a quickstart example.
 
 ## Project Status
 
