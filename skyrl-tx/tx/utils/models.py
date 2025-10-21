@@ -72,10 +72,7 @@ def load_safetensors(
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
-
-    # Strip prefix from tensor keys if provided
-    if prefix:
-        tensors = {k[len(prefix) :] if k.startswith(prefix) else k: v for k, v in tensors.items()}
+    tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
