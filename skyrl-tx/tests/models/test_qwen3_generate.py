@@ -48,7 +48,6 @@ def test_qwen3_generate():
             temperature=0.0,
             seed=42,
             return_scores=True,
-            prompt_logprobs=False
         )
 
         assert jnp.array_equal(
