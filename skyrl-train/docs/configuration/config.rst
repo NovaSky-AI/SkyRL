@@ -375,6 +375,7 @@ Algorithm Configuration
       policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
       loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
       grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
+      zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
 
       # GAE parameters
       lambd: 1.0
@@ -441,6 +442,7 @@ Algorithm Configuration
   - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 
 - ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+- ``algorithm.zero_variance_filter``: Whether to loss mask out prompts with zero variance rewards. This is only applicable when rewards are response-level.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.

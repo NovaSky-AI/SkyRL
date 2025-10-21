@@ -556,6 +556,32 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     return filtered
 
 
+def zero_variance_filter(rewards: List[float], uids: List[str]) -> List[int]:
+    """
+    Given a list of trajectory level rewards and uids, return the indices of the trajectories with non-zero variance rewards.
+
+    Args:
+        rewards: List[float]
+        uids: List[str]
+
+    Returns:
+        List[int]
+    """
+    # Group by UID and calculate standard deviation
+    uid2metric_vals = defaultdict(list)
+    for uid, reward in zip(uids, rewards):
+        uid2metric_vals[uid].append(reward)
+
+    uid2metric_std = {}
+    for uid, metric_vals in uid2metric_vals.items():
+        uid2metric_std[uid] = np.std(metric_vals)
+
+    # Filter out groups with std == 0 and group size > 1
+    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or len(uid2metric_vals[uid]) == 1]
+    kept_uids_set = set(kept_uids)
+    return [i for i, uid in enumerate(uids) if uid in kept_uids_set]
+
+
 def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
     """Validate the generator output."""
     if len(generator_output["response_ids"]) <= 0:

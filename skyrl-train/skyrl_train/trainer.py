@@ -53,6 +53,7 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
     DynamicSamplingState,
     build_dataloader,
+    zero_variance_filter,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.evaluate import evaluate
@@ -592,6 +593,12 @@ class RayPPOTrainer:
             # Token-level rewards: rewards is List[List[float]]
             per_token_rewards = rewards
         else:
+            if self.cfg.trainer.algorithm.zero_variance_filter:
+                kept_indices = zero_variance_filter(rewards, uids)
+                generator_output["loss_masks"] = [
+                    [0] * len(mask) if i not in kept_indices else mask
+                    for i, mask in enumerate(generator_output["loss_masks"])
+                ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
