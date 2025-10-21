@@ -599,9 +599,9 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices = zero_variance_filter(rewards, uids)
+                kept_indices_set = set(zero_variance_filter(rewards, uids))
                 generator_output["loss_masks"] = [
-                    [0] * len(mask) if i not in kept_indices else mask
+                    [0] * len(mask) if i not in kept_indices_set else mask
                     for i, mask in enumerate(generator_output["loss_masks"])
                 ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards

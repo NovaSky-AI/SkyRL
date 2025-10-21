@@ -572,13 +572,12 @@ def zero_variance_filter(rewards: List[float], uids: List[str]) -> List[int]:
     for uid, reward in zip(uids, rewards):
         uid2metric_vals[uid].append(reward)
 
-    uid2metric_std = {}
-    for uid, metric_vals in uid2metric_vals.items():
-        uid2metric_std[uid] = np.std(metric_vals)
+    # Identify UIDs to keep: non-zero variance or singletons
+    kept_uids_set = {
+        uid for uid, metric_vals in uid2metric_vals.items() if np.std(metric_vals) > 0 or len(metric_vals) == 1
+    }
 
-    # Filter out groups with std == 0 and group size > 1
-    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or len(uid2metric_vals[uid]) == 1]
-    kept_uids_set = set(kept_uids)
+    # Return indices of trajectories with kept UIDs
     return [i for i, uid in enumerate(uids) if uid in kept_uids_set]
 
 
