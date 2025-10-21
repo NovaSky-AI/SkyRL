@@ -61,9 +61,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        assert (
-            not self.generation_paused_event.is_set()
-        ), "pause_generation is unsupported for InferenceEngineClient.generate()."
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
@@ -158,7 +157,8 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
         """
-        assert not self.generation_paused_event.is_set(), "pause_generation is unsupported for /completions requests."
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("pause_generation is unsupported for /completions requests.")
         body = request_payload.get("json", {})
 
         # NOTE(Charlie): do not reuse headers here as the single request may become various new requests
@@ -314,7 +314,8 @@ class InferenceEngineClient(InferenceEngineInterface):
            InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens, but
            the users' requests to `InferenceEngineClient` will not return but simply blocked.
         """
-        assert not self.generation_paused_event.is_set(), "Generation is already paused"
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("Generation is already paused, cannot pause again.")
         self.generation_paused_event.set()
         await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("abort_generation")
@@ -326,7 +327,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         Resume all in-flight requests with the previously-generated tokens, and unblock incoming requests
         that were blocked by `pause_generation()`.
         """
-        assert self.generation_paused_event.is_set(), "Generation is not paused and yet resume_generation is called."
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Generation is not paused, cannot resume.")
         self.generation_paused_event.clear()
 
     async def abort_generation(self) -> None:
