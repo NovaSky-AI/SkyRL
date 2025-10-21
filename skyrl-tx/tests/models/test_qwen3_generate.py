@@ -41,7 +41,7 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        output, our_scores, _ = model.generate(
+        output, our_scores, _, _ = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
             max_new_tokens=10,
@@ -58,3 +58,50 @@ def test_qwen3_generate():
             assert np.allclose(
                 hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3
             ), f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"
+
+
+def test_qwen3_generate_speed():
+    """Profile batched text generation with KV caching."""
+    model_name = "Qwen/Qwen3-0.6B"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    config = AutoConfig.from_pretrained(model_name)
+
+
+    inputs = ["My name is", "The capital of France is"]
+    batch = tokenizer(inputs, return_tensors="pt", padding=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        hf_model.save_pretrained(tmp, safe_serialization=True)
+        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        load_safetensors(tmp, config, model)
+
+        # Warmup
+        warmup = model.generate(
+            batch.input_ids.numpy(),
+            batch.attention_mask.numpy(),
+            max_new_tokens=10,
+            temperature=0.0,
+            seed=42,
+        )
+        warmup.block_until_ready()
+
+        import time
+        start = time.perf_counter()
+
+        output, our_scores, _, _ = model.generate(
+            batch.input_ids.numpy(),
+            batch.attention_mask.numpy(),
+            max_new_tokens=10,
+            temperature=0.0,
+            seed=42,
+            return_scores=True,
+            prompt_logprobs=False
+        )
+        output.block_until_ready()
+        elapsed = time.perf_counter() - start
+
+    print(f"Generation time: {elapsed*1000:.2f} ms")
+    print(f"Tokens/sec: {(2 * 10) / elapsed:.1f}")
