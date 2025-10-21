@@ -18,7 +18,6 @@ from omegaconf import DictConfig
 import threading
 from loguru import logger
 import random
-import time
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 
@@ -315,7 +314,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         assert not self.generation_paused_event.is_set(), "Generation is already paused"
         self.generation_paused_event.set()
-        time.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
+        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("abort_generation")
 
     def resume_generation(self) -> None:
