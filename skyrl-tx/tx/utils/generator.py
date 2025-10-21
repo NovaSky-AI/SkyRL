@@ -92,11 +92,9 @@ class GeneratorMixin:
 
             # Check if any sequence hit a stop token
             if stop_tokens is not None:
-                for i in range(batch_size):
-                    if stop_reasons[i] == "length":  # Only check if not already stopped
-                        token_id = int(next_token[i, 0])
-                        if token_id in stop_tokens:
-                            stop_reasons[i] = "stop"
+                for i, reason in enumerate(stop_reasons):
+                    if reason == "length" and int(next_token[i, 0]) in stop_tokens:
+                        stop_reasons[i] = "stop"
 
             # Early exit if all sequences are finished
             if all(reason == "stop" for reason in stop_reasons):
