@@ -151,6 +151,7 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
+    stop: list[str] | list[int] = []
 
 
 class ModelMetadata(BaseModel):

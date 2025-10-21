@@ -44,11 +44,19 @@ class GeneratorMixin:
         seed: int,
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
-    ) -> jax.Array | tuple[jax.Array, list[jax.Array]]:
-        """Generate text autoregressively with KV caching."""
+        stop_tokens: set[int] | None = None,
+    ) -> tuple[jax.Array, list[jax.Array], list[str]] | jax.Array:
+        """Generate text autoregressively with KV caching.
+
+        Returns:
+            If return_scores is True: (generated_ids, scores, stop_reasons)
+            Otherwise: generated_ids
+        """
         rng = jax.random.PRNGKey(seed)
         generated_ids = input_ids
         scores = [] if return_scores else None
+        batch_size = input_ids.shape[0]
+        stop_reasons = ["length"] * batch_size
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
@@ -68,6 +76,18 @@ class GeneratorMixin:
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
             generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
 
+            # Check if any sequence hit a stop token
+            if stop_tokens is not None:
+                for i in range(batch_size):
+                    if stop_reasons[i] == "length":  # Only check if not already stopped
+                        token_id = int(next_token[i, 0])
+                        if token_id in stop_tokens:
+                            stop_reasons[i] = "stop"
+
+            # Early exit if all sequences are finished
+            if all(reason == "stop" for reason in stop_reasons):
+                break
+
             if step < max_new_tokens - 1:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
                 # Increment position for the new token
@@ -81,5 +101,5 @@ class GeneratorMixin:
                 )
 
         if return_scores:
-            return generated_ids, scores
+            return generated_ids, scores, stop_reasons
         return generated_ids

@@ -16,7 +16,7 @@ from flax import nnx
 from flax.training import checkpoints
 
 import optax
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 from huggingface_hub import snapshot_download
 
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
@@ -114,6 +114,7 @@ class TinkerEngine:
 
         # Initialize the shared base model
         self.model_config = AutoConfig.from_pretrained(self.config.base_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.base_model)
 
         # Configure LoRA settings
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
@@ -687,6 +688,18 @@ class TinkerEngine:
                 )
             adapter_indices = None
 
+        # Process stop tokens (tokenize strings if needed)
+        stop_tokens = None
+        if request_data.sampling_params.stop:
+            if isinstance(request_data.sampling_params.stop[0], str):
+                stop_tokens = {
+                    token
+                    for stop_str in request_data.sampling_params.stop
+                    for token in self.tokenizer.encode(stop_str, add_special_tokens=False)
+                }
+            else:
+                stop_tokens = set(request_data.sampling_params.stop)
+
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
         # Prepare input for generation
@@ -704,7 +717,7 @@ class TinkerEngine:
                 seed = request_data.sampling_params.seed + sample_idx
 
                 # Call the model's generate method
-                generated_ids, scores = model.generate(
+                generated_ids, scores, stop_reasons = model.generate(
                     input_ids,
                     attention_mask,
                     max_new_tokens=request_data.sampling_params.max_tokens,
@@ -712,6 +725,7 @@ class TinkerEngine:
                     seed=seed,
                     return_scores=True,
                     adapter_indices=adapter_indices,
+                    stop_tokens=stop_tokens,
                 )
 
                 # Extract the generated tokens (excluding the prompt)
@@ -728,8 +742,8 @@ class TinkerEngine:
                         token_idx = generated_tokens[len(logprobs)]
                         logprobs.append(float(log_probs[token_idx]))
 
-                # For now, assume all sequences hit the length limit
-                stop_reason = "length"
+                # Get stop reason for this sequence (batch size is 1, so index 0)
+                stop_reason = stop_reasons[0]
 
                 sequences.append(
                     types.GeneratedSequence(
