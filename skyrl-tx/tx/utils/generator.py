@@ -156,12 +156,9 @@ class GeneratorMixin:
 
             # Check for stop tokens
             if stop_token_set:
-                for batch_idx in range(generated_ids.shape[0]):
-                    if stop_reasons[batch_idx] == "length":  # Only check if not already stopped
-                        # Check if any stop token appears in the generated sequence
-                        generated_tokens = generated_ids[batch_idx, input_ids.shape[1]:].tolist()
-                        if any(token in stop_token_set for token in generated_tokens):
-                            stop_reasons[batch_idx] = "stop"
+                for batch_idx in range(next_token.shape[0]):
+                    if stop_reasons[batch_idx] == "length" and next_token[batch_idx, 0].item() in stop_token_set:
+                        stop_reasons[batch_idx] = "stop"
 
             # Early termination if all sequences have stopped
             if all(reason != "length" for reason in stop_reasons):
