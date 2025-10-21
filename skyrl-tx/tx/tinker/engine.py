@@ -716,8 +716,11 @@ class TinkerEngine:
                 # Generate with different seeds for each sample
                 seed = request_data.sampling_params.seed + sample_idx
 
+                # Only need to compute prompt_logprobs for the first sample
+                compute_prompt_logprobs = (sample_idx == 0 and request_data.prompt_logprobs)
+
                 # Call the model's generate method
-                generated_ids, scores, stop_reasons = model.generate(
+                generated_ids, scores, stop_reasons, prompt_logprobs_array = model.generate(
                     input_ids,
                     attention_mask,
                     max_new_tokens=request_data.sampling_params.max_tokens,
@@ -726,7 +729,11 @@ class TinkerEngine:
                     return_scores=True,
                     adapter_indices=adapter_indices,
                     stop_tokens=stop_tokens,
+                    prompt_logprobs=compute_prompt_logprobs
                 )
+
+                if sample_idx == 0 and prompt_logprobs_array is not None:
+                    prompt_logprobs = prompt_logprobs_array[0].tolist()
 
                 # Extract the generated tokens (excluding the prompt)
                 prompt_len = len(prompt_tokens)
@@ -754,7 +761,8 @@ class TinkerEngine:
                 )
 
         # Compute prompt logprobs if needed (for now, return empty list)
-        prompt_logprobs = []
+        if not request_data.prompt_logprobs:
+            prompt_logprobs = []
 
         logger.info(f"Generated {len(sequences)} samples for model {model_id}")
 

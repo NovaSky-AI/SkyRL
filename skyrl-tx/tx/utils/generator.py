@@ -31,6 +31,20 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
+def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
+    """Compute log probabilities of prompt tokens from prefill logits"""
+
+    logits_for_prompt = prefill_logits[:, :-1, :]
+    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
+    prompt_tokens = input_ids[:, 1:]
+    prompt_logprobs = jnp.take_along_axis(
+        log_probs, 
+        prompt_tokens[..., None], 
+        axis=-1
+    ).squeeze(-1)
+    return prompt_logprobs
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -45,12 +59,15 @@ class GeneratorMixin:
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
         stop_tokens: set[int] | None = None,
-    ) -> tuple[jax.Array, list[jax.Array], list[str]] | jax.Array:
+        prompt_logprobs: bool = False
+    ) -> tuple[jax.Array, ...] | jax.Array:
         """Generate text autoregressively with KV caching.
 
         Returns:
-            If return_scores is True: (generated_ids, scores, stop_reasons)
-            Otherwise: generated_ids
+            If return_scores and prompt_logprobs: (generated_ids, scores, stop_reasons, prompt_logprobs)
+            If return_scores: (generated_ids, scores, stop_reasons)
+            If prompt_logprobs: (generated_ids, prompt_logprobs)
+            Else: generated_ids
         """
         rng = jax.random.PRNGKey(seed)
         generated_ids = input_ids
@@ -61,6 +78,10 @@ class GeneratorMixin:
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+        
+        prompt_logprobs_array = None
+        if prompt_logprobs:
+            prompt_logprobs_array = compute_prompt_logprobs(outputs["logits"], input_ids)
 
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
@@ -101,5 +122,5 @@ class GeneratorMixin:
                 )
 
         if return_scores:
-            return generated_ids, scores, stop_reasons
+            return generated_ids, scores, stop_reasons, prompt_logprobs_array
         return generated_ids
