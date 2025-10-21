@@ -525,7 +525,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
 
 @app.post("/api/v1/asample", response_model=FutureResponse)
-async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
+async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
     if request.base_model:
         model_id = checkpoint_id = ""
@@ -535,6 +535,8 @@ async def asample(request: SampleRequest, session: AsyncSession = Depends(get_se
         if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
             raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
         await get_model(session, model_id)
+        # Validate that the checkpoint exists and is ready
+        await validate_checkpoint(req, model_id, checkpoint_id, session)
 
     request_id = await create_future(
         session=session,

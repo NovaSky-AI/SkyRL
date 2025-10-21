@@ -14,6 +14,21 @@ class KVCache:
     values: list[jax.Array]
 
 
+@dataclass
+class GenerateResult:
+    """Result from autoregressive text generation.
+
+    Attributes:
+        generated_ids: Token IDs of the generated text including the prompt.
+        stop_reasons: Reason for stopping generation for each sequence ('stop' or 'length').
+        scores: Logits for each generated token (only if return_scores=True).
+    """
+
+    generated_ids: jax.Array
+    stop_reasons: list[str]
+    scores: list[jax.Array] | None = None
+
+
 def sample_token(logits: jax.Array, *, temperature: float, key: jax.Array) -> jax.Array:
     """Sample next token from logits using temperature."""
     if temperature == 0.0:
@@ -44,11 +59,16 @@ class GeneratorMixin:
         seed: int,
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
-    ) -> jax.Array | tuple[jax.Array, list[jax.Array]]:
-        """Generate text autoregressively with KV caching."""
+    ) -> GenerateResult:
+        """Generate text autoregressively with KV caching.
+
+        Returns:
+            GenerateResult containing generated_ids, stop_reasons, and optionally scores.
+        """
         rng = jax.random.PRNGKey(seed)
         generated_ids = input_ids
         scores = [] if return_scores else None
+        stop_reasons = ["length"] * input_ids.shape[0]
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
@@ -80,6 +100,8 @@ class GeneratorMixin:
                     adapter_indices=adapter_indices,
                 )
 
-        if return_scores:
-            return generated_ids, scores
-        return generated_ids
+        return GenerateResult(
+            generated_ids=generated_ids,
+            stop_reasons=stop_reasons,
+            scores=scores,
+        )
