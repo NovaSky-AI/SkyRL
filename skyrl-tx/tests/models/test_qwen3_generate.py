@@ -41,7 +41,7 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        output, our_scores, _, _ = model.generate(
+        result = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
             max_new_tokens=10,
@@ -51,10 +51,12 @@ def test_qwen3_generate():
             prompt_logprobs=False
         )
 
-        assert jnp.array_equal(output, hf_output.sequences.numpy()), "Generated tokens don't match HuggingFace"
+        assert jnp.array_equal(
+            result.generated_ids, hf_output.sequences.numpy()
+        ), "Generated tokens don't match HuggingFace"
 
         # Compare scores (logits) for each generated token
-        for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, our_scores)):
+        for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, result.scores)):
             assert np.allclose(
                 hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3
             ), f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"

@@ -646,59 +646,47 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, model_id: str, checkpoint_id: str) -> int:
-        """Load LoRA adapter weights from a sampler checkpoint into the model.
+    def load_sampler_weights(self, model_id: str, request_data: types.SampleInput) -> jax.Array | None:
+        """Load sampler weights and determine adapter indices.
 
         Args:
             model_id: The model ID
-            checkpoint_id: The checkpoint ID
+            request_data: The sample input request data
 
         Returns:
-            The adapter index where the weights were loaded
+            The adapter_indices array for LoRA sampling, or None for base model sampling
         """
-        assert checkpoint_id != "", "checkpoint_id must not be empty"
-
-        if model_id not in self.models:
-            raise ValueError(f"Model {model_id} not loaded")
-
-        lora_model = self.models[model_id]
-        checkpoint_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
-        logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-
-        # Load checkpoint using load_lora_checkpoint
-        load_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, checkpoint_path)
-
-        logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {lora_model.adapter_index}")
-        return lora_model.adapter_index
-
-    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the base model or LoRA adapter."""
-        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
-
         # Determine if we're sampling from base model or LoRA
         if request_data.base_model is None:
             # LoRA sampling mode
-            adapter_index = self.load_sampler_weights(model_id, request_data.checkpoint_id)
-            adapter_indices = jnp.array([[adapter_index]], dtype=jnp.int32)
+            assert request_data.checkpoint_id != "", "checkpoint_id must not be empty"
+
+            if model_id not in self.models:
+                raise ValueError(f"Model {model_id} not loaded")
+
+            adapter_index = self.models[model_id].adapter_index
+            checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+            logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+
+            # Load checkpoint using load_lora_checkpoint
+            load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+
+            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+            return jnp.array([[adapter_index]], dtype=jnp.int32)
         else:
             # Base model sampling mode
             if request_data.base_model != self.config.base_model:
                 raise ValueError(
                     f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
                 )
-            adapter_indices = None
+            return None
 
-        # Process stop tokens (tokenize strings if needed)
-        stop_tokens = None
-        if request_data.sampling_params.stop:
-            if isinstance(request_data.sampling_params.stop[0], str):
-                stop_tokens = {
-                    token
-                    for stop_str in request_data.sampling_params.stop
-                    for token in self.tokenizer.encode(stop_str, add_special_tokens=False)
-                }
-            else:
-                stop_tokens = set(request_data.sampling_params.stop)
+    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
+        """Generate text samples from the base model or LoRA adapter."""
+        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
+
+        # Load sampler weights and determine adapter indices
+        adapter_indices = self.load_sampler_weights(model_id, request_data)
 
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
@@ -716,11 +704,8 @@ class TinkerEngine:
                 # Generate with different seeds for each sample
                 seed = request_data.sampling_params.seed + sample_idx
 
-                # Only need to compute prompt_logprobs for the first sample
-                compute_prompt_logprobs = (sample_idx == 0 and request_data.prompt_logprobs)
-
                 # Call the model's generate method
-                generated_ids, scores, stop_reasons, prompt_logprobs_array = model.generate(
+                result = model.generate(
                     input_ids,
                     attention_mask,
                     max_new_tokens=request_data.sampling_params.max_tokens,
@@ -728,8 +713,6 @@ class TinkerEngine:
                     seed=seed,
                     return_scores=True,
                     adapter_indices=adapter_indices,
-                    stop_tokens=stop_tokens,
-                    prompt_logprobs=compute_prompt_logprobs
                 )
 
                 if sample_idx == 0 and prompt_logprobs_array is not None:
@@ -737,11 +720,11 @@ class TinkerEngine:
 
                 # Extract the generated tokens (excluding the prompt)
                 prompt_len = len(prompt_tokens)
-                generated_tokens = generated_ids[0, prompt_len:].tolist()
+                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
 
                 # Compute logprobs from the scores
                 logprobs = []
-                for score in scores:
+                for score in result.scores:
                     log_probs = jax.nn.log_softmax(score[0], axis=-1)
                     # Get the logprob of the selected token
                     # The token at position i in generated_tokens corresponds to scores[i]
@@ -750,7 +733,7 @@ class TinkerEngine:
                         logprobs.append(float(log_probs[token_idx]))
 
                 # Get stop reason for this sequence (batch size is 1, so index 0)
-                stop_reason = stop_reasons[0]
+                stop_reason = result.stop_reasons[0]
 
                 sequences.append(
                     types.GeneratedSequence(

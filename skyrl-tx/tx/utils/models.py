@@ -72,10 +72,7 @@ def load_safetensors(
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
-
-    # Strip prefix from tensor keys if provided
-    if prefix:
-        tensors = {k[len(prefix) :] if k.startswith(prefix) else k: v for k, v in tensors.items()}
+    tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
@@ -115,26 +112,21 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(
-    model: models.Qwen3ForCausalLM, adapter_config: LoraConfig, adapter_index: int, checkpoint_path: Path | CloudPath
-):
-    """Load LoRA adapter weights from a checkpoint into the model.
+def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath):
+    """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
         model: The Qwen3ForCausalLM model to load the adapter into
-        adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    lora_state = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
-        # Use load_safetensors to load the adapter weights
-        load_safetensors(temp_dir, model.config, lora_state, skip_lora=False, prefix="base_model.model.")
-
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(lora_state))
+        load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params))
 
 
 def save_lora_checkpoint(
