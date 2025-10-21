@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import logging
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -34,8 +33,7 @@ from tx.utils.models import (
     insert_adapter_state,
 )
 from tx.layers.lora import update_adapter_config
-
-logger = logging.getLogger(__name__)
+from tx.utils.log import logger
 
 
 def round_up_seq_len(seq_len: int) -> int:
@@ -851,8 +849,6 @@ class TinkerEngine:
 
 def main():
     """Entry point for the background engine."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
-
     # Create argument parser and add Pydantic model fields
     parser = argparse.ArgumentParser(description="SkyRL tx tinker engine for processing requests")
     add_model(parser, EngineConfig)

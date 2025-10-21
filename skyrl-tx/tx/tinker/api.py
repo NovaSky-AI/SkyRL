@@ -11,7 +11,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError
 import asyncio
-import logging
 import subprocess
 import random
 
@@ -19,10 +18,7 @@ from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
 from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus
 from tx.utils.storage import download_file
-
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from tx.utils.log import logger
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
