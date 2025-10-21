@@ -21,6 +21,7 @@ from typing import List
 from datasets import Dataset
 import math
 
+
 def example_question(env_name: str) -> List[str]:
     """
     Return simple example prompts for each environment.
@@ -28,10 +29,7 @@ def example_question(env_name: str) -> List[str]:
     """
 
     # Shared instruction appended to each example
-    instruction = (
-        "Wrap the action between <action> and </action> tags.\n"
-        "For example: <action>ACTION_HERE</action>."
-    )
+    instruction = "Wrap the action between <action> and </action> tags.\n" "For example: <action>ACTION_HERE</action>."
 
     if env_name == "echo_env":
         # Echo environment simply echoes the text back.
@@ -49,7 +47,9 @@ def example_question(env_name: str) -> List[str]:
             "Define a variable x = 5 + 3 and print its value.",
             "Use a loop to print numbers 1 to 3 and their squares.",
         ]
-        instruction.append("Write the python code inside <action>...</action> tags. Example: <action>print('Hello, World!')</action>")
+        instruction.append(
+            "Write the python code inside <action>...</action> tags. Example: <action>print('Hello, World!')</action>"
+        )
         return [f"{ex}\n\n{instruction}" for ex in examples]
 
     elif env_name == "openspiel-env":

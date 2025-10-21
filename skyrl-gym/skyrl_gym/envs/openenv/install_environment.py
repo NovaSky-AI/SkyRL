@@ -8,14 +8,14 @@
 #   uv run skyrl_gym/envs/openenv/install_environment.py atari-env
 #   uv run skyrl_gym/envs/openenv/install_environment.py chat-env
 #   docker kill $(docker ps -q)
-         # pulls all images
+# pulls all images
 #
 
 import argparse
 import sys
 import subprocess
 
-# Image mapping: from https://github.com/meta-pytorch/OpenEnv/pkgs/container/ 
+# Image mapping: from https://github.com/meta-pytorch/OpenEnv/pkgs/container/
 ENV_IMAGES = {
     "base": "ghcr.io/meta-pytorch/openenv-base:sha-64d4b10",
     "atari-env": "ghcr.io/meta-pytorch/openenv-atari-env:sha-64d4b10",
@@ -23,6 +23,7 @@ ENV_IMAGES = {
     "chat-env": "ghcr.io/meta-pytorch/openenv-chat-env:sha-64d4b10",
     "echo-env": "ghcr.io/meta-pytorch/openenv-echo-env:sha-64d4b10",
 }
+
 
 def run_command(cmd, check=True):
     print(f"Running: {' '.join(cmd)}")
@@ -40,7 +41,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pull prebuilt OpenEnv Docker images.")
     parser.add_argument(
         "env_name",
-        nargs="?", 
+        nargs="?",
         help="Environment name (e.g., echo-env, coding-env, atari-env, chat-env). Leave blank to pull all.",
     )
     args = parser.parse_args()
@@ -63,7 +64,7 @@ def main() -> None:
             print("No environment specified. Pulling all environments...")
             for name, url in ENV_IMAGES.items():
                 if name == "base":
-                    continue  
+                    continue
                 pull_image(url, name)
 
         print("All images pulled successfully.")
