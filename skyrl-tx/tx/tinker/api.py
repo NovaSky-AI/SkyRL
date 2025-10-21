@@ -258,16 +258,8 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        # Normalize stop parameter to list format
-        stop: list[str] | list[int] = []
         if self.stop is not None:
-            if isinstance(self.stop, str):
-                stop = [self.stop]
-            elif isinstance(self.stop, (list, tuple)):
-                stop = list(self.stop)
-            else:
-                raise HTTPException(status_code=400, detail="'stop' parameter must be string(s) or int(s)")
-
+            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
         if self.top_k != -1:
             raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
         if self.top_p != 1.0:
@@ -280,7 +272,6 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=stop,
         )
 
 
@@ -557,7 +548,6 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
-            prompt_logprobs=request.prompt_logprobs
         ),
     )
 

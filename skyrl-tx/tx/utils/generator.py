@@ -46,20 +46,6 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
-def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
-    """Compute log probabilities of prompt tokens from prefill logits"""
-
-    logits_for_prompt = prefill_logits[:, :-1, :]
-    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
-    prompt_tokens = input_ids[:, 1:]
-    prompt_logprobs = jnp.take_along_axis(
-        log_probs, 
-        prompt_tokens[..., None], 
-        axis=-1
-    ).squeeze(-1)
-    return prompt_logprobs
-
-
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -87,10 +73,6 @@ class GeneratorMixin:
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
-        
-        prompt_logprobs_array = None
-        if prompt_logprobs:
-            prompt_logprobs_array = compute_prompt_logprobs(outputs["logits"], input_ids)
 
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
@@ -105,18 +87,6 @@ class GeneratorMixin:
 
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
             generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
-
-            # Check if any sequence hit a stop token
-            if stop_tokens is not None:
-                for i in range(batch_size):
-                    if stop_reasons[i] == "length":  # Only check if not already stopped
-                        token_id = int(next_token[i, 0])
-                        if token_id in stop_tokens:
-                            stop_reasons[i] = "stop"
-
-            # Early exit if all sequences are finished
-            if all(reason == "stop" for reason in stop_reasons):
-                break
 
             if step < max_new_tokens - 1:
                 attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
