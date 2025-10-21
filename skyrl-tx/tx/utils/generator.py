@@ -54,7 +54,7 @@ class GeneratorMixin:
         """Create a jitted decoder step function."""
 
         @jax.jit
-        def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices):
+        def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices, cache_position):
             """Single decoder step with KV caching."""
             outputs = model_fn(
                 next_token,
@@ -62,6 +62,7 @@ class GeneratorMixin:
                 positions=last_positions,
                 kv_cache=kv_cache,
                 adapter_indices=adapter_indices,
+                cache_position=cache_position,
             )
             return outputs
 
@@ -77,29 +78,61 @@ class GeneratorMixin:
         seed: int,
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
+        max_length: int = 512,
     ) -> GenerateResult:
         """Generate text autoregressively with KV caching.
+
+        Args:
+            max_length: Maximum sequence length for fixed-size buffers (default: 512).
 
         Returns:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         rng = jax.random.PRNGKey(seed)
+        batch_size = input_ids.shape[0]
+        prompt_length = input_ids.shape[1]
+
+        # Create fixed-size buffers
         generated_ids = input_ids
         scores = [] if return_scores else None
-        stop_reasons = ["length"] * input_ids.shape[0]
+        stop_reasons = ["length"] * batch_size
+
+        # Pad attention_mask to max_length
+        pad_length = max_length - attention_mask.shape[1]
+        attention_mask_padded = jnp.pad(attention_mask, ((0, 0), (0, pad_length)), constant_values=0)
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
+        # Pad KV cache to max_length
+        kv_cache = outputs["kv_cache"]
+        if kv_cache is not None:
+            padded_keys = []
+            padded_values = []
+            for k, v in zip(kv_cache.keys, kv_cache.values):
+                # k and v have shape [B, T, num_heads, head_dim]
+                cache_pad_length = max_length - k.shape[1]
+                padded_k = jnp.pad(k, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
+                padded_v = jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
+                padded_keys.append(padded_k)
+                padded_values.append(padded_v)
+            outputs["kv_cache"] = KVCache(keys=padded_keys, values=padded_values)
+
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
+
+        # Track current length for updating attention mask
+        current_length = prompt_length
 
         # Create jitted decoder step
         decoder_step = self._create_decoder_step()
 
         # Decode: generate tokens one at a time
         for step in range(max_new_tokens):
+            if current_length >= max_length:
+                break
+
             rng, sample_key = jax.random.split(rng)
             logits = outputs["logits"][:, -1, :]
 
@@ -110,16 +143,22 @@ class GeneratorMixin:
             generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
 
             if step < max_new_tokens - 1:
-                attention_mask = jnp.concatenate([attention_mask, jnp.ones_like(next_token)], axis=1)
+                # Update attention mask in-place at current position using dynamic_update_slice
+                from jax import lax
+                mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
+                attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_length))
+                current_length += 1
+
                 # Increment position for the new token
                 last_positions = last_positions + 1
                 outputs = decoder_step(
                     self,
                     next_token,
-                    attention_mask,
+                    attention_mask_padded,
                     last_positions,
                     outputs["kv_cache"],
                     adapter_indices,
+                    current_length,
                 )
 
         return GenerateResult(

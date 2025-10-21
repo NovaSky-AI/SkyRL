@@ -103,6 +103,7 @@ class Qwen3Attention(nnx.Module):
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        cache_position: int | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
@@ -115,10 +116,20 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Concatenate with cache
+        # Handle KV cache
         if kv_cache is not None:
-            k = jnp.concatenate([kv_cache[0], k], axis=1)
-            v = jnp.concatenate([kv_cache[1], v], axis=1)
+            if cache_position is not None:
+                # Update cache in-place at cache_position (for decoding with fixed-size cache)
+                # Use dynamic_update_slice for JIT compatibility
+                from jax import lax
+                updated_k = lax.dynamic_update_slice(kv_cache[0], k, (0, cache_position, 0, 0))
+                updated_v = lax.dynamic_update_slice(kv_cache[1], v, (0, cache_position, 0, 0))
+                k = updated_k
+                v = updated_v
+            else:
+                # Concatenate with cache (legacy behavior)
+                k = jnp.concatenate([kv_cache[0], k], axis=1)
+                v = jnp.concatenate([kv_cache[1], v], axis=1)
 
         updated_cache = (k, v)
 
@@ -306,6 +317,7 @@ class Qwen3DecoderLayer(nnx.Module):
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        cache_position: int | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -315,6 +327,7 @@ class Qwen3DecoderLayer(nnx.Module):
             positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            cache_position=cache_position,
         )
         hidden_states = residual + hidden_states
 
@@ -352,6 +365,7 @@ class Qwen3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        cache_position: int | None = None,
     ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -371,6 +385,7 @@ class Qwen3Model(nnx.Module):
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
+                cache_position=cache_position,
             )
             updated_keys.append(k)
             updated_values.append(v)
@@ -416,6 +431,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        cache_position: int | None = None,
     ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -427,6 +443,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            cache_position=cache_position,
         )
         hidden_states = outputs["last_hidden_state"]
         if self.config.tie_word_embeddings:
