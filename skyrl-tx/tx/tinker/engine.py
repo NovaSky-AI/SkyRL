@@ -16,7 +16,7 @@ from flax import nnx
 from flax.training import checkpoints
 
 import optax
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
@@ -114,7 +114,6 @@ class TinkerEngine:
 
         # Initialize the shared base model
         self.model_config = AutoConfig.from_pretrained(self.config.base_model)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.base_model)
 
         # Configure LoRA settings
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
