@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [tool.uv]
-required-version = ">=0.5.0"
+required-version = ">=0.8.10"
 conflicts = [
     [
         { extra = "vllm" },
