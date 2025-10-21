@@ -397,6 +397,11 @@ Algorithm Configuration
         kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
         ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
+      # cispo parameters (only used when policy_loss_type: "cispo")
+      cispo:
+        clip_low: 0.2 # lower bound for importance sampling ratio clipping
+        clip_high: 0.2 # upper bound for importance sampling ratio clipping
+
       # value loss parameters
       value_clip: 0.2
 
@@ -429,9 +434,10 @@ Algorithm Configuration
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
-  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
+  - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
@@ -463,6 +469,12 @@ Algorithm Configuration
 
   - ``kl_cov_frac``: Percentage of tokens to apply KL regularization to.
   - ``ppo_kl_coef``: Coefficient for KL regularization term.
+
+- ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
+
+  - ``clip_low``: Lower bound for importance sampling ratio clipping.
+  - ``clip_high``: Upper bound for importance sampling ratio clipping.
+
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
