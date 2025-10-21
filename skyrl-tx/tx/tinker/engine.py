@@ -646,56 +646,56 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, model_id: str, checkpoint_id: str) -> int:
-        """Load LoRA adapter weights from a sampler checkpoint into the model.
+    def load_sampler_weights(self, model_id: str, request_data: types.SampleInput) -> jax.Array | None:
+        """Load sampler weights and determine adapter indices.
 
         Args:
             model_id: The model ID
-            checkpoint_id: The checkpoint ID
+            request_data: The sample input request data
 
         Returns:
-            The adapter index where the weights were loaded
+            The adapter_indices array for LoRA sampling, or None for base model sampling
         """
-        assert checkpoint_id != "", "checkpoint_id must not be empty"
-
-        if model_id not in self.models:
-            raise ValueError(f"Model {model_id} not loaded")
-
-        lora_model = self.models[model_id]
-        checkpoint_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
-        logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-
-        # Load checkpoint using load_lora_checkpoint
-        load_lora_checkpoint(self.model, lora_model.adapter_index, checkpoint_path)
-
-        logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {lora_model.adapter_index}")
-        return lora_model.adapter_index
-
-    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the base model or LoRA adapter."""
-        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
-
         # Determine if we're sampling from base model or LoRA
         if request_data.base_model is None:
             # LoRA sampling mode
-            adapter_index = self.load_sampler_weights(model_id, request_data.checkpoint_id)
-            adapter_indices = jnp.array([[adapter_index]], dtype=jnp.int32)
+            assert request_data.checkpoint_id != "", "checkpoint_id must not be empty"
+
+            if model_id not in self.models:
+                raise ValueError(f"Model {model_id} not loaded")
+
+            lora_model = self.models[model_id]
+            checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+            logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+
+            # Load checkpoint using load_lora_checkpoint
+            load_lora_checkpoint(self.model, lora_model.adapter_index, checkpoint_path)
+
+            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {lora_model.adapter_index}")
+            return jnp.array([[lora_model.adapter_index]], dtype=jnp.int32)
         else:
             # Base model sampling mode
             if request_data.base_model != self.config.base_model:
                 raise ValueError(
                     f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
                 )
-            adapter_indices = None
+            return None
+
+    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
+        """Generate text samples from the base model or LoRA adapter."""
+        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
+
+        # Load sampler weights and determine adapter indices
+        adapter_indices = self.load_sampler_weights(model_id, request_data)
 
         # Process stop tokens (tokenize strings if needed)
         match request_data.sampling_params.stop:
+            case []:
+                stop_tokens = None
             case list(elements) if isinstance(elements[0], str):
                 stop_tokens = {token for s in elements for token in self.tokenizer.encode(s, add_special_tokens=False)}
             case list(elements):
                 stop_tokens = set(elements)
-            case None:
-                stop_tokens = None
 
         prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
 
