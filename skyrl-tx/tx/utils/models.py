@@ -115,9 +115,7 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(
-    model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath
-):
+def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
@@ -127,13 +125,11 @@ def load_lora_checkpoint(
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    lora_state = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
-        # Use load_safetensors to load the adapter weights
-        load_safetensors(temp_dir, model.config, lora_state, skip_lora=False, prefix="base_model.model.")
-
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(lora_state))
+        load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params))
 
 
 def save_lora_checkpoint(
