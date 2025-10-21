@@ -21,7 +21,7 @@ def _setup_root_logger() -> None:
         show_level=False,
         markup=True,
     )
-    formatter = logging.Formatter("%(levelname)-8s: %(message)s")
+    formatter = logging.Formatter("%(levelname)s:     %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
