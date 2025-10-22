@@ -50,34 +50,34 @@ class TerminalBenchGenerator(GeneratorInterface):
         if self.generator_cfg.chat_template.name_or_path is not None:
             raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        tasks = []
-        for prompt in input_batch["prompts"]:
-            tasks.append(
-                self.terminal_bench_agent_loop(
-                    prompt=prompt,
-                )
-            )
+    # async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    #     tasks = []
+    #     for prompt in input_batch["prompts"]:
+    #         tasks.append(
+    #             self.terminal_bench_agent_loop(
+    #                 prompt=prompt,
+    #             )
+    #         )
 
-        all_outputs = await asyncio.gather(*tasks)
+    #     all_outputs = await asyncio.gather(*tasks)
         
-        all_outputs = [output for output in all_outputs if output is not None]
+    #     all_outputs = [output for output in all_outputs if output is not None]
 
-        responses = [output.response_ids for output in all_outputs]
-        rewards = [output.reward for output in all_outputs]
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+    #     responses = [output.response_ids for output in all_outputs]
+    #     rewards = [output.reward for output in all_outputs]
+    #     rollout_metrics = get_rollout_metrics(responses, rewards)
 
-        generator_output: GeneratorOutput = {
-            "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": responses,
-            "rewards": rewards,
-            "loss_masks": [output.loss_mask for output in all_outputs],
-            "stop_reasons": [output.stop_reason for output in all_outputs],
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
-        }
+    #     generator_output: GeneratorOutput = {
+    #         "prompt_token_ids": [output.prompt_ids for output in all_outputs],
+    #         "response_ids": responses,
+    #         "rewards": rewards,
+    #         "loss_masks": [output.loss_mask for output in all_outputs],
+    #         "stop_reasons": [output.stop_reason for output in all_outputs],
+    #         "rollout_metrics": rollout_metrics,
+    #         "rollout_logprobs": None,
+    #     }
 
-        return generator_output
+    #     return generator_output
 
     async def terminal_bench_agent_loop(
         self,
@@ -183,3 +183,61 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
         )
+
+    
+
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        # For testing, skip the actual async agent loop
+        max_response_tokens = (
+            self.generator_cfg.sampling_params.max_generate_length
+            + self.generator_cfg.max_input_length
+        )
+
+        fake_output = self.fake_generator_output(
+            tokenizer=self.tokenizer,
+            input_batch=input_batch,
+            max_response_tokens=max_response_tokens,
+        )
+
+        return fake_output
+    
+
+    def fake_generator_output(self, tokenizer, input_batch, max_response_tokens: int, batch_size: int = None):
+        """
+        Create a fake generator_output dict that mimics the structure of a real one.
+
+        Args:
+            tokenizer: your tokenizer (used to get vocab size)
+            input_batch: the same input_batch used in generate()
+            max_response_tokens: maximum length of fake responses
+            batch_size: optional override for batch size
+        """
+        import random
+        vocab_size = len(tokenizer)
+        prompts = input_batch["prompts"]
+        batch_size = batch_size or len(prompts)
+
+        def random_tokens(length):
+            return [random.randint(0, vocab_size - 1) for _ in range(length)]
+
+        fake_outputs = []
+        for _ in range(batch_size):
+            fake_outputs.append({
+                "prompt_ids": random_tokens(32),  # arbitrary prompt length
+                "response_ids": random_tokens(max_response_tokens),
+                "reward": random.uniform(0, 1),
+                "loss_mask": [1] * max_response_tokens,
+                "stop_reason": "length",
+            })
+
+        generator_output = {
+            "prompt_token_ids": [o["prompt_ids"] for o in fake_outputs],
+            "response_ids": [o["response_ids"] for o in fake_outputs],
+            "rewards": [o["reward"] for o in fake_outputs],
+            "loss_masks": [o["loss_mask"] for o in fake_outputs],
+            "stop_reasons": [o["stop_reason"] for o in fake_outputs],
+            "rollout_metrics": {"avg_reward": sum(o["reward"] for o in fake_outputs) / batch_size},
+            "rollout_logprobs": None,
+        }
+
+        return generator_output

@@ -190,20 +190,18 @@ class Terminus2(BaseAgent):
 
     def _get_model_context_limit(self) -> int:
         """Get the context limit (max input tokens) for the current model."""
+        fallback_context_limit = 1000000
+        try:
+            model_info = get_model_info(self._model_name)
+            max_input_tokens = model_info.get("max_input_tokens")
 
-        return 100000
-        # fallback_context_limit = 1000000
-        # try:
-        #     model_info = get_model_info(self._model_name)
-        #     max_input_tokens = model_info.get("max_input_tokens")
+            # Fallback to max_tokens if max_input_tokens not available
+            if max_input_tokens is None:
+                max_input_tokens = model_info.get("max_tokens")
 
-        #     # Fallback to max_tokens if max_input_tokens not available
-        #     if max_input_tokens is None:
-        #         max_input_tokens = model_info.get("max_tokens")
-
-        #     return max_input_tokens or fallback_context_limit
-        # except Exception:
-        #     return fallback_context_limit
+            return max_input_tokens or fallback_context_limit
+        except Exception:
+            return fallback_context_limit
 
     def _limit_output_length(self, output: str, max_bytes: int = 10000) -> str:
         """
@@ -664,10 +662,29 @@ so ask everything you need to know."""
                 )
                 continue
 
+            # timeout_occurred, terminal_output = await self._execute_commands(
+            #     commands,
+            #     self._session,
+            # )
+            exec_start_time = time.time()
+            self._logger.info(f"Episode {episode}: Executing {len(commands)} commands: {commands}")
             timeout_occurred, terminal_output = await self._execute_commands(
                 commands,
                 self._session,
             )
+            exec_end_time = time.time()
+            self._logger.info(f"Episode {episode}: Execution finished in {exec_end_time - exec_start_time:.3f} seconds")
+            # Save the time taken and commands to a file in the root directory
+            output_path = "/data/terminus.log"
+            # Convert commands list to readable string
+            cmds_str = "; ".join([str(cmd.keystrokes) for cmd in commands])
+            line = (
+                f"Episode {episode}, Time: {exec_end_time - exec_start_time:.3f} seconds, "
+                f"Commands: {cmds_str}\n"
+            )
+            with open(output_path, "a") as f:
+                f.write(line)
+
 
             if is_task_complete:
                 if self._pending_completion:

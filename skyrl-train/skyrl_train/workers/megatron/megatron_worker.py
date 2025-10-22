@@ -40,6 +40,7 @@ class MegatronWorker:
         try:
             import transformer_engine  # noqa: F401
         except ImportError:
+            print(">> MEGATRON POLICY WORKER BASE INIT, CHECK TE IMPORT FAILED")
             raise ValueError(
                 """
                 transformer_engine is required for using the megatron backend.
@@ -151,8 +152,11 @@ class MegatronWorker:
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
+        print(">> MEGATRON POLICY WORKER BASE INIT, JUST CALLING OTHER METHODS")
         super().__init__(**kwargs)
+        print(">> MEGATRON POLICY WORKER BASE INIT, CHECK TE IMPORT")
         self.check_te_import()
+        print(">> MEGATRON POLICY WORKER BASE INIT, CHECK TE IMPORT DONE")
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -174,15 +178,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
-        if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+        print("????1????")
+        print(f">>> MASTER_ADDR={os.environ.get('MASTER_ADDR')}, MASTER_PORT={os.environ.get('MASTER_PORT')}")
+        print("is_initialized", torch.distributed.is_initialized())
+        try:
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend="nccl")
+        except Exception as e:
+            print(f"[init_process_group] Failed with error: {e}")
 
+        print("????2????")
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.policy.megatron_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
         )
+        print("????3????")
         self.strategy.setup_distributed()
+
+        print("????4????")
 
         self.mesh_rank = MeshRank(
             dp=mpu.get_data_parallel_rank(),

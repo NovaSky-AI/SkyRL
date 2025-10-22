@@ -17,7 +17,6 @@ sudo apt update && sudo apt install --fix-broken && sudo apt install -y default-
 
 
 
-
 # ---------- PyTorch + cuDNN + Transformer Engine ----------
 # PyTorch + cuDNN + Transformer Engine
 uv pip install --no-cache-dir "torch==2.7.1" "nvidia-cudnn-cu12>=9.3" && \
@@ -32,8 +31,11 @@ export CUDNN_PATH="/opt/cudnn"
 export CPATH="${CUDNN_PATH}/include:${CPATH}"
 export LD_LIBRARY_PATH="${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}"
 
+export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=1"
 
 uv pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.5.0"
+# uv pip install --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
+# uv pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]"
 # --------------------
 
 
@@ -84,3 +86,8 @@ EOF'
 sudo docker run hello-world
 
 sudo systemctl restart docker
+
+
+
+# build-essential and libnuma
+sudo apt update && sudo apt-get install build-essential libnuma-dev
