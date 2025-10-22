@@ -2,11 +2,10 @@ from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOss
 from skyrl_train.patches.gptoss.patch_transformers import patch_GptOssAttention
 from transformers import AutoConfig
 from skyrl_train.utils.profiler import CudaTimer
-import ray 
+import ray
 import torch
 import random
 import numpy as np
-import time
 from einops import repeat
 import argparse
 
@@ -21,6 +20,7 @@ parser.add_argument("--num_trials", type=int, default=20, help="Number of trials
 parser.add_argument("--torch_dtype", type=lambda x: getattr(torch, x), default=torch.bfloat16, help="Torch dtype")
 parser.add_argument("--with-attention", help="Whether to add attention mask", type=bool, default=False)
 args = parser.parse_args()
+
 
 @ray.remote(num_gpus=1)
 def run_bench(args):
@@ -45,16 +45,23 @@ def run_bench(args):
         attention_mask = None
         if with_attention:
             # zero out 30%
-            num_zeros = int(0.3*sequence_length)
+            num_zeros = int(0.3 * sequence_length)
             left_padding = random.randint(0, num_zeros)
             right_padding = num_zeros - left_padding
-            attention_mask = torch.cat((torch.zeros(batch_size, left_padding), torch.ones(batch_size, sequence_length - num_zeros), torch.zeros(batch_size, right_padding)), dim=1).to(device, dtype=torch.long)
+            attention_mask = torch.cat(
+                (
+                    torch.zeros(batch_size, left_padding),
+                    torch.ones(batch_size, sequence_length - num_zeros),
+                    torch.zeros(batch_size, right_padding),
+                ),
+                dim=1,
+            ).to(device, dtype=torch.long)
         return prompt, attention_mask
 
     # use 256 MB tensor to clear L2 cache (same as triton timing approach)
-    x = torch.empty(int(256 * (1024 ** 2)), dtype=torch.int8, device='cuda')
+    x = torch.empty(int(256 * (1024**2)), dtype=torch.int8, device="cuda")
 
-    def flush_cache():  
+    def flush_cache():
         x.zero_()
 
     ## eager
@@ -68,14 +75,22 @@ def run_bench(args):
     try:
         for i in range(NUM_TRIALS):
 
-            prompt, attention_mask = generate_inputs(BATCH_SIZE, SEQUENCE_LENGTH, config.hidden_size, DEVICE, TORCH_DTYPE, args.with_attention)
+            prompt, attention_mask = generate_inputs(
+                BATCH_SIZE, SEQUENCE_LENGTH, config.hidden_size, DEVICE, TORCH_DTYPE, args.with_attention
+            )
             full_batch = prompt.contiguous()
-            position_ids = repeat(torch.arange(SEQUENCE_LENGTH, dtype=TORCH_DTYPE), "L -> B L", B=BATCH_SIZE).to(DEVICE, dtype=torch.long).contiguous()
+            position_ids = (
+                repeat(torch.arange(SEQUENCE_LENGTH, dtype=TORCH_DTYPE), "L -> B L", B=BATCH_SIZE)
+                .to(DEVICE, dtype=torch.long)
+                .contiguous()
+            )
             position_embeddings = rotary_emb(prompt, position_ids)
             grad_out = torch.randn_like(full_batch)
 
             with CudaTimer(DEVICE) as results:
-                output, _ = eager_gptoss(full_batch, position_embeddings=position_embeddings, attention_mask=attention_mask)
+                output, _ = eager_gptoss(
+                    full_batch, position_embeddings=position_embeddings, attention_mask=attention_mask
+                )
             with CudaTimer(DEVICE) as results_bwd:
                 output.backward(grad_out)
             eager_gptoss.zero_grad()
@@ -90,7 +105,7 @@ def run_bench(args):
         print(f"Overall mean eager time: {eager_time}")
     except torch.OutOfMemoryError as e:
         print(f"Eager attention OOM'ed with the following traceback: {e}. Skipping...")
-    finally:        
+    finally:
         eager_gptoss.zero_grad()
         eager_gptoss.to("cpu")
         flush_cache()
@@ -105,16 +120,24 @@ def run_bench(args):
     try:
         for i in range(NUM_TRIALS):
 
-            prompt, attention_mask = generate_inputs(BATCH_SIZE, SEQUENCE_LENGTH, config.hidden_size, DEVICE, TORCH_DTYPE, args.with_attention)
+            prompt, attention_mask = generate_inputs(
+                BATCH_SIZE, SEQUENCE_LENGTH, config.hidden_size, DEVICE, TORCH_DTYPE, args.with_attention
+            )
             full_batch = prompt.contiguous()
             # #full_batch = torch.cat((chosen_full, rejected_full), dim=0).contiguous()
             position_ids = None
-            position_ids = repeat(torch.arange(SEQUENCE_LENGTH, dtype=TORCH_DTYPE), "L -> B L", B=BATCH_SIZE).to(DEVICE, dtype=TORCH_DTYPE).contiguous()
+            position_ids = (
+                repeat(torch.arange(SEQUENCE_LENGTH, dtype=TORCH_DTYPE), "L -> B L", B=BATCH_SIZE)
+                .to(DEVICE, dtype=TORCH_DTYPE)
+                .contiguous()
+            )
             position_embeddings = rotary_emb(prompt, position_ids)
             grad_out = torch.randn_like(full_batch)
 
             with CudaTimer(DEVICE) as results:
-                output, _ = flex_gptoss(full_batch, position_embeddings=position_embeddings, attention_mask=attention_mask)
+                output, _ = flex_gptoss(
+                    full_batch, position_embeddings=position_embeddings, attention_mask=attention_mask
+                )
             with CudaTimer(DEVICE) as results_bwd:
                 output.backward(grad_out)
             flex_gptoss.zero_grad()
@@ -123,14 +146,14 @@ def run_bench(args):
             if i >= NUM_WARMUP_TRIALS:
                 fwd_times.append(results.elapsed_time)
                 bwd_times.append(results_bwd.elapsed_time)
-        
+
         flex_attn_time = np.mean(fwd_times) + np.mean(bwd_times)
         print(f"Flex Attn Time Fwd: {np.mean(fwd_times)} ± {np.std(fwd_times)}")
         print(f"Flex Attn Time Bwd: {np.mean(bwd_times)} ± {np.std(bwd_times)}")
         print(f"Flex Attn overall time: {flex_attn_time}")
     except torch.OutOfMemoryError as e:
         print(f"Flex attention OOM'ed with the following traceback: {e}. Skipping...")
-    finally:        
+    finally:
         flex_gptoss.zero_grad()
         flex_gptoss.to("cpu")
         flush_cache()

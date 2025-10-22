@@ -95,4 +95,4 @@ class CudaTimer:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.end_event.record()
         torch.cuda.synchronize(self.device)
-        self.elapsed_time = self.start_event.elapsed_time(self.end_event) # Calculate the elapsed time
+        self.elapsed_time = self.start_event.elapsed_time(self.end_event)  # Calculate the elapsed time
