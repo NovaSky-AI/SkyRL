@@ -96,13 +96,13 @@ class GeneratorMixin:
         prompt_length = input_ids.shape[1]
 
         # Create fixed-size buffers
-        generated_ids = input_ids
         scores = [] if return_scores else None
         stop_reasons = ["length"] * batch_size
 
-        # Pad attention_mask to max_length
-        pad_length = max_length - attention_mask.shape[1]
+        # Pad inputs to max_length
+        pad_length = max_length - prompt_length
         attention_mask_padded = jnp.pad(attention_mask, ((0, 0), (0, pad_length)), constant_values=0)
+        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)), constant_values=0)
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
@@ -113,10 +113,6 @@ class GeneratorMixin:
 
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
-
-        #  Pre allocate in advance generated_ids buffer with fixed size to avoid rechaching
-        generated_ids_buf = jnp.zeros((batch_size, max_length), dtype=input_ids.dtype)
-        generated_ids_buf = generated_ids_buf.at[:, :prompt_length].set(input_ids)
 
         def scan_fn(carry, _):
             """Autoregressively generate with jax.scan for efficiency"""
@@ -152,7 +148,7 @@ class GeneratorMixin:
         initial_carry = (
             outputs["kv_cache"],
             rng,
-            generated_ids_buf,
+            generated_ids,
             attention_mask_padded,
             last_positions,
             outputs["logits"][:, -1, :],
