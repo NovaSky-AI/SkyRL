@@ -17,7 +17,7 @@ parser.add_argument("--layer_idx", type=int, default=5, help="Layer index")
 parser.add_argument("--num_warmup_trials", type=int, default=10, help="Number of warmup trials that are ignored")
 parser.add_argument("--num_trials", type=int, default=20, help="Number of trials total")
 parser.add_argument("--torch_dtype", type=lambda x: getattr(torch, x), default=torch.bfloat16, help="Torch dtype")
-parser.add_argument("--with-attention", help="Whether to add attention mask", type=bool, default=False)
+parser.add_argument("--with-attention", help="Whether to add attention mask", action="store_true")
 args = parser.parse_args()
 
 
