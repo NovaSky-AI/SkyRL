@@ -1,5 +1,6 @@
 """Generator mixin for autoregressive text generation with KV caching."""
 
+from __future__ import annotations
 from dataclasses import dataclass
 
 import jax
@@ -16,7 +17,7 @@ class KVCache:
     values: list[jax.Array]
     cache_position: int
 
-    def pad_to_length(self, max_length: int) -> "KVCache":
+    def pad_to_length(self, max_length: int) -> KVCache:
         """Pad KV cache to a specified maximum length.
 
         Args:
@@ -30,10 +31,8 @@ class KVCache:
         for k, v in zip(self.keys, self.values):
             # k and v have shape [B, T, num_heads, head_dim]
             cache_pad_length = max_length - k.shape[1]
-            padded_k = jnp.pad(k, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
-            padded_v = jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
-            padded_keys.append(padded_k)
-            padded_values.append(padded_v)
+            padded_keys.append(jnp.pad(k, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0))
+            padded_values.append(jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0))
         return KVCache(keys=padded_keys, values=padded_values, cache_position=self.cache_position)
 
 
@@ -78,14 +77,13 @@ class GeneratorMixin:
         @jax.jit
         def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices):
             """Single decoder step with KV caching."""
-            outputs = model_fn(
+            return model_fn(
                 next_token,
                 attention_mask=attention_mask,
                 positions=last_positions,
                 kv_cache=kv_cache,
                 adapter_indices=adapter_indices,
             )
-            return outputs
 
         self.decoder_step = decoder_step
 
