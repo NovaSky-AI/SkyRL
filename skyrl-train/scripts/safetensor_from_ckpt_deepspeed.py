@@ -76,15 +76,15 @@ def config_dir_from_path(config_path: str) -> str:
     return os.path.dirname(config_path)
 
 
-def _normalize_keys_to_hf(state_dict, convert_tensors=False) -> Dict[str, torch.Tensor]:
+def _normalize_keys_to_hf(state_dict, convert_to_cpu=False) -> Dict[str, torch.Tensor]:
     """Strip leading 'module.' if present; optionally convert tensors to CPU FP32."""
     out: Dict[str, torch.Tensor] = {}
     for k, v in state_dict.items():
         if not isinstance(v, torch.Tensor):
             continue
         k_norm = k[7:] if k.startswith("module.") else k
-        if convert_tensors:
-            out[k_norm] = v.detach().to(torch.float32).cpu()
+        if convert_to_cpu:
+            out[k_norm] = v.detach().cpu()
         else:
             out[k_norm] = v
     return out
@@ -99,8 +99,7 @@ def gather_full_state_dict_zero3(ckpt_dir: str) -> Dict[str, torch.Tensor]:
     if raw is None:
         raise RuntimeError(f"Failed to load ZeRO-3 checkpoint from {ckpt_dir}")
         
-    # Single loop: normalize keys and convert tensors to CPU FP32
-    return _normalize_keys_to_hf(raw, convert_tensors=True)
+    return _normalize_keys_to_hf(raw, convert_to_cpu=True)
 
 
 def apply_tied_embeddings_drop(state_dict: Dict[str, torch.Tensor], config_path: str) -> None:
@@ -132,7 +131,7 @@ def copy_auxiliary_files(hf_src_dir: Optional[str], out_dir: str) -> Tuple[int, 
     for item in os.listdir(hf_src_dir):
         src_path = os.path.join(hf_src_dir, item)
         
-        # Skip model weight files (we're replacing these)
+        # Skip model weight files
         if item.startswith(('pytorch_model', 'model.safetensors')):
             continue
         if item.startswith('.'):
@@ -161,7 +160,6 @@ def try_hf_builtin_conversion(ckpt_dir: str, out_dir: str, config_path: str) -> 
         model = AutoModelForCausalLM.from_pretrained(
             ckpt_dir,
             config=config,
-            dtype=torch.float32,
             device_map="cpu",
             trust_remote_code=True  # In case of custom models
         )
@@ -193,7 +191,6 @@ def main() -> None:
             print(f"[FAILURE] ZeRO-3 gather failed: {e}", file=sys.stderr)
             return
 
-    # Copy tokenizer and generation files if present
     hf_src_dir = find_hf_metadata_dir(ckpt_dir)
     copied, total = copy_auxiliary_files(hf_src_dir, out_dir)
     if total != copied:
