@@ -127,9 +127,9 @@ trainer:
       ppo_kl_coef: 1.0
     
     # cispo parameters (only used when policy_loss_type: "cispo")
-    cispo:
-      cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (bound = 1 - cispo_eps_clip_low)
-      cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (bound = 1 + cispo_eps_clip_high)
+    cispo: 
+      cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update)
+      cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update)
 
 
   gradient_checkpointing: true
