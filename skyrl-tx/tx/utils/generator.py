@@ -144,13 +144,10 @@ class GeneratorMixin:
 
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
 
-            # Use cache_position to track where to write
-            current_pos = kv_cache.cache_position
-            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, current_pos))
-
-            # Update attention mask
+            # Update generated_ids and attention mask
+            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
             mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
-            attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_pos))
+            attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, kv_cache.cache_position))
 
             last_positions = last_positions + 1
 
@@ -194,12 +191,8 @@ class GeneratorMixin:
         if return_scores:
             scores = [logits_seq[i] for i in range(logits_seq.shape[0])]
 
-        # Slice to return only the actual generated tokens (not the padded buffer)
-        final_length = prompt_length + max_new_tokens
-        generated_ids_output = generated_ids[:, :final_length]
-
         return GenerateResult(
-            generated_ids=generated_ids_output,
+            generated_ids=generated_ids[:, : prompt_length + max_new_tokens],
             stop_reasons=stop_reasons,
             scores=scores,
         )
