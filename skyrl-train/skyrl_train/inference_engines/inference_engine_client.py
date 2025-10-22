@@ -370,11 +370,14 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     def __getstate__(self):
         """
-        Override to avoid pickling the server thread, which is not picklable.
-        Needed when passing InferenceEngineClient as an argument to async_run_ray_method().
+        Override to avoid pickling the server thread and the threading.Event object, which are not picklable.
+        Needed when passing InferenceEngineClient as an argument to async_run_ray_method(), mainly for
+        invoking `init_weight_sync_state()` and `broadcast_to_inference_engines()`, which do
+        not need these attributes.
         """
         state = self.__dict__.copy()
         state["_server_thread"] = None
+        state["generation_paused_event"] = None
         return state
 
     def _spin_up_http_endpoint(self):
