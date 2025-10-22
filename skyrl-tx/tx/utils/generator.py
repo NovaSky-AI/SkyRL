@@ -91,32 +91,26 @@ class GeneratorMixin:
         Returns:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
-        rng = jax.random.PRNGKey(seed)
         batch_size, prompt_length = input_ids.shape
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
-
-        # Pad KV cache to max_length
-        outputs["kv_cache"] = outputs["kv_cache"].pad_to_length(max_length)
+        kv_cache = outputs["kv_cache"].pad_to_length(max_length)
 
         def scan_fn(carry, _):
-            """Autoregressively generate with jax.scan for efficiency"""
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
-
             rng, sample_key = jax.random.split(rng)
-
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
-            mask_update = jnp.ones((batch_size, 1), dtype=attention_mask.dtype)
-            attention_mask = lax.dynamic_update_slice(attention_mask, mask_update, (0, kv_cache.cache_position))
-
+            attention_mask = lax.dynamic_update_slice(
+                attention_mask, jnp.ones((batch_size, 1), dtype=attention_mask.dtype), (0, kv_cache.cache_position)
+            )
             last_positions = last_positions + 1
 
-            # Run decoder step (cache_position will be incremented inside)
+            # Run decoder step
             outputs = self(
                 next_token,
                 attention_mask=attention_mask,
@@ -134,26 +128,20 @@ class GeneratorMixin:
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
 
-        # Initial carry state
         initial_carry = (
-            outputs["kv_cache"],
-            rng,
+            kv_cache,
+            jax.random.PRNGKey(seed),
             generated_ids,
             attention_mask,
             positions[:, -1:],
             outputs["logits"][:, -1, :],
         )
-
-        # Run scan loop (replaces the Python for loop)
         (_, _, generated_ids, _, _, _), logits_seq = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens
         )
 
-        # Use logits_seq for scores if requested
-        scores = [logits_seq[i] for i in range(logits_seq.shape[0])] if return_scores else None
-
         return GenerateResult(
             generated_ids=generated_ids[:, : prompt_length + max_new_tokens],
             stop_reasons=["length"] * batch_size,
-            scores=scores,
+            scores=list(logits_seq) if return_scores else None,
         )
