@@ -94,15 +94,6 @@ class GeneratorMixin:
         rng = jax.random.PRNGKey(seed)
         batch_size, prompt_length = input_ids.shape
 
-        # Create fixed-size buffers
-        scores = [] if return_scores else None
-        stop_reasons = ["length"] * batch_size
-
-        # Pad inputs to max_length
-        pad_length = max_length - prompt_length
-        attention_mask_padded = jnp.pad(attention_mask, ((0, 0), (0, pad_length)), constant_values=0)
-        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)), constant_values=0)
-
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
@@ -112,7 +103,7 @@ class GeneratorMixin:
 
         def scan_fn(carry, _):
             """Autoregressively generate with jax.scan for efficiency"""
-            kv_cache, rng, generated_ids, attention_mask_padded, last_positions, logits = carry
+            kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
 
             rng, sample_key = jax.random.split(rng)
 
@@ -120,32 +111,35 @@ class GeneratorMixin:
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
-            mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
-            attention_mask_padded = lax.dynamic_update_slice(
-                attention_mask_padded, mask_update, (0, kv_cache.cache_position)
-            )
+            mask_update = jnp.ones((batch_size, 1), dtype=attention_mask.dtype)
+            attention_mask = lax.dynamic_update_slice(attention_mask, mask_update, (0, kv_cache.cache_position))
 
             last_positions = last_positions + 1
 
             # Run decoder step (cache_position will be incremented inside)
             outputs = self(
                 next_token,
-                attention_mask=attention_mask_padded,
+                attention_mask=attention_mask,
                 positions=last_positions,
                 kv_cache=kv_cache,
                 adapter_indices=adapter_indices,
             )
 
             new_logits = outputs["logits"][:, -1, :]
-            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask_padded, last_positions, new_logits)
+            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask, last_positions, new_logits)
             return new_carry, logits if return_scores else None
+
+        # Pad inputs to max_length
+        pad_length = max_length - prompt_length
+        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)), constant_values=0)
+        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
 
         # Initial carry state
         initial_carry = (
             outputs["kv_cache"],
             rng,
             generated_ids,
-            attention_mask_padded,
+            attention_mask,
             positions[:, -1:],
             outputs["logits"][:, -1, :],
         )
@@ -156,11 +150,10 @@ class GeneratorMixin:
         )
 
         # Use logits_seq for scores if requested
-        if return_scores:
-            scores = [logits_seq[i] for i in range(logits_seq.shape[0])]
+        scores = [logits_seq[i] for i in range(logits_seq.shape[0])] if return_scores else None
 
         return GenerateResult(
             generated_ids=generated_ids[:, : prompt_length + max_new_tokens],
-            stop_reasons=stop_reasons,
+            stop_reasons=["length"] * batch_size,
             scores=scores,
         )
