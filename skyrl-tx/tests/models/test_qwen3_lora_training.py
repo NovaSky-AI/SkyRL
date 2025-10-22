@@ -11,7 +11,7 @@ from tx.layers.lora import update_adapter_config
 
 
 def test_lora_training():
-    base_model = "Qwen/Qwen3-30B-A3B"
+    base_model = "Qwen/Qwen3-0.6B"
     config = AutoConfig.from_pretrained(base_model)
     config.max_lora_adapters = 5
     config.max_lora_rank = 32
@@ -38,7 +38,8 @@ def test_lora_training():
         adapter_indices = jnp.array([0, 1], dtype=jnp.int32)
 
         def loss_fn(model, input_ids, target_ids):
-            outputs = model(input_ids, adapter_indices=adapter_indices)
+            attention_mask = jnp.ones_like(input_ids)
+            outputs = model(input_ids, adapter_indices=adapter_indices, attention_mask)
             logits = outputs["logits"]
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
