@@ -14,6 +14,7 @@ class KVCache:
 
     keys: list[jax.Array]
     values: list[jax.Array]
+    cache_position: int
 
 
 @dataclass
@@ -55,7 +56,7 @@ class GeneratorMixin:
         """Create a jitted decoder step function."""
 
         @jax.jit
-        def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices, cache_position):
+        def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices):
             """Single decoder step with KV caching."""
             outputs = model_fn(
                 next_token,
@@ -63,7 +64,6 @@ class GeneratorMixin:
                 positions=last_positions,
                 kv_cache=kv_cache,
                 adapter_indices=adapter_indices,
-                cache_position=cache_position,
             )
             return outputs
 
@@ -118,13 +118,11 @@ class GeneratorMixin:
                 padded_v = jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
                 padded_keys.append(padded_k)
                 padded_values.append(padded_v)
-            outputs["kv_cache"] = KVCache(keys=padded_keys, values=padded_values)
+            # Initialize cache_position to current_length (where we'll write the first new token)
+            outputs["kv_cache"] = KVCache(keys=padded_keys, values=padded_values, cache_position=prompt_length)
 
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
-
-        # Track current length for updating attention mask
-        current_length = jnp.array(prompt_length, dtype=jnp.int32)
 
         # Create jitted decoder step
         decoder_step = self._create_decoder_step()
@@ -135,21 +133,23 @@ class GeneratorMixin:
 
         def scan_fn(carry, _):
             """Autoregressively generate with jax.scan for efficiency"""
-            kv_cache, rng, generated_ids, attention_mask_padded, last_positions, current_length, logits = carry
+            kv_cache, rng, generated_ids, attention_mask_padded, last_positions, logits = carry
 
             rng, sample_key = jax.random.split(rng)
 
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
 
-            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, current_length))
+            # Use cache_position to track where to write
+            current_pos = kv_cache.cache_position
+            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, current_pos))
 
             # Update attention mask
             mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
-            attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_length))
+            attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_pos))
 
             last_positions = last_positions + 1
 
-            # Run decoder step (pass current_length before incrementing, as it's the position we just wrote to)
+            # Run decoder step (cache_position will be incremented inside)
             outputs = decoder_step(
                 self,
                 next_token,
@@ -157,13 +157,10 @@ class GeneratorMixin:
                 last_positions,
                 kv_cache,
                 adapter_indices,
-                current_length,
             )
 
-            current_length = current_length + 1
-
             new_logits = outputs["logits"][:, -1, :]
-            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask_padded, last_positions, current_length, new_logits)
+            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask_padded, last_positions, new_logits)
             return new_carry, logits if return_scores else None
 
         # Initial carry state
@@ -174,7 +171,6 @@ class GeneratorMixin:
             generated_ids_buf,
             attention_mask_padded,
             last_positions,
-            current_length,
             initial_logits,
         )
 
@@ -187,7 +183,7 @@ class GeneratorMixin:
         )
 
         # Unpack final results
-        kv_cache_final, rng_final, generated_ids, attention_mask_final, last_pos_final, current_length_final, logits_final = final_carry
+        kv_cache_final, rng_final, generated_ids, attention_mask_final, last_pos_final, logits_final = final_carry
 
         # Use logits_seq for scores if requested
         if return_scores:
