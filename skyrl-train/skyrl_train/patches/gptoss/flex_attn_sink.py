@@ -23,6 +23,8 @@ __all__ = [
     "old_flex_attention_with_sink",
 ]
 
+from typing import Optional
+
 import torch
 import functools
 from torch.nn.attention.flex_attention import (
@@ -64,8 +66,16 @@ def generate_sliding_window_with_sink(window_size: int):
 
 @functools.lru_cache
 def generate_sink_score_mod(
-    sink_weights: torch.Tensor,
+    sink_weights: torch.Tensor, sequence_parallel_size: int = 1, sequence_parallel_rank: Optional[int] = None
 ):
+    if sequence_parallel_rank is None and sequence_parallel_size > 1:
+        raise ValueError("Must provide `sequence_parallel_rank` with `sequence_parallel_size` > 1")
+    elif sequence_parallel_rank is None:
+        sequence_parallel_rank = 0
+    if sequence_parallel_size > 1:
+        sink_weights = torch.tensor_split(sink_weights, sequence_parallel_size, dim=0)[sequence_parallel_rank]
+
+    # print(f"Offset: for sink score {offset} with rank {sequence_parallel_rank}. {sink_weights.shape=}, {num_heads=}")
     def sink_score_mod(score, batch, head, q_idx, kv_idx):
         # Sink token is at the first location
         return torch.where(
@@ -119,6 +129,10 @@ def old_flex_attention_with_sink(
     absolute positioning will fail.
     """
 
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+
     enable_gqa = num_key_value_groups != 1
     bsz, heads_Q, qlen_Q, dim = query.shape
     _, heads_KV, qlen_KV, _ = key.shape
@@ -153,8 +167,10 @@ def old_flex_attention_with_sink(
 
         mask_mod = combine_masks(_padding_mask, mask_mod)
 
+    sequence_parallel_size = kwargs.get("sequence_parallel_size", 1)
+    sequence_parallel_rank = kwargs.get("sequence_parallel_rank", None)
     score_mod = generate_sink_score_mod(
-        sinks,
+        sinks, sequence_parallel_size=sequence_parallel_size, sequence_parallel_rank=sequence_parallel_rank
     )
     # NOTE: if the block mask is not compiled, it leads to O(N^2) memory usage
     block_mask = _create_block_mask(mask_mod, bsz, heads_Q, qlen_Q, qlen_KV + 1, device=key.device, _compile=True)

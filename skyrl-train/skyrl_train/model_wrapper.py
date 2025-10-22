@@ -15,7 +15,11 @@ import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
-from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
+from skyrl_train.distributed.ulysses.utils import (
+    get_ulysses_sequence_parallel_rank,
+    ulysses_pad_and_slice_inputs,
+    gather_outputs_and_unpad,
+)
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
@@ -127,6 +131,7 @@ class HFModelWrapper(nn.Module):
                     from skyrl_train.patches.gptoss.patch_transformers import (
                         custom_attention,
                         custom_attention_mask,
+                        patch_GptOssAttention,
                     )
                     from transformers import AttentionInterface, AttentionMaskInterface
 
@@ -135,6 +140,13 @@ class HFModelWrapper(nn.Module):
                     # set attention implementation to be `custom_flex`
                     self.model.set_attn_implementation("custom_flex")
                     self.attn_implementation = "custom_flex"
+                    sequence_parallel_rank = None
+                    if self.sequence_parallel_size > 1:
+                        sequence_parallel_rank = get_ulysses_sequence_parallel_rank()
+                    patch_GptOssAttention(
+                        sequence_parallel_rank=sequence_parallel_rank,
+                        sequence_parallel_size=self.sequence_parallel_size,
+                    )
 
             # LoRA
             if lora_rank > 0:
@@ -306,6 +318,7 @@ class HFModelWrapper(nn.Module):
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
         else:
+            print("FWD: came here", flush=True)
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
         logits_BSV = output["logits"]

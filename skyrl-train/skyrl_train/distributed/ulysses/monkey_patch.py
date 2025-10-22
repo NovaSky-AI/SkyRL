@@ -20,7 +20,7 @@ Apply monkey-patch function to models
 import importlib.metadata
 import sys
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Callable
 
 from loguru import logger
 import torch
@@ -48,80 +48,96 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep, head_dim)
 
 
-# TODO (sumanthrh): For some reason, VERL all-gathers position_ids but not attention_mask.
-# I've added attention_mask all gather here, but this is pending correctness checks for sp_size > 1.
-def _ulysses_flash_attention_forward(
-    query_states: torch.Tensor,
-    key_states: torch.Tensor,
-    value_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    *args,
-    position_ids: Optional[torch.Tensor] = None,
-    **kwargs,
-):
-    """Insert all-to-all before and after flash attention.
-    DeepSpeed-Ulysses: https://arxiv.org/pdf/2309.14509
+def make_ulysses_attn_forward(attn_interface: Callable):
+    def _ulysses_attention_forward(
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        *args,
+        position_ids: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        """Insert all-to-all before and after flash attention.
+        DeepSpeed-Ulysses: https://arxiv.org/pdf/2309.14509
 
-    Args:
-        query_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads, head_dim)
-        key_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
-        value_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
-        position_ids (torch.Tensor, optional): (batch_size, seqlen/sp_size)
+        Args:
+            query_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads, head_dim)
+            key_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
+            value_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
+            position_ids (torch.Tensor, optional): (batch_size, seqlen/sp_size)
 
-    Returns:
-        torch.Tensor: (batch_size, seqlen/sp_size, nheads, head_dim)
-    """
-    ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
+        Returns:
+            torch.Tensor: (batch_size, seqlen/sp_size, nheads, head_dim)
+        """
+        ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
 
-    ########## AlltoAll for Ulysses ##########
-    if ulysses_sp_size > 1:
-        assert position_ids is not None, "position_ids is required for Ulysses sequence parallelism"
-        # NOTE: repeat kv heads to be divided by sequence parallel. Instead of repeating nheads_q//nheads_k,
-        # we choose to repeat sp_size//nheads_k, since flash_attention supports MQA/GQA.
-        # For example:
-        # - nheads_k=4, sp=8, repeats=2
-        # - nheads_k=8, sp=8, repeats=1
-        # - nheads_k=16, sp=8, repeats=1
-        repeats = max(ulysses_sp_size // key_states.size(2), 1)
-        key_states = repeat_kv(key_states, repeats)
-        value_states = repeat_kv(value_states, repeats)
+        mask_status = 0 if attention_mask is None else 1
+        import os
 
-        # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=1, head_dim=2)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
+        print(
+            f"RANK {os.environ.get('RANK', 'unknown')}: attention_mask={'None' if mask_status==0 else 'NotNone'}",
+            flush=True,
+        )
+        print(f"{attention_mask.shape}, {query_states.shape}")
+        ########## AlltoAll for Ulysses ##########
+        if ulysses_sp_size > 1:
+            # assert position_ids is not None, "position_ids is required for Ulysses sequence parallelism"
+            # NOTE: repeat kv heads to be divided by sequence parallel. Instead of repeating nheads_q//nheads_k,
+            # we choose to repeat sp_size//nheads_k, since flash_attention supports MQA/GQA.
+            # For example:
+            # - nheads_k=4, sp=8, repeats=2
+            # - nheads_k=8, sp=8, repeats=1
+            # - nheads_k=16, sp=8, repeats=1
+            repeats = max(ulysses_sp_size // key_states.size(2), 1)  # 2 // 8, 1 -> 1
+            key_states = repeat_kv(key_states, repeats)
+            value_states = repeat_kv(value_states, repeats)
 
-        # TODO: all_gather position_ids because `prepare_fa2_from_position_ids` needs it, we can eliminate
-        # this all_gather by passing cu_seq_lens_q, cu_seq_lens_k, max_length_k, max_length_q explicitly.
-        # https://github.com/huggingface/transformers/pull/33932
-        # (bsz, seq_len/n) -> (bsz, seq_len)
-        position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
-        torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
-        position_ids = torch.concat(position_ids_list, dim=-1)
+            # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
+            query_states = gather_seq_scatter_heads(query_states, seq_dim=1, head_dim=2)
+            key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
+            value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
+            torch.distributed.barrier()
 
-    if attention_mask is not None:
-        # all gather attention mask
-        # (bsz, seq_len/n) -> (bsz, seq_len)
-        attention_mask_list = [torch.empty_like(attention_mask) for _ in range(ulysses_sp_size)]
-        torch.distributed.all_gather(attention_mask_list, attention_mask, group=get_ulysses_sequence_parallel_group())
-        attention_mask = torch.concat(attention_mask_list, dim=-1)
+            # TODO: all_gather position_ids because `prepare_fa2_from_position_ids` needs it, we can eliminate
+            # this all_gather by passing cu_seq_lens_q, cu_seq_lens_k, max_length_k, max_length_q explicitly.
+            # https://github.com/huggingface/transformers/pull/33932
+            # (bsz, seq_len/n) -> (bsz, seq_len)
+            if position_ids is not None:
+                position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
+                torch.distributed.all_gather(
+                    position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group()
+                )
+                position_ids = torch.concat(position_ids_list, dim=-1)
 
-    # NOTE: we need to recompute this parameter otherwise the output shape will be wrong with
-    # a non-null attention mask
-    if "query_length" in kwargs:
-        kwargs["query_length"] = query_states.size(1)
+            # # print(f"entered value: {entered} rank: {os.environ['RANK']}")
+            # # tensor = torch.tensor([entered]).to("cuda")
+            # res = torch.distributed.all_reduce(tensor, group=get_ulysses_sequence_parallel_group())
+            if attention_mask is not None:
+                # all gather attention mask
+                attention_mask_list = [torch.empty_like(attention_mask) for _ in range(ulysses_sp_size)]
+                torch.distributed.all_gather(
+                    attention_mask_list, attention_mask, group=get_ulysses_sequence_parallel_group()
+                )
+                attention_mask = torch.concat(attention_mask_list, dim=-1)
 
-    # (bsz, seq_len, n_head/n, head_dim)
-    attn_output = _flash_attention_forward(
-        query_states, key_states, value_states, attention_mask, *args, position_ids=position_ids, **kwargs
-    )
+        # NOTE: we need to recompute this parameter otherwise the output shape will be wrong with
+        # a non-null attention mask
+        if "query_length" in kwargs:
+            kwargs["query_length"] = query_states.size(1)
 
-    ########## AlltoAll for Ulysses ##########
-    if ulysses_sp_size > 1:
-        # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
-        attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
+        # (bsz, seq_len, n_head/n, head_dim)
+        attn_output = attn_interface(
+            query_states, key_states, value_states, attention_mask, *args, position_ids=position_ids, **kwargs
+        )
 
-    return attn_output
+        ########## AlltoAll for Ulysses ##########
+        if ulysses_sp_size > 1:
+            attn_output = gather_heads_scatter_seq(attn_output, seq_dim=1, head_dim=2)
+
+        return attn_output
+
+    return _ulysses_attention_forward
 
 
 def apply_monkey_patch(
@@ -149,13 +165,13 @@ def apply_monkey_patch(
     # transformers<=4.47.1
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):
-            module._flash_attention_forward = _ulysses_flash_attention_forward
+            module._flash_attention_forward = make_ulysses_attn_forward(_flash_attention_forward)
             logger.info(f"Monkey patch _flash_attention_forward in {model.__module__}")
         else:
             # transformers>=4.48.0
             from transformers.integrations import flash_attention
 
-            flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
+            flash_attention._flash_attention_forward = make_ulysses_attn_forward(_flash_attention_forward)
             logger.info(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
 
 

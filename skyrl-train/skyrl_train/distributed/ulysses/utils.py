@@ -81,6 +81,7 @@ def gather_seq_scatter_heads(
     if not group:
         return x
     sp_world = get_ulysses_sequence_parallel_world_size(group)
+    print("SP world size: ", sp_world)
     x = SeqAllToAll.apply(group, x, head_dim, seq_dim)
     if unpadded_dim_size and unpadded_dim_size % sp_world != 0:
         padding_size = x.size(seq_dim) - unpadded_dim_size
