@@ -110,9 +110,6 @@ class GeneratorMixin:
         # Pad KV cache to max_length
         outputs["kv_cache"] = outputs["kv_cache"].pad_to_length(max_length)
 
-        # Keep track of only the last position for decoding
-        last_positions = positions[:, -1:]
-
         def scan_fn(carry, _):
             """Autoregressively generate with jax.scan for efficiency"""
             kv_cache, rng, generated_ids, attention_mask_padded, last_positions, logits = carry
@@ -149,7 +146,7 @@ class GeneratorMixin:
             rng,
             generated_ids,
             attention_mask_padded,
-            last_positions,
+            positions[:, -1:],
             outputs["logits"][:, -1, :],
         )
 
