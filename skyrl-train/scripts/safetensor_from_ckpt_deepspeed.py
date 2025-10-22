@@ -4,6 +4,7 @@ Standalone converter: DeepSpeed checkpoint -> HuggingFace safetensors.
 """
 
 import argparse
+import gc
 import os
 import shutil
 import sys
@@ -17,12 +18,22 @@ from transformers import AutoModelForCausalLM, AutoConfig
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt-dir", required=True, help="Path to DeepSpeed checkpoint directory (containing global_step_N subdirs, or a specific global_step_N dir).")
+    parser.add_argument(
+        "--ckpt-dir",
+        required=True,
+        help="Path to DeepSpeed checkpoint directory (containing global_step_N subdirs, or a specific global_step_N dir).",
+    )
     parser.add_argument("--out-dir", required=True, help="Output directory for the HuggingFace model.")
     parser.add_argument(
         "--config",
         default=None,
         help="Optional path to HF config.json if not present in <ckpt_dir>/huggingface/.",
+    )
+    parser.add_argument(
+        "--max-safetensor-shard-size",
+        dest="max_shard_size",
+        default="2GB",
+        help="Optional maximum shard size for safetensors. Defaults to 2GB.",
     )
     return parser.parse_args()
 
@@ -30,7 +41,7 @@ def parse_args() -> argparse.Namespace:
 def find_hf_metadata_dir(ckpt_dir: str) -> Optional[str]:
     """
     Find huggingface metadata directory using DeepSpeed 'latest' file.
-    
+
     Returns path to huggingface directory, or None if not found.
     """
     # Check for DeepSpeed 'latest' file
@@ -46,7 +57,7 @@ def find_hf_metadata_dir(ckpt_dir: str) -> Optional[str]:
             print("Could not find HF latest directory")
         except OSError as e:
             print(f"Warning: Could not read 'latest' file in {ckpt_dir}: {e}")
-    
+
     return None
 
 
@@ -76,30 +87,22 @@ def config_dir_from_path(config_path: str) -> str:
     return os.path.dirname(config_path)
 
 
-def _normalize_keys_to_hf(state_dict, convert_to_cpu=False) -> Dict[str, torch.Tensor]:
-    """Strip leading 'module.' if present; optionally convert tensors to CPU FP32."""
-    out: Dict[str, torch.Tensor] = {}
-    for k, v in state_dict.items():
-        if not isinstance(v, torch.Tensor):
-            continue
-        k_norm = k[7:] if k.startswith("module.") else k
-        if convert_to_cpu:
-            out[k_norm] = v.detach().cpu()
-        else:
-            out[k_norm] = v
-    return out
-
-
 def gather_full_state_dict_zero3(ckpt_dir: str) -> Dict[str, torch.Tensor]:
-    """
-    Use DeepSpeed zero-to-fp32 to reconstruct the full FP32 parameter state dict from a ZeRO-3 checkpoint.
-    Returns a flat dict[name] -> tensor on CPU in FP32.
-    """
     raw = get_fp32_state_dict_from_zero_checkpoint(ckpt_dir)
     if raw is None:
         raise RuntimeError(f"Failed to load ZeRO-3 checkpoint from {ckpt_dir}")
-        
-    return _normalize_keys_to_hf(raw, convert_to_cpu=True)
+
+    keys_to_process = [k for k, v in raw.items() if isinstance(v, torch.Tensor)]
+    normalized = {}
+    for k in keys_to_process:
+        v = raw[k]
+        k_norm = k[7:] if k.startswith("module.") else k
+        normalized[k_norm] = v.detach().cpu()
+        del raw[k]
+
+    del raw
+    gc.collect()
+    return normalized
 
 
 def apply_tied_embeddings_drop(state_dict: Dict[str, torch.Tensor], config_path: str) -> None:
@@ -123,18 +126,18 @@ def copy_auxiliary_files(hf_src_dir: Optional[str], out_dir: str) -> Tuple[int, 
     """Copy all auxiliary files, auto-detecting what's needed."""
     if not hf_src_dir or not os.path.isdir(hf_src_dir):
         return (0, 0)
-    
+
     os.makedirs(out_dir, exist_ok=True)
 
     copied = 0
     found = 0
     for item in os.listdir(hf_src_dir):
         src_path = os.path.join(hf_src_dir, item)
-        
+
         # Skip model weight files
-        if item.startswith(('pytorch_model', 'model.safetensors')):
+        if item.startswith(("pytorch_model", "model.safetensors")):
             continue
-        if item.startswith('.'):
+        if item.startswith("."):
             continue
         if os.path.isfile(src_path):
             found += 1
@@ -143,11 +146,11 @@ def copy_auxiliary_files(hf_src_dir: Optional[str], out_dir: str) -> Tuple[int, 
                 copied += 1
             except OSError as e:
                 print(f"Warning: Failed to copy {item}: {e}")
-    
+
     return (copied, found)
 
 
-def try_hf_builtin_conversion(ckpt_dir: str, out_dir: str, config_path: str) -> bool:
+def try_hf_builtin_conversion(ckpt_dir: str, out_dir: str, config_path: str, max_shard_size: str) -> bool:
     """
     Try using HF's built-in conversion first.
     Returns True if successful, False if fallback needed.
@@ -155,23 +158,29 @@ def try_hf_builtin_conversion(ckpt_dir: str, out_dir: str, config_path: str) -> 
     try:
         config = AutoConfig.from_pretrained(config_dir_from_path(config_path))
         print(f"Detected model type: {config.model_type}")
-        
+
         # Try to load directly from the checkpoint
         model = AutoModelForCausalLM.from_pretrained(
             ckpt_dir,
             config=config,
             device_map="cpu",
-            trust_remote_code=True  # In case of custom models
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,  # In case of custom models
         )
-        
+
         # Save as safetensors
-        model.save_pretrained(out_dir, safe_serialization=True)
+        model.save_pretrained(out_dir, safe_serialization=True, max_shard_size=max_shard_size)
         print(f"Used HuggingFace built-in conversion successfully")
+
+        del model
+        gc.collect()
         return True
-        
     except Exception as e:
         print(f"HF built-in conversion failed: {e}")
         print(f"Falling back to manual DeepSpeed conversion")
+        if "model" in locals():
+            del model
+            gc.collect()
         return False
 
 
@@ -182,7 +191,7 @@ def main() -> None:
 
     config_path = resolve_config_path(ckpt_dir, args.config)
 
-    if not try_hf_builtin_conversion(ckpt_dir, out_dir, config_path):
+    if not try_hf_builtin_conversion(ckpt_dir, out_dir, config_path, args.max_shard_size):
         try:
             state_dict = gather_full_state_dict_zero3(ckpt_dir)
             apply_tied_embeddings_drop(state_dict, config_path)
