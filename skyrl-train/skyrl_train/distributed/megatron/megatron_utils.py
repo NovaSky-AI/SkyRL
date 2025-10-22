@@ -259,16 +259,47 @@ def offload_megatron_optimizer(optimizers):
             return opt.chained_optimizers
         return [opt]
 
+    def _move_nested_cuda_to_cpu_(obj):
+        if isinstance(obj, torch.Tensor):
+            if obj.is_cuda:
+                return obj.to("cpu", non_blocking=True)
+            return obj
+        if isinstance(obj, list):
+            for i in range(len(obj)):
+                obj[i] = _move_nested_cuda_to_cpu_(obj[i])
+            return obj
+        if isinstance(obj, tuple):
+            lst = list(obj)
+            for i in range(len(lst)):
+                lst[i] = _move_nested_cuda_to_cpu_(lst[i])
+            return type(())(lst)
+        if isinstance(obj, dict):
+            for k in list(obj.keys()):
+                if k == "params":
+                    continue
+                obj[k] = _move_nested_cuda_to_cpu_(obj[k])
+            return obj
+        return obj
+
     for _opt in _iter_opts(optimizers):
         offload_megatron_copy_params(_opt)
-        opt_state_dict_values = _opt.optimizer.state.values()
-        for v in opt_state_dict_values:
-            if "exp_avg" in v:
-                v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
-            if "exp_avg_sq" in v:
-                v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+        # Move optimizer.state and any nested CUDA tensors to CPU
+        for st in _opt.optimizer.state.values():
+            if isinstance(st, dict):
+                _move_nested_cuda_to_cpu_(st)
+        # Move selected optimizer attributes that can hold CUDA buffers
+        for name, value in vars(_opt.optimizer).items():
+            if name in ("param_groups", "defaults"):
+                continue
+            if any(substr in name for substr in ("fp32", "state", "buffer", "moment", "exp_avg")):
+                _move_nested_cuda_to_cpu_(value)
         gc.collect()
-        torch.cuda.empty_cache()
+    try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
 
 
 @torch.no_grad()

@@ -26,7 +26,7 @@ from skyrl_train.generators.utils import get_metrics_from_generator_output, prep
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.utils import ppo_utils, trainer_utils
+from skyrl_train.utils import ppo_utils, trainer_utils, print_mem
 from skyrl_train.utils.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -260,12 +260,20 @@ class RayPPOTrainer:
                     # 7. sync weights to inference engines
                     if self.colocate_all:
                         self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                        ray.get(self.policy_model.async_run_ray_method("pass_through", "empty_cache"))
+                        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+                        memory = memory[0]
+                        print_mem("memory after offloading policy optimizer", memory)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
                     with Timer("sync_weights", self.all_timings):
                         ray.get(self.sync_policy_weights_to_inference_engines())
                     if self.colocate_all:
                         with Timer("offload_policy_model_to_cpu"):
                             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+                        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+                        memory = memory[0]
+                        print_mem("memory after offloading policy optimizer", memory)
+                        ray.get(self.policy_model.async_run_ray_method("pass_through", "empty_cache"))
                         asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
                 # 8. set logs
@@ -992,6 +1000,10 @@ class RayPPOTrainer:
 
         io.makedirs(global_step_folder, exist_ok=True)
 
+
+        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+        memory = memory[0]
+        print_mem("memory before saving policy checkpoint", memory)
         # Save policy checkpoint
         ray.get(
             self.policy_model.async_run_ray_method(
@@ -1001,6 +1013,11 @@ class RayPPOTrainer:
                 tokenizer=self.tokenizer,
             )
         )
+
+
+        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+        memory = memory[0]
+        print_mem("memory after saving policy checkpoint", memory)
 
         # Save critic checkpoint (if it exists)
         if self.critic_model is not None:

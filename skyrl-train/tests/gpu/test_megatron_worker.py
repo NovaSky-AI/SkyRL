@@ -1,5 +1,6 @@
 """
 Run with:
+export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
 SKYRL_PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
 """
 

@@ -37,6 +37,7 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+import gc
 
 
 class MegatronStrategy(DistributedStrategy):
@@ -158,7 +159,13 @@ class MegatronStrategy(DistributedStrategy):
         sharded_state_dict = {}
         model_sharded_state_dict = model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
+        moved_optimizer = False
         if optimizer:
+            try:
+                offload_megatron_optimizer(optimizer)
+                moved_optimizer = True
+            except Exception:
+                moved_optimizer = False
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
@@ -190,6 +197,42 @@ class MegatronStrategy(DistributedStrategy):
 
         dist.barrier()
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+        try:
+            del sharded_state_dict
+            del model_sharded_state_dict
+        except Exception:
+            pass
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        if optimizer and moved_optimizer:
+            try:
+                load_megatron_optimizer(optimizer)
+            except Exception:
+                pass
+            torch.cuda.synchronize()
+
+        # Cleanup any lingering refs and caches
+        try:
+            del sharded_state_dict
+            del model_sharded_state_dict
+        except Exception:
+            pass
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        # Restore optimizer to GPU if it was offloaded
+        if optimizer and moved_optimizer:
+            try:
+                load_megatron_optimizer(optimizer)
+            except Exception:
+                pass
+            torch.cuda.synchronize()
 
     def load_checkpoint(
         self,
