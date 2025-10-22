@@ -28,6 +28,7 @@ from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 from transformers.trainer_pt_utils import get_module_class_from_name
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.distributed_c10d import _get_default_group
 from collections import OrderedDict
 
 from packaging import version
@@ -235,7 +236,7 @@ def get_fsdp_state_ctx(model, state_type, state_cfg, optim_cfg):
 # Fsdp2 load full state dict from `accelerate`
 # Reference: https://github.com/huggingface/accelerate/blob/0af621bbecc0e43f5d43766a4945d3d2236bb8a9/src/accelerate/utils/fsdp_utils.py#L455
 # NOTE (sumanthrh): The original code from `accelerate` assumes init on meta device - with cpu init only on rank 0, but the code is compatible with cpu init on all ranks.
-def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, device_mesh: DeviceMesh, cpu_offload=None):
+def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offload=None):
     """
     Loads the full state dict (could be only on rank 0) into the sharded model. This is done by broadcasting the
     parameters from rank 0 to all other ranks. This function modifies the model in-place.
@@ -278,12 +279,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, device_mes
             tensor = tensor.contiguous()
         return tensor
 
-    fsdp_rank = device_mesh.get_local_rank("fsdp")
-    if fsdp_rank == 0:
+    if dist.get_rank() == 0:
         for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
             full_param = full_param.detach().cuda()
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_param, src=0, group=mesh.get_group("fsdp"))
+            dist.broadcast(full_param, src=0, group=_get_default_group())
             sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
@@ -297,7 +297,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, device_mes
         for param_name, sharded_param in meta_sharded_sd.items():
             full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_tensor, src=0, group=mesh.get_group("fsdp"))
+            dist.broadcast(full_tensor, src=0, group=_get_default_group())
             sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
