@@ -131,7 +131,7 @@ class GeneratorMixin:
 
         # Pad inputs to max_length
         pad_length = max_length - prompt_length
-        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)), constant_values=0)
+        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
 
         # Initial carry state
