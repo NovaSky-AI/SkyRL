@@ -55,7 +55,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="cispo_gsm8k" \
-  trainer.run_name="cispo_gsm8k_test_low_0_high_5" \
+  trainer.run_name="cispo_gsm8k_test" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/cispo_gsm8k_1.5B_ckpt" \
   $@
