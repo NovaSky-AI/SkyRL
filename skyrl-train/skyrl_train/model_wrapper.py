@@ -3,7 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
 import torch
@@ -61,6 +61,7 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
         use_torch_compile: bool = False,
+        rope_scaling: Dict[str, Any] = {},
         **kwargs,
     ) -> None:
         super().__init__()
@@ -71,6 +72,11 @@ class HFModelWrapper(nn.Module):
         # packing samples using Flash Attention 2
         if use_sample_packing:
             assert self.use_flash_attention_2, "Flash attention 2 should be used for `use_sample_packing`"
+
+        print("MYDEBUG HFModelWrapper.__init__", pretrain_or_model)
+        import traceback
+        for line in traceback.format_stack():
+            print("MYDEBUG HFModelWrapper", line.strip())
 
         if isinstance(pretrain_or_model, str):
             attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
@@ -107,6 +113,12 @@ class HFModelWrapper(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
+            rope_scaling_kwargs = {}
+            if rope_scaling:
+                rope_scaling_kwargs["rope_scaling"] = rope_scaling
+
+            print("MYDEBUG HFModelWrapper.__init__2", rope_scaling_kwargs)
+
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
@@ -114,6 +126,7 @@ class HFModelWrapper(nn.Module):
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
+                **rope_scaling_kwargs,
             )
 
             # LoRA

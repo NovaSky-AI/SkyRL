@@ -7,6 +7,7 @@ import torch
 import torch.distributed
 from loguru import logger
 from transformers.trainer import get_scheduler
+from omegaconf import OmegaConf
 
 
 from skyrl_train.model_wrapper import get_llm_for_sequence_regression, HFModelWrapper
@@ -342,6 +343,10 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
+        rope_scaling_cfg = (OmegaConf.to_container(self.cfg.trainer.rope_scaling)
+                            if "rope_scaling" in self.cfg.trainer
+                            else {})
+
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
@@ -349,6 +354,7 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             ds_config=strategy.get_ds_eval_config(),
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
+            rope_scaling=rope_scaling_cfg,
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
