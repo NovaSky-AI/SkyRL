@@ -9,7 +9,7 @@ import torch
 from safetensors import safe_open
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
-CONVERSION_SCRIPT_PATH = "/Users/pranavbharadwaj/SkyRL/skyrl-train/scripts/safetensor_from_ckpt_deepspeed.py"
+CONVERSION_SCRIPT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "safetensor_from_ckpt_deepspeed.py"))
 ALIASES = {
     "lm_head.weight": "transformer.wte.weight",  # common tied embeddings
 }
