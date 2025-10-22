@@ -117,16 +117,9 @@ class Qwen3Attention(nnx.Module):
 
         # Handle KV cache
         if kv_cache is not None:
-            # Update cache in-place at cache_position (for decoding with fixed-size cache)
-            # Use dynamic_update_slice for JIT compatibility
-            from jax import lax
-            cache_k, cache_v, cache_position = kv_cache
-            updated_k = lax.dynamic_update_slice(cache_k, k, (0, cache_position, 0, 0))
-            updated_v = lax.dynamic_update_slice(cache_v, v, (0, cache_position, 0, 0))
-            k = updated_k
-            v = updated_v
-
-        updated_cache = (k, v)
+            k_cache, v_cache, cache_position = kv_cache
+            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
+            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
 
         # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
         attn_output = jax.nn.dot_product_attention(
@@ -139,7 +132,7 @@ class Qwen3Attention(nnx.Module):
         )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
-        return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
+        return self.o_proj(output, adapter_indices=adapter_indices), (k, v)
 
 
 class Qwen3MLP(nnx.Module):
