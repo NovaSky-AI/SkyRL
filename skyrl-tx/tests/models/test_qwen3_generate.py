@@ -1,4 +1,5 @@
 import tempfile
+import time
 
 from flax import nnx
 import jax
@@ -98,8 +99,6 @@ def test_qwen3_generate_speed():
             seed=42,
         )
         warmup.generated_ids.block_until_ready()
-
-        import time
 
         runs = 1
         times = []
