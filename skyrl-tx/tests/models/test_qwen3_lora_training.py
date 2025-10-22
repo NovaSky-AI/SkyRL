@@ -11,7 +11,7 @@ from tx.layers.lora import update_adapter_config
 
 
 def test_lora_training():
-    base_model = "Qwen/Qwen3-0.6B"
+    base_model = "Qwen/Qwen3-30B-A3B"
     config = AutoConfig.from_pretrained(base_model)
     config.max_lora_adapters = 5
     config.max_lora_rank = 32
