@@ -173,10 +173,9 @@ class GeneratorMixin:
         )
 
         # Run scan loop (replaces the Python for loop)
-        final_carry, logits_seq = jax.lax.scan(scan_fn, initial_carry, xs=None, length=max_new_tokens)
-
-        # Unpack final results
-        kv_cache_final, rng_final, generated_ids, attention_mask_final, last_pos_final, logits_final = final_carry
+        (_, _, generated_ids, _, _, _), logits_seq = jax.lax.scan(
+            scan_fn, initial_carry, xs=None, length=max_new_tokens
+        )
 
         # Use logits_seq for scores if requested
         if return_scores:
