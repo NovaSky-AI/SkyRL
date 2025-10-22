@@ -14,7 +14,7 @@ cd SkyRL/skyrl-train
 
 Prerequisites: Ensure that you have Docker installed and the required OpenEnv environment images pulled locally.
 
-First, install the OpenEnv environments:
+First, install the OpenEnv environments (i.e., download the images for each environment):
 
 ```bash
 # Execute from skyrl-train directory
