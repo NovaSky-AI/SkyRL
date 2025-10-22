@@ -12,7 +12,7 @@ from typing import Dict, Optional, Tuple
 import torch
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from safetensors.torch import save_file as safetensors_save_file
-from transformers import AutoConfig
+from transformers import AutoModelForCausalLM, AutoConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,14 +76,17 @@ def config_dir_from_path(config_path: str) -> str:
     return os.path.dirname(config_path)
 
 
-def _normalize_keys_to_hf(state_dict) -> Dict[str, torch.Tensor]:
-    """Strip leading 'module.' if present; leave other names as-is."""
+def _normalize_keys_to_hf(state_dict, convert_tensors=False) -> Dict[str, torch.Tensor]:
+    """Strip leading 'module.' if present; optionally convert tensors to CPU FP32."""
     out: Dict[str, torch.Tensor] = {}
     for k, v in state_dict.items():
         if not isinstance(v, torch.Tensor):
             continue
         k_norm = k[7:] if k.startswith("module.") else k
-        out[k_norm] = v
+        if convert_tensors:
+            out[k_norm] = v.detach().to(torch.float32).cpu()
+        else:
+            out[k_norm] = v
     return out
 
 
@@ -96,13 +99,8 @@ def gather_full_state_dict_zero3(ckpt_dir: str) -> Dict[str, torch.Tensor]:
     if raw is None:
         raise RuntimeError(f"Failed to load ZeRO-3 checkpoint from {ckpt_dir}")
         
-    # Ensure tensors are CPU float32 and normalize keys
-    out: Dict[str, torch.Tensor] = {}
-    raw = _normalize_keys_to_hf(raw)
-    for k, v in raw.items():
-        if isinstance(v, torch.Tensor):
-            out[k] = v.detach().to(torch.float32).cpu()
-    return out
+    # Single loop: normalize keys and convert tensors to CPU FP32
+    return _normalize_keys_to_hf(raw, convert_tensors=True)
 
 
 def apply_tied_embeddings_drop(state_dict: Dict[str, torch.Tensor], config_path: str) -> None:
@@ -152,13 +150,10 @@ def copy_auxiliary_files(hf_src_dir: Optional[str], out_dir: str) -> Tuple[int, 
 
 def try_hf_builtin_conversion(ckpt_dir: str, out_dir: str, config_path: str) -> bool:
     """
-    Try using HuggingFace's built-in conversion first.
+    Try using HF's built-in conversion first.
     Returns True if successful, False if fallback needed.
     """
     try:
-        from transformers import AutoModelForCausalLM, AutoConfig
-        
-        # HF can auto-detect model type from config.json
         config = AutoConfig.from_pretrained(config_dir_from_path(config_path))
         print(f"Detected model type: {config.model_type}")
         
@@ -189,22 +184,14 @@ def main() -> None:
 
     config_path = resolve_config_path(ckpt_dir, args.config)
 
-    if try_hf_builtin_conversion(ckpt_dir, out_dir, config_path):
-        hf_src_dir = find_hf_metadata_dir(ckpt_dir)
-        copied, total = copy_auxiliary_files(hf_src_dir, out_dir)
-        if total != copied:
-            print(f"WARNING: Copied {copied}/{total} auxiliary files")
-        print(f"[SUCCESS]: safetensors conversion completed")
-        return
-
-    try:
-        state_dict = gather_full_state_dict_zero3(ckpt_dir)
-    except Exception as e:
-        print(f"[FAILURE] ZeRO-3 gather failed: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    apply_tied_embeddings_drop(state_dict, config_path)
-    save_safetensors_and_config(out_dir, state_dict, config_path)
+    if not try_hf_builtin_conversion(ckpt_dir, out_dir, config_path):
+        try:
+            state_dict = gather_full_state_dict_zero3(ckpt_dir)
+            apply_tied_embeddings_drop(state_dict, config_path)
+            save_safetensors_and_config(out_dir, state_dict, config_path)
+        except Exception as e:
+            print(f"[FAILURE] ZeRO-3 gather failed: {e}", file=sys.stderr)
+            return
 
     # Copy tokenizer and generation files if present
     hf_src_dir = find_hf_metadata_dir(ckpt_dir)
