@@ -39,7 +39,7 @@ def test_lora_training():
 
         def loss_fn(model, input_ids, target_ids):
             attention_mask = jnp.ones_like(input_ids)
-            outputs = model(input_ids, adapter_indices=adapter_indices, attention_mask)
+            outputs = model(input_ids, adapter_indices=adapter_indices, attention_mask=attention_mask)
             logits = outputs["logits"]
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
