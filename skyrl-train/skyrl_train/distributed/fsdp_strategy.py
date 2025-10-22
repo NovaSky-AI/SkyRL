@@ -269,7 +269,7 @@ class FSDPStrategy(DistributedStrategy):
             module = model.model if is_wrapped else model
             full_state = module.state_dict()
             apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
-            fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, cpu_offload)
             fsdp_module = module
         else:
             raise NotImplementedError(f"{self.fsdp_strategy} not implemented")
