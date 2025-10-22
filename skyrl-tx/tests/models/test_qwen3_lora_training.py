@@ -27,25 +27,22 @@ def test_lora_training():
         update_adapter_config(model, adapter_index=1, lora_rank=8, lora_alpha=8)
 
         # Create optimizer that only targets LoRA A and B parameters
-        def is_lora_param(path, value):
-            return any(name in path for name in ["lora_A", "lora_B"])
-
-        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=is_lora_param)
+        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
 
         batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
         target_ids = batch[:, 1:]
         input_ids = batch[:, :-1]
         adapter_indices = jnp.array([0, 1], dtype=jnp.int32)
+        attention_mask = jnp.ones_like(input_ids)
 
-        def loss_fn(model, input_ids, target_ids):
-            attention_mask = jnp.ones_like(input_ids)
-            outputs = model(input_ids, adapter_indices=adapter_indices, attention_mask=attention_mask)
+        def loss_fn(model, input_ids, target_ids, attention_mask):
+            outputs = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
             logits = outputs["logits"]
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
         # Compute gradients - we need to use nnx.split to separate parameters
         # that we want to compute gradients for
-        graphdef, lora_params, non_lora_params = nnx.split(model, is_lora_param, ...)
+        graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
         # Helper to extract adapter params at specific index
         def get_adapter_params(params, adapter_idx):
@@ -72,7 +69,7 @@ def test_lora_training():
 
             def loss_for_lora(lora_params):
                 merged_model = nnx.merge(graphdef, lora_params, non_lora_params)
-                return loss_fn(merged_model, input_ids, target_ids)
+                return loss_fn(merged_model, input_ids, target_ids, attention_mask)
 
             loss_and_grad_fn = nnx.value_and_grad(loss_for_lora)
             loss, lora_grads = loss_and_grad_fn(lora_params)

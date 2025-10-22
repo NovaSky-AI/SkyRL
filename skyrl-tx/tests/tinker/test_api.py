@@ -9,9 +9,10 @@ from urllib.parse import urlparse
 import pytest
 import tinker
 from tinker import types
+from transformers import AutoTokenizer
 
 
-BASE_MODEL = "Qwen/Qwen3-0.6B"
+BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +32,6 @@ def api_server():
             "8000",
             "--base-model",
             BASE_MODEL,
-            "--enable-dummy-sample",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -100,6 +100,9 @@ def test_training_workflow(service_client):
 
     # Save the optimizer state
     resume_path = training_client.save_state(name="0000").result().path
+    # Get the training run ID from the first save
+    parsed_resume = urlparse(resume_path)
+    original_training_run_id = parsed_resume.netloc
 
     # Run training step
     fwdbwd_future = training_client.forward_backward(processed_examples, "cross_entropy")
@@ -139,23 +142,32 @@ def test_training_workflow(service_client):
         urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
         assert os.path.getsize(tmp_archive.name) > 0
 
+    # List all checkpoints for the original training run
+    checkpoints_response = rest_client.list_checkpoints(original_training_run_id).result()
+    assert checkpoints_response is not None
+    assert len(checkpoints_response.checkpoints) > 0
+    # Verify that the checkpoint we created is in the list
+    checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
+    assert "0000" in checkpoint_ids
 
-def test_sample(service_client):
-    """Test the sample endpoint."""
-    # Create a training client and save weights to get a valid model
-    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
-    tokenizer = training_client.get_tokenizer()
 
-    # Save weights to get a valid model path
-    save_future = training_client.save_weights_for_sampler(name="test_sample")
-    model_path = save_future.result().path
+@pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
+def test_sample(service_client, use_lora):
+    """Test the sample endpoint with base model or LoRA adapter."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-    # Create a sampling client from the saved model path and get a sample
-    sampling_client = service_client.create_sampling_client(model_path)
-    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello", add_special_tokens=True))
+    if use_lora:
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        sampling_path = training_client.save_weights_for_sampler(name="test_sample").result().path
+        sampling_client = service_client.create_sampling_client(sampling_path)
+    else:
+        sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+
+    # Sample from the model (base or LoRA)
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
     sample_result = sampling_client.sample(
         prompt=prompt,
-        sampling_params=types.SamplingParams(temperature=1.0, top_k=50, max_tokens=10),
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10),
         num_samples=1,
     ).result()
 
