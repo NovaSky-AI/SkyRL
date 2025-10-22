@@ -399,8 +399,8 @@ Algorithm Configuration
 
       # cispo parameters (only used when policy_loss_type: "cispo")
       cispo:
-        cispo_eps_clip_low: 0 # offset for lower bound of importance sampling ratio clipping
-        cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping
+        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (bound = 1 - cispo_eps_clip_low)
+        cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (bound = 1 + cispo_eps_clip_high)
 
       # value loss parameters
       value_clip: 0.2
