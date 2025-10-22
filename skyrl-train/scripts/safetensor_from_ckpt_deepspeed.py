@@ -44,8 +44,8 @@ def find_hf_metadata_dir(ckpt_dir: str) -> Optional[str]:
             if os.path.isdir(hf_dir):
                 return hf_dir
             print("Could not find HF latest directory")
-        except (IOError, OSError):
-            pass
+        except OSError as e:
+            print(f"Warning: Could not read 'latest' file in {ckpt_dir}: {e}")
     
     return None
 
