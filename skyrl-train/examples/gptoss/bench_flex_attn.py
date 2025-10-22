@@ -12,8 +12,7 @@ import argparse
 parser = argparse.ArgumentParser()
 
 parser.add_argument("--batch_size", type=int, default=4, help="Batch size for processing")
-parser.add_argument("--prefix_length", type=int, default=512, help="Prefix length")
-parser.add_argument("--model_name", type=str, default="unsloth/gpt-oss-20b-BF16", help="Model name to use")
+parser.add_argument("--sequence_length", type=int, default=512, help="Prefix length")
 parser.add_argument("--layer_idx", type=int, default=5, help="Layer index")
 parser.add_argument("--num_warmup_trials", type=int, default=10, help="Number of warmup trials that are ignored")
 parser.add_argument("--num_trials", type=int, default=20, help="Number of trials total")
@@ -26,8 +25,8 @@ args = parser.parse_args()
 def run_bench(args):
 
     BATCH_SIZE = args.batch_size
-    SEQUENCE_LENGTH = args.prefix_length
-    MODEL_NAME = args.model_name
+    SEQUENCE_LENGTH = args.sequence_length
+    MODEL_NAME = "unsloth/gpt-oss-20b-BF16"
     LAYER_IDX = args.layer_idx
     DEVICE = "cuda:0"
     NUM_WARMUP_TRIALS = args.num_warmup_trials

@@ -48,35 +48,37 @@ try:
     HAS_FLEX_ATTENTION = True
     from torch.nn.attention.flex_attention import _score_mod_signature, _mask_mod_signature
 
-    # Determine kernel_options since low memory GPUs will go out of memory
-    # InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 65536 Hardware limit:65536 Reducing block sizes or `num_stages` may help.
-    # See https://github.com/pytorch/pytorch/issues/133254#issuecomment-2408710459
-    # https://github.com/pytorch/pytorch/issues/133254#issuecomment-2539969593
-    vram_of_gpu = min(
-        torch.cuda.memory.mem_get_info(i)[-1] / 1024 / 1024 / 1024 for i in range(torch.cuda.device_count())
-    )
-    kernel_options = None
-    if vram_of_gpu <= 16:
-        kernel_options = {
-            "BLOCK_M": 32,
-            "BLOCK_N": 32,
-            "BLOCK_M1": 32,
-            "BLOCK_N1": 32,
-            "BLOCK_M2": 32,
-            "BLOCK_N2": 32,
-        }
-        _flex_attention = functools.partial(_flex_attention, kernel_options=kernel_options)
-    elif vram_of_gpu <= 24:
-        kernel_options = {
-            "BLOCK_M": 64,
-            "BLOCK_N": 64,
-            "BLOCK_M1": 32,
-            "BLOCK_N1": 64,
-            "BLOCK_M2": 64,
-            "BLOCK_N2": 32,
-        }
-        _flex_attention = functools.partial(_flex_attention, kernel_options=kernel_options)
-    pass
+    try:
+        # Determine kernel_options since low memory GPUs will go out of memory
+        # InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 65536 Hardware limit:65536 Reducing block sizes or `num_stages` may help.
+        # See https://github.com/pytorch/pytorch/issues/133254#issuecomment-2408710459
+        # https://github.com/pytorch/pytorch/issues/133254#issuecomment-2539969593
+        vram_of_gpu = min(
+            torch.cuda.memory.mem_get_info(i)[-1] / 1024 / 1024 / 1024 for i in range(torch.cuda.device_count())
+        )
+        kernel_options = None
+        if vram_of_gpu <= 16:
+            kernel_options = {
+                "BLOCK_M": 32,
+                "BLOCK_N": 32,
+                "BLOCK_M1": 32,
+                "BLOCK_N1": 32,
+                "BLOCK_M2": 32,
+                "BLOCK_N2": 32,
+            }
+            _flex_attention = functools.partial(_flex_attention, kernel_options=kernel_options)
+        elif vram_of_gpu <= 24:
+            kernel_options = {
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_M1": 32,
+                "BLOCK_N1": 64,
+                "BLOCK_M2": 64,
+                "BLOCK_N2": 32,
+            }
+            _flex_attention = functools.partial(_flex_attention, kernel_options=kernel_options)
+    except Exception:
+        pass
     flex_attention = torch.compile(_flex_attention)
 
     @functools.lru_cache
