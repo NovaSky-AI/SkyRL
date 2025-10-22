@@ -147,7 +147,6 @@ class GeneratorMixin:
                 from jax import lax
                 mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
                 attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_length))
-                current_length += 1
 
                 # Increment position for the new token
                 last_positions = last_positions + 1
@@ -160,6 +159,8 @@ class GeneratorMixin:
                     adapter_indices,
                     current_length,
                 )
+
+                current_length += 1
 
         return GenerateResult(
             generated_ids=generated_ids,
