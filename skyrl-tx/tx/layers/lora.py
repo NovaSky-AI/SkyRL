@@ -58,27 +58,46 @@ class LoRAMixin:
         x: jax.Array,
         base_output: jax.Array,
         adapter_indices: jax.Array | None,
+        is_embed: bool = False,
     ) -> jax.Array:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        (batch_size, seq_len, in_features) = x.shape
-        assert len(self.lora_A.shape) == 3 and self.lora_A.value.shape[1] == in_features
-        assert adapter_indices.shape[0] == batch_size
+        if is_embed:
+            (batch_size, seq_len) = x.shape
+            features = base_output.shape[-1]
 
-        x_flat = x.reshape(-1, in_features)
-        adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
+            x_flat = x.reshape(-1, 1)  # (B, S) → (B*S, 1)
+            adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
-        # Sort tokens to prepare for ragged_dot
-        x_sorted, group_sizes, unsort_indices, _ = prepare_routing(
-            x_flat, adapter_indices_expanded, self.max_lora_adapters
-        )
+            # Sort tokens to prepare for ragged_dot
+            x_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
+                x_flat, adapter_indices_expanded, self.max_lora_adapters,
+                adapter_indices=adapter_indices_expanded
+            )
+            x_sorted = x_sorted.squeeze(-1)  # (B*S, 1) -> (B*S,)
 
-        # Apply LoRA using ragged_dot: x @ A @ B
-        intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
+            # Apply LoRA using gather and ragged_dot: A[x] @ B
+            intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
+            lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
-        # Unsort, reshape, scale
+        else:
+            (batch_size, seq_len, in_features) = x.shape
+            assert len(self.lora_A.shape) == 3 and self.lora_A.value.shape[1] == in_features
+            assert adapter_indices.shape[0] == batch_size
+
+            x_flat = x.reshape(-1, in_features)
+            adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
+
+            # Sort tokens to prepare for ragged_dot
+            x_sorted, group_sizes, unsort_indices, _ = prepare_routing(
+                x_flat, adapter_indices_expanded, self.max_lora_adapters
+            )
+
+            # Apply LoRA using ragged_dot: x @ A @ B
+            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
+            lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
+
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
         lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
         return base_output + lora_output.reshape(base_output.shape)
@@ -127,29 +146,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
-
-        if self.max_lora_adapters == 0 or adapter_indices is None:
-            return base_out
-
-        (batch_size, seq_len) = x.shape
-        features = base_out.shape[-1]
-
-        x_flat = x.reshape(-1, 1) # (B, S) → (B*S, 1)
-        adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
-
-        # Sort tokens to prepare for ragged_dot
-        x_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
-            x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
-        )
-        x_sorted = x_sorted.squeeze(-1) # (B*S, 1) -> (B*S,)
-
-        # Apply LoRa using gather and the ragged_dot A[x] @ B
-        intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
-
-        lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, features)
-        lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
-        return base_out + lora_output
+        return self.apply_lora(x, base_out, adapter_indices, is_embed=True)
 
 
 class LoRALinear(LoRAMixin, nnx.Linear):
@@ -200,7 +197,7 @@ class LoRALinear(LoRAMixin, nnx.Linear):
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
-        return self.apply_lora(x, base_out, adapter_indices)
+        return self.apply_lora(x, base_out, adapter_indices, is_embed=False)
 
 
 class LoRAExpert(LoRAMixin, nnx.Module):
