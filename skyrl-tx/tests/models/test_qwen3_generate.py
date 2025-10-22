@@ -101,8 +101,6 @@ def test_qwen3_generate_speed():
 
         import time
 
-        start = time.perf_counter()
-
         runs = 1
         times = []
 
@@ -127,7 +125,7 @@ def test_qwen3_generate_speed():
         batch_size, seq_length = result.generated_ids.shape
         total_tokens = batch_size * seq_length
 
-    print(f"Generation stats (50 tokens, 5 runs):")
+    print(f"Generation stats (50 tokens, {runs} runs):")
     print(f"Mean time: {mean_time*1000:.2f} ± {std_time*1000:.2f} ms")
     print(f"Min/Max: {times.min()*1000:.2f} / {times.max()*1000:.2f} ms")
     print(f"Tokens/sec: {(total_tokens) / mean_time:.2f}")

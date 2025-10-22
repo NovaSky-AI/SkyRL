@@ -26,14 +26,14 @@ class KVCache:
         Returns:
             New KVCache with padded keys and values.
         """
-        padded_keys = []
-        padded_values = []
-        for k, v in zip(self.keys, self.values):
-            # k and v have shape [B, T, num_heads, head_dim]
-            cache_pad_length = max_length - k.shape[1]
-            padded_keys.append(jnp.pad(k, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0))
-            padded_values.append(jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0))
-        return KVCache(keys=padded_keys, values=padded_values, cache_position=self.cache_position)
+        # k and v have shape [B, T, num_heads, head_dim]
+        cache_pad_length = max_length - self.keys[0].shape[1]
+        pad_spec = ((0, 0), (0, cache_pad_length), (0, 0), (0, 0))
+        return KVCache(
+            keys=[jnp.pad(k, pad_spec) for k in self.keys],
+            values=[jnp.pad(v, pad_spec) for v in self.values],
+            cache_position=self.cache_position,
+        )
 
 
 @dataclass
@@ -92,8 +92,7 @@ class GeneratorMixin:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         rng = jax.random.PRNGKey(seed)
-        batch_size = input_ids.shape[0]
-        prompt_length = input_ids.shape[1]
+        batch_size, prompt_length = input_ids.shape
 
         # Create fixed-size buffers
         scores = [] if return_scores else None
