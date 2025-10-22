@@ -46,6 +46,13 @@ def validate_conversion(ckpt_dir, safetensors_dir):
     try:
         print("Reconstructing original DeepSpeed checkpoint...")
         original_state = get_fp32_state_dict_from_zero_checkpoint(ckpt_dir)
+        # Normalize keys to match the conversion script's output
+        if original_state:
+            original_state = {
+                (k[7:] if k.startswith("module.") else k): v
+                for k, v in original_state.items()
+                if isinstance(v, torch.Tensor)
+            }
         print(f"Original checkpoint: {len(original_state)} parameters")
 
         print("Loading converted safetensors...")
