@@ -279,7 +279,7 @@ def ulysses_pad_and_slice_inputs(
 
     Args:
         input_ids_rmpad: shape of [bsz, seqlen]
-        position_ids_rmpad: shape of [bsz, seqlen], where bsz must be 1
+        position_ids_rmpad: shape of [bsz, seqlen]
         sp_size (int): ulysses sequence parallelism size
 
     Returns:
@@ -287,9 +287,7 @@ def ulysses_pad_and_slice_inputs(
         torch.Tensor: padded and sliced position_ids
         int: pad size
     """
-    if position_ids_rmpad is not None:
-        assert position_ids_rmpad.size(0) == 1
-        assert input_ids_rmpad.size(1) == position_ids_rmpad.size(1)
+
     if sp_size <= 1:
         return input_ids_rmpad, position_ids_rmpad, attention_mask_rmpad, 0
 
@@ -302,11 +300,19 @@ def ulysses_pad_and_slice_inputs(
     if pad_size > 0:
         input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
         if position_ids_rmpad is not None:
-            pad_pos_ids = torch.arange(pad_size, device=position_ids_rmpad.device).unsqueeze(0)
+            pad_pos_ids = (
+                torch.arange(pad_size, device=position_ids_rmpad.device)
+                .unsqueeze(0)
+                .repeat(position_ids_rmpad.size(0), 1)
+            )
             position_ids_rmpad = torch.cat((position_ids_rmpad, pad_pos_ids), dim=-1)
 
         if attention_mask_rmpad is not None:
-            pad_attn_mask = torch.zeros(pad_size, device=attention_mask_rmpad.device).unsqueeze(0)
+            pad_attn_mask = (
+                torch.zeros(pad_size, device=attention_mask_rmpad.device)
+                .unsqueeze(0)
+                .repeat(attention_mask_rmpad.size(0), 1)
+            )
             attention_mask_rmpad = torch.cat((attention_mask_rmpad, pad_attn_mask), dim=-1)
 
     input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)

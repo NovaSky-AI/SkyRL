@@ -14,7 +14,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBl
 from tx.layers.lora import LoRAMixin
 from tx.models import Qwen3ForCausalLM
 from tx.models.qwen3 import Qwen3MoeSparseMoeBlock
-from tx.utils.models import load_checkpoint
+from tx.utils.models import load_safetensors
 
 
 @pytest.mark.parametrize("tp", [1, 2])
@@ -45,7 +45,7 @@ def test_qwen3(tp: int):
         mesh = jax.make_mesh((1, tp), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_checkpoint(tmp, config, model)
+        load_safetensors(tmp, config, model)
 
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
         assert np.allclose(hf_outputs.hidden_states[0], outputs["hidden_states"][0], rtol=1e-6)
@@ -207,7 +207,7 @@ def test_qwen3_lora():
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-            load_checkpoint(base_tmp, config, model)
+            load_safetensors(base_tmp, config, model)
 
         # Get outputs from all HF models
         hf_outputs_list = []

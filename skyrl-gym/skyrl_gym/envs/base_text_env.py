@@ -81,3 +81,20 @@ class BaseTextEnv(Env[ConversationType, str]):
         Closes the environment, override if needed by subclasses.
         """
         pass
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """
+        Return environment-specific metrics for the episode.
+        Default is empty dict (no metrics).
+        """
+        return {}
+
+    @staticmethod
+    def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Static method to aggregate metrics across many episodes of this env class.
+        Default behavior: average the numerics, drop the non-numerics.
+        """
+        from skyrl_gym.metrics import default_aggregate_metrics
+
+        return default_aggregate_metrics(metrics)

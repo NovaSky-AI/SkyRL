@@ -18,18 +18,17 @@
 
 from collections import defaultdict
 from enum import StrEnum
-from typing import Callable, List, Tuple, Union, Optional, Literal
 from functools import wraps
-import torch
+from typing import Callable, List, Literal, Optional, Tuple, Union
+
 import numpy as np
-
-from omegaconf import DictConfig
-from skyrl_train.training_batch import TrainingInputBatch
-from jaxtyping import Float
-
 import ray
+import torch
+from jaxtyping import Float
 from loguru import logger
+from omegaconf import DictConfig
 
+from skyrl_train.training_batch import TrainingInputBatch
 
 # Import cloudpickle for function serialization
 try:
@@ -183,7 +182,6 @@ def ppo_critic_loss(
     config: DictConfig,
     loss_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[float]]:
-
     if config.value_clip is not None:
         values_clipped = old_values + (values - old_values).clamp(-config.value_clip, config.value_clip)
         surr1 = (values_clipped - returns) ** 2
@@ -420,6 +418,12 @@ class BaseFunctionRegistry:
         cls._ray_actor = None
         cls._synced_to_actor = False
 
+    @classmethod
+    def repopulate(cls):
+        """Repopulate the registry with the default functions."""
+        cls.reset()
+        cls.register(cls._function_type, cls._function_type)
+
 
 class AdvantageEstimator(StrEnum):
     GAE = "gae"
@@ -444,11 +448,26 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     _actor_name = "advantage_estimator_registry"
     _function_type = "advantage estimator"
 
+    @classmethod
+    def repopulate_registry(cls):
+        ae_avail = set(cls.list_available())
+        ae_types = {
+            "grpo": [AdvantageEstimator.GRPO, compute_grpo_outcome_advantage],
+            "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
+            "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
+            "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+        }
+
+        for ae_name, (ae_type, ae_func) in ae_types.items():
+            if ae_name not in ae_avail:
+                cls.register(ae_type, ae_func)
+
 
 class PolicyLossType(StrEnum):
     REGULAR = "regular"
     DUAL_CLIP = "dual_clip"
     GSPO = "gspo"
+    CISPO = "cispo"
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
 
@@ -468,6 +487,22 @@ class PolicyLossRegistry(BaseFunctionRegistry):
 
     _actor_name = "policy_loss_registry"
     _function_type = "policy loss"
+
+    @classmethod
+    def repopulate_registry(cls):
+        """Repopulate the registry with default policy loss functions."""
+        pl_avail = set(cls.list_available())
+        pl_types = {
+            "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
+            "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
+            "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
+            "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
+        }
+
+        for pl_name, (pl_type, pl_func) in pl_types.items():
+            if pl_name not in pl_avail:
+                cls.register(pl_type, pl_func)
 
 
 def register_advantage_estimator(name: Union[str, AdvantageEstimator]):
@@ -617,6 +652,35 @@ def gspo_policy_loss(
     return loss, clip_ratio
 
 
+@register_policy_loss(PolicyLossType.CISPO)
+def compute_policy_loss_cispo(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """Implementation of CISPO (Clipped IS-weight Policy Optimization) loss function,
+    as proposed in https://arxiv.org/abs/2506.13585.
+
+    Instead of clipping the importance sampling ratio in the loss directly, as done
+    in PPO loss, CISPO clips the importance sampling ratio in the policy gradient
+    update. This means the model can still learn from samples whose importance sampling
+    ratio is clipped in CISPO, as opposed to PPO where these samples have zero
+    gradient and are essentially ignored.
+    """
+    ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    clamped_ratio = torch.clamp(ratio, 1 - config.cispo.clip_low, 1 + config.cispo.clip_high)
+    loss = -advantages * clamped_ratio.detach() * log_probs
+
+    is_clipped = (ratio < 1 - config.cispo.clip_low) | (ratio > 1 + config.cispo.clip_high)
+    clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
+
+    loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    return loss, clip_ratio
+
+
 @register_policy_loss(PolicyLossType.CLIP_COV)
 def compute_policy_loss_clip_cov(
     log_probs: torch.Tensor,
@@ -675,7 +739,10 @@ def compute_policy_loss_clip_cov(
     # Apply correction mask to losses
     pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
     pg_loss = reduce_loss(
-        loss=pg_losses, loss_mask=loss_mask, loss_reduction=config.loss_reduction, max_seq_len=config.max_seq_len
+        loss=pg_losses,
+        loss_mask=loss_mask,
+        loss_reduction=config.loss_reduction,
+        max_seq_len=config.max_seq_len,
     )
 
     return pg_loss, clip_frac.item()
@@ -722,12 +789,19 @@ def compute_policy_loss_kl_cov(
 
             if len(large_cov_idxs) > 0:
                 large_cov_idxs = all_valid_idx[large_cov_idxs]
-                pg_losses[large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]] = pg_losses_kl[
-                    large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]
+                pg_losses[
+                    large_cov_idxs // advantages.shape[1],
+                    large_cov_idxs % advantages.shape[1],
+                ] = pg_losses_kl[
+                    large_cov_idxs // advantages.shape[1],
+                    large_cov_idxs % advantages.shape[1],
                 ]
 
     pg_loss = reduce_loss(
-        loss=pg_losses, loss_mask=loss_mask, loss_reduction=config.loss_reduction, max_seq_len=config.max_seq_len
+        loss=pg_losses,
+        loss_mask=loss_mask,
+        loss_reduction=config.loss_reduction,
+        max_seq_len=config.max_seq_len,
     )
 
     # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0
@@ -935,6 +1009,11 @@ def compute_grpo_outcome_advantage(
     return scores, scores
 
 
+def repopulate_all_registries():
+    PolicyLossRegistry.repopulate_registry()
+    AdvantageEstimatorRegistry.repopulate_registry()
+
+
 def compute_advantages_and_returns(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -945,6 +1024,7 @@ def compute_advantages_and_returns(
     grpo_norm_by_std: bool = True,
     gamma=1.0,
     lambd=1.0,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     estimator_func = AdvantageEstimatorRegistry.get(adv_estimator)
 
@@ -957,4 +1037,5 @@ def compute_advantages_and_returns(
         gamma=gamma,
         lambd=lambd,
         config=config,
+        **kwargs,
     )
