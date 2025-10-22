@@ -163,23 +163,17 @@ class GeneratorMixin:
             return new_carry, logits if return_scores else None
 
         # Initial carry state
-        initial_logits = outputs["logits"][:, -1, :]
         initial_carry = (
             outputs["kv_cache"],
             rng,
             generated_ids_buf,
             attention_mask_padded,
             last_positions,
-            initial_logits,
+            outputs["logits"][:, -1, :],
         )
 
         # Run scan loop (replaces the Python for loop)
-        final_carry, logits_seq = jax.lax.scan(
-            scan_fn,
-            initial_carry,
-            xs=None,
-            length=max_new_tokens,
-        )
+        final_carry, logits_seq = jax.lax.scan(scan_fn, initial_carry, xs=None, length=max_new_tokens)
 
         # Unpack final results
         kv_cache_final, rng_final, generated_ids, attention_mask_final, last_pos_final, logits_final = final_carry
