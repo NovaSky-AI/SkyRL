@@ -95,7 +95,7 @@ The sampling API supports the following parameters for controlling text generati
 #### Parameter Validation
 
 * `top_k` must be >= -1
-* `top_p` must be between 0 and 1 (exclusive)
+* `top_p` must be > 0 and <= 1
 * `temperature` must be >= 0
 * `top_k` and `top_p` cannot both be set to non-default values simultaneously
 

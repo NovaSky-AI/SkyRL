@@ -262,7 +262,7 @@ class SamplingParams(BaseModel):
         if self.top_k < -1:
             raise HTTPException(status_code=400, detail="top_k must be >= -1")
         if self.top_p <= 0 or self.top_p > 1:
-            raise HTTPException(status_code=400, detail="top_p must be between 0 and 1")
+            raise HTTPException(status_code=400, detail="top_p must be greater than 0 and less than or equal to 1")
         if self.temperature < 0:
             raise HTTPException(status_code=400, detail="temperature must be >= 0")
         
