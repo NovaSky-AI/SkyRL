@@ -4,12 +4,13 @@ Test script to validate checkpoint to safetensors conversion
 """
 import argparse
 import subprocess
+import sys
 import os
 import torch
 from safetensors import safe_open
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
-CONVERSION_SCRIPT_PATH = "/Users/pranavbharadwaj/SkyRL/skyrl-train/scripts/safetensor_from_ckpt_deepspeed.py"
+CONVERSION_SCRIPT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "safetensor_from_ckpt_deepspeed.py"))
 ALIASES = {
     "lm_head.weight": "transformer.wte.weight",  # common tied embeddings
 }
@@ -116,11 +117,12 @@ def validate_conversion(ckpt_dir, safetensors_dir):
             f"(original {len(keys_pt)}, safetensors {len(keys_st)}; alias-aware).")
         if mismatches == 0:
             if only_in_pt or only_in_st:
-                print("All compared tensors match (there are asymmetric keys; see warnings).")
-                return False
+                print("All compared tensors match, but key sets differ.")
+                print(f"Keys only in original: {only_in_pt}")
+                print(f"Keys only in safetensors: {only_in_st}")
             else:
                 print(f"All tensors match and key sets align.")
-                return True
+            return True
         else:
             print(f"Found {mismatches} mismatches.")
             return False
@@ -137,29 +139,22 @@ def main():
 
     print(f"Testing conversion from {args.ckpt_dir} to {args.safetensors_dir}")
 
-    try:
-        result = subprocess.run(["python3", CONVERSION_SCRIPT_PATH, "--ckpt-dir", args.ckpt_dir, "--out-dir", args.safetensors_dir], 
-                                capture_output=True, text=True)
-        if result.stderr:
-            print(f"Script output (stderr):\n{result.stderr}")
-        if result.returncode != 0:
-            print("FAILURE: Conversion script failed.")
-            return False
-
-        validation_passed = validate_conversion(args.ckpt_dir, args.safetensors_dir)
-        if validation_passed:
-            print("\nSUCCESS")
-        else:
-            print("\nFAILURE")
-        
-        return validation_passed
-
-    except subprocess.CalledProcessError as e:
-        print(f"Error running script: {e}")
-        print(f"Script stderr:\n{e.stderr}")
+    result = subprocess.run(["python3", CONVERSION_SCRIPT_PATH, "--ckpt-dir", args.ckpt_dir, "--out-dir", args.safetensors_dir], 
+                            capture_output=True, text=True)
+    if result.stderr:
+        print(f"Script output (stderr):\n{result.stderr}")
+    if result.returncode != 0:
+        print("FAILURE: Conversion script failed.")
         return False
 
+    validation_passed = validate_conversion(args.ckpt_dir, args.safetensors_dir)
+    if validation_passed:
+        print("\nSUCCESS")
+    else:
+        print("\nFAILURE")
+
+    return validation_passed
 
 if __name__ == "__main__":
-    main()
+    sys.exit(not main())
     
