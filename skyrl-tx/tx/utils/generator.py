@@ -16,6 +16,26 @@ class KVCache:
     values: list[jax.Array]
     cache_position: int
 
+    def pad_to_length(self, max_length: int) -> "KVCache":
+        """Pad KV cache to a specified maximum length.
+
+        Args:
+            max_length: Target length to pad the cache to.
+
+        Returns:
+            New KVCache with padded keys and values.
+        """
+        padded_keys = []
+        padded_values = []
+        for k, v in zip(self.keys, self.values):
+            # k and v have shape [B, T, num_heads, head_dim]
+            cache_pad_length = max_length - k.shape[1]
+            padded_k = jnp.pad(k, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
+            padded_v = jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
+            padded_keys.append(padded_k)
+            padded_values.append(padded_v)
+        return KVCache(keys=padded_keys, values=padded_values, cache_position=self.cache_position)
+
 
 @dataclass
 class GenerateResult:
@@ -107,19 +127,7 @@ class GeneratorMixin:
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
         # Pad KV cache to max_length
-        kv_cache = outputs["kv_cache"]
-        if kv_cache is not None:
-            padded_keys = []
-            padded_values = []
-            for k, v in zip(kv_cache.keys, kv_cache.values):
-                # k and v have shape [B, T, num_heads, head_dim]
-                cache_pad_length = max_length - k.shape[1]
-                padded_k = jnp.pad(k, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
-                padded_v = jnp.pad(v, ((0, 0), (0, cache_pad_length), (0, 0), (0, 0)), constant_values=0)
-                padded_keys.append(padded_k)
-                padded_values.append(padded_v)
-            # Initialize cache_position to current_length (where we'll write the first new token)
-            outputs["kv_cache"] = KVCache(keys=padded_keys, values=padded_values, cache_position=prompt_length)
+        outputs["kv_cache"] = outputs["kv_cache"].pad_to_length(max_length)
 
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
