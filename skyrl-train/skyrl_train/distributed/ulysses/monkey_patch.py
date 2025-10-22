@@ -106,6 +106,11 @@ def _ulysses_flash_attention_forward(
         torch.distributed.all_gather(attention_mask_list, attention_mask, group=get_ulysses_sequence_parallel_group())
         attention_mask = torch.concat(attention_mask_list, dim=-1)
 
+    # NOTE: we need to recompute this parameter otherwise the output shape will be wrong with
+    # a non-null attention mask
+    if "query_length" in kwargs:
+        kwargs["query_length"] = query_states.size(1)
+
     # (bsz, seq_len, n_head/n, head_dim)
     attn_output = _flash_attention_forward(
         query_states, key_states, value_states, attention_mask, *args, position_ids=position_ids, **kwargs

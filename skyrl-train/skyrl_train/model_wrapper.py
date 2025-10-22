@@ -268,9 +268,8 @@ class HFModelWrapper(nn.Module):
 
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if self.sequence_parallel_size > 1:
-            assert self.use_sample_packing, "sequence packing needs to be enabled for sequence parallelism"
-            # don't pass any attention mask for flash attention 2. this will save an all gather.
-            attention_mask_fwd = None if self.use_flash_attention_2 else attention_mask_fwd
+            # NOTE: don't pass any attn mask with sample packing
+            attention_mask_fwd = None if self.use_flash_attention_2 and self.use_sample_packing else attention_mask_fwd
 
             # slice for sequence parallelism
             # (bsz, seqlen) -> (bsz, seqlen//sp_size)
@@ -301,9 +300,10 @@ class HFModelWrapper(nn.Module):
 
         # gather output if sp > 1
         if self.sequence_parallel_size > 1:
-            log_probs = gather_outputs_and_unpad(log_probs.squeeze(0), gather_dim=0, unpad_dim=0, padding_size=pad_size)
-            # (nnz,) -> (1, nnz)
-            log_probs = log_probs.unsqueeze(0)
+            dim = log_probs.ndim - 1
+            log_probs = gather_outputs_and_unpad(
+                log_probs, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+            )  # shape can be (1, nnz) - with packing or (B, S) - without packing
 
         if self.use_sample_packing:
             # add padding back - postprocess logprobs to be compatible with original tensor
@@ -313,19 +313,33 @@ class HFModelWrapper(nn.Module):
                 log_probs.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
             ).squeeze(-1)
 
-            # (1, nnz,)
-            if compute_entropy:
-                # entropy calculation as a metric - we use no grad
-                entropy_1N = self.chunked_entropy_from_logits_fn(logits_BSV, requires_grad=False)
-                if self.sequence_parallel_size > 1:
-                    entropy_1N = gather_outputs_and_unpad(
-                        entropy_1N.squeeze(0), gather_dim=0, unpad_dim=0, padding_size=pad_size
-                    ).unsqueeze(0)
-                entropy_BS = pad_input(
-                    entropy_1N.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
-                ).squeeze(-1)
+        if compute_entropy:
+            # entropy calculation as a metric - we use no grad
+            # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
+            # For non-sample packing: pass the attention mask to exclude padding tokens
+            entropy_mask = None
+            if not self.use_sample_packing:
+                # Non-sample packing: pass attention mask to handle padding
+                # Use attention_mask_fwd which may be sliced (if sequence_parallel_size > 1) or full
+                entropy_mask = attention_mask_fwd
 
-                output["entropy"] = entropy_BS
+            entropy_BS = self.chunked_entropy_from_logits_fn(
+                logits_BSV, requires_grad=False, attention_mask=entropy_mask
+            )
+
+            if self.sequence_parallel_size > 1:
+                dim = entropy_BS.ndim - 1
+                entropy_BS = gather_outputs_and_unpad(
+                    entropy_BS, gather_dim=dim, unpad_dim=dim, padding_size=pad_size
+                )  # shape can be (1, nnz) - with packing or (B,S) - without packing
+            if self.use_sample_packing:
+                entropy_BS = pad_input(
+                    entropy_BS.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                ).squeeze(
+                    -1
+                )  # (1, nnz) -> (B, S)
+
+            output["entropy"] = entropy_BS
 
         if isinstance(num_actions, list):
             if len(num_actions) == 1:
