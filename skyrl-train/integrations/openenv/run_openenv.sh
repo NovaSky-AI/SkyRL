@@ -23,7 +23,7 @@ set -x
 # : "${INFERENCE_BACKEND:=sglang}"
 : "${MAX_TURNS:=4}"
 
-uv run --isolated --extra $INFERENCE_BACKEND --with  "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m integrations.openenv.entrypoints.main_openenv \
+uv run --isolated --extra $INFERENCE_BACKEND --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m integrations.openenv.entrypoints.main_openenv \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

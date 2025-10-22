@@ -5,6 +5,7 @@ from skyrl_train.utils import initialize_ray
 import ray
 from skyrl_gym.envs import register
 
+
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
     # Register the multiply environment inside the entrypoint task (no need to modify the skyrl-gym package).
@@ -14,6 +15,7 @@ def skyrl_entrypoint(cfg: DictConfig):
     )
     exp = BasePPOExp(cfg)
     exp.run()
+
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
