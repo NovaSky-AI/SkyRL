@@ -135,11 +135,9 @@ class GeneratorMixin:
 
         def scan_fn(carry, _):
             """Autoregressively generate with jax.scan for efficiency"""
-            outputs, rng, generated_ids, attention_mask_padded, last_positions, current_length = carry
+            kv_cache, rng, generated_ids, attention_mask_padded, last_positions, current_length, logits = carry
 
             rng, sample_key = jax.random.split(rng)
-
-            logits = outputs["logits"][:, -1, :]
 
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
 
@@ -150,30 +148,34 @@ class GeneratorMixin:
             attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_length))
 
             last_positions = last_positions + 1
-            current_length = current_length + 1
 
-            # Run decoder step
+            # Run decoder step (pass current_length before incrementing, as it's the position we just wrote to)
             outputs = decoder_step(
                 self,
                 next_token,
                 attention_mask_padded,
                 last_positions,
-                outputs["kv_cache"],
+                kv_cache,
                 adapter_indices,
                 current_length,
             )
 
-            new_carry = (outputs, rng, generated_ids, attention_mask_padded, last_positions, current_length)
-            return new_carry, logits
+            current_length = current_length + 1
+
+            new_logits = outputs["logits"][:, -1, :]
+            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask_padded, last_positions, current_length, new_logits)
+            return new_carry, logits if return_scores else None
 
         # Initial carry state
+        initial_logits = outputs["logits"][:, -1, :]
         initial_carry = (
-            outputs,
+            outputs["kv_cache"],
             rng,
             generated_ids_buf,
             attention_mask_padded,
             last_positions,
             current_length,
+            initial_logits,
         )
 
         # Run scan loop (replaces the Python for loop)
@@ -185,15 +187,18 @@ class GeneratorMixin:
         )
 
         # Unpack final results
-        outputs_final, rng_final, generated_ids, attention_mask_final, last_pos_final, current_length_final = final_carry
+        kv_cache_final, rng_final, generated_ids, attention_mask_final, last_pos_final, current_length_final, logits_final = final_carry
 
         # Use logits_seq for scores if requested
         if return_scores:
             scores = [logits_seq[i] for i in range(logits_seq.shape[0])]
-        
+
+        # Slice to return only the actual generated tokens (not the padded buffer)
+        final_length = prompt_length + max_new_tokens
+        generated_ids_output = generated_ids[:, :final_length]
 
         return GenerateResult(
-            generated_ids=generated_ids,
+            generated_ids=generated_ids_output,
             stop_reasons=stop_reasons,
             scores=scores,
         )
