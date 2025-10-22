@@ -25,8 +25,8 @@ def find_checkpoint_subdir(ckpt_dir: str) -> str:
             if os.path.isdir(latest_step_dir):
                 return latest_step_dir
             print("Did not find latest step dir")
-        except (IOError, OSError):
-            pass
+        except OSError as e:
+            print(f"Warning: Could not read 'latest' file in {ckpt_dir}: {e}")
     print("Did not find HF latest file")
     return ckpt_dir
 
