@@ -151,7 +151,7 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
-    stop: str | Sequence[str] | Sequence[int] | None = None
+    stop: Sequence[int] | None = None
     top_k: int = -1
     top_p: float = 1.0
 

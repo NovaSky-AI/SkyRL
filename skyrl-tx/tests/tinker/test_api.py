@@ -192,7 +192,7 @@ def test_sampling_params_validation(service_client):
         )
     assert "top_k must be >= -1" in str(exc_info.value.detail)
     
-    # Test invalid top_p
+    # Test invalid top_p - upper bound violation
     with pytest.raises(HTTPException) as exc_info:
         sampling_client.sample(
             prompt=prompt,
@@ -200,6 +200,45 @@ def test_sampling_params_validation(service_client):
             num_samples=1,
         )
     assert "top_p must be between 0 and 1" in str(exc_info.value.detail)
+    
+    # Test invalid top_p - lower bound violation (top_p = 0)
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, top_p=0),
+            num_samples=1,
+        )
+    assert "top_p must be between 0 and 1" in str(exc_info.value.detail)
+    
+    # Test invalid top_p - negative value
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, top_p=-0.1),
+            num_samples=1,
+        )
+    assert "top_p must be between 0 and 1" in str(exc_info.value.detail)
+    
+    # Test valid top_p boundary values (should not raise exceptions)
+    # top_p = 1.0 (upper boundary - valid)
+    try:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=1, top_p=1.0),
+            num_samples=1,
+        )
+    except HTTPException:
+        pytest.fail("top_p=1.0 should be valid but raised HTTPException")
+    
+    # top_p = 0.1 (lower boundary - valid, since validation is top_p <= 0)
+    try:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=1, top_p=0.1),
+            num_samples=1,
+        )
+    except HTTPException:
+        pytest.fail("top_p=0.1 should be valid but raised HTTPException")
     
     # Test negative temperature
     with pytest.raises(HTTPException) as exc_info:
@@ -218,6 +257,43 @@ def test_sampling_params_validation(service_client):
             num_samples=1,
         )
     assert "Cannot use both top_k and top_p simultaneously" in str(exc_info.value.detail)
+    
+    # Test invalid stop parameter - string instead of token IDs
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, stop="</s>"),
+            num_samples=1,
+        )
+    assert "stop must be a sequence of token IDs" in str(exc_info.value.detail)
+    
+    # Test invalid stop parameter - negative token ID
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, stop=[1, -1, 2]),
+            num_samples=1,
+        )
+    assert "stop must contain only non-negative integer token IDs" in str(exc_info.value.detail)
+    
+    # Test invalid stop parameter - non-integer values
+    with pytest.raises(HTTPException) as exc_info:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, stop=[1, 2.5, 3]),
+            num_samples=1,
+        )
+    assert "stop must contain only non-negative integer token IDs" in str(exc_info.value.detail)
+    
+    # Test valid stop parameter - should not raise exception
+    try:
+        sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(temperature=1.0, max_tokens=1, stop=[1, 2, 3]),
+            num_samples=1,
+        )
+    except HTTPException:
+        pytest.fail("Valid stop parameter with token IDs should not raise HTTPException")
 
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
