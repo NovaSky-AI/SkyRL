@@ -82,7 +82,7 @@ This creates training and validation datasets with example prompts for the speci
 Training
 --------
 
-We provide an example training script for Qwen2.5-0.5B-Instruct on OpenEnv environments:
+We provide an example training script for Qwen2.5-1.5B-Instruct on OpenEnv environments:
 
 .. code-block:: bash
     # Execute from skyrl-train directory
