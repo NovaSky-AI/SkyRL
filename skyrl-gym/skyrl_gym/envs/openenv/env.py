@@ -7,7 +7,10 @@ from envs.echo_env import EchoEnv, EchoAction
 from envs.coding_env import CodingEnv, CodeAction
 from envs.openspiel_env import OpenSpielEnv, OpenSpielAction
 from envs.atari_env import AtariEnv, AtariAction
+from envs.sumo_rl_env import SumoRLEnv, SumoAction
+from envs.finrl_env import FinRLEnv, FinRLAction
 import re
+import ast
 
 
 class OpenEnv(BaseTextEnv):
@@ -49,6 +52,10 @@ class OpenEnv(BaseTextEnv):
             return OpenSpielEnv
         elif env_name == "atari-env":
             return AtariEnv
+        elif env_name == "sumo-rl-env":
+            return SumoRLEnv
+        elif env_name == "finrl-env":
+            return FinRLEnv
         # TODO: handle ChatEnv, maybe use ChatEnv to maintain message history?
         else:
             raise ValueError(f"Unknown environment '{env_name}'")
@@ -84,12 +91,20 @@ class OpenEnv(BaseTextEnv):
             if not action.isdigit():
                 raise ValueError(f"Atari action must be numeric, got: {action}")
             return AtariAction(action_id=int(action))
+        elif env_name == "sumo-rl-env":
+            return SumoAction(phase_id=int(action))
+        elif env_name == "finrl-env":
+            try:
+                actions_list = ast.literal_eval(action)
+            except Exception as e:
+                raise ValueError(f"Invalid FinRL action format '{action}', needs to be a list of floats: {e}")
+
+            return FinRLAction(actions=list(actions_list))
         else:
             raise ValueError(f"Unknown environment '{env_name}'")
 
     def _is_done(self) -> bool:
-        if self.turns >= self.max_turns:
-            return True
+        return self.turns >= self.max_turns
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.chat_history.append({"role": "assistant", "content": action})
@@ -99,6 +114,7 @@ class OpenEnv(BaseTextEnv):
         if done:
             return BaseTextEnvStepOutput(observations=[], reward=0, done=done, metadata={})
 
+        error = None
         try:
             action = self._get_openenv_action(self.env_name, action)
             result = self.env.step(action)

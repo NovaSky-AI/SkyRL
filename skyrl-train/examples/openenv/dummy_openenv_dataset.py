@@ -38,8 +38,6 @@ def example_question(env_name: str) -> List[str]:
             "Send a short test message.",
             "Write one more message to echo back.",
         ]
-        return [f"{ex}\n\n{instruction}" for ex in examples]
-
     elif env_name == "coding_env":
         # Coding environment executes code and returns stdout.
         examples = [
@@ -50,60 +48,42 @@ def example_question(env_name: str) -> List[str]:
         instruction += (
             "Write the python code inside <action>...</action> tags. Example: <action>print('Hello, World!')</action>"
         )
-
-        return [f"{ex}\n\n{instruction}" for ex in examples]
-
-    elif env_name == "openspiel-env":
-        # OpenSpiel environment uses action IDs (0, 1, 2...).
+    elif env_name == "openspiel-env" or env_name == "atari-env":
         examples = [
-            "Choose the first legal action (action id 0).",
+            "Choose a legal action given the legal action states.",
         ]
-        return [f"{ex}\n\n{instruction}" for ex in examples]
-
-    elif env_name == "atari-env":
-        # Atari environment: expect numeric action IDs as above
+    elif env_name == "sumo-rl-env":
         examples = [
-            "Perform an action with id 0 to start the game.",
+            "Choose a legal action (a valid traffic light phase id).",
         ]
-        return [f"{ex}\n\n{instruction}" for ex in examples]
-
+    elif env_name == "finrl-env":
+        examples = [
+            "Choose a trading action by specifying normalized values between -1 and 1 for each stock, where positive means buy and negative means sell. Wrap the action between <action> and </action> tags. For example: <action>[0.5, -0.3, 0.0]</action>."
+        ]
     else:
         raise ValueError(f"Unknown environment name: {env_name}")
 
+    return [f"{ex}\n\n{instruction}" for ex in examples]
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="~/data/openenv")
-    parser.add_argument("--env_name", default="echo_env")
-    args = parser.parse_args()
 
-    args.output_dir = os.path.expanduser(os.path.join(args.output_dir, args.env_name))
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    base_questions = example_question(args.env_name)
-
-    # Repeat until 32 examples total
-    target_size = 32
+def build_dataset(env_name: str, output_dir: str, data_source="openenv", target_size=32):
+    """Generate and save train/validation datasets for one environment."""
+    base_questions = example_question(env_name)
     repeat_factor = math.ceil(target_size / len(base_questions))
     questions = (base_questions * repeat_factor)[:target_size]
 
-    # Split evenly into train/validation
+    # Split the questions into train and validation sets
     split_index = target_size // 2
     train_questions = questions[:split_index]
     val_questions = questions[split_index:]
 
-    data_source = "openenv"
-
     def make_map_fn(split):
         def process_fn(example, idx):
-            question = example["question"]
             return {
                 "data_source": data_source,
-                "prompt": [
-                    {"role": "user", "content": question},
-                ],
+                "prompt": [{"role": "user", "content": example["question"]}],
                 "env_class": "openenv",
-                "env_name": args.env_name,
+                "env_name": env_name,
             }
 
         return process_fn
@@ -114,7 +94,31 @@ if __name__ == "__main__":
     train_dataset = train_dataset.map(make_map_fn("train"), with_indices=True)
     val_dataset = val_dataset.map(make_map_fn("validation"), with_indices=True)
 
-    train_dataset.to_parquet(os.path.join(args.output_dir, "train.parquet"))
-    val_dataset.to_parquet(os.path.join(args.output_dir, "validation.parquet"))
+    os.makedirs(output_dir, exist_ok=True)
+    train_dataset.to_parquet(os.path.join(output_dir, "train.parquet"))
+    val_dataset.to_parquet(os.path.join(output_dir, "validation.parquet"))
 
-    print(f"Saved {len(train_dataset)} train and {len(val_dataset)} validation examples to {args.output_dir}")
+    print(f"Saved {len(train_dataset)} train and {len(val_dataset)} validation examples to {output_dir}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output_dir", default="~/data/openenv")
+    parser.add_argument("--env_name", default=None)
+    args = parser.parse_args()
+
+    args.output_dir = os.path.expanduser(args.output_dir)
+    all_envs = ["echo_env", "coding_env", "openspiel-env", "atari-env", "sumo-rl-env", "finrl-env"]
+
+    if args.env_name is None:
+        print("No --env_name specified. Preparing datasets for all available environments:")
+        for env in all_envs:
+            print(f" - {env}")
+        print()
+        for env in all_envs:
+            build_dataset(env, os.path.join(args.output_dir, env))
+    else:
+        if args.env_name not in all_envs:
+            print(f"Error: Unknown environment '{args.env_name}'. Available environments are: {', '.join(all_envs)}")
+            exit(1)
+        build_dataset(args.env_name, os.path.join(args.output_dir, args.env_name))

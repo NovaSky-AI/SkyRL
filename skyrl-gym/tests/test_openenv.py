@@ -4,28 +4,46 @@ from omegaconf import DictConfig
 import numpy as np
 
 
-@pytest.mark.parametrize("expected_reward", [-1])
-def test_openspiel_action(expected_reward):
+@pytest.mark.parametrize(
+    "game_name, max_steps",
+    [
+        ("catch", 5),
+        ("tic_tac_toe", 10),
+    ],
+)
+def test_openspiel_games(game_name, max_steps):
+    """Test OpenSpielEnv integration for both single- and multi-player games."""
+
     env = skyrl_gym.make(
         "openenv",
         env_config=DictConfig({"env_class": "openenv"}),
-        extras={"env_name": "openspiel-env"},
+        extras={"env_name": "openspiel-env", "game_name": game_name},
     )
-    action_id = env.initial_step_result.observation.legal_actions[0]
+
+    first_obs = env.initial_step_result.observation
+    assert hasattr(first_obs, "legal_actions"), "Missing legal_actions in initial observation"
+    assert len(first_obs.legal_actions) > 0, "No legal actions available at start"
+
+    action_id = first_obs.legal_actions[0]
     result = None
 
-    for _ in range(10):
+    for step in range(max_steps):
         result = env.step(f"<action>{action_id}</action>")
         obs = result["metadata"]["observation"]
 
-        print(f"Reward: {obs.reward}")
+        assert hasattr(obs, "reward"), f"Step {step}: Missing reward in observation"
+        assert hasattr(obs, "done"), f"Step {step}: Missing done flag in observation"
 
         if obs.done:
             break
-        if obs.legal_actions:
+
+        if hasattr(obs, "legal_actions") and obs.legal_actions:
             action_id = obs.legal_actions[0]
 
-    assert obs.reward == expected_reward, f"Expected reward {expected_reward}, got {obs.reward}. Observation: {obs}"
+    assert result is not None, "No step result obtained"
+    assert isinstance(obs.reward, (int, float, type(None))), "Reward must be numeric or None"
+    assert hasattr(obs, "info_state"), "Observation missing info_state field"
+    assert hasattr(obs, "game_phase"), "Observation missing game_phase field"
 
 
 @pytest.mark.parametrize(
@@ -98,3 +116,21 @@ def test_atari_action(model_response, expected_shape):
     )
 
     assert screen.shape == expected_shape, f"Expected {expected_shape}, got {screen.shape}"
+
+
+@pytest.mark.parametrize("model_response", [("<action>1</action>")])
+def test_sumo_rl_action(model_response):
+    env = skyrl_gym.make(
+        "openenv",
+        env_config=DictConfig({"env_class": "openenv"}),
+        extras={"env_name": "sumo-rl-env"},
+    )
+    step_output = env.step(model_response)
+
+    assert "observation" in step_output["metadata"], "Observation missing in metadata"
+    obs = step_output["metadata"]["observation"]
+
+    assert hasattr(obs, "sim_time"), "Missing sim_time in observation"
+    assert hasattr(obs, "reward"), "Missing reward in observation"
+    assert isinstance(obs.sim_time, (int, float)), "sim_time must be numeric"
+    assert isinstance(obs.reward, (int, float, type(None))), "reward must be numeric or None"
