@@ -128,14 +128,8 @@ class GeneratorMixin:
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
 
-        initial_carry = (
-            kv_cache,
-            jax.random.PRNGKey(seed),
-            generated_ids,
-            attention_mask,
-            positions[:, -1:],
-            outputs["logits"][:, -1, :],
-        )
+        rng = jax.random.PRNGKey(seed)
+        initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :])
         (_, _, generated_ids, _, _, _), logits_seq = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens
         )
