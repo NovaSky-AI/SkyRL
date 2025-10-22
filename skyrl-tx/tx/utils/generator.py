@@ -72,8 +72,8 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
-    def _create_decoder_step(self):
-        """Create a jitted decoder step function."""
+    def init_generator(self):
+        """Initialize the generator by creating a jitted decoder step function."""
 
         @jax.jit
         def decoder_step(model_fn, next_token, attention_mask, last_positions, kv_cache, adapter_indices):
@@ -87,7 +87,7 @@ class GeneratorMixin:
             )
             return outputs
 
-        return decoder_step
+        self.decoder_step = decoder_step
 
     def generate(
         self,
@@ -132,9 +132,6 @@ class GeneratorMixin:
         # Keep track of only the last position for decoding
         last_positions = positions[:, -1:]
 
-        # Create jitted decoder step
-        decoder_step = self._create_decoder_step()
-
         #  Pre allocate in advance generated_ids buffer with fixed size to avoid rechaching
         generated_ids_buf = jnp.zeros((batch_size, max_length), dtype=input_ids.dtype)
         generated_ids_buf = generated_ids_buf.at[:, :prompt_length].set(input_ids)
@@ -158,7 +155,7 @@ class GeneratorMixin:
             last_positions = last_positions + 1
 
             # Run decoder step (cache_position will be incremented inside)
-            outputs = decoder_step(
+            outputs = self.decoder_step(
                 self,
                 next_token,
                 attention_mask_padded,
