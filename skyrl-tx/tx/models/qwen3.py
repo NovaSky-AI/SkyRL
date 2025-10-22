@@ -121,6 +121,8 @@ class Qwen3Attention(nnx.Module):
             k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
             v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
 
+        updated_cache = (k, v)
+
         # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
         attn_output = jax.nn.dot_product_attention(
             q,
@@ -132,7 +134,7 @@ class Qwen3Attention(nnx.Module):
         )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
-        return self.o_proj(output, adapter_indices=adapter_indices), (k, v)
+        return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
 
 
 class Qwen3MLP(nnx.Module):
