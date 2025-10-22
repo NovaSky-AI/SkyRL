@@ -127,6 +127,7 @@ class HFModelWrapper(nn.Module):
                     from skyrl_train.patches.gptoss.patch_transformers import (
                         custom_attention,
                         custom_attention_mask,
+                        patch_GptOssAttention,
                     )
                     from transformers import AttentionInterface, AttentionMaskInterface
 
@@ -135,6 +136,9 @@ class HFModelWrapper(nn.Module):
                     # set attention implementation to be `custom_flex`
                     self.model.set_attn_implementation("custom_flex")
                     self.attn_implementation = "custom_flex"
+                    # NOTE: Even though we set a custom attn implementation, we
+                    # also patch the full attention function for GPT OSS
+                    patch_GptOssAttention()
 
             # LoRA
             if lora_rank > 0:
