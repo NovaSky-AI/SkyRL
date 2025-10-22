@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 import jax
+from jax import lax
 import jax.numpy as jnp
 
 
@@ -123,44 +124,73 @@ class GeneratorMixin:
         last_positions = positions[:, -1:]
 
         # Track current length for updating attention mask
-        current_length = prompt_length
+        current_length = jnp.array(prompt_length, dtype=jnp.int32)
 
         # Create jitted decoder step
         decoder_step = self._create_decoder_step()
 
-        # Decode: generate tokens one at a time
-        for step in range(max_new_tokens):
-            if current_length >= max_length:
-                break
+        #  Pre allocate in advance generated_ids buffer with fixed size to avoid rechaching
+        generated_ids_buf = jnp.zeros((batch_size, max_length), dtype=input_ids.dtype)
+        generated_ids_buf = generated_ids_buf.at[:, :prompt_length].set(input_ids)
+
+        def scan_fn(carry, _):
+            """Autoregressively generate with jax.scan for efficiency"""
+            outputs, rng, generated_ids, attention_mask_padded, last_positions, current_length = carry
 
             rng, sample_key = jax.random.split(rng)
+
             logits = outputs["logits"][:, -1, :]
 
-            if return_scores:
-                scores.append(logits)
-
             next_token = sample_token(logits, temperature=temperature, key=sample_key)
-            generated_ids = jnp.concatenate([generated_ids, next_token], axis=1)
 
-            if step < max_new_tokens - 1:
-                # Update attention mask in-place at current position using dynamic_update_slice
-                from jax import lax
-                mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
-                attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_length))
+            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, current_length))
 
-                # Increment position for the new token
-                last_positions = last_positions + 1
-                outputs = decoder_step(
-                    self,
-                    next_token,
-                    attention_mask_padded,
-                    last_positions,
-                    outputs["kv_cache"],
-                    adapter_indices,
-                    current_length,
-                )
+            # Update attention mask
+            mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
+            attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, current_length))
 
-                current_length += 1
+            last_positions = last_positions + 1
+            current_length = current_length + 1
+
+            # Run decoder step
+            outputs = decoder_step(
+                self,
+                next_token,
+                attention_mask_padded,
+                last_positions,
+                outputs["kv_cache"],
+                adapter_indices,
+                current_length,
+            )
+
+            new_carry = (outputs, rng, generated_ids, attention_mask_padded, last_positions, current_length)
+            return new_carry, logits
+
+        # Initial carry state
+        initial_carry = (
+            outputs,
+            rng,
+            generated_ids_buf,
+            attention_mask_padded,
+            last_positions,
+            current_length,
+        )
+
+        # Run scan loop (replaces the Python for loop)
+        final_carry, logits_seq = jax.lax.scan(
+            scan_fn,
+            initial_carry,
+            xs=None,
+            length=max_new_tokens,
+        )
+
+        # Unpack final results
+        outputs_final, rng_final, generated_ids, attention_mask_final, last_pos_final, current_length_final = final_carry
+
+        # Use logits_seq for scores if requested
+        if return_scores:
+            scores = [logits_seq[i] for i in range(logits_seq.shape[0])]
+        
 
         return GenerateResult(
             generated_ids=generated_ids,
