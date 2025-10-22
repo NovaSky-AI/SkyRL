@@ -68,11 +68,10 @@ class OpenEnv(BaseTextEnv):
         Returns:
             Action object to pass into the OpenEnv environment.
         """
-        match = None
         if "<action>" in action and "</action>" in action:
-            match = re.search(r"<action>(.*?)</action>", action, re.DOTALL)
+            matches = re.findall(r"<action>(.*?)</action>", action)
 
-        action = match.group(1) if match else None
+        action = matches[-1] if len(matches) > 0 else None
 
         if not action:
             raise ValueError(f"No action found in action string: {action}")
