@@ -130,12 +130,17 @@ class GeneratorMixin:
 
         rng = jax.random.PRNGKey(seed)
         initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :])
-        (_, _, generated_ids, _, _, _), logits_seq = jax.lax.scan(
-            scan_fn, initial_carry, xs=None, length=max_new_tokens
+        (kv_cache, rng, generated_ids, attention_mask, last_positions, logits), logits_seq = jax.lax.scan(
+            scan_fn, initial_carry, xs=None, length=max_new_tokens - 1
         )
+
+        # Sample final token
+        rng, sample_key = jax.random.split(rng)
+        next_token = sample_token(logits, temperature=temperature, key=sample_key)
+        generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
         return GenerateResult(
             generated_ids=generated_ids[:, : prompt_length + max_new_tokens],
             stop_reasons=["length"] * batch_size,
-            scores=list(logits_seq) if return_scores else None,
+            scores=list(logits_seq) + [logits] if return_scores else None,
         )
