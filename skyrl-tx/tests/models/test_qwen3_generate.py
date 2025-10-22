@@ -68,7 +68,6 @@ def test_qwen3_generate_speed():
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     config = AutoConfig.from_pretrained(model_name)
 
-
     inputs = [
         "Why do humans need sleep and what happens when we dream",
         "Explain the meaning of life and consciousness",
@@ -101,6 +100,7 @@ def test_qwen3_generate_speed():
         warmup.generated_ids.block_until_ready()
 
         import time
+
         start = time.perf_counter()
 
         runs = 1
@@ -111,9 +111,9 @@ def test_qwen3_generate_speed():
             result = model.generate(
                 batch.input_ids.numpy(),
                 batch.attention_mask.numpy(),
-                max_new_tokens=50, 
+                max_new_tokens=50,
                 temperature=0.0,
-                seed=42 + i, # Different seed every run
+                seed=42 + i,  # Different seed every run
                 return_scores=True,
             )
             result.generated_ids.block_until_ready()

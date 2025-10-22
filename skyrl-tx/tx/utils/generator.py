@@ -147,18 +147,15 @@ class GeneratorMixin:
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
             mask_update = jnp.ones((batch_size, 1), dtype=attention_mask_padded.dtype)
-            attention_mask_padded = lax.dynamic_update_slice(attention_mask_padded, mask_update, (0, kv_cache.cache_position))
+            attention_mask_padded = lax.dynamic_update_slice(
+                attention_mask_padded, mask_update, (0, kv_cache.cache_position)
+            )
 
             last_positions = last_positions + 1
 
             # Run decoder step (cache_position will be incremented inside)
             outputs = self.decoder_step(
-                self,
-                next_token,
-                attention_mask_padded,
-                last_positions,
-                kv_cache,
-                adapter_indices,
+                self, next_token, attention_mask_padded, last_positions, kv_cache, adapter_indices
             )
 
             new_logits = outputs["logits"][:, -1, :]
