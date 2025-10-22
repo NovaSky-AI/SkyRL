@@ -156,7 +156,8 @@ def old_flex_attention_with_sink(
     score_mod = generate_sink_score_mod(
         sinks,
     )
-    block_mask = _create_block_mask(mask_mod, bsz, heads_Q, qlen_Q, qlen_KV + 1, device=key.device)
+    # NOTE: if the block mask is not compiled, it leads to O(N^2) memory usage
+    block_mask = _create_block_mask(mask_mod, bsz, heads_Q, qlen_Q, qlen_KV + 1, device=key.device, _compile=True)
     attn_output = (flex_attention if compile else uncompiled_flex_attention)(
         query,
         key_padded,
