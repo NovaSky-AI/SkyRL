@@ -69,7 +69,18 @@ def test_qwen3_generate_speed():
     config = AutoConfig.from_pretrained(model_name)
 
 
-    inputs = ["My name is", "The capital of France is"]
+    inputs = [
+        "Why do humans need sleep and what happens when we dream",
+        "Explain the meaning of life and consciousness",
+        "Describe the process of photosynthesis in plants",
+        "How do airplanes fly through the air efficiently",
+        "What are black holes and how are they formed",
+        "Tell me about the solar system and its planets",
+        "Explain the difference between AI and machine learning",
+        "How does the human brain process language",
+        "What is quantum computing and how does it work",
+    ]
+
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -92,7 +103,7 @@ def test_qwen3_generate_speed():
         import time
         start = time.perf_counter()
 
-        runs = 5
+        runs = 1
         times = []
 
         for i in range(runs):
@@ -113,7 +124,10 @@ def test_qwen3_generate_speed():
         mean_time = times.mean()
         std_time = times.std()
 
+        batch_size, seq_length = result.generated_ids.shape
+        total_tokens = batch_size * seq_length
+
     print(f"Generation stats (50 tokens, 5 runs):")
     print(f"Mean time: {mean_time*1000:.2f} ± {std_time*1000:.2f} ms")
     print(f"Min/Max: {times.min()*1000:.2f} / {times.max()*1000:.2f} ms")
-    print(f"Tokens/sec: {(2 * 50) / mean_time:.2f}")
+    print(f"Tokens/sec: {(total_tokens) / mean_time:.2f}")
