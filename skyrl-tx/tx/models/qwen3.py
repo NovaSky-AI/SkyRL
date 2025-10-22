@@ -403,7 +403,6 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
                 kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
                 rngs=rngs,
             )
-        self.init_generator()
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
