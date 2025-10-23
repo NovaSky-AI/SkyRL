@@ -345,6 +345,26 @@ class TinkerEngine:
         batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return batchable
+    
+    def find_batchable_sample(self, session: Session) -> list[FutureDB]:
+        """Find all forward_backward ops that come before any destructive update for their model.
+        Similar to  'find_batchable_forward_backward'
+
+        Args:
+            session: Database session
+
+        Returns:
+            List of FutureDB objects that can be safely batched together
+        """
+        sample_query = (
+            select(FutureDB)
+            .where(FutureDB.request_type == types.RequestType.SAMPLE)
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .order_by(FutureDB.request_id)
+        )
+        sample_ops = session.exec(sample_query).all()
+
+        return sample_ops
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
@@ -522,6 +542,120 @@ class TinkerEngine:
                 loss_fn_output_type="scalar",
                 loss_fn_outputs=loss_fn_outputs,
                 metrics={},
+            )
+
+        return results
+    
+    def process_sample_batch(
+        self, requests: list[tuple[FutureDB, str, types.SampleInput]]
+    ) -> dict[str, types.SampleOutput | types.SampleError]:
+        """Process multiple sample requests in a single batch
+        
+        Args:
+            requests: List of (future, model_id, request_data) tuples
+
+        Returns:
+            Dict mapping request_id --> result_data or error info
+        """
+        if not requests:
+            return {}
+
+        results = {}
+        valid_requests = []
+
+        # Filter out invalid requests and mark them as failed
+        for future, model_id, request_data in requests:
+            if model_id and model_id not in self.models:
+                results[future.request_id] = types.SampleError(
+                    error=f"Model {model_id} not loaded",
+                    status="failed",
+                )
+            else:
+                valid_requests.append((future, model_id, request_data))
+
+        if not valid_requests:
+            return results
+        
+        all_prompts = []
+        all_seeds = []
+        all_sampling_params = []
+        all_adapter_indices = []
+        request_batch_slices = []
+
+        current_batch_idx = 0
+        for future, model_id, request_data in valid_requests:
+            # Get adapter index (need to cast in jnp.int32 because that is what generate accepts)
+            adapter_indices_single = (
+                jnp.array([[self.models[model_id].adapter_index]], dtype=jnp.int32)
+                if model_id in self.models
+                else None
+            )
+
+            request_start = current_batch_idx
+            for sample_idx in range(request_data.num_samples):
+                prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+                all_prompts.append(prompt_tokens)
+                all_seeds.append(request_data.sampling_params.seed + sample_idx)
+                all_sampling_params.append(request_data.sampling_params)
+                all_adapter_indices.append(adapter_indices_single)
+                current_batch_idx += 1
+
+            request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
+
+        # Pad sequences to same length
+        max_len = max(len(seq) for seq in all_prompts)
+
+        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32)
+        attention_mask = jnp.array([[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32)
+        
+        total_bs = int(input_ids.shape[0])
+        prompt_lens = [len(seq) for seq in all_prompts]
+
+        # Collect per-sample outputs
+        sequences_out = [None] * total_bs
+
+        with jax.set_mesh(self.mesh):
+            model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
+
+            for i in range(total_bs):
+                seed = all_seeds[i]
+                sampling_params = all_sampling_params[i]
+                adapter_idx = all_adapter_indices[i]
+
+                result = model.generate(
+                    input_ids[i:i+1],
+                    attention_mask[i:i+1],
+                    max_new_tokens=sampling_params.max_tokens,
+                    temperature=sampling_params.temperature,
+                    seed=seed,
+                    return_scores=True,
+                    adapter_indices=adapter_idx,
+                )
+
+                prompt_len = prompt_lens[i]
+                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
+
+                logprobs = []
+                for score in result.scores:
+                    log_probs = jax.nn.log_softmax(score[0], axis=-1)
+                    if len(logprobs) < len(generated_tokens):
+                        token_idx = generated_tokens[len(logprobs)]
+                        logprobs.append(float(log_probs[token_idx]))
+                
+                sequences_out[i] = types.GeneratedSequence(
+                    stop_reason=result.stop_reasons[0],
+                    tokens=generated_tokens,
+                    logprobs=logprobs
+                )
+        
+        for request_id, _, start_idx, end_idx in request_batch_slices:
+            sequences = []
+            for i in range(start_idx, end_idx):
+                sequences.append(sequences_out[i])
+
+            results[request_id] = types.SampleOutput(
+                sequences=sequences,
+                prompt_logprobs=[]
             )
 
         return results
@@ -775,8 +909,6 @@ class TinkerEngine:
                 result = self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
-            case types.RequestType.SAMPLE:
-                result = self.process_sample(model_id, types.SampleInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS:
                 result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:
@@ -791,12 +923,13 @@ class TinkerEngine:
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
                 forward_backward_futures = self.find_batchable_forward_backward(session)
-
+                sample_futures = self.find_batchable_sample(session)
                 # Get other pending requests (non-forward_backward or those blocked by optim_step)
                 statement = (
                     select(FutureDB)
                     .where(FutureDB.status == RequestStatus.PENDING)
                     .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
+                    .where(FutureDB.request_type != types.RequestType.SAMPLE)
                     .order_by(FutureDB.request_id)
                 )
                 other_futures = session.exec(statement).all()
@@ -829,6 +962,37 @@ class TinkerEngine:
                         logger.exception(f"Error processing forward_backward batch: {e}")
                         # Mark all forward_backward requests in the batch as failed
                         for future in forward_backward_futures:
+                            future.result_data = {"error": str(e)}
+                            future.status = RequestStatus.FAILED
+                            future.completed_at = datetime.now(timezone.utc)
+                            session.add(future)
+                        session.commit()
+
+                if sample_futures:
+                    try:
+                        batch_requests = [
+                            (f, f.model_id, types.SampleInput.model_validate(f.request_data)) for f in sample_futures
+                        ]
+                        results = self.process_sample_batch(batch_requests)
+
+                        for future in sample_futures:
+                            if future.request_id in results:
+                                result_data = results[future.request_id]
+                                if isinstance(result_data, types.SampleError):
+                                    future.status = RequestStatus.FAILED
+                                else:
+                                    future.status = RequestStatus.COMPLETED
+                                future.result_data = result_data.model_dump()
+                                future.completed_at = datetime.now(timezone.utc)
+                                session.add(future)
+                                logger.info(f"Completed {future.request_type} request {future.request_id}")
+
+                        session.commit()
+
+                    except Exception as e:
+                        logger.exception(f"Error processing sample batch: {e}")
+                        # Mark all sample requests in the batch as failed
+                        for future in sample_futures:
                             future.result_data = {"error": str(e)}
                             future.status = RequestStatus.FAILED
                             future.completed_at = datetime.now(timezone.utc)

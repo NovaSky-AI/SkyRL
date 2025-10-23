@@ -112,6 +112,11 @@ class ForwardBackwardError(BaseModel):
     status: str
 
 
+class SampleError(BaseModel):
+    error: str
+    status: str
+
+
 class OptimStepInput(BaseModel):
     adam_params: AdamParams
 
