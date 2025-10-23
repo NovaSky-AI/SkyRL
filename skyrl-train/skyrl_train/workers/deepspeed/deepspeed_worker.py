@@ -343,9 +343,9 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
-        rope_scaling_cfg = (OmegaConf.to_container(self.cfg.trainer.rope_scaling)
-                            if "rope_scaling" in self.cfg.trainer
-                            else {})
+        rope_scaling_cfg = (
+            OmegaConf.to_container(self.cfg.trainer.rope_scaling) if "rope_scaling" in self.cfg.trainer else {}
+        )
 
         wrapped_model = HFModelWrapper(
             model_path,

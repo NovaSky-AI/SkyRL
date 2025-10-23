@@ -152,7 +152,9 @@ def create_ray_wrapped_inference_engines(
                     rope_factor = rope_scaling.get("factor", None)
                     rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
                     assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
-                    assert rope_max_pos is not None, "Please provide rope `original_max_position_embeddings` to compute model max length"
+                    assert (
+                        rope_max_pos is not None
+                    ), "Please provide rope `original_max_position_embeddings` to compute model max length"
                     rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
             if rope_theta is not None:
                 rope_engine_kwargs["rope_theta"] = rope_theta
