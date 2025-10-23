@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
@@ -33,10 +35,19 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    app.state.db_engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
+    app.state.db_engine = create_async_engine(
+            f"sqlite+aiosqlite:///{DB_PATH}",
+            echo=False,
+            poolclass=StaticPool,
+            connect_args={
+                "timeout": 30.0,
+                "check_same_thread": False
+            }
+        )
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
 
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
