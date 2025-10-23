@@ -1,6 +1,8 @@
 import torch
 from unittest.mock import patch
-from skyrl_train.distributed.ulysses.monkey_patch import _ulysses_flash_attention_forward
+from skyrl_train.distributed.ulysses.monkey_patch import make_ulysses_attn_forward
+
+ulysses_flash_attention_forward = make_ulysses_attn_forward()
 
 
 def test_basic_forward_no_parallel():
@@ -24,7 +26,7 @@ def test_basic_forward_no_parallel():
         with patch(
             "skyrl_train.distributed.ulysses.monkey_patch.get_ulysses_sequence_parallel_world_size", return_value=1
         ):
-            _ulysses_flash_attention_forward(query_states, key_states, value_states, position_ids=position_ids)
+            ulysses_flash_attention_forward(query_states, key_states, value_states, position_ids=position_ids)
 
             # Verify the original flash attention was called with correct inputs
             mock_fa.assert_called_once()
@@ -80,7 +82,7 @@ def test_sequence_parallel_forward():
             # Do nothing - output list remains as is
             mock_all_gather.side_effect = lambda output_list, input_tensor, **kwargs: None
 
-            output = _ulysses_flash_attention_forward(query_states, key_states, value_states, position_ids=position_ids)
+            output = ulysses_flash_attention_forward(query_states, key_states, value_states, position_ids=position_ids)
 
             # Verify the communication operations were called
             assert mock_gather_seq_scatter_heads.call_count == 3  # Called for q, k, v

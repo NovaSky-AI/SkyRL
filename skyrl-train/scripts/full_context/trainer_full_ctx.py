@@ -16,7 +16,9 @@ class FullCtxTrainer(RayPPOTrainer):
 
     def train(self):
         """Run a few training steps with max sequence length."""
-        logger.info("Starting dummy training with max sequence length...")
+        logger.info(
+            f"Starting dummy training with max sequence length... {self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length}"
+        )
 
         self.global_step = 0
 

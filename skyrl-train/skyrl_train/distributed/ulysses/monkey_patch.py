@@ -48,7 +48,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep, head_dim)
 
 
-def make_ulysses_attn_forward(attn_interface: Callable):
+def make_ulysses_attn_forward(attn_interface: Callable = _flash_attention_forward):
     def _ulysses_attention_forward(
         query_states: torch.Tensor,
         key_states: torch.Tensor,
@@ -72,14 +72,6 @@ def make_ulysses_attn_forward(attn_interface: Callable):
         """
         ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
 
-        mask_status = 0 if attention_mask is None else 1
-        import os
-
-        print(
-            f"RANK {os.environ.get('RANK', 'unknown')}: attention_mask={'None' if mask_status==0 else 'NotNone'}",
-            flush=True,
-        )
-        print(f"{attention_mask.shape}, {query_states.shape}")
         ########## AlltoAll for Ulysses ##########
         if ulysses_sp_size > 1:
             # assert position_ids is not None, "position_ids is required for Ulysses sequence parallelism"
