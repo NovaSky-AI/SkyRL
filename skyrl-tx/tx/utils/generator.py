@@ -7,6 +7,8 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
+import tx.utils.models
+
 
 @jax.tree_util.register_dataclass
 @dataclass
@@ -81,7 +83,6 @@ class GeneratorMixin:
         seed: int,
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
-        max_length: int = 512,
     ) -> GenerateResult:
         """Generate text autoregressively with KV caching.
 
@@ -92,6 +93,7 @@ class GeneratorMixin:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         batch_size, prompt_length = input_ids.shape
+        max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)

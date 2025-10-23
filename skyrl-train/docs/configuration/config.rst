@@ -398,9 +398,9 @@ Algorithm Configuration
         ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
       # cispo parameters (only used when policy_loss_type: "cispo")
-      cispo:
-        clip_low: 0.2 # lower bound for importance sampling ratio clipping
-        clip_high: 0.2 # upper bound for importance sampling ratio clipping
+      cispo: 
+        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+        cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
       # value loss parameters
       value_clip: 0.2
@@ -472,8 +472,8 @@ Algorithm Configuration
 
 - ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
 
-  - ``clip_low``: Lower bound for importance sampling ratio clipping.
-  - ``clip_high``: Upper bound for importance sampling ratio clipping.
+  - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
+  - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
 
 
 Policy Loss Formulation
