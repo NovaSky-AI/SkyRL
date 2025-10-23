@@ -5,7 +5,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import optax
-
 from tx.tinker.engine import TinkerEngine
 from tx.tinker.config import EngineConfig
 from tx.tinker import api
@@ -254,3 +253,51 @@ def test_process_optim_step_hyperparams_behavior():
     # Expect a large gap in update magnitude between the two adapters.
     assert tiny_norm > 0
     assert default_norm / tiny_norm == pytest.approx(1e4, rel=5e-3)
+
+
+def test_gradient_checkpointing():
+    """
+    Verify gradient checkpointing doesn't affect loss values.
+    """
+    losses = []
+    for use_gradient_checkpointing in (False, True):
+        cfg = EngineConfig(
+            base_model="Qwen/Qwen3-0.6B",
+            enforce_eager=False,
+            train_batch_size=2,
+            micro_batch_size=1,
+            max_lora_adapters=1,
+            max_lora_rank=4,
+            gradient_checkpointing=use_gradient_checkpointing,
+        )
+        engine = TinkerEngine(cfg)
+
+        # Create batch
+        B, T = 2, 8
+        vocab = engine.model.config.vocab_size
+        input_ids = jnp.arange(B * T, dtype=jnp.int32).reshape(B, T) % vocab
+        attention_mask = jnp.ones((B, T), dtype=jnp.int32)
+        adapter_indices = jnp.zeros((B,), dtype=jnp.int32)
+        target_ids = input_ids
+        loss_mask = jnp.ones((B, T), dtype=jnp.float32)
+        loss_fn_types = jnp.zeros((B,), dtype=jnp.int32)
+        sampling_logprobs = jnp.zeros((B, T), dtype=jnp.float32)
+        advantages = jnp.zeros((B, T), dtype=jnp.float32)
+
+        # Compute loss, using gradient checkpointing if enabled
+        (loss_full, _), _ = engine._loss_and_grad_fn(
+            engine.lora_params,
+            engine.non_lora_params,
+            input_ids,
+            attention_mask,
+            adapter_indices,
+            target_ids,
+            loss_mask,
+            loss_fn_types,
+            sampling_logprobs,
+            advantages,
+        )
+        losses.append(float(loss_full))
+
+    # Check relative difference between losses is small
+    assert abs(losses[0] - losses[1]) / abs(losses[0]) < 5e-3

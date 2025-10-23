@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.training import checkpoints
 
+
 import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
@@ -149,6 +150,17 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
+        # Wrap the model forward call to use nnx.remat for gradient checkpointing
+        def _model_forward(
+            model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+        ) -> jax.Array:
+            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+            return output["logits"]
+
+        if self.config.gradient_checkpointing:
+            # policy=None corresponds full activation recomputation
+            _model_forward = nnx.remat(_model_forward, policy=None)
+
         def loss_for_lora(
             lora_params: nnx.State,
             non_lora_params: nnx.State,
@@ -162,9 +174,8 @@ class TinkerEngine:
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
-                "logits"
-            ]  # [B, T, V]
+            logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
 
