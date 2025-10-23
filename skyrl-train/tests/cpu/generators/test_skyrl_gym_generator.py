@@ -759,7 +759,6 @@ async def test_apply_overlong_filtering_non_batched(
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
-    # TODO(Dev): Fix is fine for now, will revisit in case issues arise
     async def llm_generate_side_effect(input_batch):
 
         if input_batch.get("sampling_params") is not None:

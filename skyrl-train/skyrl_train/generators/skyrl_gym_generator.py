@@ -182,7 +182,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
-        per_step_rewards: List[Tuple[Optional[float], Optional[int]]] = []
+        per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
 
@@ -190,6 +190,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 stop_reason = "length"
                 break
 
+            # 1. Generate output
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
