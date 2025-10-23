@@ -142,10 +142,7 @@ class OpenEnv(BaseTextEnv):
         self.turns += 1
         self.chat_history.append({"role": "assistant", "content": action})
 
-        # Check max turns reached
-        done = self._is_done()
-        if done:
-            return BaseTextEnvStepOutput(observations=[], reward=0, done=done, metadata={})
+        max_turns_reached = self._is_done()
 
         error = None
         try:
@@ -159,26 +156,31 @@ class OpenEnv(BaseTextEnv):
             observation = None
             reward = -1
 
-        if observation:
-            new_obs = {"role": "user", "content": observation}
-        elif error:
-            new_obs = {"role": "user", "content": error}
+        if max_turns_reached:
+            # If reached max turns, just return the reward and done
+            return BaseTextEnvStepOutput(observations=[], reward=reward, done=max_turns_reached, metadata={})
         else:
-            new_obs = None
+            # Return observation for multi-turn interaction
+            if observation:
+                new_obs = {"role": "user", "content": observation}
+            elif error:
+                new_obs = {"role": "user", "content": error}
+            else:
+                new_obs = None
 
-        if new_obs:
-            self.chat_history.append(new_obs)
+            if new_obs:
+                self.chat_history.append(new_obs)
 
-        info = {
-            "env_class": self.env_name,
-            "action": action,
-            "observation": observation,
-        }
-        # print("chat history: ", self.chat_history)
+            info = {
+                "env_class": self.env_name,
+                "action": action,
+                "observation": observation,
+            }
+            # print("chat history: ", self.chat_history)
 
-        return BaseTextEnvStepOutput(
-            observations=[new_obs] if new_obs else [],
-            reward=reward,
-            done=done,
-            metadata=info,
-        )
+            return BaseTextEnvStepOutput(
+                observations=[new_obs] if new_obs else [],
+                reward=reward,
+                done=done,
+                metadata=info,
+            )
