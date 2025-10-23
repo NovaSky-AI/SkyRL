@@ -140,17 +140,18 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             )
         )
 
-        memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-        memory = memory[0]
+        # Step 2.1: Make sure that offloading still works after saving checkpoint
+        memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
         print_mem("memory after saving checkpoint", memory)
+        actor_group.offload_to_cpu()
 
-        actor_group.offload_to_cpu(offload_optimizer=True, offload_model=True)
+        memory_after_offloading = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
+        print_mem("memory after offloading", memory)
 
-        memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-        memory = memory[0]
-        print_mem("memory after trying to offload optimizer", memory)
-
-        actor_group.backload_to_gpu(backload_optimizer=True, backload_model=True)
+        assert (
+            memory_after_offloading < memory_after_saving
+        ), f"Memory after offloading should be less than after saving: {memory_after_offloading} bytes < {memory_after_saving} bytes"
+        actor_group.backload_to_gpu()
 
         # check that relevant files are saved
         huggingface_dir = os.path.join(checkpoint_path, "huggingface")
@@ -177,28 +178,12 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             megatron_batch=train_batch_2,
         )
 
-        memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-        memory = memory[0]
-        print_mem("memory after second training step", memory)
-
         # Step 2: Save checkpoint
         ray.get(
             actor_group.async_run_ray_method(
                 "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
             )
         )
-
-        memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-        memory = memory[0]
-        print_mem("memory after saving checkpoint after second training step", memory)
-
-        actor_group.offload_to_cpu(offload_optimizer=True, offload_model=True)
-
-        memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-        memory = memory[0]
-        print_mem("memory after trying to offload optimizer after second training step", memory)
-
-        actor_group.backload_to_gpu(backload_optimizer=True, backload_model=True)
 
         # Create test input for comparing model outputs
         dp_size = actor_group.actor_infos[0].rank.dp_size

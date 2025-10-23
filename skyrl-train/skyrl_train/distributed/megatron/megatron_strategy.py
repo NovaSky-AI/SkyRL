@@ -20,10 +20,9 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     offload_megatron_optimizer,
     load_megatron_optimizer,
+    offload_megatron_grads_to_cpu,
+    load_megatron_grads_to_gpu,
 )
-
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
@@ -37,7 +36,6 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
-import gc
 
 
 class MegatronStrategy(DistributedStrategy):
@@ -57,9 +55,9 @@ class MegatronStrategy(DistributedStrategy):
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
 
-        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
-        # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        import multiprocessing as mp
+
+        mp.set_start_method("spawn", force=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -98,6 +96,7 @@ class MegatronStrategy(DistributedStrategy):
         if offload_model:
             offload_megatron_model_to_cpu(model)
         if optimizer and offload_optimizer:
+            offload_megatron_grads_to_cpu(model)
             offload_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -107,6 +106,7 @@ class MegatronStrategy(DistributedStrategy):
         if backload_model:
             load_megatron_model_to_gpu(model)
         if optimizer and backload_optimizer:
+            load_megatron_grads_to_gpu(model)
             load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 
@@ -159,13 +159,7 @@ class MegatronStrategy(DistributedStrategy):
         sharded_state_dict = {}
         model_sharded_state_dict = model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
-        moved_optimizer = False
         if optimizer:
-            try:
-                offload_megatron_optimizer(optimizer)
-                moved_optimizer = True
-            except Exception:
-                moved_optimizer = False
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
@@ -197,42 +191,6 @@ class MegatronStrategy(DistributedStrategy):
 
         dist.barrier()
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
-        try:
-            del sharded_state_dict
-            del model_sharded_state_dict
-        except Exception:
-            pass
-        try:
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-        gc.collect()
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        if optimizer and moved_optimizer:
-            try:
-                load_megatron_optimizer(optimizer)
-            except Exception:
-                pass
-            torch.cuda.synchronize()
-
-        # Cleanup any lingering refs and caches
-        try:
-            del sharded_state_dict
-            del model_sharded_state_dict
-        except Exception:
-            pass
-        gc.collect()
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-
-        # Restore optimizer to GPU if it was offloaded
-        if optimizer and moved_optimizer:
-            try:
-                load_megatron_optimizer(optimizer)
-            except Exception:
-                pass
-            torch.cuda.synchronize()
 
     def load_checkpoint(
         self,

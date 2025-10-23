@@ -1000,7 +1000,6 @@ class RayPPOTrainer:
 
         io.makedirs(global_step_folder, exist_ok=True)
 
-
         memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
         memory = memory[0]
         print_mem("memory before saving policy checkpoint", memory)
@@ -1013,7 +1012,6 @@ class RayPPOTrainer:
                 tokenizer=self.tokenizer,
             )
         )
-
 
         memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
         memory = memory[0]
