@@ -73,11 +73,6 @@ class HFModelWrapper(nn.Module):
         if use_sample_packing:
             assert self.use_flash_attention_2, "Flash attention 2 should be used for `use_sample_packing`"
 
-        print("MYDEBUG HFModelWrapper.__init__", pretrain_or_model)
-        import traceback
-        for line in traceback.format_stack():
-            print("MYDEBUG HFModelWrapper", line.strip())
-
         if isinstance(pretrain_or_model, str):
             attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
@@ -116,8 +111,6 @@ class HFModelWrapper(nn.Module):
             rope_scaling_kwargs = {}
             if rope_scaling:
                 rope_scaling_kwargs["rope_scaling"] = rope_scaling
-
-            print("MYDEBUG HFModelWrapper.__init__2", rope_scaling_kwargs)
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,

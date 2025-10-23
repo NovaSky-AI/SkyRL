@@ -70,7 +70,6 @@ class RayPPOTrainer:
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
-        print("MYDEBUG RayPPOTrainer.__init__")
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
