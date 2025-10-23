@@ -99,4 +99,4 @@ We use dummy datasets for all the environment integration now. Please modify `pr
 ## TODOs and Limitations
 We welcome any contributions to help resolve the remaining tasks!
 * Make it easier to specify different OpenEnv environments used for training and validation.
-* Make it smoother to specify which dataset splits to use (ie, resolve the challenge specified in the `Troubleshooting` section.)
+* Make it smoother to specify which dataset splits to use
