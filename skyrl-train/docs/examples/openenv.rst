@@ -106,7 +106,7 @@ Supporting environments are: ``echo_env``, ``coding_env``, ``openspiel-env``, ``
 
 Example Reward Curve 
 --------
-Example reward curve for the ``echo_env`` environment looks like this: 
+Here's how the reward curve for the above example script looks like after a few steps: 
 
 .. list-table::
    :widths: 50 50
