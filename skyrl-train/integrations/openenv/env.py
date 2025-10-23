@@ -12,6 +12,39 @@ from envs.finrl_env import FinRLEnv, FinRLAction
 import re
 import ast
 
+import dataclasses
+
+
+def serialize_observation(obs: Any, max_list_len: int = 20) -> str:
+    """
+    Convert any Observation (dataclass or dict) into a flat string.
+    Long lists are truncated for readability.
+    """
+    if obs is None:
+        return "Observation: None"
+
+    # Convert to dict representation
+    if dataclasses.is_dataclass(obs):
+        obs_dict = dataclasses.asdict(obs)
+    elif hasattr(obs, "__dict__"):
+        obs_dict = vars(obs)
+    elif isinstance(obs, dict):
+        obs_dict = obs
+    else:
+        # Fallback for unexpected types
+        return f"Observation: {str(obs)}"
+
+    flat_lines = []
+    for k, v in obs_dict.items():
+        if isinstance(v, list):
+            display = v[:max_list_len]
+            suffix = " ..." if len(v) > max_list_len else ""
+            flat_lines.append(f"{k}: {display}{suffix} (len={len(v)})")
+        else:
+            flat_lines.append(f"{k}: {v}")
+
+    return "\n".join(flat_lines) + "\n given this information, try again."
+
 
 class OpenEnv(BaseTextEnv):
     """
@@ -56,7 +89,6 @@ class OpenEnv(BaseTextEnv):
             return SumoRLEnv
         elif env_name == "finrl-env":
             return FinRLEnv
-        # TODO: handle ChatEnv, maybe use ChatEnv to maintain message history?
         else:
             raise ValueError(f"Unknown environment '{env_name}'")
 
@@ -68,6 +100,7 @@ class OpenEnv(BaseTextEnv):
         Returns:
             Action object to pass into the OpenEnv environment.
         """
+        matches = []
         if "<action>" in action and "</action>" in action:
             matches = re.findall(r"<action>(.*?)</action>", action)
 
@@ -106,6 +139,7 @@ class OpenEnv(BaseTextEnv):
         return self.turns >= self.max_turns
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
+        self.turns += 1
         self.chat_history.append({"role": "assistant", "content": action})
 
         # Check max turns reached
@@ -117,14 +151,13 @@ class OpenEnv(BaseTextEnv):
         try:
             action = self._get_openenv_action(self.env_name, action)
             result = self.env.step(action)
-            observation = result.observation
-            reward = result.reward
+            observation = serialize_observation(result.observation)
+            reward = 0.0 if not result.reward else result.reward
             done = result.done
         except Exception as e:
             error = str(e)
             observation = None
             reward = -1
-            print(f"Error during step: {error}")
 
         if observation:
             new_obs = {"role": "user", "content": observation}
@@ -141,6 +174,7 @@ class OpenEnv(BaseTextEnv):
             "action": action,
             "observation": observation,
         }
+        # print("chat history: ", self.chat_history)
 
         return BaseTextEnvStepOutput(
             observations=[new_obs] if new_obs else [],

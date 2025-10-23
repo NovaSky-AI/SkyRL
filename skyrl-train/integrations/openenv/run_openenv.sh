@@ -14,7 +14,7 @@ set -x
 
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/openenv/run_dummy_openenv.sh`.
 
-: "${ENV_NAME:="coding_env"}"
+: "${ENV_NAME:="echo_env"}"
 : "${DATA_DIR:="$HOME/data/openenv/$ENV_NAME"}"
 : "${CKPT_PATH:="$HOME/ckpts/openenv_${ENV_NAME}_1.5B"}"
 : "${NUM_GPUS:=4}"
@@ -48,15 +48,20 @@ uv run --isolated --extra $INFERENCE_BACKEND --with "openenv@git+https://github.
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
+  generator.sampling_params.temperature=0.6 \
+  generator.sampling_params.top_p=0.95 \
+  generator.sampling_params.stop='["</action>"]' \
+  generator.eval_sampling_params.stop='["</action>"]' \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  trainer.algorithm.use_kl_loss=false \
+  trainer.algorithm.use_kl_loss=true \
   generator.max_turns=$MAX_TURNS \
   generator.backend=$INFERENCE_BACKEND \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=true \
+  generator.batched=false \
   environment.env_class=openenv \
+  generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

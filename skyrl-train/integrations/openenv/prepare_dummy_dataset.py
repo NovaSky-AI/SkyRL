@@ -41,26 +41,16 @@ def example_question(env_name: str) -> List[str]:
     elif env_name == "coding_env":
         # Coding environment executes code and returns stdout.
         examples = [
-            "Print 'What is that?' using Python.",
-            "Define a variable x = 5 + 3 and print its value.",
-            "Use a loop to print numbers 1 to 3 and their squares.",
+            "Print 'I love RL!' using Python.",
+            "Provide a function fib(n) that can compute the n-th Fibonacci number",
+            "Using a for loop, print numbers 1 to 5 and their squares.",
         ]
-        instruction += (
+        instruction = (
             "Write the python code inside <action>...</action> tags. Example: <action>print('Hello, World!')</action>"
         )
-    elif env_name == "openspiel-env" or env_name == "atari-env":
-        examples = [
-            "Choose a legal action given the legal action states.",
-        ]
-    elif env_name == "sumo-rl-env":
-        examples = [
-            "Choose a legal action (a valid traffic light phase id).",
-        ]
-    elif env_name == "finrl-env":
-        examples = [
-            "Choose a trading action by specifying normalized values between -1 and 1 for each stock, where positive means buy and negative means sell. Wrap the action between <action> and </action> tags. For example: <action>[0.5, -0.3, 0.0]</action>."
-        ]
     else:
+        # NOTE: we only provide dummy train set examples for echo_env and coding_env
+        # For other environments, you need to provide your own train / validation set examples.
         raise ValueError(f"Unknown environment name: {env_name}")
 
     return [f"{ex}\n\n{instruction}" for ex in examples]
@@ -108,7 +98,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     args.output_dir = os.path.expanduser(args.output_dir)
-    all_envs = ["echo_env", "coding_env", "openspiel-env", "atari-env", "sumo-rl-env", "finrl-env"]
+    all_envs = ["echo_env", "coding_env"]
 
     if args.env_name is None:
         print("No --env_name specified. Preparing datasets for all available environments:")

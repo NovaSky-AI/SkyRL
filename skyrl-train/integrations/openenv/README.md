@@ -39,7 +39,7 @@ uv run integrations/openenv/prepare_dummy_dataset.py --output_dir ~/data/openenv
 # uv run integrations/openenv/prepare_dummy_dataset.py --output_dir ~/data/openenv 
 ```
 
-This creates training and validation datasets with example prompts for the specified environment. Available environments include: ``echo_env``, ``coding_env``, ``openspiel-env``, ``atari-env``, ``sumo-rl-env``, ``finrl-env``.
+This creates training and validation datasets with example prompts for the specified environment (we provide two examples in ``echo_env`` and ``coding_env``)
 
 `prepare_dummy_dataset.py` has additional optional parameters:
   - `--output_dir`: directory to place datasets (default: `~/data/openenv`)
