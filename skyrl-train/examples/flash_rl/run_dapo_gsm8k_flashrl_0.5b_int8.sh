@@ -33,7 +33,7 @@ MAX_RESPONSE_LENGTH=1024
 
 CKPT_PATH="$HOME/ckpts/gsm8k_0.5B_ckpt"
 
-uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 -- python -m examples.flash_rl.main_dapo_flashrl \
+uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 --with vllm@https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl --with transformers==4.53.3 -- python -m examples.flash_rl.main_dapo_flashrl \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

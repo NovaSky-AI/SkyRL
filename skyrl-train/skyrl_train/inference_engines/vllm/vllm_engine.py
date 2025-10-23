@@ -275,7 +275,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Check if LoRA is enabled and create LoRA requests
         lora_requests = None
         if self._is_lora:
-            lora_int_ids = list(self.llm.list_loras())
+            lora_int_ids = list(self.llm.llm_engine.list_loras())
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
                 batch_size = len(prompt_token_ids)
@@ -333,7 +333,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        result = self.llm.add_lora(lora_request)
+        result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
