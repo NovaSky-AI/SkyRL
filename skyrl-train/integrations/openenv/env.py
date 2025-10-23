@@ -184,3 +184,6 @@ class OpenEnv(BaseTextEnv):
                 done=done,
                 metadata=info,
             )
+
+    def close(self):
+        self.env.close()
