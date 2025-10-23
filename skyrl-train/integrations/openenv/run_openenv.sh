@@ -22,7 +22,7 @@ set -x
 
 : "${INFERENCE_BACKEND:=vllm}"
 # : "${INFERENCE_BACKEND:=sglang}"
-: "${MAX_TURNS:=4}"
+: "${MAX_TURNS:=1}"
 
 uv run --isolated --extra $INFERENCE_BACKEND --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m integrations.openenv.entrypoints.main_openenv \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -66,7 +66,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --with "openenv@git+https://github.
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="openenv" \
-  trainer.run_name="openenv_test" \
+  trainer.run_name="openenv_${ENV_NAME}_test" \
   trainer.resume_mode=latest \
   trainer.ckpt_path=$CKPT_PATH \
   trainer.dump_data_batch=true \

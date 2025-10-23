@@ -101,3 +101,4 @@ Tips
 
 - **Docker Resources**: Ensure sufficient Docker resources are available, especially for computationally intensive environments like Atari or OpenSpiel.
 - **Generation Format**: The generation format is expected to be a single action wrapped in ``<action>...</action>`` tags for dummy testing. Change `_get_openenv_action` in ``integrations/openenv/env.py`` for custom parsing logic.
+- **Multi-Turn Interaction**: change ``MAX_TURNS``in ``run_openenv.sh`` to enable multi-turn interaction.

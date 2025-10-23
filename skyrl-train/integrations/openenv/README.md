@@ -84,8 +84,8 @@ See all available training configuration parameters in `ppo_base_config.yaml`.
 ## Tips
 
 - **Docker Resources**: Ensure sufficient Docker resources are available, especially for computationally intensive environments like Atari or OpenSpiel.
-- **Generation Format**: The generation format is expected to be a single action wrapped in ``<action>...</action>`` tags for dummy testing. Change `_get_openenv_action` in the OpenEnv environment wrapper (`integrations/openenv/env.py`) for custom parsing logic.
-- **Environment Variables**: You can override default values with environment variables like `NUM_GPUS=1`, `ENV_NAME=coding_env`, etc.
+- **Generation Format**: The generation format right now is expected to be a single action wrapped in ``<action>...</action>`` tags for dummy testing. Change `_get_openenv_action` in the OpenEnv environment wrapper (`integrations/openenv/env.py`) for custom parsing logic.
+- **Environment Variables**: You can override default values with environment variables like `NUM_GPUS=1`, `ENV_NAME=coding_env`, `MAX_TURNS=1` etc.
 - **Logging**: Set `LOGGER=console` to print logs to stdout instead of using wandb.
 
 ## Troubleshooting
