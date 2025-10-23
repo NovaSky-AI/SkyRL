@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -22,6 +22,13 @@ class RequestType(str, Enum):
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
+
+
+class CheckpointType(str, Enum):
+    """Type of checkpoint."""
+
+    TRAINING = "training"
+    SAMPLER = "sampler"
 
 
 class TinkerPath(BaseModel):
@@ -44,7 +51,10 @@ class TinkerPath(BaseModel):
 
 
 class AdamParams(BaseModel):
-    lr: float
+    learning_rate: float
+    beta1: float
+    beta2: float
+    eps: float
 
 
 class LoraConfig(BaseModel):
@@ -62,8 +72,33 @@ class CreateModelOutput(BaseModel):
     lora_config: LoraConfig
 
 
+class ModelInputChunk(BaseModel):
+    tokens: list[int]
+
+
+class ModelInput(BaseModel):
+    chunks: list[ModelInputChunk]
+
+
+class TensorData(BaseModel):
+    data: list[int] | list[float]
+
+
+class LossFnInputs(BaseModel):
+    target_tokens: TensorData
+    weights: TensorData
+    advantages: TensorData
+    logprobs: TensorData
+
+
+class Datum(BaseModel):
+    loss_fn_inputs: LossFnInputs
+    model_input: ModelInput
+
+
 class ForwardBackwardInput(BaseModel):
-    forward_backward_input: dict[str, Any]
+    data: list[Datum]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
 
 
 class ForwardBackwardOutput(BaseModel):
@@ -112,14 +147,21 @@ class LoadWeightsOutput(BaseModel):
     type: str
 
 
+class SamplingParams(BaseModel):
+    temperature: float
+    max_tokens: int
+    seed: int
+
+
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
 
 
 class SampleInput(BaseModel):
-    prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
+    base_model: str | None = None
+    prompt: ModelInput
+    sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
 

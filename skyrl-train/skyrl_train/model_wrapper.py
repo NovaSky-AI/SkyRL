@@ -143,6 +143,8 @@ class HFModelWrapper(nn.Module):
                     sequence_parallel_rank = None
                     if self.sequence_parallel_size > 1:
                         sequence_parallel_rank = get_ulysses_sequence_parallel_rank()
+                    # NOTE: Even though we set a custom attn implementation, we
+                    # also patch the full attention function for GPT OSS
                     patch_GptOssAttention(
                         sequence_parallel_rank=sequence_parallel_rank,
                         sequence_parallel_size=self.sequence_parallel_size,
