@@ -7,7 +7,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
-from tx.utils.models import round_up_seq_len
+import tx.utils.models
 
 
 @jax.tree_util.register_dataclass
@@ -93,7 +93,7 @@ class GeneratorMixin:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         batch_size, prompt_length = input_ids.shape
-        max_length = round_up_seq_len(prompt_length + max_new_tokens)
+        max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
