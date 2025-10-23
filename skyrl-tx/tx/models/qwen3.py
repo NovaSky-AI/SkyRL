@@ -18,7 +18,7 @@ class RMSNorm(nnx.Module):
 
     def __call__(self, x: jax.Array) -> jax.Array:
         rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-        return self.weight * x / rms
+        return (self.weight * x / rms).astype(x.dtype)
 
 
 def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta: int) -> jax.Array:
