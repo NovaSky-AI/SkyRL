@@ -16,7 +16,7 @@ from loguru import logger
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--num-nodes", type=int, default=4)
+parser.add_argument("--num-nodes", type=int, default=2)
 parser.add_argument("--master-port", type=int, default=12355)
 args = parser.parse_args()
 
@@ -24,10 +24,10 @@ args = parser.parse_args()
 def log_versions(rank):
     logger.warning(
         f"{rank} Python version: {sys.version} | "
-        f"PyTorch version: {torch.__version__} | "
+        f"PyTorch version: {torch.__version__} and path {torch.__file__} | "
         f"CUDA available: {torch.cuda.is_available()} | "
         f"CUDA version: {torch.version.cuda if torch.cuda.is_available() else 'N/A'} | "
-        f"Ray version: {ray.__version__}"
+        f"Ray version: {ray.__version__}" 
     )
 
 
@@ -63,11 +63,12 @@ class PyTorchDistActor:
         except Exception as e:
             logger.error(f"Rank {self.rank} FAILED init_process_group: {e}")
             raise
-
+        log_versions(self.rank)
+        # print(f"Torch is being imported from: {torch.__file__. Version is {torch.__version__}")
         # Create a 1GB tensor
         # 1 GB = 1,073,741,824 bytes
         # float32 = 4 bytes, so we need 268,435,456 elements
-        tensor_size = 2000  # ~1 GB
+        tensor_size = 2000000  # ~1 GB
         
         logger.warning(f"Rank {self.rank} BEFORE tensor creation")
         if self.rank == 0:

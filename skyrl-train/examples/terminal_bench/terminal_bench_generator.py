@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
+from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -20,6 +21,7 @@ class TerminalBenchAgentOutput:
     stop_reason: str
     loss_mask: List[int]
     prompt_ids: List[int]
+    rollout_logprobs: Optional[List[float]]
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -51,8 +53,12 @@ class TerminalBenchGenerator(GeneratorInterface):
             raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        
         tasks = []
         for prompt in input_batch["prompts"]:
+            # task = asyncio.create_task(self.terminal_bench_agent_loop(prompt=prompt))
+            # tasks.append(task)
+            # await asyncio.sleep(1)
             tasks.append(
                 self.terminal_bench_agent_loop(
                     prompt=prompt,
@@ -86,6 +92,14 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
+        # Sleeping to create an overlap between task execution and inferencing
+        import random
+        await asyncio.sleep(random.uniform(1, 60))
+
+        # Generate session_id for sticky routing to inference engines
+        # All LLM requests in this trial will share the same session_id
+        session_id = uuid4().hex
+
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
@@ -94,7 +108,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
                     model_name=f"hosted_vllm/{self.model_name}",
-                    kwargs={"api_base": f"{self.base_url}/v1", "key": "fake_key", "max_episodes": self.max_episodes},
+                    kwargs={
+                        "api_base": f"{self.base_url}/v1",
+                        "key": "fake_key",
+                        "session_id": session_id,
+                        "max_episodes": self.max_episodes,
+                    },
                 ),
             )
         elif self.agent_name == "oracle":
@@ -120,6 +139,11 @@ class TerminalBenchGenerator(GeneratorInterface):
                     print(f"[WARNING] Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
+                
+                if "all_messages" not in results.agent_result.metadata:
+                    print(f"[WARNING] No 'all_messages' in agent_result.metadata for agent. Exception info: {results.agent_result}")
+                    continue
+
                 chat_history = results.agent_result.metadata["all_messages"]
                 if len(chat_history) > 0:
                     break
@@ -146,6 +170,12 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         response_ids = []
         loss_mask = []
+        rollout_logprobs = []
+
+        # Get logprobs for assistant messages from trial results
+        # Format: [[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]
+        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
+        assistant_msg_idx = 0
 
         for message in response_messages:
             # Apply chat template and tokenize each message
@@ -157,8 +187,23 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Extend loss_mask: 0s for user, 1s for assistant
             if message["role"] == "user":
                 loss_mask.extend([0] * len(msg_encoding))
+                if assistant_logprobs:
+                    rollout_logprobs.extend([0.0] * len(msg_encoding))
             else:  # assistant
                 loss_mask.extend([1] * len(msg_encoding))
+                if assistant_logprobs:
+                    if assistant_msg_idx >= len(assistant_logprobs):
+                        raise ValueError(
+                            f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists."
+                        )
+                    msg_logprobs = assistant_logprobs[assistant_msg_idx]
+                    if len(msg_logprobs) != len(msg_encoding):
+                        raise ValueError(
+                            f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(msg_encoding)}) "
+                            f"for assistant message #{assistant_msg_idx + 1}."
+                        )
+                    rollout_logprobs.extend(msg_logprobs)
+                    assistant_msg_idx += 1
 
         # Determine stop reason
         max_response_tokens = (
@@ -176,10 +221,72 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
+        rollout_logprobs = rollout_logprobs[:max_response_tokens]
+
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
+            # in case sandboxes doesn't return logprobs, use None
+            rollout_logprobs=rollout_logprobs if assistant_logprobs is not None else None,
         )
+
+    
+
+    # async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    #     # For testing, skip the actual async agent loop
+    #     max_response_tokens = (
+    #         self.generator_cfg.sampling_params.max_generate_length
+    #         + self.generator_cfg.max_input_length
+    #     )
+
+    #     fake_output = self.fake_generator_output(
+    #         tokenizer=self.tokenizer,
+    #         input_batch=input_batch,
+    #         max_response_tokens=max_response_tokens,
+    #     )
+
+    #     return fake_output
+    
+
+    # def fake_generator_output(self, tokenizer, input_batch, max_response_tokens: int, batch_size: int = None):
+    #     """
+    #     Create a fake generator_output dict that mimics the structure of a real one.
+
+    #     Args:
+    #         tokenizer: your tokenizer (used to get vocab size)
+    #         input_batch: the same input_batch used in generate()
+    #         max_response_tokens: maximum length of fake responses
+    #         batch_size: optional override for batch size
+    #     """
+    #     import random
+    #     vocab_size = len(tokenizer)
+    #     prompts = input_batch["prompts"]
+    #     batch_size = batch_size or len(prompts)
+
+    #     def random_tokens(length):
+    #         return [random.randint(0, vocab_size - 1) for _ in range(length)]
+
+    #     fake_outputs = []
+    #     for _ in range(batch_size):
+    #         fake_outputs.append({
+    #             "prompt_ids": random_tokens(32),  # arbitrary prompt length
+    #             "response_ids": random_tokens(max_response_tokens),
+    #             "reward": random.uniform(0, 1),
+    #             "loss_mask": [1] * max_response_tokens,
+    #             "stop_reason": "length",
+    #         })
+
+    #     generator_output = {
+    #         "prompt_token_ids": [o["prompt_ids"] for o in fake_outputs],
+    #         "response_ids": [o["response_ids"] for o in fake_outputs],
+    #         "rewards": [o["reward"] for o in fake_outputs],
+    #         "loss_masks": [o["loss_mask"] for o in fake_outputs],
+    #         "stop_reasons": [o["stop_reason"] for o in fake_outputs],
+    #         "rollout_metrics": {"avg_reward": sum(o["reward"] for o in fake_outputs) / batch_size},
+    #         "rollout_logprobs": None,
+    #     }
+
+    #     return generator_output

@@ -10,8 +10,8 @@ set -x
 export WANDB_API_KEY="854a2b39e99ffee11c76d1003eb8a777045687e9"
 export WANDB_ENTITY="bespoke-labs"
 
-DATA_DIR="$HOME/ez_apex_250"
-NUM_NODES=4
+DATA_DIR="/data/ez_apex_250"
+NUM_NODES=2
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
@@ -24,13 +24,13 @@ INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in thi
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
 MEGATRON_TP=2
 MEGATRON_PP=2
-MEGATRON_CP=8
+MEGATRON_CP=4
 
 MEGATRON_EP=8
-MEGATRON_ETP=2
+MEGATRON_ETP=1
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=32
+NUM_INFERENCE_ENGINES=16
 INFERENCE_ENGINE_TP=1
 
 # Torch profiler (optional)
@@ -40,19 +40,25 @@ SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP
 
 export NCCL_SOCKET_IFNAME=enp210s0f0np0
 export GLOO_SOCKET_IFNAME=enp210s0f0np0
-export NCCL_IB_HCA=mlx5_ib0
+export RAY_worker_register_timeout_seconds=1800
+# export NCCL_IB_HCA=mlx5_ib0
+# export NCCL_IB_HCA=mlx5_0
+export NCCL_IB_HCA="mlx5_ib0,mlx5_ib1,mlx5_ib2,mlx5_ib3,mlx5_ib4,mlx5_ib5,mlx5_ib6,mlx5_ib7"
 export NCCL_IB_DISABLE=0
-export NCCL_IB_GID_INDEX=3     
-export NCCL_DEBUG=INFO
+# export NCCL_IB_GID_INDEX=3     
+# export NCCL_DEBUG=INFO
 
 export SKYRL_PYTHONPATH_EXPORT=1
+export SKYRL_LD_LIBRARY_PATH_EXPORT=1
 export PYTHONPATH="$HOME/SkyRL/skyrl-train/"
 # export CUDNN_PATH="$(python -c 'import inspect, os, nvidia.cudnn as c; print(os.path.dirname(inspect.getfile(c)))')"
 # export CUDNN_PATH="/home/user/SkyRL/skyrl-train/.venv/lib/python3.12/site-packages/nvidia/cudnn"
-# export CUDNN_PATH="/opt/cudnn"
-export CPATH="$CUDNN_PATH/include:${CPATH:-}"
-export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
-export RAY_worker_register_timeout_seconds=1800
+export CUDNN_PATH="/opt/cudnn"
+export CPATH="${CUDNN_PATH}/include:${CPATH}"
+export LD_LIBRARY_PATH="${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}"
+
+
+# export RAY_worker_register_timeout_seconds=1800
 # export GLOO_SOCKET_IFNAME=enp27s0f0np0  #TODO: Make sure to change this for other nodes. Use this to check: ip -4 route
 # export NCCL_SOCKET_IFNAME=enp27s0f0np0
 # export CUDA_LAUNCH_BLOCKING=1
@@ -63,7 +69,9 @@ export RAY_worker_register_timeout_seconds=1800
 export HYDRA_FULL_ERROR=1
 export NCCL_DEBUG=INFO
 
-# uv pip install -U numpy
+export TOKENIZERS_PARALLELISM=false
+# sudo prlimit --pid=$$ --nofile=2097152
+# export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
 uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
@@ -112,8 +120,8 @@ uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --wit
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=32 \
-  trainer.policy_mini_batch_size=1 \
+  trainer.train_batch_size=64 \
+  trainer.policy_mini_batch_size=4 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=32000 \
@@ -127,12 +135,12 @@ uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --wit
   generator.batched=true \
   environment.env_class=terminal_bench \
   generator.n_samples_per_prompt=8 \
-  generator.gpu_memory_utilization=0.7 \
+  generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
   trainer.run_name="ez_apex_megatron_hyperbolic" \
-  trainer.ckpt_path="/mnt/nvme_shared/ckpt" \
-  trainer.export_path="/mnt/nvme_shared/hf_ckpt" \
+  trainer.ckpt_path="/data/ckpt" \
+  trainer.export_path="/data/hf_ckpt" \
   trainer.hf_save_interval=4 \
   trainer.ckpt_interval=4 \
   trainer.algorithm.eps_clip_low=0.2 \

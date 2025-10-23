@@ -10,11 +10,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
+          cpus: '4.0'
           memory: 4G
           pids: 100
         reservations:
-          cpus: '0.5'
+          cpus: '1'
           memory: 512M
     ulimits:
       nofile:

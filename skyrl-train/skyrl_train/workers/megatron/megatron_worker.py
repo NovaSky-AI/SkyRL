@@ -1,4 +1,5 @@
 import torch
+import logging
 import torch.nn as nn
 import torch.distributed
 import ray
@@ -40,6 +41,7 @@ class MegatronWorker:
         try:
             import transformer_engine  # noqa: F401
         except ImportError:
+            print(">> MEGATRON POLICY WORKER BASE INIT, CHECK TE IMPORT FAILED")
             raise ValueError(
                 """
                 transformer_engine is required for using the megatron backend.
@@ -151,8 +153,11 @@ class MegatronWorker:
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
+        print(">> MEGATRON POLICY WORKER BASE INIT, JUST CALLING OTHER METHODS")
         super().__init__(**kwargs)
+        print(">> MEGATRON POLICY WORKER BASE INIT, CHECK TE IMPORT")
         self.check_te_import()
+        print(">> MEGATRON POLICY WORKER BASE INIT, CHECK TE IMPORT DONE")
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -174,15 +179,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
-        if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+        print("????1????")
+        print(f">>> MASTER_ADDR={os.environ.get('MASTER_ADDR')}, MASTER_PORT={os.environ.get('MASTER_PORT')}")
+        print("is_initialized", torch.distributed.is_initialized())
+        try:
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend="nccl")
+        except Exception as e:
+            print(f"[init_process_group] Failed with error: {e}")
 
+        print("????2????")
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.policy.megatron_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
         )
+        print("????3????")
         self.strategy.setup_distributed()
+
+        print("????4????")
 
         self.mesh_rank = MeshRank(
             dp=mpu.get_data_parallel_rank(),
@@ -264,6 +279,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
         worker MegatronModelWrapper.forward_backward_mini_batch method.
         """
+        logger = logging.getLogger(__name__)
+        logger.info("[ppo_train][megatron] Start")
+
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
@@ -280,6 +298,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.start()
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
+            logger.info(f"[ppo_train][megatron] Epoch {epoch + 1}/{self.cfg.trainer.update_epochs_per_batch} start")
             self.optimizer.zero_grad()
             pbar = tqdm(
                 dataloader,
@@ -318,14 +337,28 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     seq_len = micro_buffer[0]["sequences"].shape[1]
                     micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
-                    metrics_list = self.model.forward_backward_mini_batch(
-                        micro_batches=micro_buffer,
-                        seq_len=seq_len,
-                        micro_batch_size=micro_bsz,
-                        temperature=self.cfg.generator.sampling_params.temperature,
-                    )
+                    try:
+                        logger.info(
+                            f"[ppo_train][megatron] Epoch {epoch + 1} local_step {local_step}: forward_backward start"
+                        )
+                        metrics_list = self.model.forward_backward_mini_batch(
+                            micro_batches=micro_buffer,
+                            seq_len=seq_len,
+                            micro_batch_size=micro_bsz,
+                            temperature=self.cfg.generator.sampling_params.temperature,
+                        )
 
-                    grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+                        grad_norm = self.strategy.optimizer_step(
+                            self.optimizer, self.model, self.scheduler, name="actor"
+                        )
+                        logger.info(
+                            f"[ppo_train][megatron] Epoch {epoch + 1} local_step {local_step}: optimizer step passed"
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            f"[ppo_train][megatron] Epoch {epoch + 1} local_step {local_step}: step failed with error: {e}"
+                        )
+                        raise
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
@@ -360,9 +393,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     if "raw_grad_norm" in status_list[-1]:
                         short_status["grad_norm"] = status_list[-1]["raw_grad_norm"]
                     pbar.set_postfix(short_status)
+                    logger.info(
+                        f"[ppo_train][megatron] Epoch {epoch + 1} local_step {local_step}: mini-batch passed | {short_status}"
+                    )
 
                     policy_update_steps += 1
                     micro_buffer = []
+            logger.info(f"[ppo_train][megatron] Epoch {epoch + 1} end")
 
             # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
             micro_buffer = []
@@ -380,6 +417,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
+        logger.info("[ppo_train][megatron] Completed")
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):

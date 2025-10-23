@@ -10,7 +10,7 @@ set -x
 export WANDB_API_KEY="854a2b39e99ffee11c76d1003eb8a777045687e9"
 export WANDB_ENTITY="bespoke-labs"
 
-DATA_DIR="$HOME/ez_apex_250"
+DATA_DIR="/data/ez_apex_281"
 NUM_NODES=1
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
@@ -38,18 +38,21 @@ ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
 
-export NCCL_SOCKET_IFNAME=enp13s0np0
+# export NCCL_SOCKET_IFNAME=enp13s0np0
+# export NCCL_SOCKET_IFNAME=enp210s0f0np0
+# export GLOO_SOCKET_IFNAME=enp210s0f0np0
+
 export NCCL_IB_HCA=mlx5_0
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3     
 # export NCCL_DEBUG=INFO
 
 export SKYRL_PYTHONPATH_EXPORT=1
-export PYTHONPATH="/home/ubuntu/SkyRL/skyrl-train/"
+export PYTHONPATH="$HOME/SkyRL/skyrl-train/"
 # export CUDNN_PATH="$(python -c 'import inspect, os, nvidia.cudnn as c; print(os.path.dirname(inspect.getfile(c)))')"
 export CUDNN_PATH="/opt/cudnn"
-export CPATH="$CUDNN_PATH/include:${CPATH:-}"
-export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
+export CPATH="$CUDNN_PATH/include:${CPATH:}"
+export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:}"
 export RAY_worker_register_timeout_seconds=1800
 # export GLOO_SOCKET_IFNAME=enp27s0f0np0  #TODO: Make sure to change this for other nodes. Use this to check: ip -4 route
 # export NCCL_SOCKET_IFNAME=enp27s0f0np0
@@ -62,7 +65,7 @@ export HYDRA_FULL_ERROR=1
 export TOKENIZERS_PARALLELISM=false
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
-uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
@@ -129,8 +132,6 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
   trainer.project_name="terminal_bench" \
   trainer.run_name="terminal_bench_megatron_H200_single" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="/mnt/data/ez_apex_250_single" \
-  trainer.export_path="/mnt/data/hf_ckpt_single" \
   trainer.hf_save_interval=10 \
   trainer.ckpt_interval=-1 \
   trainer.algorithm.eps_clip_low=0.2 \
@@ -141,4 +142,11 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --w
 
 
 # ./run_tbench_megatron.sh 2>&1 | tee -a run_tbench_megatron.log
+
+# trainer.ckpt_path="/data/ez_apex_250_single" \
+#   trainer.export_path="/data/hf_ckpt_single" \
+
+
+
+
 

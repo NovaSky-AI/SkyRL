@@ -11,7 +11,7 @@ export WANDB_API_KEY="854a2b39e99ffee11c76d1003eb8a777045687e9"
 export WANDB_ENTITY="bespoke-labs"
 
 DATA_DIR="$HOME/ez_apex_250"
-NUM_NODES=4
+NUM_NODES=2
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
@@ -22,15 +22,15 @@ MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct"
 INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in this setup
 
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
-MEGATRON_TP=4
-MEGATRON_PP=1
-MEGATRON_CP=8
+MEGATRON_TP=2
+MEGATRON_PP=2
+MEGATRON_CP=4
 
-MEGATRON_EP=16
-MEGATRON_ETP=2
+MEGATRON_EP=8
+MEGATRON_ETP=1
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=16
+NUM_INFERENCE_ENGINES=8
 INFERENCE_ENGINE_TP=2
 
 # Torch profiler (optional)
@@ -63,10 +63,10 @@ export RAY_worker_register_timeout_seconds=1800
 export HYDRA_FULL_ERROR=1
 export NCCL_DEBUG=INFO
 
-# uv pip install -U numpy
+export TOKENIZERS_PARALLELISM=false
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
-uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
@@ -131,8 +131,8 @@ uv run --active --extra $INFERENCE_BACKEND --extra sandboxes --extra mcore --wit
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
   trainer.run_name="terminal_bench_megatron_H200_4_small" \
-  trainer.ckpt_path="$HOME/ez_apex_250_small" \
-  trainer.export_path="$HOME/hf_ckpt_small" \
+  trainer.ckpt_path="/data/ez_apex_250_small" \
+  trainer.export_path="/data/hf_ckpt_small" \
   trainer.hf_save_interval=1 \
   trainer.ckpt_interval=1 \
   trainer.algorithm.eps_clip_low=0.2 \

@@ -1,7 +1,7 @@
 import os
 
 #
-SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 60))
+SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180))
 """
 Timeout for allocating the placement group for different actors in SkyRL
 """
