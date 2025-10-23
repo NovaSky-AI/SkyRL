@@ -27,14 +27,6 @@ At a high level, the integration looks as follows:
 
 .. code-block:: python
 
-    # In integrations/openenv/entrypoints/main_openenv.py
-    from skyrl_gym.envs import register
-    
-    register(
-        id="openenv",
-        entry_point="integrations.openenv.env:OpenEnv",
-    )
-    
     # The OpenEnv wrapper class
     class OpenEnv(BaseTextEnv):
         def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
@@ -48,12 +40,26 @@ At a high level, the integration looks as follows:
             result = self.env.step(action)
             # Process result and return observations, reward, done
 
+
+Finally, we also register the new environment in the entrypoint script:
+
+.. code-block:: python
+        
+    # In integrations/openenv/entrypoints/main_openenv.py
+    from skyrl_gym.envs import register
+    
+    register(
+        id="openenv",
+        entry_point="integrations.openenv.env:OpenEnv",
+    )
+
+
 Environment Setup
 -----------------
 
-Prerequisites: Ensure that you have Docker installed and the required OpenEnv environment images pulled locally.
+Prerequisites: Ensure that you have Docker installed
 
-First, install the OpenEnv environments:
+First, we need to install the OpenEnv environments:
 
 .. code-block:: bash
 
