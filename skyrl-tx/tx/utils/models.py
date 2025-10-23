@@ -89,7 +89,7 @@ def load_safetensors(
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
             tensors[key] = tensors[key].reshape(param.shape)
         assert param.shape == tensors[key].shape, f"shape mismatch for {key}"
-        updates.append((path, tensors[key]))
+        updates.append((path, tensors[key].astype(param.dtype)))
     nnx.update(model, nnx.from_flat_state(updates))
 
 
