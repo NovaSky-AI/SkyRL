@@ -28,6 +28,7 @@ from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 from transformers.trainer_pt_utils import get_module_class_from_name
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.distributed_c10d import _get_default_group
 from collections import OrderedDict
 
 from packaging import version

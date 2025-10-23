@@ -26,10 +26,10 @@ torch_profiler_config:
 # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/optimizer/optimizer_config.py#L12
 optimizer_config_kwargs:
   # set these all to true (and optimizer_offload_fraction=1.0) for optimizer cpu offloading
-  overlap_cpu_optimizer_d2h_h2d: false
-  use_precision_aware_optimizer: false
-  optimizer_cpu_offload: false
-  optimizer_offload_fraction: 0.0
+  overlap_cpu_optimizer_d2h_h2d: true
+  use_precision_aware_optimizer: true
+  optimizer_cpu_offload: true
+  optimizer_offload_fraction: 1.0
 
 # pass-through kwargs to the Megatron's `TransformerConfig` object
 # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33

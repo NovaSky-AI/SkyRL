@@ -8,6 +8,7 @@ import sys
 import ray
 import torch
 import torch.distributed as dist
+print(f"Torch is being imported from: {torch.__file__}")
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from ray.util.placement_group import placement_group

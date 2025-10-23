@@ -733,22 +733,38 @@ class RayPPOTrainer:
             # handle colocate policy and ref model
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
+                logger.info(f"!!!!!!!!!!!!!!!!!!!!! collect_results")
                 base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                logger.info(f"!!!!!!!!!!!!!!!!!!!!! collect_results DONE")
+                logger.info(f"!!!!!!!!!!!!!!!!!!!!! offload_to_cpu")
                 self.ref_model.offload_to_cpu()
+                logger.info(f"!!!!!!!!!!!!!!!!!!!!! offload_to_cpu DONE")
+                logger.info(f"!!!!!!!!!!!!!!!!!!!!! async_run_ray_method")
                 ray.get(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
+                logger.info(f"!!!!!!!!!!!!!!!!!!!!! async_run_ray_method DONE")
         else:
             base_log_probs = None
 
         # calculate action log probs
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! backload_to_gpu")
         if self.colocate_all:
             self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
+        
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! backload_to_gpu DONE")
 
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! mesh forward")
         action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+        print(action_log_probs_refs)
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! mesh forward DONE")
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
+            logger.info(f"!!!!!!!!!!!!!!!!!!!!! collect_results")
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            logger.info(f"!!!!!!!!!!!!!!!!!!!!! collect_results DONE")
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
+
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! continue1")
         # wait all models done
         # if not colocate_policy_ref, then need to gather base_log_probs
         # if self.critic_model is not None, then need to gather value
@@ -771,6 +787,7 @@ class RayPPOTrainer:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
 
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! continue2")
         if not self.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
             if self.ref_model is not None:
@@ -779,6 +796,7 @@ class RayPPOTrainer:
                 empty_cache_refs.extend(self.critic_model.async_run_ray_method("pass_through", "empty_cache"))
             ray.get(empty_cache_refs)
 
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! continue3")
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
@@ -789,6 +807,7 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! continue4")
         if self.cfg.generator.sampling_params.logprobs is not None:
             # calculates the difference in probs between inference and trainer components
             # only consider response tokens
@@ -805,6 +824,8 @@ class RayPPOTrainer:
                     "policy/rollout_train_prob_diff_std": prob_diff_std,
                 }
             )
+        
+        logger.info(f"!!!!!!!!!!!!!!!!!!!!! fwd_logprobs_values_reward DONE")
         return training_input
 
     def apply_reward_kl_penalty(
