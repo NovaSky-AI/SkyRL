@@ -34,9 +34,7 @@ def example_question(env_name: str) -> List[str]:
     if env_name == "echo_env":
         # Echo environment simply echoes the text back.
         examples = [
-            "Say hello to the environment.",
-            "Send a short test message.",
-            "Write one more message to echo back.",
+            "Send a short test message to the echo environment.",
         ]
     elif env_name == "coding_env":
         # Coding environment executes code and returns stdout.
