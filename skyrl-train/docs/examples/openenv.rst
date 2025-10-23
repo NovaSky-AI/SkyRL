@@ -106,16 +106,12 @@ Supporting environments are: ``echo_env``, ``coding_env``, ``openspiel-env``, ``
 
 Example Reward Curve 
 --------
+
 Here's how the reward curve for the above example script looks like after a few steps: 
 
-.. list-table::
-   :widths: 50 50
-   :header-rows: 0
-
-   * - .. image:: images/openenv-reward.png
-         :width: 400px
-         :align: center
-
+..  image:: images/openenv-reward.png
+    :scale: 60%
+    :align: center
 Tips
 ~~~~~
 
