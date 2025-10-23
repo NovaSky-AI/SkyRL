@@ -26,6 +26,10 @@ class EngineConfig(BaseModel):
         default=True,
         description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
     )
+    gradient_checkpointing: bool = Field(
+        default=False,
+        description="Whether to use gradient checkpointing (full recomputation strategy)",
+    )
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
