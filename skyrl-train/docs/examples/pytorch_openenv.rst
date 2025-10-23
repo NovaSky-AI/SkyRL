@@ -6,7 +6,7 @@ In this example, we walk through a simple example on how to train a reinforcemen
 How does it work?
 ------------------
 
-SkyRL integrates with OpenEnv through a custom environment wrapper ``OpenEnv`` that implements the ``BaseTextEnv`` interface. This wrapper allows SkyRL to interact with various OpenEnv environments including:
+SkyRL integrates with any Gymnasium API-based environment easily with SkyRL-Gym, which provides a simple interface for text-based environments called ``BaseTextEnv``. We integrate OpenEnv environments through a custom environment wrapper ``OpenEnv`` that implements the ``BaseTextEnv`` interface. This wrapper allows SkyRL to interact with various OpenEnv environments, including:
 
 - **Echo Environment**: Simple echo environment for testing
 - **Coding Environment**: Python code execution in sandboxed environment  
