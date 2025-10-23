@@ -787,16 +787,6 @@ async def test_apply_overlong_filtering_non_batched(
 
     # Verify truncated response has zeroed loss mask
     assert len(output_truncated["loss_masks"]) == 1
-    # assert len(output_truncated["loss_masks"][0]) == 6  # Truncated to max_generate_length=5
-    # assert output_truncated["loss_masks"][0] == [
-    #     1,
-    #     1,
-    #     1,
-    #     1,
-    #     1,
-    #     1,
-    # ], "Loss mask should be all ones for response ending with eos token, since we manually append the eos token to the response, zeros otherwise"
-
     assert len(output_truncated["loss_masks"][0]) == 5
     assert output_truncated["loss_masks"][0] == [
         0,
@@ -806,9 +796,7 @@ async def test_apply_overlong_filtering_non_batched(
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
 
-    # TODO(Dev): Check if this is correct behaviour
     # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
-
     # Second test: response that ends with eos token (should not be filtered)
     # Reset the environment init to ensure clean state
     mock_env.init.return_value = ([{"role": "user", "content": "Fresh input"}], {})
@@ -1234,7 +1222,8 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
             self.turns += 1
             if self.turns < self.max_turns:
                 return BaseTextEnvStepOutput(observations=[], reward=1.0, done=False, metadata={})
-            else:  ## reach max turns, return final reward
+            else:
+                # On the final turn, return the final reward.
                 return BaseTextEnvStepOutput(observations=[], reward=2.0, done=True, metadata={})
 
     mock_make.return_value = TruncEnv()
