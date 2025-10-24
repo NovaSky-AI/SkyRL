@@ -157,7 +157,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
-
         done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
@@ -200,7 +199,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
-
             engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
@@ -284,7 +282,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         appended_eos_token = False
-
         if not self.use_conversation_multi_turn:
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
