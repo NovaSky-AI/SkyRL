@@ -89,9 +89,7 @@ def test_qwen3_generate_speed():
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
-        sampling_params = [
-            types.SamplingParams(max_tokens=50, temperature=0.0, seed=42 + i) for i in range(len(inputs))
-        ]
+        sampling_params = [types.SamplingParams(max_tokens=50, temperature=0.0, seed=42) for i in range(len(inputs))]
 
         # Warmup
         warmup = model.generate(
