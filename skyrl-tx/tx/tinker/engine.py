@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlmodel import create_engine, Session, select, func
-from sqlalchemy.pool import StaticPool
-from sqlalchemy import text
 
 import jax
 import jax.numpy as jnp
@@ -80,20 +78,7 @@ class TinkerEngine:
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
-        self.db_engine = create_engine(
-            f"sqlite:///{db_path}",
-            echo=False,
-            poolclass=StaticPool,
-            connect_args={
-                "timeout": 30.0,
-                "check_same_thread": False
-            }
-        )
-
-        # Only support SQL lite for now
-        with self.db_engine.connect() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL"))
-            conn.commit()
+        self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
@@ -321,7 +306,7 @@ class TinkerEngine:
         batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return batchable
-    
+
     def find_batchable_sample(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any destructive update for their model.
         Similar to  'find_batchable_forward_backward'
@@ -521,12 +506,12 @@ class TinkerEngine:
             )
 
         return results
-    
+
     def process_sample_batch(
         self, requests: list[tuple[FutureDB, str, types.SampleInput]]
     ) -> dict[str, types.SampleOutput | types.SampleError]:
         """Process multiple sample requests in a single batch
-        
+
         Args:
             requests: List of (future, model_id, request_data) tuples
 
@@ -551,7 +536,7 @@ class TinkerEngine:
 
         if not valid_requests:
             return results
-        
+
         all_prompts = []
         all_seeds = []
         all_sampling_params = []
@@ -562,9 +547,7 @@ class TinkerEngine:
         for future, model_id, request_data in valid_requests:
             # Get adapter index (need to cast in jnp.int32 because that is what generate accepts)
             adapter_indices_single = (
-                jnp.array([[self.models[model_id].adapter_index]], dtype=jnp.int32)
-                if model_id in self.models
-                else None
+                jnp.array([[self.models[model_id].adapter_index]], dtype=jnp.int32) if model_id in self.models else None
             )
 
             request_start = current_batch_idx
@@ -582,8 +565,10 @@ class TinkerEngine:
         max_len = max(len(seq) for seq in all_prompts)
 
         input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32)
-        attention_mask = jnp.array([[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32)
-        
+        attention_mask = jnp.array(
+            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32
+        )
+
         total_bs = int(input_ids.shape[0])
         prompt_lens = [len(seq) for seq in all_prompts]
 
@@ -599,8 +584,8 @@ class TinkerEngine:
                 adapter_idx = all_adapter_indices[i]
 
                 result = model.generate(
-                    input_ids[i:i+1],
-                    attention_mask[i:i+1],
+                    input_ids[i : i + 1],
+                    attention_mask[i : i + 1],
                     max_new_tokens=sampling_params.max_tokens,
                     temperature=sampling_params.temperature,
                     seed=seed,
@@ -617,22 +602,17 @@ class TinkerEngine:
                     if len(logprobs) < len(generated_tokens):
                         token_idx = generated_tokens[len(logprobs)]
                         logprobs.append(float(log_probs[token_idx]))
-                
+
                 sequences_out[i] = types.GeneratedSequence(
-                    stop_reason=result.stop_reasons[0],
-                    tokens=generated_tokens,
-                    logprobs=logprobs
+                    stop_reason=result.stop_reasons[0], tokens=generated_tokens, logprobs=logprobs
                 )
-        
+
         for request_id, _, start_idx, end_idx in request_batch_slices:
             sequences = []
             for i in range(start_idx, end_idx):
                 sequences.append(sequences_out[i])
 
-            results[request_id] = types.SampleOutput(
-                sequences=sequences,
-                prompt_logprobs=[]
-            )
+            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=[])
 
         return results
 
@@ -893,6 +873,57 @@ class TinkerEngine:
                 raise ValueError(f"Unknown request type: {request_type}")
         return result.model_dump()
 
+    def process_batch_requests(
+        self,
+        session: Session,
+        futures: list[FutureDB],
+        batch_processor,
+        request_input_type,
+        error_type,
+        batch_name: str,
+    ):
+        """Generic function to process a batch of requests.
+
+        Args:
+            session: Database session
+            futures: List of FutureDB objects to process
+            batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
+            request_input_type: Pydantic model class for parsing request_data (e.g., types.ForwardBackwardInput)
+            error_type: Error type class to check for failures (e.g., types.ForwardBackwardError)
+            batch_name: Name for logging purposes (e.g., "forward_backward")
+        """
+        if not futures:
+            return
+
+        try:
+            batch_requests = [(f, f.model_id, request_input_type.model_validate(f.request_data)) for f in futures]
+            results = batch_processor(batch_requests)
+
+            # Update each future with its result
+            for future in futures:
+                if future.request_id in results:
+                    result_data = results[future.request_id]
+                    if isinstance(result_data, error_type):
+                        future.status = RequestStatus.FAILED
+                    else:
+                        future.status = RequestStatus.COMPLETED
+                    future.result_data = result_data.model_dump()
+                    future.completed_at = datetime.now(timezone.utc)
+                    session.add(future)
+                    logger.info(f"Completed {future.request_type} request {future.request_id}")
+
+            session.commit()
+
+        except Exception as e:
+            logger.exception(f"Error processing {batch_name} batch: {e}")
+            # Mark all requests in the batch as failed
+            for future in futures:
+                future.result_data = {"error": str(e)}
+                future.status = RequestStatus.FAILED
+                future.completed_at = datetime.now(timezone.utc)
+                session.add(future)
+            session.commit()
+
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
@@ -911,69 +942,24 @@ class TinkerEngine:
                 other_futures = session.exec(statement).all()
 
                 # Process forward_backward requests in batch
-                if forward_backward_futures:
-                    try:
-                        batch_requests = [
-                            (f, f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
-                            for f in forward_backward_futures
-                        ]
-                        results = self.process_forward_backward_batch(batch_requests)
+                self.process_batch_requests(
+                    session,
+                    forward_backward_futures,
+                    self.process_forward_backward_batch,
+                    types.ForwardBackwardInput,
+                    types.ForwardBackwardError,
+                    "forward_backward",
+                )
 
-                        # Update each future with its result
-                        for future in forward_backward_futures:
-                            if future.request_id in results:
-                                result_data = results[future.request_id]
-                                if isinstance(result_data, types.ForwardBackwardError):
-                                    future.status = RequestStatus.FAILED
-                                else:
-                                    future.status = RequestStatus.COMPLETED
-                                future.result_data = result_data.model_dump()
-                                future.completed_at = datetime.now(timezone.utc)
-                                session.add(future)
-                                logger.info(f"Completed {future.request_type} request {future.request_id}")
-
-                        session.commit()
-
-                    except Exception as e:
-                        logger.exception(f"Error processing forward_backward batch: {e}")
-                        # Mark all forward_backward requests in the batch as failed
-                        for future in forward_backward_futures:
-                            future.result_data = {"error": str(e)}
-                            future.status = RequestStatus.FAILED
-                            future.completed_at = datetime.now(timezone.utc)
-                            session.add(future)
-                        session.commit()
-
-                if sample_futures:
-                    try:
-                        batch_requests = [
-                            (f, f.model_id, types.SampleInput.model_validate(f.request_data)) for f in sample_futures
-                        ]
-                        results = self.process_sample_batch(batch_requests)
-
-                        for future in sample_futures:
-                            if future.request_id in results:
-                                result_data = results[future.request_id]
-                                if isinstance(result_data, types.SampleError):
-                                    future.status = RequestStatus.FAILED
-                                else:
-                                    future.status = RequestStatus.COMPLETED
-                                future.result_data = result_data.model_dump()
-                                future.completed_at = datetime.now(timezone.utc)
-                                session.add(future)
-                                logger.info(f"Completed {future.request_type} request {future.request_id}")
-
-                        session.commit()
-
-                    except Exception as e:
-                        logger.exception(f"Error processing sample batch: {e}")
-                        # Mark all sample requests in the batch as failed
-                        for future in sample_futures:
-                            future.result_data = {"error": str(e)}
-                            future.status = RequestStatus.FAILED
-                            future.completed_at = datetime.now(timezone.utc)
-                            session.add(future)
-                        session.commit()
+                # Process sample requests in batch
+                self.process_batch_requests(
+                    session,
+                    sample_futures,
+                    self.process_sample_batch,
+                    types.SampleInput,
+                    types.SampleError,
+                    "sample",
+                )
 
                 # Process other request types individually (in the future we can also batch independent optim_steps)
                 for future in other_futures:
