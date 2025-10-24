@@ -11,6 +11,7 @@ import inspect
 
 from loguru import logger
 from transformers.masking_utils import causal_mask_function
+from skyrl_train.distributed.ulysses.monkey_patch import make_ulysses_attn_forward
 
 
 def patch_function_past_key_values(
@@ -59,7 +60,7 @@ def patch_function_past_key_values(
 pass
 
 
-def patch_GptOssAttention():
+def patch_GptOssAttention(sequence_parallel_size: int = 1, sequence_parallel_rank: Optional[int] = None):
     try:
         from .flex_attn_sink import (
             old_flex_attention_with_sink,
@@ -77,6 +78,10 @@ def patch_GptOssAttention():
         raise
 
     torch._dynamo.config.cache_size_limit = 256
+
+    flex_attention_forward = old_flex_attention_with_sink
+    if sequence_parallel_size > 1:
+        flex_attention_forward = make_ulysses_attn_forward(old_flex_attention_with_sink)
 
     def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         """
@@ -183,7 +188,6 @@ def patch_GptOssAttention():
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # print(f"ENTER CUSTOM ATTN: key value shape: {hidden_states.shape=} {self.head_dim=}")
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)  # 2, 32, 2880/64, 64
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)  # 1, -1, 7, 64
@@ -200,7 +204,11 @@ def patch_GptOssAttention():
         num_key_value_groups = getattr(self, "num_key_value_groups", 1)
         scale = getattr(self, "scaling", None) or getattr(self, "scale", None)
         sliding_window = getattr(self, "sliding_window", None)
-        attn_output = old_flex_attention_with_sink(
+        # switch dims to be consistent with (bsz, seq_len, head_dim, hidden_dim) convention
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+        attn_output = flex_attention_forward(
             query_states,
             key_states,
             value_states,
@@ -209,6 +217,8 @@ def patch_GptOssAttention():
             num_key_value_groups=num_key_value_groups,
             sinks=sinks,
             sliding_window=sliding_window,
+            sequence_parallel_rank=sequence_parallel_rank,
+            sequence_parallel_size=sequence_parallel_size,
         )
         attn_weights = None
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
@@ -266,6 +276,11 @@ def custom_attention(
     num_key_value_groups = getattr(module, "num_key_value_groups", 1)
     scale = getattr(module, "scaling", None) or getattr(module, "scale", None)
     sliding_window = getattr(module, "sliding_window", None)
+
+    # switch dims to be consistent with (bsz, seq_len, head_dim, hidden_dim) convention
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
 
     attn_output = old_flex_attention_with_sink(
         query,

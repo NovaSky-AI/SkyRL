@@ -15,7 +15,11 @@ import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
-from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
+from skyrl_train.distributed.ulysses.utils import (
+    get_ulysses_sequence_parallel_rank,
+    ulysses_pad_and_slice_inputs,
+    gather_outputs_and_unpad,
+)
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
@@ -136,9 +140,15 @@ class HFModelWrapper(nn.Module):
                     # set attention implementation to be `custom_flex`
                     self.model.set_attn_implementation("custom_flex")
                     self.attn_implementation = "custom_flex"
+                    sequence_parallel_rank = None
+                    if self.sequence_parallel_size > 1:
+                        sequence_parallel_rank = get_ulysses_sequence_parallel_rank()
                     # NOTE: Even though we set a custom attn implementation, we
                     # also patch the full attention function for GPT OSS
-                    patch_GptOssAttention()
+                    patch_GptOssAttention(
+                        sequence_parallel_rank=sequence_parallel_rank,
+                        sequence_parallel_size=self.sequence_parallel_size,
+                    )
 
             # LoRA
             if lora_rank > 0:
