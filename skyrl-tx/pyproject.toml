@@ -39,6 +39,7 @@ tinker = [
     "sqlmodel",
     "sqlalchemy[asyncio]",
     "aiosqlite",
+    "asyncpg",
 ]
 
 aws = [
