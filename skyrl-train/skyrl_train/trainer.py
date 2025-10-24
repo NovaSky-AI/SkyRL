@@ -260,14 +260,12 @@ class RayPPOTrainer:
                     # 7. sync weights to inference engines
                     if self.colocate_all:
                         self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                        ray.get(self.policy_model.async_run_ray_method("pass_through", "empty_cache"))
                         asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
                     with Timer("sync_weights", self.all_timings):
                         ray.get(self.sync_policy_weights_to_inference_engines())
                     if self.colocate_all:
                         with Timer("offload_policy_model_to_cpu"):
                             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-                        ray.get(self.policy_model.async_run_ray_method("pass_through", "empty_cache"))
                         asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
                 # 8. set logs
