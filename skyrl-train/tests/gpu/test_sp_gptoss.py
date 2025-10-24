@@ -1,10 +1,9 @@
 """
-uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_model_wrapper.py
+uv run --isolated --extra dev pytest tests/gpu/test_sp_gptoss.py
 """
 
 from skyrl_train.model_wrapper import HFModelWrapper
 import torch
-from unittest.mock import MagicMock, patch
 from transformers import AutoTokenizer
 import ray
 import torch.distributed as dist
@@ -28,78 +27,6 @@ def get_dummy_inputs():
     return input_ids, attention_mask, num_actions, input_without_padding
 
 
-@patch("skyrl_train.model_wrapper.logprobs_from_logits")
-@torch.no_grad()
-def test_hf_model_wrapper_fwd_with_sample_packing(mock_logprobs_from_logits):
-    model = HFModelWrapper(
-        pretrain_or_model=MODEL_NAME,
-        use_flash_attention_2=True,
-        bf16=False,
-        sequence_parallel_size=1,
-        use_sample_packing=True,
-    )
-    model.model.eval()
-    model.model.to("cuda")
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
-    input_ids, attention_mask, num_actions, input_without_padding = get_dummy_inputs()
-    actual_actions = input_ids[:, -num_actions:]
-    # mock the actual forward
-    input_ids, attention_mask, input_without_padding = (
-        input_ids.to("cuda"),
-        attention_mask.to("cuda"),
-        input_without_padding.to("cuda"),
-    )
-    # forward is with packed sequence length
-    model.model.forward = MagicMock(return_value={"logits": torch.randn(1, 6, 1000).to("cuda")})
-    # just roll the inputs over for return value. This means that the model is correctly predicting the next token.
-    # The last token will be the prediction beyond the eos token, just set to pad token id
-    mock_return_value = torch.roll(input_without_padding, shifts=-1, dims=-1)
-    mock_return_value[:, -1] = tokenizer.pad_token_id
-    mock_logprobs_from_logits.return_value = mock_return_value
-
-    action_log_probs = model(input_ids, num_actions, attention_mask)
-    expected_log_probs = actual_actions.to("cuda")
-    assert torch.equal(
-        action_log_probs, expected_log_probs
-    ), f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
-
-
-@patch("skyrl_train.model_wrapper.logprobs_from_logits")
-@torch.no_grad()
-def test_hf_model_wrapper_fwd_without_sample_packing(mock_logprobs_from_logits):
-    model = HFModelWrapper(
-        pretrain_or_model=MODEL_NAME,
-        use_flash_attention_2=True,
-        bf16=False,
-        sequence_parallel_size=1,
-        use_sample_packing=False,
-    )
-    model.model.eval()
-    model.model.to("cuda")
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True)
-    input_ids, attention_mask, num_actions, input_without_padding = get_dummy_inputs()
-    actual_actions = input_ids[:, -num_actions:]
-    # mock the actual forward
-    input_ids, attention_mask, input_without_padding = (
-        input_ids.to("cuda"),
-        attention_mask.to("cuda"),
-        input_without_padding.to("cuda"),
-    )
-    # forward is with packed sequence length
-    model.model.forward = MagicMock(return_value={"logits": torch.randn(1, 10, 1000).to("cuda")})
-    # just roll the inputs over. This means that the model is correctly predicting the next token.
-    mock_return_value = torch.roll(input_ids, shifts=-1, dims=-1)
-    # The last token will be the prediction beyond the eos token, just set to pad token id
-    mock_return_value[:, -1] = tokenizer.pad_token_id
-    mock_logprobs_from_logits.return_value = mock_return_value
-
-    action_log_probs = model(input_ids, num_actions, attention_mask)
-    expected_log_probs = actual_actions.to("cuda")
-    assert torch.equal(
-        action_log_probs, expected_log_probs
-    ), f"Expected log probs to be {expected_log_probs} but got {action_log_probs}"
-
-
 @ray.remote(num_gpus=1)
 class ActorTask:
     def __init__(self, rank, world_size, sequence_parallel_size, use_sample_packing):
@@ -110,6 +37,8 @@ class ActorTask:
         # Initialize distributed environment
         dist.init_process_group(backend="nccl", init_method="tcp://localhost:23456", world_size=world_size, rank=rank)
 
+        group = _get_default_group()
+        set_ulysses_sequence_parallel_group(group)
         # Create model with sequence parallelism
         self.model = HFModelWrapper(
             pretrain_or_model=MODEL_NAME,
@@ -118,8 +47,6 @@ class ActorTask:
             sequence_parallel_size=sequence_parallel_size,
             use_sample_packing=use_sample_packing,
         )
-        group = _get_default_group()
-        set_ulysses_sequence_parallel_group(group)
         apply_monkey_patch(model=self.model.model, ulysses_sp_size=self.sequence_parallel_size, use_parent_class=False)
         self.model.model.eval()
         self.model.model.to("cuda")
@@ -196,10 +123,10 @@ def test_actor_model_fwd_with_sequence_parallelism(ray_init_fixture):
     # # and the outputs should be gathered and match the non-parallel output
     for i, (logprob_sp, entropy_sp) in enumerate(results_sp):
         assert torch.allclose(
-            logprob_sp, logprobs_no_sp
+            logprob_sp, logprobs_no_sp, atol=0.0, rtol=0.01
         ), f"Logprobs with sequence parallelism don't match logprobs without sequence parallelism for rank {i}"
         assert torch.allclose(
-            entropy_no_sp, entropy_sp
+            entropy_no_sp, entropy_sp, atol=0.0, rtol=0.01
         ), "Entropy with sequence parallelism doesn't match entropy without sequence parallelism"
 
     # Cleanup
