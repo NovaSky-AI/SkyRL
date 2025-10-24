@@ -55,7 +55,7 @@ class GenerateResult:
     scores: list[jax.Array] | None = None
 
 
-def sample_tokens(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
+def sample_token(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
     """Sample next token from logits using temperatures."""
     temperatures = temperatures[:, None]
     zero_temp_mask = temperatures == 0.0
@@ -114,7 +114,7 @@ class GeneratorMixin:
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
             rng, sample_key = jax.random.split(rng)
-            next_token = sample_tokens(logits, temperatures=temperatures, key=sample_key)
+            next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
@@ -148,7 +148,7 @@ class GeneratorMixin:
 
         # Sample final token
         rng, sample_key = jax.random.split(rng)
-        next_token = sample_tokens(logits, temperatures=temperatures, key=sample_key)
+        next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
         return GenerateResult(
