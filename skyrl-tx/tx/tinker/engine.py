@@ -378,9 +378,6 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id -> result_data or error info
         """
-        if not requests:
-            return {}
-
         results = {}
         valid_requests = []
 
@@ -518,9 +515,6 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id --> result_data or error info
         """
-        if not requests:
-            return {}
-
         results = {}
         valid_requests = []
 
@@ -820,8 +814,9 @@ class TinkerEngine:
             return
 
         try:
-            batch_requests = [(f, f.model_id, request_input_type.model_validate(f.request_data)) for f in futures]
-            results = batch_processor(batch_requests)
+            results = batch_processor(
+                [(f, f.model_id, request_input_type.model_validate(f.request_data)) for f in futures]
+            )
 
             # Update each future with its result
             for future in futures:
