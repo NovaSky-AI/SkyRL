@@ -20,10 +20,9 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     offload_megatron_optimizer,
     load_megatron_optimizer,
+    offload_megatron_grads_to_cpu,
+    load_megatron_grads_to_gpu,
 )
-
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
@@ -56,9 +55,9 @@ class MegatronStrategy(DistributedStrategy):
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
 
-        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
-        # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        import multiprocessing as mp
+
+        mp.set_start_method("spawn", force=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -97,6 +96,7 @@ class MegatronStrategy(DistributedStrategy):
         if offload_model:
             offload_megatron_model_to_cpu(model)
         if optimizer and offload_optimizer:
+            offload_megatron_grads_to_cpu(model)
             offload_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -106,6 +106,7 @@ class MegatronStrategy(DistributedStrategy):
         if backload_model:
             load_megatron_model_to_gpu(model)
         if optimizer and backload_optimizer:
+            load_megatron_grads_to_gpu(model)
             load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 

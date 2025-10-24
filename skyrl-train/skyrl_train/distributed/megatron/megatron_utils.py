@@ -108,6 +108,43 @@ def freeze_moe_router(model):
 
 
 @torch.no_grad()
+def offload_megatron_grads_to_cpu(models):
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            for buffers in model_chunk_all_buffers:
+                for buffer in buffers:
+                    if buffer.grad_data.storage().size() > 0:
+                        buffer.grad_data_size = buffer.grad_data.storage().size()
+                        buffer.grad_data.storage().resize_(0)
+        else:
+            # we need this for ref module
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None:
+                    param.grad = param.grad.to("cpu", non_blocking=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+@torch.no_grad()
+def load_megatron_grads_to_gpu(models):
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            for buffers in model_chunk_all_buffers:
+                for buffer in buffers:
+                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                    buffer.grad_data.zero_()
+        else:
+            # we need this for ref module
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None:
+                    param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+@torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
     In megatron, the model and optimizer storage are:
@@ -128,33 +165,21 @@ def offload_megatron_model_to_cpu(models):
                         buffer.param_data.storage().resize_(0)
 
                     assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
-
-                    if buffer.grad_data.storage().size() > 0:
-                        # if the grad_data size is already zero, we assume that it is already offloaded
-                        buffer.grad_data_size = buffer.grad_data.storage().size()
-                        buffer.grad_data.storage().resize_(0)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
-                if param.grad is not None:
-                    param.grad = param.grad.to("cpu", non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True):
+def load_megatron_model_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
-                    # sometimes, we don't want to load grad for pure inference
-                    if load_grad:
-                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                        buffer.grad_data.zero_()
-
                     if buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
@@ -164,8 +189,6 @@ def load_megatron_model_to_gpu(models, load_grad=True):
             device_id = torch.cuda.current_device()
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to(device_id, non_blocking=True)
-                if param.grad is not None:
-                    param.grad = param.grad.to(device_id, non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
