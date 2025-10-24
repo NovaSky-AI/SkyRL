@@ -142,7 +142,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
 
         For subsequent retry requests, we can reuse the original request payload except for the following fields:
-        - Update the last assistant message content to accumulated content, where the role uses the first non-zero response's role.
+        - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
         - Set continue_final_message=True and add_generation_prompt=False.
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
         - Besides, resend the original request unchanged if no tokens have been generated yet.
@@ -168,7 +168,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_token_ids: List[int] = []
         accum_completion_tokens: int = 0
 
-        # First non-zero response (i.e. the response that prefilled the prompt) to copy meta from.
+        # First non-empty response (i.e. the response that prefilled the prompt) to copy meta from.
         base_response: Optional[Dict[str, Any]] = None
 
         # Determine original max tokens key and value (if any)
@@ -196,8 +196,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 # Build continuation request based on original request and accumulated content.
                 # We want the engine to continue the generation from the last message and only
                 # return the new content generated.
-                assert accum_content != "", "accum_content must be non-empty here"
-                assert response_role is not None, "response_role must be set here"
+                assert accum_content != "", "accum_content must be non-empty for a continuation request"
+                assert response_role is not None, "response_role must be set for a continuation request"
 
                 cur_request_json = original_request_json.copy()
                 cur_request_json["messages"] = original_request_json["messages"] + [
@@ -235,9 +235,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             if finish_reason == "abort" and new_completion_tokens == 0:
                 continue
 
-            # Now we either generated something or/and finish_reason is not "abort"
+            # At this point, either some tokens were generated and/or request completed with a non-"abort" finish_reason
 
-            # 1.5. Update base response if it is the first non-zero response
+            # 1.5. Update base response if it is the first non-empty response
             if base_response is None:
                 if finish_reason != "abort":
                     # If we only made one request and it is not aborted, return the partial result directly.
@@ -257,7 +257,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             accum_completion_tokens += new_completion_tokens
 
         # 2. Build final response by combining fields
-        assert base_response is not None, "Expected at least one non-zero response to build final response"
+        assert base_response is not None, "Expected at least one non-empty response to build final response"
         final_response = base_response
 
         # 2.1. Combine usage: prompt_tokens from base, completion_tokens summed, total_tokens accordingly
