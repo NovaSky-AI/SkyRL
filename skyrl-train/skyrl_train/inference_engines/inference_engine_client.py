@@ -306,13 +306,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         Currently only supported for `/chat/completions` and not `/completions` or `generate()`.
 
         Both in-flight and incoming requests will be blocked until `resume_generation` is called.
-        1. We first set the paused event to avoid new requests from being submitted while aborting requests.
-        2. Then we add a grace period to ensure all in-flight requests have entered the engine's
+        1. Set the paused event to avoid new requests from being submitted while aborting requests.
+        2. Wait for a grace period to ensure all in-flight requests have entered the engine's
            scheduler and hence can be aborted. Otherwise, there can be requests already submitted
-           but not yet entered the scheduler, so we miss to abort them.
-        3. Finally, we call abort requests on all self.engines. This will cause the requests sent from
-           InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens, but
-           the users' requests to `InferenceEngineClient` will not return but simply blocked.
+           but not yet entered the scheduler, which can miss the abort request.
+        3. Finally, we abort requests on all engines. This will cause the requests sent from
+           InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens.
+           The request to `InferenceEngineClient` will not yet return until requests are completed with
+           stop reason that is not `abort`.
         """
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
