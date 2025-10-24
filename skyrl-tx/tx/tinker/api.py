@@ -17,8 +17,19 @@ import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
+<<<<<<< HEAD
 from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus, get_database_url
 from tx.tinker.migrate import run_migrations_on_startup
+=======
+from tx.tinker.db_models import (
+    CheckpointDB,
+    ModelDB,
+    FutureDB,
+    RequestStatus,
+    CheckpointStatus,
+    get_async_database_url,
+)
+>>>>>>> postgre-support
 from tx.utils.storage import download_file
 
 
@@ -34,6 +45,7 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
+<<<<<<< HEAD
     # Run database migrations
     logger.info("Running database migrations...")
     run_migrations_on_startup()
@@ -50,6 +62,10 @@ async def lifespan(app: FastAPI):
     elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
     
+=======
+    # Get database URL from config or environment
+    db_url = get_async_database_url(app.state.engine_config.database_url)
+>>>>>>> postgre-support
     app.state.db_engine = create_async_engine(db_url, echo=False)
 
     async with app.state.db_engine.begin() as conn:
