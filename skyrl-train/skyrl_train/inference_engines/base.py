@@ -96,6 +96,11 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def pp_size(self) -> int:
+        """Return the pipeline parallel size of this inference engine."""
+        raise NotImplementedError()
+
+    @abstractmethod
     def dp_size(self) -> int:
         """Return the data parallel size of this inference engine."""
         raise NotImplementedError()

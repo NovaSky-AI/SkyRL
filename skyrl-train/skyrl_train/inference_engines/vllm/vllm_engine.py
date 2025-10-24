@@ -176,6 +176,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._pp_size = kwargs.get("pipeline_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._is_lora = kwargs.get("enable_lora", False)
 
@@ -184,6 +185,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def tp_size(self):
         return self._tp_size
+
+    def pp_size(self):
+        return self._pp_size
 
     def dp_size(self):
         return self._dp_size
@@ -267,6 +271,12 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
 
     def _create_engine(self, *args, **kwargs):
+        # Pipeline parallelism requires AsyncLLMEngine
+        if kwargs.get("pipeline_parallel_size", 1) > 1:
+            raise ValueError(
+                "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
+                "Please set `generator.async_engine=true` in your config."
+            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:

@@ -38,12 +38,15 @@ def get_test_actor_config() -> DictConfig:
         return cfg
 
 
-def init_ray_inference_engines(backend: str, tp_size: int, dp_size: int, config: DictConfig) -> InferenceEngineClient:
+def init_ray_inference_engines(
+    backend: str, tp_size: int, pp_size: int, dp_size: int, config: DictConfig
+) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engine = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
         data_parallel_size=dp_size,
         model_dtype="bfloat16",
         pretrain=MODEL,
@@ -113,16 +116,17 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
 
 
 @pytest.mark.parametrize(
-    "backend,tp_size,dp_size",
+    "backend,tp_size,pp_size,dp_size",
     [
-        pytest.param("vllm", 2, 1, marks=pytest.mark.vllm),
-        pytest.param("vllm", 2, 2, marks=pytest.mark.vllm),
+        pytest.param("vllm", 2, 1, 1, marks=pytest.mark.vllm),
+        pytest.param("vllm", 2, 1, 2, marks=pytest.mark.vllm),
+        pytest.param("vllm", 2, 2, 1, marks=pytest.mark.vllm),  # TP=2, PP=2
         # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 1, 1, marks=pytest.mark.sglang),
+        pytest.param("sglang", 1, 1, 1, marks=pytest.mark.sglang),
     ],
-    ids=["vllm", "vllm_dp2", "sglang"],
+    ids=["vllm_tp2", "vllm_dp2", "vllm_tp2_pp2", "sglang"],
 )
-def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
+def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
     """
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
@@ -170,7 +174,7 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
             remote_server_process.wait()
 
     # Get responses from Ray engine
-    llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
+    llm_client = init_ray_inference_engines(backend, tp_size, pp_size, dp_size, cfg)
     sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
     # Batched generation
