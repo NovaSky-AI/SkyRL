@@ -115,9 +115,9 @@ def create_ray_wrapped_inference_engines(
     distributed_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
     data_parallel_backend = "mp"
     use_hybrid_engine = shared_pg is not None
-    num_gpus_per_actor = int(tensor_parallel_size <= 1 and pipeline_parallel_size <= 1)
+    num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
 
-    if use_hybrid_engine and tensor_parallel_size <= 1 and pipeline_parallel_size <= 1:
+    if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
         # Every worker will use 0.2 GPU, so that we can schedule
         # inference and training workers on the same GPUs.
         num_gpus_per_actor = 0.2
