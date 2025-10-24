@@ -2,7 +2,7 @@
 
 import argparse
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -110,6 +110,7 @@ class TinkerEngine:
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
+            update_adapter_config(self.model, adapter_index=0, lora_rank=1, lora_alpha=1.0)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -572,34 +573,45 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
-            for i in range(total_bs):
-                seed = all_seeds[i]
-                sampling_params = all_sampling_params[i]
-                adapter_idx = all_adapter_indices[i]
+            # Build groups for batching depending on sampling params:
+            group = defaultdict(list)
+            for i, params in enumerate(all_sampling_params):
+                key = (params.max_tokens, params.temperature)
+                group[key].append(i)
+            
+            for (max_tokens, temperature), indices in group.items():
+                # generation for groups of requests that share max_tokens and temperature
+                batch_input_ids = input_ids[jnp.array(indices)]
+                batch_attention_mask = attention_mask[jnp.array(indices)]
+                batch_adapter_indices = jnp.concatenate([all_adapter_indices[i] for i in indices], axis=0)
 
                 result = model.generate(
-                    input_ids[i : i + 1],
-                    attention_mask[i : i + 1],
-                    max_new_tokens=sampling_params.max_tokens,
-                    temperature=sampling_params.temperature,
-                    seed=seed,
+                    batch_input_ids,
+                    batch_attention_mask,
+                    max_new_tokens=max_tokens,
+                    temperature=temperature,
+                    seed=all_seeds[indices[0]],
                     return_scores=True,
-                    adapter_indices=adapter_idx,
+                    adapter_indices=batch_adapter_indices,
                 )
 
-                prompt_len = prompt_lens[i]
-                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
+                for local_idx, global_idx in enumerate(indices):
 
-                logprobs = []
-                for score in result.scores:
-                    log_probs = jax.nn.log_softmax(score[0], axis=-1)
-                    if len(logprobs) < len(generated_tokens):
-                        token_idx = generated_tokens[len(logprobs)]
-                        logprobs.append(float(log_probs[token_idx]))
+                    prompt_len = prompt_lens[global_idx]
+                    generated_tokens = result.generated_ids[local_idx, prompt_len:].tolist()
 
-                sequences_out[i] = types.GeneratedSequence(
-                    stop_reason=result.stop_reasons[0], tokens=generated_tokens, logprobs=logprobs
-                )
+                    logprobs = []
+                    for score in result.scores:
+                        log_probs = jax.nn.log_softmax(score[local_idx], axis=-1)
+                        if len(logprobs) < len(generated_tokens):
+                            token_idx = generated_tokens[len(logprobs)]
+                            logprobs.append(float(log_probs[token_idx]))
+
+                    sequences_out[global_idx] = types.GeneratedSequence(
+                        stop_reason=result.stop_reasons[local_idx],
+                        tokens=generated_tokens,
+                        logprobs=logprobs,
+                    )
 
         for request_id, _, start_idx, end_idx in request_batch_slices:
             sequences = []
