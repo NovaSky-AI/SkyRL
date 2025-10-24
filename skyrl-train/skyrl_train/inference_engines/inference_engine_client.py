@@ -15,6 +15,7 @@ from skyrl_train.inference_engines.utils import (
     aggregate_completion_usage_info,
 )
 from omegaconf import DictConfig
+from copy import deepcopy
 import threading
 from loguru import logger
 import random
@@ -130,8 +131,159 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
         )
 
+    async def _chat_completion_with_retry(
+        self, engine_idx: int, original_request_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
+
+        The retry mechanism is intended to use in combination with `pause_generation()` and `resume_generation()` for
+        in-flight weight updates and partial rollouts.
+
+        This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
+
+        For subsequent retry requests, we can reuse the original request payload except for the following fields:
+        - Update the last assistant message content to accumulated content, where the role uses the first non-zero response's role.
+        - Set continue_final_message=True and add_generation_prompt=False.
+        - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
+        - Besides, resend the original request unchanged if no tokens have been generated yet.
+
+        For final response, we can keep all the first non-empty response's fields (i.e. prefilled already),
+        including `prompt_logprobs` and `prompt_token_ids`, except:
+        - Accumulate for `choices[0]["logprobs"]["content"]`
+        - Accumulate for `choices[0]["token_ids"]`
+        - Accumulate for `choices[0]["message"]["content"]`
+        - Use the last response's finish_reason and stop_reason
+        """
+        # 0. Prepare various variables for the loop.
+        original_request_json: Dict[str, Any] = deepcopy(original_request_payload.get("json", {}))
+        headers: Dict[str, str] = dict(original_request_payload.get("headers", {}))
+
+        assert not original_request_json.get(
+            "continue_final_message", False
+        ), "continue_final_message must be False for /chat/completions requests"
+
+        # Accumulated fields for building subsequent requests and final response
+        accum_content: str = ""
+        accum_logprobs_content: List[Any] = []
+        accum_token_ids: List[int] = []
+        accum_completion_tokens: int = 0
+
+        # First non-zero response (i.e. the response that prefilled the prompt) to copy meta from.
+        base_response: Optional[Dict[str, Any]] = None
+
+        # Determine original max tokens key and value (if any)
+        max_key = None
+        if "max_tokens" in original_request_json:
+            max_key = "max_tokens"
+        elif "max_completion_tokens" in original_request_json:
+            max_key = "max_completion_tokens"
+        orig_max_tokens: Optional[int] = original_request_json.get(max_key) if max_key else None
+
+        # Fields to be updated in each loop iteration
+        finish_reason: str = "abort"
+        partial_response = None
+        response_role: Optional[str] = None
+
+        # 1. Loop until the generation is aborted.
+        while finish_reason == "abort":
+            await self._wait_for_generation_to_resume()
+
+            # 1.1. Prepare the request payload.
+            if accum_completion_tokens == 0:
+                # If we haven't generated any tokens yet, send the original request unchanged
+                cur_request_json = deepcopy(original_request_json)
+            else:
+                # Build continuation request based on original request and accumulated content.
+                # We want the engine to continue the generation from the last message and only
+                # return the new content generated.
+                assert accum_content != "", "accum_content must be non-empty here"
+                assert response_role is not None, "response_role must be set here"
+
+                cur_request_json = deepcopy(original_request_json)
+                cur_request_json["messages"].append({"role": response_role, "content": accum_content})
+                cur_request_json["continue_final_message"] = True
+                cur_request_json["add_generation_prompt"] = False
+                if orig_max_tokens is not None:
+                    assert (
+                        orig_max_tokens - accum_completion_tokens >= 0
+                    ), "orig_max_tokens - accum_completion_tokens must be non-negative"
+                    cur_request_json[max_key] = orig_max_tokens - accum_completion_tokens
+
+            # 1.2. Send the request.
+            logger.debug(f"/chat/completions request sent (including potential retries): {cur_request_json}")
+            partial_response = await self.engines[engine_idx].chat_completion(
+                {"json": cur_request_json, "headers": headers}
+            )
+
+            # 1.3. Extract fields from the response.
+            choice = partial_response["choices"][0]
+            finish_reason = choice["finish_reason"]
+            new_content = choice["message"]["content"]
+            assert (
+                partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None
+            ), "partial_response['usage']['completion_tokens'] must be present"
+            new_completion_tokens = partial_response["usage"]["completion_tokens"]
+            if response_role is None:
+                response_role = choice["message"]["role"]
+            else:
+                assert response_role == choice["message"]["role"], "response_role must be the same across retries"
+
+            # 1.4. Aborted without generating tokens, so partial_response is useless.
+            if finish_reason == "abort" and new_completion_tokens == 0:
+                continue
+
+            # Now we either generated something or/and finish_reason is not "abort"
+
+            # 1.5. Update base response if it is the first non-zero response
+            if base_response is None:
+                base_response = deepcopy(partial_response)
+                if finish_reason != "abort":
+                    # If we only made one request and it is not aborted, return the partial result directly.
+                    # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
+                    return partial_response
+
+            # 1.6. Accumulate content, logprobs, and token ids; update completion tokens sum
+            accum_content += new_content
+            logprobs = choice.get("logprobs")
+            if logprobs is not None and logprobs.get("content") is not None:
+                accum_logprobs_content.extend(logprobs["content"])
+            if choice.get("token_ids") is not None:
+                accum_token_ids.extend(choice["token_ids"])
+            accum_completion_tokens += new_completion_tokens
+
+        # 2. Build final response by combining fields
+        assert base_response is not None, "Expected at least one non-zero response to build final response"
+        final_response = deepcopy(base_response)
+
+        # 2.1. Combine usage: prompt_tokens from base, completion_tokens summed, total_tokens accordingly
+        # So these usage fields exclude the re-computation cost.
+        base_usage = final_response["usage"]
+        prompt_tokens = base_usage["prompt_tokens"]
+        final_usage = deepcopy(base_usage)
+        final_usage["completion_tokens"] = accum_completion_tokens
+        final_usage["total_tokens"] = prompt_tokens + accum_completion_tokens
+        final_response["usage"] = final_usage
+
+        # 2.2. Use accumulated content, logprobs, token_ids.
+        final_choice = final_response["choices"][0]
+        final_choice["message"]["content"] = accum_content
+        if final_choice.get("logprobs", None) is not None:
+            final_choice["logprobs"]["content"] = accum_logprobs_content
+        if final_choice.get("token_ids", None) is not None:
+            final_choice["token_ids"] = accum_token_ids
+
+        # 2.3. Use last response's finish_reason and stop_reason.
+        final_choice["finish_reason"] = finish_reason
+        if "stop_reason" in final_choice:
+            # If vLLM returns stop_reason separately, keep the last
+            final_choice["stop_reason"] = partial_response["choices"][0].get("stop_reason")
+
+        final_response["choices"][0] = final_choice
+
+        return final_response
+
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        await self._wait_for_generation_to_resume()
         session_id = request_payload["json"].pop("session_id", None)
         if session_id is None:
             # if session_id is not provided, we'll use a random engine
@@ -140,8 +292,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
             engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
 
-        # TODO(Charlie): add retry logic here until the stop_reason is not "abort".
-        return await self.engines[engine_idx].chat_completion(request_payload)
+        # Always use the retry loop which also issues the first request inside
+        return await self._chat_completion_with_retry(engine_idx, request_payload)
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
