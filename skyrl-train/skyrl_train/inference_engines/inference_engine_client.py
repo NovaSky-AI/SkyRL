@@ -243,6 +243,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
                     return partial_response
+                # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, but
+                # be careful when modifying this method.
                 base_response = partial_response.copy()
 
             # 1.6. Accumulate content, logprobs, and token ids; update completion tokens sum
@@ -277,7 +279,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # 2.3. Use last response's finish_reason and stop_reason.
         final_choice["finish_reason"] = finish_reason
-        if "stop_reason" in final_choice:
+        if stop_reason is not None:
             # If vLLM returns stop_reason separately, keep the last
             final_choice["stop_reason"] = stop_reason
 
