@@ -64,7 +64,7 @@ def sample_tokens(logits: jax.Array, *, temperatures: jax.Array, rngs: jax.Array
     temperature_mask = temperatures == 0.0
     scaled_logits = jnp.where(temperature_mask, logits, logits / temperatures)
     # Use vmap to apply categorical sampling per-sample with per-sample keys
-    sampled = jax.vmap(lambda k, l: jax.random.categorical(k, l))(sample_keys, scaled_logits)[:, None]
+    sampled = jax.vmap(lambda key, sl: jax.random.categorical(key, sl))(sample_keys, scaled_logits)[:, None]
     greedy = jnp.argmax(logits, axis=-1)[:, None]
     next_token = jnp.where(temperature_mask, greedy, sampled)
     return next_token, new_rngs
