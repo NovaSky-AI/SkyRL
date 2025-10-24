@@ -30,6 +30,14 @@ class EngineConfig(BaseModel):
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
     )
+    external_inference_url: str | None = Field(
+        default=None,
+        description="URL of the external inference engine. If set, sample requests will be sent to the external engine instead (currently only VLLM is supported)."
+    )
+    external_inference_api_key: str = Field(
+        default="EMPTY",
+        description="API key for an external inference engine. If not provided will use vLLM 'EMPTY' key convention"
+    )
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
