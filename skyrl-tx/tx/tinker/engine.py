@@ -839,7 +839,7 @@ class TinkerEngine:
             session.commit()
 
         except Exception as e:
-            logger.exception(f"Error processing {batch_name} batch: {e}")
+            logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
             for future in futures:
                 future.result_data = {"error": str(e)}
