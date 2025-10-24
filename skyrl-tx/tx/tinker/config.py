@@ -40,7 +40,7 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         model: The Pydantic model class
     """
     import typing
-    
+
     for name, field in model.model_fields.items():
         arg_name = name.replace("_", "-")
         kwargs = {
