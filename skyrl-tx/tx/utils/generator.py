@@ -11,7 +11,6 @@ import tx.utils.models
 from tx.tinker import types
 
 
-
 @jax.tree_util.register_dataclass
 @dataclass
 class KVCache:
@@ -62,7 +61,7 @@ def apply_top_k(logits: jax.Array, top_k: int) -> jax.Array:
             # top_k=0 means no tokens are allowed, set all to -inf
             return jnp.full_like(logits, -jnp.inf)
         return logits
-    
+
     # Get top-k values and their indices
     top_k_logits, _ = jax.lax.top_k(logits, top_k)
     # Set threshold to the k-th largest value
@@ -78,7 +77,7 @@ def apply_top_p(logits: jax.Array, top_p: float) -> jax.Array:
     if top_p <= 0.0:
         # top_p=0 means no probability mass is allowed, set all to -inf
         return jnp.full_like(logits, -jnp.inf)
-    
+
     # Sort logits in descending order
     sorted_logits = jnp.sort(logits, axis=-1)[..., ::-1]
     # Compute softmax probabilities
@@ -144,7 +143,7 @@ class GeneratorMixin:
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
         return_scores: bool = False,
-        seed: int, # TODO: This will need to be per request
+        seed: int,  # TODO: This will need to be per request
     ) -> GenerateResult:
         """Generate text autoregressively with KV caching.
 
@@ -155,7 +154,9 @@ class GeneratorMixin:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         batch_size, prompt_length = input_ids.shape
-        assert len(sampling_params) == batch_size, f"Need one sampling_param per input, got {len(sampling_params)} sampling params and {batch_size} inputs"
+        assert (
+            len(sampling_params) == batch_size
+        ), f"Need one sampling_param per input, got {len(sampling_params)} sampling params and {batch_size} inputs"
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
