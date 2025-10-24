@@ -115,6 +115,7 @@ def offload_megatron_grads_to_cpu(models):
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
                     if buffer.grad_data.storage().size() > 0:
+                        buffer.grad_data_size = buffer.grad_data.storage().size()
                         buffer.grad_data.storage().resize_(0)
         else:
             # we need this for ref module
@@ -132,9 +133,8 @@ def load_megatron_grads_to_gpu(models):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
-                    if buffer.grad_data.storage().size() > 0:
-                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                        buffer.grad_data.zero_()
+                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                    buffer.grad_data.zero_()
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():

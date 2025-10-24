@@ -126,10 +126,6 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             megatron_batch=train_batch_1,
         )
 
-        memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-        memory = memory[0]
-        print_mem("memory after training step", memory)
-
         checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))
         checkpoint_dir = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1"))  # Store for cleanup
 
@@ -142,14 +138,15 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
 
         # Step 2.1: Make sure that offloading still works after saving checkpoint
         memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
-        print_mem("memory after saving checkpoint", memory)
+        print_mem("memory after saving checkpoint", memory_after_saving)
+
         actor_group.offload_to_cpu()
 
         memory_after_offloading = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
-        print_mem("memory after offloading", memory)
+        print_mem("memory after offloading", memory_after_offloading)
 
         assert (
-            memory_after_offloading < memory_after_saving
+            memory_after_offloading["allocated"] < memory_after_saving["allocated"]
         ), f"Memory after offloading should be less than after saving: {memory_after_offloading} bytes < {memory_after_saving} bytes"
         actor_group.backload_to_gpu()
 
@@ -177,14 +174,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             accumulation_steps=accumulation_steps,
             megatron_batch=train_batch_2,
         )
-
-        # Step 2: Save checkpoint
-        ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
-            )
-        )
-
+        
         # Create test input for comparing model outputs
         dp_size = actor_group.actor_infos[0].rank.dp_size
         test_input = torch.randint(0, 1000, (dp_size, 20), device="cpu")  # batch_size=dp_size, seq_len=20
