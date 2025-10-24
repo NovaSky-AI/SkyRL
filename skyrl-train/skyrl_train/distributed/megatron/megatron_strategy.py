@@ -35,6 +35,8 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.dist_checkpointing.strategies import base as ckpt_base
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 
 
 class MegatronStrategy(DistributedStrategy):
@@ -54,9 +56,9 @@ class MegatronStrategy(DistributedStrategy):
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
 
-        # NOTE: set multiprocessing start method to spawn to avoid `os.fork()`-ing short-lived background workers,
-        # which does not work well with Ray.
-        mp.set_start_method("spawn", force=True)
+        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
+        # short-lived background workers, which does not work well with Ray.
+        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -187,6 +189,8 @@ class MegatronStrategy(DistributedStrategy):
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
         dist.barrier()
+        ckpt_base.async_calls.close()
+        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
