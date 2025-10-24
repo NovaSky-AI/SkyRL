@@ -33,6 +33,7 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
     We pause and then resume generation twice in the middle. We expect each response to
     finish with reason `length` and have exactly `max_tokens` completion tokens.
     """
+    server_thread = None
     try:
         # 1. Build engine and start server
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
@@ -159,7 +160,7 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
             # TODO(Charlie): after we add model version to the output, check that as well
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
