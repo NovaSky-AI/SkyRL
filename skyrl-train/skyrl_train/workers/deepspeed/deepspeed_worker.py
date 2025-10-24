@@ -7,12 +7,12 @@ import torch
 import torch.distributed
 from loguru import logger
 from transformers.trainer import get_scheduler
-from omegaconf import OmegaConf
 
 
 from skyrl_train.model_wrapper import get_llm_for_sequence_regression, HFModelWrapper
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
 from skyrl_train.utils import get_physical_gpu_id
+from skyrl_train.utils.trainer_utils import get_rope_config
 from skyrl_train.utils.utils import str_to_torch_dtype
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -64,6 +64,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
             use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
+            rope_scaling=get_rope_config(self.cfg.trainer),
         )
 
         # configure optimizer
@@ -343,10 +344,6 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
         strategy.setup_distributed()
         self.strategy = strategy
 
-        rope_scaling_cfg = (
-            OmegaConf.to_container(self.cfg.trainer.rope_scaling) if "rope_scaling" in self.cfg.trainer else {}
-        )
-
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
@@ -354,7 +351,7 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             ds_config=strategy.get_ds_eval_config(),
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
-            rope_scaling=rope_scaling_cfg,
+            rope_scaling=get_rope_config(self.cfg.trainer),
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
