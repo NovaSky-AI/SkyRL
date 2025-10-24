@@ -11,12 +11,14 @@ import torch.nn as nn
 from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
+import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
+from packaging.version import Version
 
 
 class HFModelWrapper(nn.Module):
@@ -66,15 +68,15 @@ class HFModelWrapper(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.use_flash_attention_2 = use_flash_attention_2
+        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
-            assert self.use_flash_attention_2, "Flash attention 2 should be used for `use_sample_packing`"
+            assert (
+                self.attn_implementation == "flash_attention_2"
+            ), "Flash attention 2 should be used for `use_sample_packing`"
 
         if isinstance(pretrain_or_model, str):
-            attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
-
             # Note: dschf is defined in function scope to avoid global effects
             # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
             if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
@@ -110,11 +112,33 @@ class HFModelWrapper(nn.Module):
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
-                attn_implementation=attn_implementation,
+                attn_implementation=self.attn_implementation,
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
             )
+
+            # gpt oss
+            if Version(transformers.__version__) >= Version("4.56.2"):
+                from transformers import GptOssConfig
+
+                if isinstance(self.model.config, GptOssConfig):
+                    # patch attention with Unsloth's flex attn
+                    from skyrl_train.patches.gptoss.patch_transformers import (
+                        custom_attention,
+                        custom_attention_mask,
+                        patch_GptOssAttention,
+                    )
+                    from transformers import AttentionInterface, AttentionMaskInterface
+
+                    AttentionInterface.register("custom_flex", custom_attention)
+                    AttentionMaskInterface.register("custom_flex", custom_attention_mask)
+                    # set attention implementation to be `custom_flex`
+                    self.model.set_attn_implementation("custom_flex")
+                    self.attn_implementation = "custom_flex"
+                    # NOTE: Even though we set a custom attn implementation, we
+                    # also patch the full attention function for GPT OSS
+                    patch_GptOssAttention()
 
             # LoRA
             if lora_rank > 0:
@@ -269,7 +293,7 @@ class HFModelWrapper(nn.Module):
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
-            attention_mask_fwd = None if self.use_flash_attention_2 and self.use_sample_packing else attention_mask_fwd
+            attention_mask_fwd = None if self.use_sample_packing else attention_mask_fwd
 
             # slice for sequence parallelism
             # (bsz, seqlen) -> (bsz, seqlen//sp_size)
@@ -281,7 +305,7 @@ class HFModelWrapper(nn.Module):
             )
 
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.use_flash_attention_2:
+        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)

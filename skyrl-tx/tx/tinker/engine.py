@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import logging
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -14,6 +13,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.training import checkpoints
+
 
 import optax
 from transformers import AutoConfig
@@ -32,33 +32,10 @@ from tx.utils.models import (
     load_safetensors,
     extract_adapter_state,
     insert_adapter_state,
+    round_up_seq_len,
 )
 from tx.layers.lora import update_adapter_config
-
-logger = logging.getLogger(__name__)
-
-
-def round_up_seq_len(seq_len: int) -> int:
-    """
-    Rounds a sequence length up to roughly two significant binary digits.
-    We do this to pad sequences, so the Jax JIT compiler needs to
-    compile fewer different shapes.
-    """
-    if seq_len <= 32:
-        return 32
-
-    # Find the position of the most significant bit.
-    msb_pos = seq_len.bit_length() - 1
-    # Create a mask for the two most significant bits.
-    mask = (1 << msb_pos) | (1 << (msb_pos - 1))
-    # Round down to the nearest value with at most two significant bits.
-    result = seq_len & mask
-
-    # If we rounded down, round up to the next bucket boundary.
-    if result < seq_len:
-        result += 1 << (msb_pos - 1)
-
-    return result
+from tx.utils.log import logger
 
 
 @dataclass
@@ -168,6 +145,17 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
+        # Wrap the model forward call to use nnx.remat for gradient checkpointing
+        def _model_forward(
+            model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+        ) -> jax.Array:
+            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+            return output["logits"]
+
+        if self.config.gradient_checkpointing:
+            # policy=None corresponds full activation recomputation
+            _model_forward = nnx.remat(_model_forward, policy=None)
+
         def loss_for_lora(
             lora_params: nnx.State,
             non_lora_params: nnx.State,
@@ -181,9 +169,8 @@ class TinkerEngine:
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
-                "logits"
-            ]  # [B, T, V]
+            logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
 
@@ -863,8 +850,6 @@ class TinkerEngine:
 
 def main():
     """Entry point for the background engine."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(filename)s:%(lineno)d] - %(message)s")
-
     # Create argument parser and add Pydantic model fields
     parser = argparse.ArgumentParser(description="SkyRL tx tinker engine for processing requests")
     add_model(parser, EngineConfig)
