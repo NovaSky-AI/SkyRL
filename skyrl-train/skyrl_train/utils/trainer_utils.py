@@ -1,11 +1,11 @@
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
+from omegaconf import OmegaConf, DictConfig
 from enum import Enum
 import ray
 from skyrl_train.workers.worker import PPORayActorGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import os
 from loguru import logger
-from omegaconf import DictConfig
 import json
 import torch
 import numpy as np
@@ -642,3 +642,9 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
         logger.info(f"Validation set size: {len(dataloader)}")
 
     return dataloader
+
+
+def get_rope_config(trainer_cfg: DictConfig) -> dict[str, Any]:
+    if "rope_scaling" in trainer_cfg:
+        return {}
+    return OmegaConf.to_container(trainer_cfg.rope_scaling)

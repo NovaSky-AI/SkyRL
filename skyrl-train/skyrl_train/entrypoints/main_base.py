@@ -66,6 +66,11 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
 
+    if (rope_scaling := cfg.trainer.policy.model.get("rope_scaling", None)) is not None:
+        engine_kwargs["rope_scaling"] = rope_scaling
+    if (rope_theta := cfg.trainer.policy.model.get("rope_theta", None)) is not None:
+        engine_kwargs["rope_theta"] = rope_theta
+
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 

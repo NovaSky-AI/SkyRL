@@ -31,6 +31,11 @@ trainer:
           alpha: 16
           dropout: 0
           lora_sync_path: "/tmp/skyrl_lora_sync"
+      rope_scaling:
+        rope_type: yarn
+        factor: 4.0
+        original_max_position_embeddings: 32768
+      rope_theta: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
@@ -166,6 +171,10 @@ trainer:
   logger: "wandb"
   dump_data_batch: false
   dump_eval_results: true
+  rope_scaling:
+    rope_type: yarn
+    factor: 4.0
+    original_max_position_embeddings: 32768
 
 
 generator:
