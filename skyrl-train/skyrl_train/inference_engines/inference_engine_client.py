@@ -141,20 +141,20 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
 
-        For subsequent retry requests, we can reuse the original request payload except for the following fields:
+        For subsequent retry requests, we can reuse the original request wiht the followinge xceptions:
         - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
         - Set continue_final_message=True and add_generation_prompt=False.
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
-        - Besides, resend the original request unchanged if no tokens have been generated yet.
+        - If no tokens have been generated yet, resend the original request unchanged.
 
-        For final response, we can keep all the first non-empty response's fields (i.e. prefilled already),
-        including `prompt_logprobs` and `prompt_token_ids`, except:
-        - Accumulate for `choices[0]["logprobs"]["content"]`
-        - Accumulate for `choices[0]["token_ids"]`
-        - Accumulate for `choices[0]["message"]["content"]`
+        For the final response, we maintain all the first non-empty response's fields (i.e. prefilled already),
+        with the following exceptions:
+        - Accumulate the following across retry requests:
+          - `choices[0]["logprobs"]["content"]`
+          - `choices[0]["token_ids"]`
+          - `choices[0]["message"]["content"]`
         - Use the last response's finish_reason and stop_reason
         """
-        # 0. Prepare various variables for the loop.
         original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
         headers: Dict[str, str] = original_request_payload.get("headers", {}).copy()
 
