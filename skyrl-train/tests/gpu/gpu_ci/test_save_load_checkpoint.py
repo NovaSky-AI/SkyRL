@@ -136,6 +136,12 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             )
         )
 
+        ray.get(
+            actor_group.async_run_ray_method(
+                "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
+            )
+        )
+
         # Step 2.1: Make sure that offloading still works after saving checkpoint
         memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
         print_mem("memory after saving checkpoint", memory_after_saving)

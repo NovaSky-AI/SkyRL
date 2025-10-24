@@ -3,6 +3,8 @@ import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl_train.utils.utils import peer_access_supported
+import os
+from skyrl_train.utils.constants import SKYRL_PYTHONPATH_EXPORT
 
 
 @lru_cache(5)
@@ -27,6 +29,9 @@ def ray_init_fixture():
                 "NCCL_SHM_DISABLE": "1",
             }
         )
+
+    if SKYRL_PYTHONPATH_EXPORT:
+        env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})
