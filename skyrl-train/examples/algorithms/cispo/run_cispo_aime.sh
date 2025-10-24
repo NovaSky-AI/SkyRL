@@ -2,7 +2,7 @@ set -x
 
 # Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on DAPO training data and validate on AIME 2024.
 # uv run examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_aime.sh
+# bash examples/algorithms/cispo/run_cispo_aime.sh
 
 MODEL_NAME="/mnt/local_storage/qwen2.5-math"
 DATA_DIR="$HOME/data/dapo"
@@ -42,11 +42,18 @@ N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
 
+# CISPO parameters
+CISPO_EPS_CLIP_LOW=0
+CISPO_EPS_CLIP_HIGH=5
+POLICY_LOSS="cispo"
+
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.policy_loss_type="dual_clip" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS" \
+  trainer.algorithm.cispo.cispo_eps_clip_low=$CISPO_EPS_CLIP_LOW \
+  trainer.algorithm.cispo.cispo_eps_clip_high=$CISPO_EPS_CLIP_HIGH \
   +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
   +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
@@ -75,8 +82,8 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=16 \
-  trainer.micro_train_batch_size_per_gpu=16 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
+  trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
@@ -95,8 +102,8 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="aime" \
-  trainer.run_name="qwen_2_5_math_7b_aime_eval_fixed_no_cuda_graphs" \
+  trainer.run_name="qwen_2_5_math_7b_aime_eval_fixed_no_cuda_graphs_cispo" \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/qwen_2.5_math_7b_aime_ckpt_eval_fixed_no_cuda_graphs" \
+  trainer.ckpt_path="$HOME/ckpts/qwen_2.5_math_7b_aime_ckpt_eval_fixed_no_cuda_graphs_cispo" \
   $@

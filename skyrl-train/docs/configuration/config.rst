@@ -241,7 +241,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.weight_decay``: L2 regularization strength for AdamW.
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
-- ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
+- ``optimizer_config.num_warmup_steps``: Number of mini-batch steps to warmup the optimizer for.
 - ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from `Huggingface <https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType>`_.
 
 Policy Configuration
