@@ -16,7 +16,7 @@ class EngineConfig(BaseModel):
     )
     database_url: str | None = Field(
         default=None,
-        description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TINKER_DATABASE_URL env var or defaults to SQLite",
+        description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
@@ -62,9 +62,8 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
                 if origin is typing.Union:
                     # Get the non-None type from the union
                     args = typing.get_args(field.annotation)
-                    non_none_types = [arg for arg in args if arg is not type(None)]
-                    if non_none_types:
-                        kwargs["type"] = non_none_types[0]
+                    if type(None) in args:
+                        kwargs["type"] = next((arg for arg in args if arg is not type(None)), None)
                 elif callable(field.annotation):
                     kwargs["type"] = field.annotation
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
 from sqlmodel import SQLModel, Field, JSON
+from sqlalchemy.engine import url as sqlalchemy_url
 
 from tx.tinker import types
 
@@ -31,7 +32,7 @@ def get_database_url(db_url: str | None = None) -> str:
         return db_url
     
     # Check environment variable
-    env_url = os.environ.get("TINKER_DATABASE_URL")
+    env_url = os.environ.get("TX_DATABASE_URL")
     if env_url:
         return env_url
     
@@ -47,19 +48,30 @@ def get_async_database_url(db_url: str | None = None) -> str:
     
     Returns:
         Async database URL string for SQLAlchemy.
+    
+    Raises:
+        ValueError: If the database scheme is not supported.
     """
-    url = get_database_url(db_url)
+    url_str = get_database_url(db_url)
+    
+    # Parse the URL using SQLAlchemy's URL utility
+    parsed_url = sqlalchemy_url.make_url(url_str)
     
     # Convert to async driver if needed
-    if url.startswith("sqlite://"):
+    backend_name = parsed_url.get_backend_name()
+    if backend_name == "sqlite":
         # Use aiosqlite for async SQLite
-        return url.replace("sqlite://", "sqlite+aiosqlite://")
-    elif url.startswith("postgresql://"):
+        parsed_url = parsed_url.set(drivername="sqlite+aiosqlite")
+    elif backend_name == "postgresql":
         # Use asyncpg for async PostgreSQL
-        return url.replace("postgresql://", "postgresql+asyncpg://")
+        parsed_url = parsed_url.set(drivername="postgresql+asyncpg")
+    elif "+" in parsed_url.drivername:
+        # Already has an async driver specified, keep it
+        pass
+    else:
+        raise ValueError(f"Unsupported database scheme: {backend_name}")
     
-    # Already has async driver or unknown driver
-    return url
+    return str(parsed_url)
 
 
 class RequestStatus(str, Enum):

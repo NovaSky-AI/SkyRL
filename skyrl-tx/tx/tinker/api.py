@@ -724,14 +724,6 @@ async def root():
 if __name__ == "__main__":
     import argparse
     import uvicorn
-    from pathlib import Path
-    from dotenv import load_dotenv
-
-    # Load environment variables from .env file if it exists
-    env_file = Path(__file__).parent.parent.parent / ".env"
-    if env_file.exists():
-        logger.info(f"Loading environment variables from {env_file}")
-        load_dotenv(env_file)
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")
