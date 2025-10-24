@@ -8,6 +8,8 @@ from jax import lax
 import jax.numpy as jnp
 
 import tx.utils.models
+from tx.tinker import types
+
 
 
 @jax.tree_util.register_dataclass
@@ -91,27 +93,34 @@ def apply_top_p(logits: jax.Array, top_p: float) -> jax.Array:
     return jnp.where(logits < threshold, -jnp.inf, logits)
 
 
-def sample_token(
-    logits: jax.Array, 
-    *, 
-    temperature: float, 
+def sample_tokens(
+    logits: jax.Array,
+    *,
+    temperatures: jax.Array,
     key: jax.Array,
-    top_k: int = -1,
-    top_p: float = 1.0,
+    # top_k: int = -1,
+    # top_p: float = 1.0,
 ) -> jax.Array:
-    """Sample next token from logits using temperature, top_k, and top_p."""
-    # Apply top_k filtering if specified
-    if top_k > 0:
-        logits = apply_top_k(logits, top_k)
-    
-    # Apply top_p filtering if specified
-    if top_p < 1.0:
-        logits = apply_top_p(logits, top_p)
-    
-    # Sample with temperature
-    if temperature == 0.0:
-        return jnp.argmax(logits, axis=-1)[:, None]
-    return jax.random.categorical(key, logits / temperature, axis=-1)[:, None]
+    """Sample next tokens from logits using per-sample temperatures, top_k, and top_p.
+
+    Args:
+        logits: Shape (batch_size, vocab_size)
+        temperatures: Shape (batch_size,)
+    """
+    # Apply top_k and top_p filtering
+    # if top_k > 0:
+    #     logits = apply_top_k(logits, top_k)
+    # if top_p < 1.0:
+    #     logits = apply_top_p(logits, top_p)
+
+    # Sample with per-sample temperatures
+    temperatures = temperatures[:, None]
+    temperature_mask = temperatures == 0.0
+    scaled_logits = jnp.where(temperature_mask, logits, logits / temperatures)
+    sampled = jax.random.categorical(key, scaled_logits, axis=-1)[:, None]
+    argmax_tokens = jnp.argmax(logits, axis=-1)[:, None]
+
+    return jnp.where(temperature_mask, argmax_tokens, sampled)
 
 
 def compute_positions(attention_mask: jax.Array) -> jax.Array:
@@ -132,14 +141,10 @@ class GeneratorMixin:
         input_ids: jax.Array,
         attention_mask: jax.Array,
         *,
-        max_new_tokens: int,
-        temperature: float,
-        seed: int,
-        return_scores: bool = False,
+        sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
-        stop_tokens: list[int] | None = None,
-        top_k: int = -1,
-        top_p: float = 1.0,
+        return_scores: bool = False,
+        seed: int, # TODO: This will need to be per request
     ) -> GenerateResult:
         """Generate text autoregressively with KV caching.
 
@@ -150,7 +155,10 @@ class GeneratorMixin:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         batch_size, prompt_length = input_ids.shape
+        assert len(sampling_params) == batch_size, f"Need one sampling_param per input, got {len(sampling_params)} sampling params and {batch_size} inputs"
+        max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
+        temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
@@ -160,7 +168,7 @@ class GeneratorMixin:
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
             rng, sample_key = jax.random.split(rng)
-            next_token = sample_token(logits, temperature=temperature, key=sample_key)
+            next_token = sample_tokens(logits, temperatures=temperatures, key=sample_key)
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
@@ -195,7 +203,7 @@ class GeneratorMixin:
 
         # Sample final token
         rng, sample_key = jax.random.split(rng)
-        next_token = sample_token(logits, temperature=temperature, key=sample_key)
+        next_token = sample_tokens(logits, temperatures=temperatures, key=sample_key)
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
         return GenerateResult(
