@@ -174,7 +174,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
             accumulation_steps=accumulation_steps,
             megatron_batch=train_batch_2,
         )
-        
+
         # Create test input for comparing model outputs
         dp_size = actor_group.actor_infos[0].rank.dp_size
         test_input = torch.randint(0, 1000, (dp_size, 20), device="cpu")  # batch_size=dp_size, seq_len=20
