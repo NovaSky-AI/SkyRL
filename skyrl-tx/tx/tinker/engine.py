@@ -777,15 +777,21 @@ class TinkerEngine:
         
                 if model_id not in self.models:
                     raise ValueError(f"Model {model_id} not created")
-                
+
                 adapter_index = self.models[model_id].adapter_index
-                checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
-                logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+                # Loads model from RAM
+                if self.models[model_id].loaded_checkpoint_id == request_data.checkpoint_id:
+                    adapter_indices_list.append(adapter_index)
+                # Load model from disk
+                else:
+                    checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+                    logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
 
-                load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+                    self.models[model_id].loaded_checkpoint_id = request_data.checkpoint_id
+                    logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+                    adapter_indices_list.append(adapter_index)
 
-                logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
-                adapter_indices_list.append(adapter_index)
             else:
                 if request_data.base_model != self.config.base_model:
                     raise ValueError(

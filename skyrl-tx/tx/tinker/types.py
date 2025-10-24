@@ -161,6 +161,7 @@ class SamplingParams(BaseModel):
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+    loaded_checkpoint_id: str | None = None
 
 
 class SampleInput(BaseModel):
