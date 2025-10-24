@@ -9,6 +9,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tx.models import Qwen3ForCausalLM
+from tx.tinker import types
 from tx.utils.models import load_safetensors
 
 
@@ -42,12 +43,11 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
+        sampling_params = [types.SamplingParams(max_tokens=10, temperature=0.0, seed=42) for _ in range(len(inputs))]
         result = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
-            max_new_tokens=10,
-            temperature=0.0,
-            seed=42,
+            sampling_params=sampling_params,
             return_scores=True,
         )
 
@@ -89,14 +89,16 @@ def test_qwen3_generate_speed():
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
+        sampling_params = [
+            types.SamplingParams(max_tokens=50, temperature=0.0, seed=42 + i) for i in range(len(inputs))
+        ]
 
         # Warmup
         warmup = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
-            max_new_tokens=10,
-            temperature=0.0,
-            seed=42,
+            sampling_params=sampling_params,
+            return_scores=True,
         )
         warmup.generated_ids.block_until_ready()
 
@@ -108,9 +110,7 @@ def test_qwen3_generate_speed():
             result = model.generate(
                 batch.input_ids.numpy(),
                 batch.attention_mask.numpy(),
-                max_new_tokens=50,
-                temperature=0.0,
-                seed=42 + i,  # Different seed every run
+                sampling_params=sampling_params,
                 return_scores=True,
             )
             result.generated_ids.block_until_ready()
