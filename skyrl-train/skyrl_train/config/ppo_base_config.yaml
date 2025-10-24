@@ -189,6 +189,7 @@ generator:
   enable_prefix_caching: true
   enable_chunked_prefill: true
   max_num_batched_tokens: 8192
+  # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
