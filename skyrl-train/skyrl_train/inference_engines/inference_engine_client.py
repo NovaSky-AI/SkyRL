@@ -181,7 +181,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # Fields to be updated in each loop iteration
         finish_reason: str = "abort"
-        partial_response = None
+        stop_reason: Optional[str] = None
         response_role: Optional[str] = None
 
         # 1. Loop until the generation is aborted.
@@ -220,6 +220,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             # 1.3. Extract fields from the response.
             choice = partial_response["choices"][0]
             finish_reason = choice["finish_reason"]
+            stop_reason = choice.get("stop_reason", None)
             new_content = choice["message"]["content"]
             assert (
                 partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None
@@ -278,9 +279,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         final_choice["finish_reason"] = finish_reason
         if "stop_reason" in final_choice:
             # If vLLM returns stop_reason separately, keep the last
-            final_choice["stop_reason"] = partial_response["choices"][0].get("stop_reason")
-
-        final_response["choices"][0] = final_choice
+            final_choice["stop_reason"] = stop_reason
 
         return final_response
 
