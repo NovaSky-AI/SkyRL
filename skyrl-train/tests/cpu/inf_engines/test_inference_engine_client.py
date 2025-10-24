@@ -442,6 +442,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
     - continue_final_message/add_generation_prompt flags are set
     - remaining max_tokens decreases by accumulated completion tokens
     - Final response accumulates content, logprobs, token_ids and recomputes usage correctly
+    - Each retry request is what we expect the engine to receive
     """
 
     class MockEngine:
@@ -461,7 +462,12 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
                             "finish_reason": "abort",
                             "logprobs": {
                                 "content": [
-                                    {"token": "token_id:11", "top_logprobs": [{"token": "token_id:11", "logprob": 0.0}]}
+                                    {
+                                        "token": "token_id:11",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:11", "logprob": -0.1, "bytes": [116]}],
+                                    },
                                 ]
                             },
                             "token_ids": [11],
@@ -497,7 +503,12 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
                             "finish_reason": "stop",
                             "logprobs": {
                                 "content": [
-                                    {"token": "token_id:12", "top_logprobs": [{"token": "token_id:12", "logprob": 0.0}]}
+                                    {
+                                        "token": "token_id:12",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:12", "logprob": -0.1, "bytes": [116]}],
+                                    },
                                 ]
                             },
                             "token_ids": [12],
@@ -568,8 +579,9 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
     choice = out["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert choice["message"]["content"] == "AB"
-    assert choice["logprobs"]["content"][0]["token"].endswith(":11")
-    assert choice["logprobs"]["content"][1]["token"].endswith(":12")
+    assert len(choice["logprobs"]["content"]) == 2
+    assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
+    assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
 
     # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
@@ -619,15 +631,21 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
                                 "content": [
                                     {
                                         "token": "token_id:21",
-                                        "top_logprobs": [{"token": "token_id:21", "logprob": 0.0}],
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:21", "logprob": -0.1, "bytes": [116]}],
                                     },
                                     {
                                         "token": "token_id:22",
-                                        "top_logprobs": [{"token": "token_id:22", "logprob": 0.0}],
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:22", "logprob": -0.1, "bytes": [116]}],
                                     },
                                     {
                                         "token": "token_id:23",
-                                        "top_logprobs": [{"token": "token_id:23", "logprob": 0.0}],
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:23", "logprob": -0.1, "bytes": [116]}],
                                     },
                                 ]
                             },

@@ -15,7 +15,6 @@ from skyrl_train.inference_engines.utils import (
     aggregate_completion_usage_info,
 )
 from omegaconf import DictConfig
-from copy import deepcopy
 import threading
 from loguru import logger
 import random
@@ -156,8 +155,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         - Use the last response's finish_reason and stop_reason
         """
         # 0. Prepare various variables for the loop.
-        original_request_json: Dict[str, Any] = deepcopy(original_request_payload.get("json", {}))
-        headers: Dict[str, str] = dict(original_request_payload.get("headers", {}))
+        original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
+        headers: Dict[str, str] = original_request_payload.get("headers", {}).copy()
 
         assert not original_request_json.get(
             "continue_final_message", False
@@ -192,7 +191,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             # 1.1. Prepare the request payload.
             if accum_completion_tokens == 0:
                 # If we haven't generated any tokens yet, send the original request unchanged
-                cur_request_json = deepcopy(original_request_json)
+                cur_request_json = original_request_json.copy()
             else:
                 # Build continuation request based on original request and accumulated content.
                 # We want the engine to continue the generation from the last message and only
@@ -200,8 +199,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 assert accum_content != "", "accum_content must be non-empty here"
                 assert response_role is not None, "response_role must be set here"
 
-                cur_request_json = deepcopy(original_request_json)
-                cur_request_json["messages"].append({"role": response_role, "content": accum_content})
+                cur_request_json = original_request_json.copy()
+                cur_request_json["messages"] = original_request_json["messages"] + [
+                    {"role": response_role, "content": accum_content}
+                ]
                 cur_request_json["continue_final_message"] = True
                 cur_request_json["add_generation_prompt"] = False
                 if orig_max_tokens is not None:
@@ -237,11 +238,11 @@ class InferenceEngineClient(InferenceEngineInterface):
 
             # 1.5. Update base response if it is the first non-zero response
             if base_response is None:
-                base_response = deepcopy(partial_response)
                 if finish_reason != "abort":
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
                     return partial_response
+                base_response = partial_response.copy()
 
             # 1.6. Accumulate content, logprobs, and token ids; update completion tokens sum
             accum_content += new_content
@@ -254,13 +255,13 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # 2. Build final response by combining fields
         assert base_response is not None, "Expected at least one non-zero response to build final response"
-        final_response = deepcopy(base_response)
+        final_response = base_response
 
         # 2.1. Combine usage: prompt_tokens from base, completion_tokens summed, total_tokens accordingly
         # So these usage fields exclude the re-computation cost.
         base_usage = final_response["usage"]
         prompt_tokens = base_usage["prompt_tokens"]
-        final_usage = deepcopy(base_usage)
+        final_usage = base_usage.copy()
         final_usage["completion_tokens"] = accum_completion_tokens
         final_usage["total_tokens"] = prompt_tokens + accum_completion_tokens
         final_response["usage"] = final_usage
