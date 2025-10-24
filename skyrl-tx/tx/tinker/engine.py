@@ -786,75 +786,6 @@ class TinkerEngine:
                 )
             return None
 
-    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the base model or LoRA adapter."""
-        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
-
-        # Load sampler weights and determine adapter indices
-        adapter_indices = self.load_sampler_weights(model_id, request_data)
-
-        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
-
-        # Prepare input for generation
-        input_ids = jnp.array([prompt_tokens], dtype=jnp.int32)
-        attention_mask = jnp.ones_like(input_ids, dtype=jnp.int32)
-
-        # Generate samples
-        sequences = []
-        with jax.set_mesh(self.mesh):
-            # Merge the model for inference
-            model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
-
-            for sample_idx in range(request_data.num_samples):
-                # Generate with different seeds for each sample
-                seed = request_data.sampling_params.seed + sample_idx
-
-                # Call the model's generate method
-                result = model.generate(
-                    input_ids,
-                    attention_mask,
-                    max_new_tokens=request_data.sampling_params.max_tokens,
-                    temperature=request_data.sampling_params.temperature,
-                    seed=seed,
-                    return_scores=True,
-                    adapter_indices=adapter_indices,
-                )
-
-                # Extract the generated tokens (excluding the prompt)
-                prompt_len = len(prompt_tokens)
-                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
-
-                # Compute logprobs from the scores
-                logprobs = []
-                for score in result.scores:
-                    log_probs = jax.nn.log_softmax(score[0], axis=-1)
-                    # Get the logprob of the selected token
-                    # The token at position i in generated_tokens corresponds to scores[i]
-                    if len(logprobs) < len(generated_tokens):
-                        token_idx = generated_tokens[len(logprobs)]
-                        logprobs.append(float(log_probs[token_idx]))
-
-                # Get stop reason for this sequence (batch size is 1, so index 0)
-                stop_reason = result.stop_reasons[0]
-
-                sequences.append(
-                    types.GeneratedSequence(
-                        stop_reason=stop_reason,
-                        tokens=generated_tokens,
-                        logprobs=logprobs,
-                    )
-                )
-
-        # Compute prompt logprobs if needed (for now, return empty list)
-        prompt_logprobs = []
-
-        logger.info(f"Generated {len(sequences)} samples for model {model_id}")
-
-        return types.SampleOutput(
-            sequences=sequences,
-            prompt_logprobs=prompt_logprobs,
-        )
-
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
             case types.RequestType.CREATE_MODEL:
@@ -874,13 +805,7 @@ class TinkerEngine:
         return result.model_dump()
 
     def process_batch_requests(
-        self,
-        session: Session,
-        futures: list[FutureDB],
-        batch_processor,
-        request_input_type,
-        error_type,
-        batch_name: str,
+        self, session: Session, futures: list[FutureDB], batch_processor, request_input_type, error_type
     ):
         """Generic function to process a batch of requests.
 
@@ -890,7 +815,6 @@ class TinkerEngine:
             batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
             request_input_type: Pydantic model class for parsing request_data (e.g., types.ForwardBackwardInput)
             error_type: Error type class to check for failures (e.g., types.ForwardBackwardError)
-            batch_name: Name for logging purposes (e.g., "forward_backward")
         """
         if not futures:
             return
@@ -941,24 +865,20 @@ class TinkerEngine:
                 )
                 other_futures = session.exec(statement).all()
 
-                # Process forward_backward requests in batch
                 self.process_batch_requests(
                     session,
                     forward_backward_futures,
                     self.process_forward_backward_batch,
                     types.ForwardBackwardInput,
                     types.ForwardBackwardError,
-                    "forward_backward",
                 )
 
-                # Process sample requests in batch
                 self.process_batch_requests(
                     session,
                     sample_futures,
                     self.process_sample_batch,
                     types.SampleInput,
                     types.SampleError,
-                    "sample",
                 )
 
                 # Process other request types individually (in the future we can also batch independent optim_steps)
