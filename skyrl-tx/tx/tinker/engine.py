@@ -543,15 +543,17 @@ class TinkerEngine:
         current_batch_idx = 0
         for i, (future, model_id, request_data) in enumerate(valid_requests):
             # Get adapter index (need to cast in jnp.int32 because that is what generate accepts)
-            adapter_indices_single = adapter_indices_batch[i:i+1]
+            adapter_idx = adapter_indices_batch[i]
 
             request_start = current_batch_idx
-            for sample_idx in range(request_data.num_samples):
+
+            # Create expand group rollout
+            for _ in range(request_data.num_samples):
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
-                all_seeds.append(request_data.sampling_params.seed + sample_idx)
+                all_seeds.append(request_data.sampling_params.seed)
                 all_sampling_params.append(request_data.sampling_params)
-                all_adapter_indices.append(adapter_indices_single)
+                all_adapter_indices.append(adapter_idx)
                 current_batch_idx += 1
 
             request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
@@ -563,34 +565,34 @@ class TinkerEngine:
         attention_mask = jnp.array(
             [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32
         )
-
-        total_bs = int(input_ids.shape[0])
         prompt_lens = [len(seq) for seq in all_prompts]
 
+        all_adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
+        
         # Collect per-sample outputs
-        sequences_out = [None] * total_bs
+        sequences_out = [None] * int(input_ids.shape[0])
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
-            # Build groups for batching depending on sampling params:
+            # Build groups for batching depending on max_params, seed, and temperature:
             group = defaultdict(list)
             for i, params in enumerate(all_sampling_params):
-                key = (params.max_tokens, params.temperature)
+                key = (params.max_tokens, params.temperature, params.seed)
                 group[key].append(i)
             
-            for (max_tokens, temperature), indices in group.items():
+            for (max_tokens, temperature, seed), indices in group.items():
                 # generation for groups of requests that share max_tokens and temperature
                 batch_input_ids = input_ids[jnp.array(indices)]
                 batch_attention_mask = attention_mask[jnp.array(indices)]
-                batch_adapter_indices = jnp.concatenate([all_adapter_indices[i] for i in indices], axis=0)
+                batch_adapter_indices = all_adapter_indices[jnp.array(indices)]
 
                 result = model.generate(
                     batch_input_ids,
                     batch_attention_mask,
                     max_new_tokens=max_tokens,
                     temperature=temperature,
-                    seed=all_seeds[indices[0]],
+                    seed=seed,
                     return_scores=True,
                     adapter_indices=batch_adapter_indices,
                 )
