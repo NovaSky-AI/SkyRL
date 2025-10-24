@@ -3,7 +3,6 @@ import random
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
-import multiprocessing as mp
 
 import numpy as np
 import torch
@@ -22,7 +21,8 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_optimizer,
     load_megatron_optimizer,
 )
-
+from megatron.core.dist_checkpointing.strategies import base as ckpt_base
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
@@ -35,8 +35,6 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 
 
 class MegatronStrategy(DistributedStrategy):
