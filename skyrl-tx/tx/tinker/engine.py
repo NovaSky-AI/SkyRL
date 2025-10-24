@@ -330,7 +330,7 @@ class TinkerEngine:
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
-        adapter_index = max((m.adapter_index for m in self.models.values()), default=-1) + 1
+        adapter_index = max((m.adapter_index for m in self.models.values()), default=0) + 1
 
         if adapter_index >= self.config.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
@@ -537,12 +537,12 @@ class TinkerEngine:
         all_adapter_indices = []
         request_batch_slices = []
 
+        adapter_indices_batch = self.load_sampler_weights(valid_requests)
+
         current_batch_idx = 0
-        for future, model_id, request_data in valid_requests:
+        for i, (future, model_id, request_data) in enumerate(valid_requests):
             # Get adapter index (need to cast in jnp.int32 because that is what generate accepts)
-            adapter_indices_single = (
-                jnp.array([[self.models[model_id].adapter_index]], dtype=jnp.int32) if model_id in self.models else None
-            )
+            adapter_indices_single = adapter_indices_batch[i:i+1]
 
             request_start = current_batch_idx
             for sample_idx in range(request_data.num_samples):
@@ -745,40 +745,41 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, model_id: str, request_data: types.SampleInput) -> jax.Array | None:
-        """Load sampler weights and determine adapter indices.
+    def load_sampler_weights(self, requests: list[tuple[FutureDB, str, types.SampleInput]]) -> jax.Array:
+        """"Load sampler weights for all requests and return full adapter indices array.
 
         Args:
-            model_id: The model ID
-            request_data: The sample input request data
+            requests: List of (future, model_id, request_data) tuples for the batch
 
         Returns:
-            The adapter_indices array for LoRA sampling, or None for base model sampling
+            The adapter_indices array for LoRA sampling [batch_size]
+            Uses adapter index 0 for base model sampling (no LoRA)
         """
-        # Determine if we're sampling from base model or LoRA
-        if request_data.base_model is None:
-            # LoRA sampling mode
-            assert request_data.checkpoint_id != "", "checkpoint_id must not be empty"
+        adapter_indices_list = []
 
-            if model_id not in self.models:
-                raise ValueError(f"Model {model_id} not loaded")
+        for _, model_id, request_data in requests:
+            if request_data.base_model is None:
+                assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
+        
+                if model_id not in self.models:
+                    raise ValueError(f"Model {model_id} not created")
+                
+                adapter_index = self.models[model_id].adapter_index
+                checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+                logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
 
-            adapter_index = self.models[model_id].adapter_index
-            checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
-            logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+                load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
 
-            # Load checkpoint using load_lora_checkpoint
-            load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+                logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+                adapter_indices_list.append(adapter_index)
+            else:
+                if request_data.base_model != self.config.base_model:
+                    raise ValueError(
+                        f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                    )
+                adapter_indices_list.append(0)
 
-            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
-            return jnp.array([[adapter_index]], dtype=jnp.int32)
-        else:
-            # Base model sampling mode
-            if request_data.base_model != self.config.base_model:
-                raise ValueError(
-                    f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
-                )
-            return None
+        return jnp.array(adapter_indices_list, dtype=jnp.int32)
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
