@@ -16,7 +16,7 @@ from flax.training import checkpoints
 
 
 import optax
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 from huggingface_hub import snapshot_download
 
 from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
@@ -91,6 +91,7 @@ class TinkerEngine:
 
         # Initialize the shared base model
         self.model_config = AutoConfig.from_pretrained(self.config.base_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.base_model)
 
         # Configure LoRA settings
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
@@ -701,6 +702,9 @@ class TinkerEngine:
                     adapter_indices=adapter_indices,
                 )
 
+                if sample_idx == 0 and prompt_logprobs_array is not None:
+                    prompt_logprobs = prompt_logprobs_array[0].tolist()
+
                 # Extract the generated tokens (excluding the prompt)
                 prompt_len = len(prompt_tokens)
                 generated_tokens = result.generated_ids[0, prompt_len:].tolist()
@@ -727,7 +731,8 @@ class TinkerEngine:
                 )
 
         # Compute prompt logprobs if needed (for now, return empty list)
-        prompt_logprobs = []
+        if not request_data.prompt_logprobs:
+            prompt_logprobs = []
 
         logger.info(f"Generated {len(sequences)} samples for model {model_id}")
 
