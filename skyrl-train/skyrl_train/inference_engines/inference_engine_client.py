@@ -244,7 +244,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
                     return partial_response
                 # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, but
-                # be careful when modifying this method.
+                # be careful when modifying this.
                 base_response = partial_response.copy()
 
             # 1.6. Accumulate content, logprobs, and token ids; update completion tokens sum
@@ -261,7 +261,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         final_response = base_response
 
         # 2.1. Combine usage: prompt_tokens from base, completion_tokens summed, total_tokens accordingly
-        # So these usage fields exclude the re-computation cost.
+        # These usage fields exclude the re-computation cost.
         base_usage = final_response["usage"]
         prompt_tokens = base_usage["prompt_tokens"]
         final_usage = base_usage.copy()
@@ -269,7 +269,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         final_usage["total_tokens"] = prompt_tokens + accum_completion_tokens
         final_response["usage"] = final_usage
 
-        # 2.2. Use accumulated content, logprobs, token_ids.
+        # 2.2. Set accumulated content, logprobs, token_ids.
         final_choice = final_response["choices"][0]
         final_choice["message"]["content"] = accum_content
         if final_choice.get("logprobs", None) is not None:
@@ -277,7 +277,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if final_choice.get("token_ids", None) is not None:
             final_choice["token_ids"] = accum_token_ids
 
-        # 2.3. Use last response's finish_reason and stop_reason.
+        # 2.3. Set last response's finish_reason and stop_reason.
         final_choice["finish_reason"] = finish_reason
         if stop_reason is not None:
             # If vLLM returns stop_reason separately, keep the last
