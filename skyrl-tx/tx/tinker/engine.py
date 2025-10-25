@@ -281,6 +281,34 @@ class TinkerEngine:
             accumulator = self.accumulated_grads[model_id]
             accumulator.add(grad_sum, count)
 
+    def _filter_valid_requests(
+        self,
+        requests: list[tuple[FutureDB, str, any]],
+        error_type: type,
+    ) -> tuple[dict[str, any], list[tuple[FutureDB, str, any]]]:
+        """Filter out requests with invalid model_ids and return error results for them.
+
+        Args:
+            requests: List of (future, model_id, request_data) tuples
+            error_type: Error type class to instantiate for invalid requests
+
+        Returns:
+            Tuple of (error_results, valid_requests)
+        """
+        results = {}
+        valid_requests = []
+
+        for future, model_id, request_data in requests:
+            if model_id and model_id not in self.models:
+                results[future.request_id] = error_type(
+                    error=f"Model {model_id} not loaded",
+                    status="failed",
+                )
+            else:
+                valid_requests.append((future, model_id, request_data))
+
+        return results, valid_requests
+
     def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
         """Find all forward_backward ops that come before any destructive update for their model.
 
@@ -390,18 +418,7 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id -> result_data or error info
         """
-        results = {}
-        valid_requests = []
-
-        # Filter out invalid requests and mark them as failed
-        for future, model_id, request_data in requests:
-            if model_id not in self.models:
-                results[future.request_id] = types.ForwardBackwardError(
-                    error=f"Model {model_id} not loaded",
-                    status="failed",
-                )
-            else:
-                valid_requests.append((future, model_id, request_data))
+        results, valid_requests = self._filter_valid_requests(requests, types.ForwardBackwardError)
 
         if not valid_requests:
             return results
@@ -527,18 +544,7 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id --> result_data or error info
         """
-        results = {}
-        valid_requests = []
-
-        # Filter out invalid requests and mark them as failed
-        for future, model_id, request_data in requests:
-            if model_id and model_id not in self.models:
-                results[future.request_id] = types.SampleError(
-                    error=f"Model {model_id} not loaded",
-                    status="failed",
-                )
-            else:
-                valid_requests.append((future, model_id, request_data))
+        results, valid_requests = self._filter_valid_requests(requests, types.SampleError)
 
         if not valid_requests:
             return results
@@ -765,9 +771,6 @@ class TinkerEngine:
         for _, model_id, request_data in requests:
             if request_data.base_model is None:
                 assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
-
-                if model_id not in self.models:
-                    raise ValueError(f"Model {model_id} not created")
 
                 adapter_index = self.models[model_id].adapter_index
                 # Loads model from RAM
