@@ -687,6 +687,15 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
             for sample_idx in range(request_data.num_samples):
+                # Convert stop parameter to token IDs if needed
+                stop_tokens = None
+                if request_data.sampling_params.stop is not None:
+                    # Expect stop tokens as token IDs (integers)
+                    if isinstance(request_data.sampling_params.stop, (list, tuple)):
+                        stop_tokens = list(request_data.sampling_params.stop)
+                    else:
+                        stop_tokens = [request_data.sampling_params.stop]
+
                 # Call the model's generate method
                 result = model.generate(
                     input_ids,
@@ -694,6 +703,9 @@ class TinkerEngine:
                     sampling_params=[request_data.sampling_params],
                     return_scores=True,
                     adapter_indices=adapter_indices,
+                    stop_tokens=stop_tokens,
+                    top_k=request_data.sampling_params.top_k,
+                    top_p=request_data.sampling_params.top_p,
                 )
 
                 # Extract the generated tokens (excluding the prompt)
