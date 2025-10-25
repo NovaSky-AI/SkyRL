@@ -19,6 +19,8 @@ import threading
 from loguru import logger
 import random
 
+ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
+
 
 class InferenceEngineClient(InferenceEngineInterface):
     """
@@ -43,6 +45,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
+        self.generation_paused_event = threading.Event()
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
 
@@ -58,6 +61,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
@@ -126,6 +131,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        await self._wait_for_generation_to_resume()
         session_id = request_payload["json"].pop("session_id", None)
         if session_id is None:
             # if session_id is not provided, we'll use a random engine
@@ -133,6 +139,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         else:
             assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
             engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
+
+        # TODO(Charlie): add retry logic here until the stop_reason is not "abort".
         return await self.engines[engine_idx].chat_completion(request_payload)
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -149,6 +157,8 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
         """
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("pause_generation is unsupported for /completions requests.")
         body = request_payload.get("json", {})
 
         # NOTE(Charlie): do not reuse headers here as the single request may become various new requests
@@ -285,6 +295,53 @@ class InferenceEngineClient(InferenceEngineInterface):
         raise NotImplementedError("InferenceEngineClient does not implement dp_size()")
 
     # ----------------------------
+    # Generation pause and resume
+    # ----------------------------
+    async def _wait_for_generation_to_resume(self) -> None:
+        """Waits for generation to be resumed, intended for in-flight weight updates and partial rollouts."""
+        while self.generation_paused_event.is_set():
+            await asyncio.sleep(0.5)
+
+    async def pause_generation(self) -> None:
+        """
+        Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
+
+        Currently only supported for `/chat/completions` and not `/completions` or `generate()`.
+
+        Both in-flight and incoming requests will be blocked until `resume_generation` is called.
+        1. Set the paused event to avoid new requests from being submitted while aborting requests.
+        2. Wait for a grace period to ensure all in-flight requests have entered the engine's
+           scheduler and hence can be aborted. Otherwise, there can be requests already submitted
+           but not yet entered the scheduler, which can miss the abort request.
+        3. Finally, we abort requests on all engines. This will cause the requests sent from
+           InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens.
+           The request to `InferenceEngineClient` will not yet return until requests are completed with
+           stop reason that is not `abort`.
+        """
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("Generation is already paused, cannot pause again.")
+        self.generation_paused_event.set()
+        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
+        await self._run_on_all_engines("abort_generation")
+
+    def resume_generation(self) -> None:
+        """
+        Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
+
+        Resume all in-flight requests with the previously-generated tokens, and unblock incoming requests
+        that were blocked by `pause_generation()`.
+        """
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Generation is not paused, cannot resume.")
+        self.generation_paused_event.clear()
+
+    async def abort_generation(self) -> None:
+        raise NotImplementedError(
+            "InferenceEngineClient does not implement abort_generation(), but calls "
+            "`abort_generation` on all engines in `pause_generation()`."
+        )
+
+    # ----------------------------
     # HTTP endpoint related methods
     # ----------------------------
 
@@ -317,11 +374,14 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     def __getstate__(self):
         """
-        Override to avoid pickling the server thread, which is not picklable.
-        Needed when passing InferenceEngineClient as an argument to async_run_ray_method().
+        Override to avoid pickling the server thread and the threading.Event object, which are not picklable.
+        Needed when passing InferenceEngineClient as an argument to async_run_ray_method(), mainly for
+        invoking `init_weight_sync_state()` and `broadcast_to_inference_engines()`, which do
+        not need these attributes.
         """
         state = self.__dict__.copy()
         state["_server_thread"] = None
+        state["generation_paused_event"] = None
         return state
 
     def _spin_up_http_endpoint(self):
