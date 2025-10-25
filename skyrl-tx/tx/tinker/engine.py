@@ -770,6 +770,7 @@ class TinkerEngine:
 
         for _, model_id, request_data in requests:
             if request_data.base_model is None:
+                # This code path is for sampling from a LoRA adapter
                 assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
 
                 adapter_index = self.models[model_id].adapter_index
@@ -786,11 +787,12 @@ class TinkerEngine:
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
                     adapter_indices_list.append(adapter_index)
             else:
-                # Base model sampling mode
+                # This code path is for sampling from the base model
                 if request_data.base_model != self.config.base_model:
                     raise ValueError(
                         f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
                     )
+                assert model_id == "" and request_data.checkpoint_id == ""
                 adapter_indices_list.append(0)
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)
