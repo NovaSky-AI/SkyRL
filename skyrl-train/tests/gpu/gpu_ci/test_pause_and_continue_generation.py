@@ -20,7 +20,7 @@ import threading
 import requests
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-TP_SIZE = 1
+TP_SIZE = 2
 SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
 
@@ -28,15 +28,18 @@ SERVER_HOST = "127.0.0.1"
 @pytest.mark.vllm
 def test_continue_generation_vllm_engine(ray_init_fixture):
     """
-    We send 4 requests via `/chat/completions` concurrently with vLLM `max_num_seqs=2` so that
-    2 run and 2 wait. We ignore eos and let model geneate 2048 tokens.
+    We send 6 requests via `/chat/completions` to two engines concurrently with vLLM `max_num_seqs=2`
+    so that in each engine, 2 run and 1 wait. We ignore eos and let model geneate 2048 tokens.
     We pause and then resume generation twice in the middle. We expect each response to
     finish with reason `length` and have exactly `max_tokens` completion tokens.
     """
     server_thread = None
+    num_engines = 2
+    num_requests = 6
+    max_num_seqs = 2
     try:
         # 1. Build engine and start server
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+        cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -62,8 +65,8 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
             model=MODEL,
             num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=1,
-            # We test aborting 2 running requests and 2 waiting requests
-            max_num_seqs=2,
+            # We test aborting 2 running requests and 1 waiting requests
+            max_num_seqs=max_num_seqs,
         )
 
         def run_server():
@@ -77,7 +80,7 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
         # 2. Prepare input
         messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
 
-        # 3. Fire 4 concurrent HTTP requests, then pause/resume mid-flight
+        # 3. Fire 6 concurrent HTTP requests, then pause/resume mid-flight
         results = {}
 
         def send_request(i: int):
@@ -94,11 +97,11 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
                 "response": resp_json,
             }
 
-        threads = [threading.Thread(target=send_request, args=(i,), daemon=True) for i in range(4)]
+        threads = [threading.Thread(target=send_request, args=(i,), daemon=True) for i in range(num_requests)]
         for t in threads:
             t.start()
 
-        # Let the requests start and enqueue; with max_num_seqs=2, 2 run and 2 wait
+        # Let the requests start and enqueue; with max_num_seqs=2, 2 run and 1 wait
         asyncio.run(asyncio.sleep(1))
 
         # Pause then resume while requests are in-flight
@@ -113,11 +116,11 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
         for t in threads:
             t.join(timeout=180)
 
-        # Ensure we collected all 4 results
-        assert len(results) == 4, f"Expected 4 responses, got {len(results)}"
+        # Ensure we collected all num_requests results
+        assert len(results) == num_requests, f"Expected {num_requests} responses, got {len(results)}"
 
         # 4. Validate each output: finish_reason is length and completion_tokens == max_tokens
-        for i in range(4):
+        for i in range(num_requests):
             assert i in results, f"Missing result for index {i}"
             cur = results[i]
             assert cur.get("status_code") == 200, f"Request {i} failed: {cur.get('status_code')} {cur.get('text')}"
