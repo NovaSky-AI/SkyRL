@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.training import checkpoints
 
+
 import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
@@ -146,6 +147,17 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
+        # Wrap the model forward call to use nnx.remat for gradient checkpointing
+        def _model_forward(
+            model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+        ) -> jax.Array:
+            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+            return output["logits"]
+
+        if self.config.gradient_checkpointing:
+            # policy=None corresponds full activation recomputation
+            _model_forward = nnx.remat(_model_forward, policy=None)
+
         def loss_for_lora(
             lora_params: nnx.State,
             non_lora_params: nnx.State,
@@ -159,9 +171,8 @@ class TinkerEngine:
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            logits = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)[
-                "logits"
-            ]  # [B, T, V]
+            logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
 
@@ -792,10 +803,66 @@ class TinkerEngine:
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
                     adapter_indices_list.append(adapter_index)
 
-            else:
-                if request_data.base_model != self.config.base_model:
-                    raise ValueError(
-                        f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+            return jnp.array([[adapter_index]], dtype=jnp.int32)
+        else:
+            # Base model sampling mode
+            if request_data.base_model != self.config.base_model:
+                raise ValueError(
+                    f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                )
+            return None
+
+    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
+        """Generate text samples from the base model or LoRA adapter."""
+        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
+
+        # Load sampler weights and determine adapter indices
+        adapter_indices = self.load_sampler_weights(model_id, request_data)
+
+        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+
+        # Prepare input for generation
+        input_ids = jnp.array([prompt_tokens], dtype=jnp.int32)
+        attention_mask = jnp.ones_like(input_ids, dtype=jnp.int32)
+
+        # Generate samples
+        sequences = []
+        with jax.set_mesh(self.mesh):
+            # Merge the model for inference
+            model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
+
+            for sample_idx in range(request_data.num_samples):
+                # Call the model's generate method
+                result = model.generate(
+                    input_ids,
+                    attention_mask,
+                    sampling_params=[request_data.sampling_params],
+                    return_scores=True,
+                    adapter_indices=adapter_indices,
+                )
+
+                # Extract the generated tokens (excluding the prompt)
+                generated_tokens = result.generated_ids[0]
+
+                # Compute logprobs from the scores
+                logprobs = []
+                for score in result.scores:
+                    log_probs = jax.nn.log_softmax(score[0], axis=-1)
+                    # Get the logprob of the selected token
+                    # The token at position i in generated_tokens corresponds to scores[i]
+                    if len(logprobs) < len(generated_tokens):
+                        token_idx = generated_tokens[len(logprobs)]
+                        logprobs.append(float(log_probs[token_idx]))
+
+                # Get stop reason for this sequence (batch size is 1, so index 0)
+                stop_reason = result.stop_reasons[0]
+
+                sequences.append(
+                    types.GeneratedSequence(
+                        stop_reason=stop_reason,
+                        tokens=generated_tokens,
+                        logprobs=logprobs,
                     )
                 adapter_indices_list.append(0)
 

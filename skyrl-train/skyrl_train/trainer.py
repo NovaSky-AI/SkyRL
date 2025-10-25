@@ -334,6 +334,7 @@ class RayPPOTrainer:
             num_rollout_gpus = (
                 cfg.generator.num_inference_engines
                 * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
                 * cfg.generator.inference_engine_data_parallel_size
             )
             assert (
@@ -657,17 +658,17 @@ class RayPPOTrainer:
             data.metadata["metrics"] = {}
         data.metadata["metrics"].update(
             {
-                "avg_rewards": avg_rewards,
+                "avg_final_rewards": avg_rewards,
                 "avg_response_length": avg_response_length,
                 "avg_advantages": avg_advantages,
                 "avg_advantages_abs": avg_advantages_abs,
             }
         )
 
-        logger.info(f"avg_raw_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
+        logger.info(f"avg_final_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
         self.all_metrics.update(
             {
-                "loss/avg_raw_rewards": avg_rewards,
+                "loss/avg_final_rewards": avg_rewards,
                 "loss/avg_raw_advantages": avg_advantages,
                 "loss/avg_raw_advantages_abs": avg_advantages_abs,
             }

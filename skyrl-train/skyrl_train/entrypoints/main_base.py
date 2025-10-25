@@ -40,6 +40,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     engine_kwargs = {
         "num_inference_engines": cfg.generator.num_inference_engines,
         "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
+        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
         "model_dtype": cfg.generator.model_dtype,
         "pretrain": cfg.trainer.policy.model.path,
         "seed": cfg.trainer.seed,
@@ -77,6 +78,7 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         engine_backend=cfg.generator.backend,
         tokenizer=tokenizer,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
         data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
     )
@@ -162,6 +164,7 @@ class BasePPOExp:
                 [{"GPU": 1, "CPU": 1}]
                 * self.cfg.generator.num_inference_engines
                 * self.cfg.generator.inference_engine_tensor_parallel_size
+                * self.cfg.generator.inference_engine_pipeline_parallel_size
                 * self.cfg.generator.inference_engine_data_parallel_size,
                 strategy="PACK",
             )
