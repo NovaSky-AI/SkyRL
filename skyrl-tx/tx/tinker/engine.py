@@ -2,7 +2,7 @@
 
 import argparse
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -582,44 +582,29 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
-            # Build groups for batching depending on max_params, seed, and temperature:
-            group = defaultdict(list)
-            for i, params in enumerate(all_sampling_params):
-                key = (params.max_tokens, params.temperature, params.seed)
-                group[key].append(i)
+            result = model.generate(
+                input_ids,
+                attention_mask,
+                sampling_params=all_sampling_params,
+                return_scores=True,
+                adapter_indices=all_adapter_indices,
+            )
 
-            for (max_tokens, temperature, seed), indices in group.items():
-                # generation for groups of requests that share max_tokens and temperature
-                batch_input_ids = input_ids[jnp.array(indices)]
-                batch_attention_mask = attention_mask[jnp.array(indices)]
-                batch_adapter_indices = all_adapter_indices[jnp.array(indices)]
+            for idx in range(len(all_sampling_params)):
+                generated_tokens = result.generated_ids[idx]  # Already excludes prompt
 
-                # Create sampling_params list for this batch
-                batch_sampling_params = [all_sampling_params[idx] for idx in indices]
+                logprobs = []
+                for score in result.scores:
+                    log_probs = jax.nn.log_softmax(score[idx], axis=-1)
+                    if len(logprobs) < len(generated_tokens):
+                        token_idx = generated_tokens[len(logprobs)]
+                        logprobs.append(float(log_probs[token_idx]))
 
-                result = model.generate(
-                    batch_input_ids,
-                    batch_attention_mask,
-                    sampling_params=batch_sampling_params,
-                    return_scores=True,
-                    adapter_indices=batch_adapter_indices,
+                sequences_out[idx] = types.GeneratedSequence(
+                    stop_reason=result.stop_reasons[idx],
+                    tokens=generated_tokens,
+                    logprobs=logprobs,
                 )
-
-                for local_idx, global_idx in enumerate(indices):
-                    generated_tokens = result.generated_ids[local_idx]  # Already excludes prompt
-
-                    logprobs = []
-                    for score in result.scores:
-                        log_probs = jax.nn.log_softmax(score[local_idx], axis=-1)
-                        if len(logprobs) < len(generated_tokens):
-                            token_idx = generated_tokens[len(logprobs)]
-                            logprobs.append(float(log_probs[token_idx]))
-
-                    sequences_out[global_idx] = types.GeneratedSequence(
-                        stop_reason=result.stop_reasons[local_idx],
-                        tokens=generated_tokens,
-                        logprobs=logprobs,
-                    )
 
         for request_id, _, start_idx, end_idx in request_batch_slices:
             sequences = []
