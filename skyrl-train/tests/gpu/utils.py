@@ -383,6 +383,7 @@ def init_inference_engines(
     num_inference_engines=1,
     sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
     enable_lora=False,
+    max_num_seqs=1024,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -410,7 +411,7 @@ def init_inference_engines(
         inference_engine_enable_sleep=sleep,
         async_engine=async_engine,
         max_num_batched_tokens=8192,
-        max_num_seqs=1024,
+        max_num_seqs=max_num_seqs,
         tokenizer=tokenizer,
         backend=backend,
         sleep_level=sleep_level,

@@ -56,13 +56,13 @@ def _get_test_sampling_params(backend: str, cfg: DictConfig, endpoint: str) -> D
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int) -> DictConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> DictConfig:
     """Get base config with test-specific overrides."""
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
 
         # Override specific parameters
-        cfg.trainer.policy.model.path = MODEL
+        cfg.trainer.policy.model.path = model
         cfg.trainer.critic.model.path = ""
         cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
         cfg.generator.async_engine = True
@@ -187,7 +187,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
     try:
         # 1. Build engine
-        cfg = get_test_actor_config(num_inference_engines=2)
+        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -260,7 +260,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     endpoints = ["chat_completions", "completions"]
     try:
         # 1. Set up engine
-        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -446,7 +446,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
-        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.generator.backend = backend
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -533,7 +533,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 @pytest.mark.vllm
 def test_structured_generation(ray_init_fixture):
     try:
-        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -602,7 +602,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
     Test error handling for various invalid requests.
     """
     try:
-        cfg = get_test_actor_config(num_inference_engines=2)
+        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"

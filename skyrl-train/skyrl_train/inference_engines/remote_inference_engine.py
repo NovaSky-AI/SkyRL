@@ -246,6 +246,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             resp = await session.post(f"{self.url}/destroy_weights_update_group")
             return await resp.json()
 
+    async def abort_generation(self) -> None:
+        raise NotImplementedError("Abort generation is not supported for remote inference engines.")
+
 
 def create_remote_inference_engines(
     urls: List[str],
