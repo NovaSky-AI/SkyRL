@@ -62,10 +62,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
             raise ValueError("`StepWiseGenerator` doesn't support `use_conversation_multi_turn=False`")
 
     def _validate_cfg(self, generator_cfg: DictConfig):
-        if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
-            raise ValueError(
-                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
-            )
+        pass
 
     async def agent_loop(
         self,
