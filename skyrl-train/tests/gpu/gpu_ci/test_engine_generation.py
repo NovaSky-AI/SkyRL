@@ -235,7 +235,7 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, dp
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
 
-    llm_client = init_ray_inference_engines(backend, tp_size, dp_size, cfg)
+    llm_client = init_ray_inference_engines(backend, tp_size=tp_size, pp_size=1, dp_size=dp_size, config=cfg)
     sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
     # Test batch generation with tokens
