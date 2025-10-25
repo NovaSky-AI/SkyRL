@@ -27,7 +27,7 @@ def test_qwen3_generate():
         hf_output = hf_model.generate(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            max_new_tokens=10,
+            max_new_tokens=20,
             do_sample=False,
             return_dict_in_generate=True,
             output_scores=True,
@@ -43,7 +43,10 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        sampling_params = [types.SamplingParams(max_tokens=10, temperature=0.0, seed=42) for _ in range(len(inputs))]
+        sampling_params = [
+            types.SamplingParams(max_tokens=10, temperature=0.0, seed=42),
+            types.SamplingParams(max_tokens=20, temperature=0.0, seed=42),
+        ]
         result = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
@@ -51,15 +54,15 @@ def test_qwen3_generate():
             return_scores=True,
         )
 
-        # Extract only the newly generated tokens from HuggingFace output (excluding prompt)
-        prompt_length = batch.input_ids.shape[1]
-        hf_generated = hf_output.sequences[:, prompt_length:].numpy()
-
         # Compare generated tokens
-        for i, (our_tokens, hf_tokens) in enumerate(zip(result.generated_ids, hf_generated)):
-            assert our_tokens == hf_tokens.tolist(), (
+        for i, (our_tokens, hf_tokens, sampling_param) in enumerate(
+            zip(result.generated_ids, hf_output.sequences, sampling_params)
+        ):
+            prompt_length = batch.input_ids.shape[1]
+            hf_tokens_truncated = hf_tokens[prompt_length : prompt_length + sampling_param.max_tokens].tolist()
+            assert our_tokens == hf_tokens_truncated, (
                 f"Generated tokens for request {i} don't match HuggingFace. "
-                f"Ours: {our_tokens}, HF: {hf_tokens.tolist()}"
+                f"Ours: {our_tokens}, HF: {hf_tokens_truncated}"
             )
 
         # Compare scores (logits) for each generated token
