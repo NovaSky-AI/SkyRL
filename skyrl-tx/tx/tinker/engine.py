@@ -687,9 +687,6 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
             for sample_idx in range(request_data.num_samples):
-                # Generate with different seeds for each sample
-                seed = request_data.sampling_params.seed + sample_idx
-
                 # Convert stop parameter to token IDs if needed
                 stop_tokens = None
                 if request_data.sampling_params.stop is not None:
@@ -703,9 +700,7 @@ class TinkerEngine:
                 result = model.generate(
                     input_ids,
                     attention_mask,
-                    max_new_tokens=request_data.sampling_params.max_tokens,
-                    temperature=request_data.sampling_params.temperature,
-                    seed=seed,
+                    sampling_params=[request_data.sampling_params],
                     return_scores=True,
                     adapter_indices=adapter_indices,
                     stop_tokens=stop_tokens,
@@ -714,8 +709,7 @@ class TinkerEngine:
                 )
 
                 # Extract the generated tokens (excluding the prompt)
-                prompt_len = len(prompt_tokens)
-                generated_tokens = result.generated_ids[0, prompt_len:].tolist()
+                generated_tokens = result.generated_ids[0]
 
                 # Compute logprobs from the scores
                 logprobs = []

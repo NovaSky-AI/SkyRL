@@ -309,6 +309,7 @@ def validate_cfg(cfg: DictConfig):
         num_rollout_gpus = (
             cfg.generator.num_inference_engines
             * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
             * cfg.generator.inference_engine_data_parallel_size
         )
         assert (

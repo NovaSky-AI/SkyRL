@@ -198,6 +198,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
     def tp_size(self):
         return self._tp_size
 
+    def pp_size(self):
+        # Pipeline parallelism not supported for SGLang
+        return 1
+
     def dp_size(self):
         # TODO(tgriggs): EP/DP not yet supported for SGLang
         return 1

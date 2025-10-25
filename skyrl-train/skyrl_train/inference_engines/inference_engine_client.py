@@ -263,7 +263,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     override_existing=override_existing,
                 )
             )
-            rank_offset_count += engine.tp_size()
+            rank_offset_count += engine.tp_size() * engine.pp_size()
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -277,6 +277,9 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     def tp_size(self) -> int:
         raise NotImplementedError("InferenceEngineClient does not implement tp_size()")
+
+    def pp_size(self) -> int:
+        raise NotImplementedError("InferenceEngineClient does not implement pp_size()")
 
     def dp_size(self) -> int:
         raise NotImplementedError("InferenceEngineClient does not implement dp_size()")
