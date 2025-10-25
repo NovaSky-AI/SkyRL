@@ -44,12 +44,12 @@ class GenerateResult:
     """Result from autoregressive text generation.
 
     Attributes:
-        generated_ids: Token IDs of the generated text including the prompt.
+        generated_ids: List of token ID lists, one for each request (excluding the prompt).
         stop_reasons: Reason for stopping generation for each sequence ('stop' or 'length').
         scores: Logits for each generated token (only if return_scores=True).
     """
 
-    generated_ids: jax.Array
+    generated_ids: list[list[int]]
     stop_reasons: list[str]
     scores: list[jax.Array] | None = None
 
@@ -150,8 +150,13 @@ class GeneratorMixin:
         next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
+        # Extract only the newly generated tokens (excluding prompt) per request
+        ids = []
+        for i, sampling_param in enumerate(sampling_params):
+            ids.append(generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist())
+
         return GenerateResult(
-            generated_ids=generated_ids[:, : prompt_length + max_new_tokens],
+            generated_ids=ids,
             stop_reasons=["length"] * batch_size,
             scores=list(logits_seq) + [logits] if return_scores else None,
         )

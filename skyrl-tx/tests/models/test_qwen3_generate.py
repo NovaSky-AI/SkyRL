@@ -51,9 +51,16 @@ def test_qwen3_generate():
             return_scores=True,
         )
 
-        assert jnp.array_equal(
-            result.generated_ids, hf_output.sequences.numpy()
-        ), "Generated tokens don't match HuggingFace"
+        # Extract only the newly generated tokens from HuggingFace output (excluding prompt)
+        prompt_length = batch.input_ids.shape[1]
+        hf_generated = hf_output.sequences[:, prompt_length:].numpy()
+
+        # Compare generated tokens
+        for i, (our_tokens, hf_tokens) in enumerate(zip(result.generated_ids, hf_generated)):
+            assert our_tokens == hf_tokens.tolist(), (
+                f"Generated tokens for request {i} don't match HuggingFace. "
+                f"Ours: {our_tokens}, HF: {hf_tokens.tolist()}"
+            )
 
         # Compare scores (logits) for each generated token
         for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, result.scores)):
@@ -92,13 +99,12 @@ def test_qwen3_generate_speed():
         sampling_params = [types.SamplingParams(max_tokens=50, temperature=0.0, seed=42) for i in range(len(inputs))]
 
         # Warmup
-        warmup = model.generate(
+        model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
             sampling_params=sampling_params,
             return_scores=True,
         )
-        warmup.generated_ids.block_until_ready()
 
         runs = 1
         times = []
@@ -111,7 +117,6 @@ def test_qwen3_generate_speed():
                 sampling_params=sampling_params,
                 return_scores=True,
             )
-            result.generated_ids.block_until_ready()
             elapsed = time.perf_counter() - start
             times.append(elapsed)
 
@@ -119,8 +124,7 @@ def test_qwen3_generate_speed():
         mean_time = times.mean()
         std_time = times.std()
 
-        batch_size, _ = result.generated_ids.shape
-        total_new_tokens = batch_size * 50
+        total_new_tokens = len(result.generated_ids) * 50
 
     print(f"Generation stats (50 tokens, {runs} runs):")
     print(f"Mean time: {mean_time*1000:.2f} ± {std_time*1000:.2f} ms")
