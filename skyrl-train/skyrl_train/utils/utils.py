@@ -287,11 +287,6 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-
-        if not cfg.generator.batched:
-            raise ValueError(
-                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
-            )
         assert cfg.trainer.algorithm.policy_loss_type in [
             "regular",
             "dual_clip",
@@ -383,10 +378,6 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.logprobs > 0:
             raise ValueError(
                 f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
-            )
-        if not cfg.generator.batched:
-            raise NotImplementedError(
-                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
             )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
