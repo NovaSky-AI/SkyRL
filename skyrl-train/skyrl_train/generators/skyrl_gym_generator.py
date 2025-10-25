@@ -74,13 +74,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             self.env_executor = None
 
-        if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
-
-        if len(self.generator_cfg.chat_template_kwargs) and self.generator_cfg.batched:
-            raise ValueError(
-                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
-            )
+        self._validate_cfg(generator_cfg)
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
         # correctly format and tokenize observations into `observation_ids`.
@@ -104,6 +98,15 @@ class SkyRLGymGenerator(GeneratorInterface):
                 - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
+
+    def _validate_cfg(self, generator_cfg: DictConfig):
+        if getattr(generator_cfg.sampling_params, "logprobs", None) is not None and not generator_cfg.batched:
+            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
+
+        if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
+            raise ValueError(
+                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
+            )
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
