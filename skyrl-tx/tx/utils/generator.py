@@ -8,6 +8,7 @@ from jax import lax
 import jax.numpy as jnp
 
 import tx.utils.models
+from tx.tinker import types
 
 
 @jax.tree_util.register_dataclass
@@ -43,21 +44,25 @@ class GenerateResult:
     """Result from autoregressive text generation.
 
     Attributes:
-        generated_ids: Token IDs of the generated text including the prompt.
+        generated_ids: List of token ID lists, one for each request (excluding the prompt).
         stop_reasons: Reason for stopping generation for each sequence ('stop' or 'length').
         scores: Logits for each generated token (only if return_scores=True).
     """
 
-    generated_ids: jax.Array
+    generated_ids: list[list[int]]
     stop_reasons: list[str]
     scores: list[jax.Array] | None = None
 
 
-def sample_token(logits: jax.Array, *, temperature: float, key: jax.Array) -> jax.Array:
-    """Sample next token from logits using temperature."""
-    if temperature == 0.0:
-        return jnp.argmax(logits, axis=-1)[:, None]
-    return jax.random.categorical(key, logits / temperature, axis=-1)[:, None]
+def sample_token(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
+    """Sample next token from logits using temperatures."""
+    temperatures = temperatures[:, None]
+    zero_temp_mask = temperatures == 0.0
+    scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
+    sampled = jax.random.categorical(key, scaled_logits, axis=-1)[:, None]
+    greedy = jnp.argmax(logits, axis=-1)[:, None]
+    next_token = jnp.where(zero_temp_mask, greedy, sampled)
+    return next_token
 
 
 def compute_positions(attention_mask: jax.Array) -> jax.Array:
@@ -78,9 +83,7 @@ class GeneratorMixin:
         input_ids: jax.Array,
         attention_mask: jax.Array,
         *,
-        max_new_tokens: int,
-        temperature: float,
-        seed: int,
+        sampling_params: list[types.SamplingParams],
         return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
     ) -> GenerateResult:
@@ -93,7 +96,14 @@ class GeneratorMixin:
             GenerateResult containing generated_ids, stop_reasons, and optionally scores.
         """
         batch_size, prompt_length = input_ids.shape
+        assert len(sampling_params) == batch_size
+        max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
+        temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+        seeds = [sampling_param.seed for sampling_param in sampling_params]
+        # TODO: Implement per-request seeds
+        assert all(seed == seeds[0] for seed in seeds), "All seeds must be the same"
+        rng = jax.random.PRNGKey(seeds[0])
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
@@ -103,7 +113,7 @@ class GeneratorMixin:
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
             rng, sample_key = jax.random.split(rng)
-            next_token = sample_token(logits, temperature=temperature, key=sample_key)
+            next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
@@ -130,7 +140,6 @@ class GeneratorMixin:
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
 
-        rng = jax.random.PRNGKey(seed)
         initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :])
         (kv_cache, rng, generated_ids, attention_mask, last_positions, logits), logits_seq = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens - 1
@@ -138,11 +147,14 @@ class GeneratorMixin:
 
         # Sample final token
         rng, sample_key = jax.random.split(rng)
-        next_token = sample_token(logits, temperature=temperature, key=sample_key)
+        next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
         return GenerateResult(
-            generated_ids=generated_ids[:, : prompt_length + max_new_tokens],
+            generated_ids=[
+                generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
+                for i, sampling_param in enumerate(sampling_params)
+            ],
             stop_reasons=["length"] * batch_size,
             scores=list(logits_seq) + [logits] if return_scores else None,
         )
