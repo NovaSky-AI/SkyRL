@@ -544,7 +544,6 @@ class TinkerEngine:
             return results
 
         all_prompts = []
-        all_seeds = []
         all_sampling_params = []
         all_adapter_indices = []
         request_batch_slices = []
@@ -562,7 +561,6 @@ class TinkerEngine:
             for _ in range(request_data.num_samples):
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
-                all_seeds.append(request_data.sampling_params.seed)
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_idx)
                 current_batch_idx += 1
@@ -576,10 +574,8 @@ class TinkerEngine:
         attention_mask = jnp.array(
             [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32
         )
-        prompt_lens = [len(seq) for seq in all_prompts]
-
         all_adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
-        
+
         # Collect per-sample outputs
         sequences_out = [None] * int(input_ids.shape[0])
 
@@ -591,7 +587,7 @@ class TinkerEngine:
             for i, params in enumerate(all_sampling_params):
                 key = (params.max_tokens, params.temperature, params.seed)
                 group[key].append(i)
-            
+
             for (max_tokens, temperature, seed), indices in group.items():
                 # generation for groups of requests that share max_tokens and temperature
                 batch_input_ids = input_ids[jnp.array(indices)]
@@ -610,8 +606,6 @@ class TinkerEngine:
                 )
 
                 for local_idx, global_idx in enumerate(indices):
-
-                    prompt_len = prompt_lens[global_idx]
                     generated_tokens = result.generated_ids[local_idx]  # Already excludes prompt
 
                     logprobs = []
@@ -772,7 +766,7 @@ class TinkerEngine:
         )
 
     def load_sampler_weights(self, requests: list[tuple[FutureDB, str, types.SampleInput]]) -> jax.Array:
-        """"Load sampler weights for all requests and return full adapter indices array.
+        """Load sampler weights for all requests and return full adapter indices array.
 
         Args:
             requests: List of (future, model_id, request_data) tuples for the batch
@@ -786,7 +780,7 @@ class TinkerEngine:
         for _, model_id, request_data in requests:
             if request_data.base_model is None:
                 assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
-        
+
                 if model_id not in self.models:
                     raise ValueError(f"Model {model_id} not created")
 
