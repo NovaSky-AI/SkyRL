@@ -1,7 +1,7 @@
 sudo apt-get update -y && sudo apt-get install -y wget kmod libxml2 build-essential libnuma-dev
 
 
-echo "export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook" >> /home/user/.bashrc
+echo "export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook" >> /root/.bashrc
 
 sudo apt-get update \
   && sudo apt-get install -y openssh-server iputils-ping net-tools iproute2 traceroute netcat \
