@@ -150,13 +150,11 @@ class GeneratorMixin:
         next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
-        # Extract only the newly generated tokens (excluding prompt) per request
-        ids = []
-        for i, sampling_param in enumerate(sampling_params):
-            ids.append(generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist())
-
         return GenerateResult(
-            generated_ids=ids,
+            generated_ids=[
+                generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
+                for i, sampling_param in enumerate(sampling_params)
+            ],
             stop_reasons=["length"] * batch_size,
             scores=list(logits_seq) + [logits] if return_scores else None,
         )
