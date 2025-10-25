@@ -609,6 +609,8 @@ def _build_final_response(
     stop_reason: Optional[str],
 ) -> Dict[str, Any]:
     """Construct the final aggregated response from the base and accumulators."""
+    # NOTE(Charlie): not doing deepcopy for performance. Be careful when re-using this method
+    # as it mutates base_response.
     final_response = base_response
 
     # Combine usage: prompt_tokens from base, completion_tokens summed, total_tokens accordingly
