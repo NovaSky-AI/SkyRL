@@ -598,12 +598,13 @@ class TinkerEngine:
                 batch_attention_mask = attention_mask[jnp.array(indices)]
                 batch_adapter_indices = all_adapter_indices[jnp.array(indices)]
 
+                # Create sampling_params list for this batch
+                batch_sampling_params = [all_sampling_params[idx] for idx in indices]
+
                 result = model.generate(
                     batch_input_ids,
                     batch_attention_mask,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                    seed=seed,
+                    sampling_params=batch_sampling_params,
                     return_scores=True,
                     adapter_indices=batch_adapter_indices,
                 )
@@ -611,7 +612,7 @@ class TinkerEngine:
                 for local_idx, global_idx in enumerate(indices):
 
                     prompt_len = prompt_lens[global_idx]
-                    generated_tokens = result.generated_ids[local_idx, prompt_len:].tolist()
+                    generated_tokens = result.generated_ids[local_idx]  # Already excludes prompt
 
                     logprobs = []
                     for score in result.scores:
@@ -802,67 +803,11 @@ class TinkerEngine:
                     self.models[model_id].loaded_checkpoint_id = request_data.checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
                     adapter_indices_list.append(adapter_index)
-
-            logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
-            return jnp.array([[adapter_index]], dtype=jnp.int32)
-        else:
-            # Base model sampling mode
-            if request_data.base_model != self.config.base_model:
-                raise ValueError(
-                    f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
-                )
-            return None
-
-    def process_sample(self, model_id: str, request_data: types.SampleInput) -> types.SampleOutput:
-        """Generate text samples from the base model or LoRA adapter."""
-        logger.info(f"Sampling from model_id={model_id}, checkpoint_id={request_data.checkpoint_id}")
-
-        # Load sampler weights and determine adapter indices
-        adapter_indices = self.load_sampler_weights(model_id, request_data)
-
-        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
-
-        # Prepare input for generation
-        input_ids = jnp.array([prompt_tokens], dtype=jnp.int32)
-        attention_mask = jnp.ones_like(input_ids, dtype=jnp.int32)
-
-        # Generate samples
-        sequences = []
-        with jax.set_mesh(self.mesh):
-            # Merge the model for inference
-            model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
-
-            for sample_idx in range(request_data.num_samples):
-                # Call the model's generate method
-                result = model.generate(
-                    input_ids,
-                    attention_mask,
-                    sampling_params=[request_data.sampling_params],
-                    return_scores=True,
-                    adapter_indices=adapter_indices,
-                )
-
-                # Extract the generated tokens (excluding the prompt)
-                generated_tokens = result.generated_ids[0]
-
-                # Compute logprobs from the scores
-                logprobs = []
-                for score in result.scores:
-                    log_probs = jax.nn.log_softmax(score[0], axis=-1)
-                    # Get the logprob of the selected token
-                    # The token at position i in generated_tokens corresponds to scores[i]
-                    if len(logprobs) < len(generated_tokens):
-                        token_idx = generated_tokens[len(logprobs)]
-                        logprobs.append(float(log_probs[token_idx]))
-
-                # Get stop reason for this sequence (batch size is 1, so index 0)
-                stop_reason = result.stop_reasons[0]
-
-                sequences.append(
-                    types.GeneratedSequence(
-                        stop_reason=stop_reason,
-                        tokens=generated_tokens,
-                        logprobs=logprobs,
+            else:
+                # Base model sampling mode
+                if request_data.base_model != self.config.base_model:
+                    raise ValueError(
+                        f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
                     )
                 adapter_indices_list.append(0)
 
