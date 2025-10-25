@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import jax
 from jax import lax
 import jax.numpy as jnp
-from flax import nnx
 
 import tx.utils.models
 from tx.tinker import types
