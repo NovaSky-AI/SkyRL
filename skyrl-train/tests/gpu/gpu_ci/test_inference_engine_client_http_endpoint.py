@@ -664,7 +664,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
         print(f"Error data: {error_data}")
-        assert "messages" in error_data["error"]["message"]
+        assert error_data["error"]["message"] == "The field `messages` is required in your `/chat/completions` request."
 
         # Test 4: Invalid request - malformed JSON, raised by SkyRL
         response = requests.post(
@@ -675,12 +675,12 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         print(f"Error data: {error_data}")
         assert "Invalid JSON error" in error_data["error"]["message"]  # JSON decode error
 
-        # Test 5: Invalid request - empty messages array, raised by vLLM
+        # Test 5: Invalid request - empty messages array, raised by SkyRL
         response = requests.post(f"{base_url}/v1/chat/completions", json={"model": MODEL, "messages": []})
         assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
         print(f"Error data: {error_data}")
-        assert "list index out of range list index out of range" in error_data["error"]["message"]
+        assert error_data["error"]["message"] == "The field `messages` in `/chat/completions` cannot be an empty list."
 
         # Test 6: Wrong model name, raised by SkyRL
         response = requests.post(
