@@ -36,6 +36,7 @@ from tx.utils.models import (
 )
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
+from tx.models.outputs import Qwen3CausalLMOutput
 
 
 @dataclass
@@ -150,7 +151,7 @@ class TinkerEngine:
             model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
         ) -> jax.Array:
             output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            return output["logits"]
+            return output.logits if isinstance(output, Qwen3CausalLMOutput) else output["logits"]
 
         if self.config.gradient_checkpointing:
             # policy=None corresponds full activation recomputation

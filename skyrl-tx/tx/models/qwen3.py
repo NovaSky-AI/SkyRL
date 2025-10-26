@@ -6,13 +6,8 @@ from transformers import Qwen3Config
 
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import Param, prepare_routing
-from tx.utils.generator import (
-    GeneratorMixin,
-    KVCache,
-    Qwen3CausalLMOutput,
-    Qwen3ModelOutput,
-    compute_positions,
-)
+from tx.models.outputs import Qwen3CausalLMOutput, Qwen3ModelOutput
+from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
 class RMSNorm(nnx.Module):
