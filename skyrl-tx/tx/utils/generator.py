@@ -46,12 +46,12 @@ class GenerateResult:
     Attributes:
         generated_ids: List of token ID lists, one for each request (excluding the prompt).
         stop_reasons: Reason for stopping generation for each sequence ('stop' or 'length').
-        scores: Logits for each generated token (only if return_scores=True).
+        logprobs: Log probabilities for each sampled token.
     """
 
     generated_ids: list[list[int]]
     stop_reasons: list[str]
-    scores: list[jax.Array] | None = None
+    logprobs: list[list[float]]
 
 
 def sample_token(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
@@ -84,7 +84,6 @@ class GeneratorMixin:
         attention_mask: jax.Array,
         *,
         sampling_params: list[types.SamplingParams],
-        return_scores: bool = False,
         adapter_indices: jax.Array | None = None,
     ) -> GenerateResult:
         """Generate text autoregressively with KV caching.
@@ -111,9 +110,14 @@ class GeneratorMixin:
         kv_cache = outputs["kv_cache"].pad_to_length(max_length)
 
         def scan_fn(carry, _):
-            kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
+            kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs = carry
             rng, sample_key = jax.random.split(rng)
             next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
+
+            # Compute logprobs for sampled tokens
+            log_probs = jax.nn.log_softmax(logits, axis=-1)
+            sampled_logprobs = jnp.take_along_axis(log_probs, next_token, axis=-1)  # [batch_size, 1]
+            all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, kv_cache.cache_position))
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
@@ -132,16 +136,17 @@ class GeneratorMixin:
             )
 
             new_logits = outputs["logits"][:, -1, :]
-            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask, last_positions, new_logits)
-            return new_carry, logits if return_scores else None
+            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask, last_positions, new_logits, all_logprobs)
+            return new_carry, None
 
         # Pad inputs to max_length
         pad_length = max_length - prompt_length
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
+        all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs["logits"].dtype)
 
-        initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :])
-        (kv_cache, rng, generated_ids, attention_mask, last_positions, logits), logits_seq = jax.lax.scan(
+        initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :], all_logprobs)
+        (kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs), _ = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens - 1
         )
 
@@ -150,11 +155,19 @@ class GeneratorMixin:
         next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
+        # Compute logprobs for final sampled token
+        log_probs = jax.nn.log_softmax(logits, axis=-1)
+        final_logprobs = jnp.take_along_axis(log_probs, next_token, axis=-1)  # [batch_size, 1]
+        all_logprobs = lax.dynamic_update_slice(all_logprobs, final_logprobs, (0, kv_cache.cache_position))
+
         return GenerateResult(
             generated_ids=[
                 generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
             ],
             stop_reasons=["length"] * batch_size,
-            scores=list(logits_seq) + [logits] if return_scores else None,
+            logprobs=[
+                all_logprobs[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
+                for i, sampling_param in enumerate(sampling_params)
+            ],
         )

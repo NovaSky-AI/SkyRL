@@ -585,24 +585,14 @@ class TinkerEngine:
                 input_ids,
                 attention_mask,
                 sampling_params=all_sampling_params,
-                return_scores=True,
                 adapter_indices=all_adapter_indices,
             )
 
             for idx in range(len(all_sampling_params)):
-                generated_tokens = result.generated_ids[idx]  # Already excludes prompt
-
-                logprobs = []
-                for score in result.scores:
-                    log_probs = jax.nn.log_softmax(score[idx], axis=-1)
-                    if len(logprobs) < len(generated_tokens):
-                        token_idx = generated_tokens[len(logprobs)]
-                        logprobs.append(float(log_probs[token_idx]))
-
                 sequences_out[idx] = types.GeneratedSequence(
                     stop_reason=result.stop_reasons[idx],
-                    tokens=generated_tokens,
-                    logprobs=logprobs,
+                    tokens=result.generated_ids[idx],
+                    logprobs=result.logprobs[idx],
                 )
 
         for request_id, _, start_idx, end_idx in request_batch_slices:
