@@ -75,6 +75,20 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
+def next_token_and_logprobs(
+    logits: jax.Array, temperatures: jax.Array, rng: jax.Array, all_logprobs: jax.Array, cache_position: int
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Sample next token and compute logprobs, updating the logprobs array."""
+    rng, sample_key = jax.random.split(rng)
+    next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
+
+    logprobs = jax.nn.log_softmax(logits, axis=-1)
+    sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
+    all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, cache_position))
+
+    return rng, next_token, all_logprobs
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -111,13 +125,9 @@ class GeneratorMixin:
 
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs = carry
-            rng, sample_key = jax.random.split(rng)
-            next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
-
-            # Compute logprobs for sampled tokens
-            log_probs = jax.nn.log_softmax(logits, axis=-1)
-            sampled_logprobs = jnp.take_along_axis(log_probs, next_token, axis=-1)  # [batch_size, 1]
-            all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, kv_cache.cache_position))
+            rng, next_token, all_logprobs = next_token_and_logprobs(
+                logits, temperatures, rng, all_logprobs, kv_cache.cache_position
+            )
 
             # Update generated_ids and attention mask
             generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
@@ -167,14 +177,10 @@ class GeneratorMixin:
         )
 
         # Sample final token
-        rng, sample_key = jax.random.split(rng)
-        next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
+        rng, next_token, all_logprobs = next_token_and_logprobs(
+            logits, temperatures, rng, all_logprobs, kv_cache.cache_position
+        )
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
-
-        # Compute logprobs for final sampled token
-        log_probs = jax.nn.log_softmax(logits, axis=-1)
-        final_logprobs = jnp.take_along_axis(log_probs, next_token, axis=-1)  # [batch_size, 1]
-        all_logprobs = lax.dynamic_update_slice(all_logprobs, final_logprobs, (0, kv_cache.cache_position))
 
         return GenerateResult(
             generated_ids=[
