@@ -589,12 +589,8 @@ class TinkerEngine:
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
-
             result = model.generate(
-                input_ids,
-                attention_mask,
-                sampling_params=all_sampling_params,
-                adapter_indices=all_adapter_indices,
+                input_ids, attention_mask, sampling_params=all_sampling_params, adapter_indices=all_adapter_indices
             )
 
         all_sequences = [
