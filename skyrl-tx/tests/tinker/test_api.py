@@ -165,13 +165,24 @@ def test_sample(service_client, use_lora):
 
     # Sample from the model (base or LoRA)
     prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
-    sample_result = sampling_client.sample(
+    sample0 = sampling_client.sample(
         prompt=prompt,
-        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10),
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=20, seed=42),
         num_samples=1,
-    ).result()
+    )
+    sample1 = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, seed=42),
+        num_samples=2,
+    )
 
-    # Verify we got sequences back
+    # Verify we got the right number of sequences back
+    sample_result = sample0.result()
     assert sample_result is not None
     assert len(sample_result.sequences) == 1
-    assert len(sample_result.sequences[0].tokens) > 0
+    assert len(sample_result.sequences[0].tokens) == 20
+
+    sample_result = sample1.result()
+    assert sample_result is not None
+    assert len(sample_result.sequences) == 2
+    assert len(sample_result.sequences[0].tokens) == 10

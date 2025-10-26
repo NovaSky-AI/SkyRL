@@ -434,12 +434,11 @@ class TinkerEngine:
         all_advantages = []
         all_loss_fn_types = []
 
-        current_batch_idx = 0
         for future, model_id, request_data in valid_requests:
             adapter_index = self.models[model_id].adapter_index
             loss_fn_type = LOSS_TYPES[request_data.loss_fn]
 
-            request_start = current_batch_idx
+            request_start = len(all_input_ids)
             for item in request_data.data:
                 tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
                 all_input_ids.append(tokens)
@@ -451,9 +450,8 @@ class TinkerEngine:
                 all_adapter_indices.append(adapter_index)
                 example_model_ids.append(model_id)
                 all_loss_fn_types.append(loss_fn_type)
-                current_batch_idx += 1
 
-            request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
+            request_batch_slices.append((future.request_id, model_id, request_start, len(all_input_ids)))
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
@@ -556,22 +554,17 @@ class TinkerEngine:
 
         adapter_indices_batch = self.load_sampler_weights(valid_requests)
 
-        current_batch_idx = 0
         for i, (future, model_id, request_data) in enumerate(valid_requests):
-            # Get adapter index (need to cast in jnp.int32 because that is what generate accepts)
-            adapter_idx = adapter_indices_batch[i]
-
-            request_start = current_batch_idx
+            request_start = len(all_prompts)
 
             # Create expand group rollout
             for _ in range(request_data.num_samples):
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
                 all_sampling_params.append(request_data.sampling_params)
-                all_adapter_indices.append(adapter_idx)
-                current_batch_idx += 1
+                all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((future.request_id, model_id, request_start, current_batch_idx))
+            request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts)))
 
         # Pad sequences to same length
         max_len = max(len(seq) for seq in all_prompts)
