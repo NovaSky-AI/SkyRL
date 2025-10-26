@@ -136,7 +136,15 @@ class GeneratorMixin:
             )
 
             new_logits = outputs["logits"][:, -1, :]
-            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask, last_positions, new_logits, all_logprobs)
+            new_carry = (
+                outputs["kv_cache"],
+                rng,
+                generated_ids,
+                attention_mask,
+                last_positions,
+                new_logits,
+                all_logprobs,
+            )
             return new_carry, None
 
         # Pad inputs to max_length
@@ -145,7 +153,15 @@ class GeneratorMixin:
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
         all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs["logits"].dtype)
 
-        initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :], all_logprobs)
+        initial_carry = (
+            kv_cache,
+            rng,
+            generated_ids,
+            attention_mask,
+            positions[:, -1:],
+            outputs["logits"][:, -1, :],
+            all_logprobs,
+        )
         (kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs), _ = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens - 1
         )
