@@ -587,9 +587,6 @@ class TinkerEngine:
         )
         all_adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
 
-        # Collect per-sample outputs
-        sequences_out = [None] * int(input_ids.shape[0])
-
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
 
@@ -600,18 +597,13 @@ class TinkerEngine:
                 adapter_indices=all_adapter_indices,
             )
 
-            for idx in range(len(all_sampling_params)):
-                sequences_out[idx] = types.GeneratedSequence(
-                    stop_reason=result.stop_reasons[idx],
-                    tokens=result.generated_ids[idx],
-                    logprobs=result.logprobs[idx],
-                )
+        all_sequences = [
+            types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
+            for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
+        ]
 
         for request_id, _, start_idx, end_idx in request_batch_slices:
-            sequences = []
-            for i in range(start_idx, end_idx):
-                sequences.append(sequences_out[i])
-
+            sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=[])
 
         return results
