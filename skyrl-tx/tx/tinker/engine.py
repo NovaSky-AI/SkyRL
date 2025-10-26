@@ -348,8 +348,10 @@ class TinkerEngine:
         return batchable
 
     def find_batchable_sample(self, session: Session) -> list[FutureDB]:
-        """Find all forward_backward ops that come before any destructive update for their model.
-        Similar to  'find_batchable_forward_backward'
+        """Find all sample ops that can be safely batched together.
+
+        Returns sample operations ensuring that each model_id has only one checkpoint_id
+        to avoid loading different checkpoints for the same model in a single batch.
 
         Args:
             session: Database session
@@ -365,7 +367,16 @@ class TinkerEngine:
         )
         sample_ops = session.exec(sample_query).all()
 
-        return sample_ops
+        batchable = []
+        model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
+        for op in sample_ops:
+            checkpoint_id = op.request_data["checkpoint_id"]
+            # Base model requests (empty checkpoint_id) are always compatible, otherwise only
+            # take only requests with one checkpoint_id for a given model_id
+            if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
+                batchable.append(op)
+
+        return batchable
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
