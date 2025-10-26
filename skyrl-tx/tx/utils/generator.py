@@ -39,6 +39,40 @@ class KVCache:
         )
 
 
+@jax.tree_util.register_dataclass
+@dataclass
+class Qwen3ModelOutput:
+    """Output type for Qwen3Model.
+
+    Attributes:
+        last_hidden_state: The last hidden state from the model.
+        kv_cache: The updated key-value cache.
+        hidden_states: All hidden states if output_hidden_states=True.
+    """
+
+    last_hidden_state: jax.Array
+    kv_cache: KVCache
+    hidden_states: list[jax.Array] | None = None
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class Qwen3CausalLMOutput:
+    """Output type for Qwen3ForCausalLM.
+
+    Attributes:
+        logits: The language modeling logits.
+        last_hidden_state: The last hidden state from the model.
+        kv_cache: The updated key-value cache.
+        hidden_states: All hidden states, if output_hidden_states=True.
+    """
+
+    logits: jax.Array
+    last_hidden_state: jax.Array
+    kv_cache: KVCache
+    hidden_states: list[jax.Array] | None = None
+
+
 @dataclass
 class GenerateResult:
     """Result from autoregressive text generation.
@@ -108,7 +142,7 @@ class GeneratorMixin:
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
-        kv_cache = outputs["kv_cache"].pad_to_length(max_length)
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits = carry
@@ -131,8 +165,8 @@ class GeneratorMixin:
                 adapter_indices=adapter_indices,
             )
 
-            new_logits = outputs["logits"][:, -1, :]
-            new_carry = (outputs["kv_cache"], rng, generated_ids, attention_mask, last_positions, new_logits)
+            new_logits = outputs.logits[:, -1, :]
+            new_carry = (outputs.kv_cache, rng, generated_ids, attention_mask, last_positions, new_logits)
             return new_carry, logits if return_scores else None
 
         # Pad inputs to max_length
@@ -140,7 +174,7 @@ class GeneratorMixin:
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
 
-        initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs["logits"][:, -1, :])
+        initial_carry = (kv_cache, rng, generated_ids, attention_mask, positions[:, -1:], outputs.logits[:, -1, :])
         (kv_cache, rng, generated_ids, attention_mask, last_positions, logits), logits_seq = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens - 1
         )
