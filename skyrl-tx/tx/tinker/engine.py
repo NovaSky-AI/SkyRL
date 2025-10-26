@@ -557,7 +557,8 @@ class TinkerEngine:
         for i, (future, model_id, request_data) in enumerate(valid_requests):
             request_start = len(all_prompts)
 
-            # Create expand group rollout
+            # Expand requests for num_samples (TODO: Once we have continuous batching /
+            # paged attention, we should do the prefill only once and share the kv cache)
             for _ in range(request_data.num_samples):
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
