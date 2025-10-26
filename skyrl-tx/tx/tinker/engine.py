@@ -769,11 +769,13 @@ class TinkerEngine:
                 assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
 
                 adapter_index = self.models[model_id].adapter_index
-                # Loads model from RAM
                 if self.models[model_id].loaded_checkpoint_id == request_data.checkpoint_id:
+                    # Load model from RAM
                     adapter_indices_list.append(adapter_index)
-                # Load model from disk
                 else:
+                    # Load model from disk
+                    assert adapter_index not in adapter_indices_list, "Cannot override already used adapter"
+
                     checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
                     load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
