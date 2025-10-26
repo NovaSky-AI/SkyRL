@@ -51,7 +51,6 @@ def test_qwen3_generate():
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
             sampling_params=sampling_params,
-            return_scores=True,
         )
 
         # Compare generated tokens
@@ -65,11 +64,18 @@ def test_qwen3_generate():
                 f"Ours: {our_tokens}, HF: {hf_tokens_truncated}"
             )
 
-        # Compare scores (logits) for each generated token
-        for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, result.scores)):
-            assert np.allclose(
-                hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3
-            ), f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"
+        # Compare logprobs for sampled tokens
+        for i, (our_tokens, our_logprobs) in enumerate(zip(result.generated_ids, result.logprobs)):
+            # Compute expected logprobs from HF scores
+            for step_idx, (token_id, our_logprob) in enumerate(zip(our_tokens, our_logprobs)):
+                hf_logits = hf_output.scores[step_idx][i]
+                hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
+                expected_logprob = float(hf_logprobs[token_id])
+
+                assert np.isclose(our_logprob, expected_logprob, rtol=1e-3, atol=1e-3), (
+                    f"Request {i}, step {step_idx}: Logprob mismatch. "
+                    f"Ours: {our_logprob}, HF: {expected_logprob}, diff: {abs(our_logprob - expected_logprob)}"
+                )
 
 
 def test_qwen3_generate_speed():
@@ -106,7 +112,6 @@ def test_qwen3_generate_speed():
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
             sampling_params=sampling_params,
-            return_scores=True,
         )
 
         runs = 1
@@ -118,7 +123,6 @@ def test_qwen3_generate_speed():
                 batch.input_ids.numpy(),
                 batch.attention_mask.numpy(),
                 sampling_params=sampling_params,
-                return_scores=True,
             )
             elapsed = time.perf_counter() - start
             times.append(elapsed)
