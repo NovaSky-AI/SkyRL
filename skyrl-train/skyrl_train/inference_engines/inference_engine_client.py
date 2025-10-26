@@ -137,13 +137,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
 
-        The retry mechanism is intended to use in combination with `pause_generation()` and `resume_generation()` for
+        The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()` for
         in-flight weight updates and partial rollouts.
 
-        This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`, where we return
-        in codepath 1.5 directly.
+        This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
 
-        For subsequent retry requests, we can reuse the original request wiht the followinge xceptions:
+        For subsequent retry requests, we can reuse the original request with the following exceptions:
         - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
         - Set continue_final_message=True and add_generation_prompt=False.
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
