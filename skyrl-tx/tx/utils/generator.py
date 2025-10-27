@@ -114,8 +114,9 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
 
 
 def next_token_and_logprobs(
-    logits: jax.Array, temperatures: jax.Array, rng: jax.Array, all_logprobs: jax.Array, cache_position: int
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    logits: jax.Array, temperatures: jax.Array, rng: jax.Array, all_logprobs: jax.Array, cache_position: int,
+    stop_tokens: jax.Array | None = None, stopped: jax.Array | None = None
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sample next token and compute logprobs, updating the logprobs array."""
     rng, sample_key = jax.random.split(rng)
     next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
@@ -124,7 +125,12 @@ def next_token_and_logprobs(
     sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
     all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, cache_position))
 
-    return rng, next_token, all_logprobs
+    # Check if sampled token is in stop tokens
+    if stop_tokens is not None and stopped is not None:
+        is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
+        stopped = stopped | is_stop
+
+    return rng, next_token, all_logprobs, stopped
 
 
 class GeneratorMixin:
@@ -156,15 +162,22 @@ class GeneratorMixin:
         assert all(seed == seeds[0] for seed in seeds), "All seeds must be the same"
         rng = jax.random.PRNGKey(seeds[0])
 
+        # Extract stop tokens and pad to same length
+        max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
+        stop_tokens = jnp.full((batch_size, max(1, max_stop_tokens)), -1, dtype=jnp.int32)
+        for i, sp in enumerate(sampling_params):
+            if sp.stop:
+                stop_tokens = stop_tokens.at[i, :len(sp.stop)].set(jnp.array(sp.stop))
+
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         def scan_fn(carry, _):
-            kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs = carry
-            rng, next_token, all_logprobs = next_token_and_logprobs(
-                logits, temperatures, rng, all_logprobs, kv_cache.cache_position
+            kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs, stopped = carry
+            rng, next_token, all_logprobs, stopped = next_token_and_logprobs(
+                logits, temperatures, rng, all_logprobs, kv_cache.cache_position, stop_tokens, stopped
             )
 
             # Update generated_ids and attention mask
@@ -192,6 +205,7 @@ class GeneratorMixin:
                 last_positions,
                 new_logits,
                 all_logprobs,
+                stopped,
             )
             return new_carry, None
 
@@ -200,6 +214,7 @@ class GeneratorMixin:
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
         all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
+        stopped = jnp.zeros((batch_size, 1), dtype=jnp.bool_)
 
         initial_carry = (
             kv_cache,
@@ -209,14 +224,15 @@ class GeneratorMixin:
             positions[:, -1:],
             outputs.logits[:, -1, :],
             all_logprobs,
+            stopped,
         )
-        (kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs), _ = jax.lax.scan(
+        (kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs, stopped), _ = jax.lax.scan(
             scan_fn, initial_carry, xs=None, length=max_new_tokens - 1
         )
 
         # Sample final token
-        rng, next_token, all_logprobs = next_token_and_logprobs(
-            logits, temperatures, rng, all_logprobs, kv_cache.cache_position
+        rng, next_token, all_logprobs, stopped = next_token_and_logprobs(
+            logits, temperatures, rng, all_logprobs, kv_cache.cache_position, stop_tokens, stopped
         )
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
@@ -225,7 +241,10 @@ class GeneratorMixin:
                 generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
             ],
-            stop_reasons=["length"] * batch_size,
+            stop_reasons=[
+                "stop" if stopped[i, 0] else "length"
+                for i in range(batch_size)
+            ],
             logprobs=[
                 all_logprobs[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
