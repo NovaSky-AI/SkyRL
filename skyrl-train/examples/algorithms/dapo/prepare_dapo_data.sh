@@ -4,7 +4,7 @@
 # Example: DATA_DIR=/path/to/data/dapo bash examples/algorithms/dapo/prepare_dapo_data.sh
 set -uxo pipefail
 
-export DATA_DIR=${DATA_DIR:-"${HOME}/data/dapo"}
+export DATA_DIR=${DATA_DIR:-"/mnt/cluster_storage/data/dapo"}
 export TRAIN_FILE=${TRAIN_FILE:-"${DATA_DIR}/dapo-math-17k.parquet"}
 export TEST_FILE=${TEST_FILE:-"${DATA_DIR}/aime-2024.parquet"}
 

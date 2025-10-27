@@ -3,15 +3,15 @@ import polars as pl
 from pathlib import Path
 
 # Define input and output files
-DATA_DIR = Path.home() / "data/dapo"
+DATA_DIR = "/mnt/cluster_storage/data/dapo"
 FILES = {
     "dapo-math-17k": "dapo-math-17k.parquet",
     "aime-2024": "aime-2024.parquet",
 }
 
 for name, filename in FILES.items():
-    in_path = DATA_DIR / filename
-    out_path = DATA_DIR / f"{name}-cleaned.parquet"
+    in_path = f"{DATA_DIR}/{filename}"
+    out_path = f"{DATA_DIR}/{name}-cleaned.parquet"
 
     # Read using pandas
     df = pd.read_parquet(in_path)
