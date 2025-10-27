@@ -82,7 +82,7 @@ def test_policy_loss_cispo():
     # Create config for cispo
     config = DictConfig(
         {
-            "cispo": {"clip_low": 0.2, "clip_high": 0.2},
+            "cispo": {"cispo_eps_clip_low": 0.2, "cispo_eps_clip_high": 0.2},
             "policy_loss_type": "cispo",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,

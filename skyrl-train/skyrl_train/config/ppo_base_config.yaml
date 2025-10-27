@@ -127,9 +127,9 @@ trainer:
       ppo_kl_coef: 1.0
     
     # cispo parameters (only used when policy_loss_type: "cispo")
-    cispo:
-      clip_low: 0.2 # lower bound for importance sampling ratio clipping
-      clip_high: 0.2 # upper bound for importance sampling ratio clipping
+    cispo: 
+      cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+      cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
 
   gradient_checkpointing: true
@@ -178,8 +178,9 @@ generator:
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
+  inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1
-  inference_engine_data_parallel_size: 1  # NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
+  inference_engine_data_parallel_size: 1
   n_samples_per_prompt: 5
   async_engine: true
   batched: false

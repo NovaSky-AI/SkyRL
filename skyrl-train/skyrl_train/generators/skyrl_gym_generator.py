@@ -184,6 +184,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
         while not done:
+
+            if len(input_ids) > max_input_length:
+                stop_reason = "length"
+                break
+
             # 1. Generate output
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
@@ -253,10 +258,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
 
-            if len(input_ids) > max_input_length:
-                stop_reason = "length"
-                break
-
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
         # Close the environment
@@ -282,23 +283,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         appended_eos_token = False
         if not self.use_conversation_multi_turn:
-            # we might need to add the eos token to the response ids
-            if response_ids[-1] != self.tokenizer.eos_token_id:
+            if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 appended_eos_token = True
-
-        # need to truncate loss mask correctly for responses that go to max length
-        if self.max_turns > 1:
-            # max total resp length = max tokens (max length of final turn generation) + max_input_length (max input for any generation turn) - len(original prompt)
-            max_response_tokens = max_tokens + max_input_length - initial_prompt_length
-        else:
-            max_response_tokens = max_tokens
-
-        if len(response_ids) > max_response_tokens:
-            stop_reason = "length"
-        response_ids = response_ids[:max_response_tokens]
-        loss_mask = loss_mask[:max_response_tokens]
 
         # Build reward output
         if retokenize_chat_history:
