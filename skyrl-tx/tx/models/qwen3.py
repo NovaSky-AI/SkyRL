@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import Param, prepare_routing
-from tx.models.outputs import Qwen3CausalLMOutput, Qwen3ModelOutput
+from tx.models.outputs import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
@@ -354,7 +354,7 @@ class Qwen3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-    ) -> Qwen3ModelOutput:
+    ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -384,7 +384,7 @@ class Qwen3Model(nnx.Module):
         # Increment cache_position if cache exists, or use sequence length for new cache
         new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
 
-        return Qwen3ModelOutput(
+        return ModelOutput(
             last_hidden_state=hidden_states,
             kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
             hidden_states=all_hidden_states if output_hidden_states else None,
@@ -421,7 +421,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-    ) -> Qwen3CausalLMOutput:
+    ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
 
@@ -439,7 +439,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         else:
             logits = self.lm_head(hidden_states)
 
-        return Qwen3CausalLMOutput(
+        return CausalLMOutput(
             logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,

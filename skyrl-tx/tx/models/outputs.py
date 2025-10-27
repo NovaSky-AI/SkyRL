@@ -13,8 +13,8 @@ from tx.utils.generator import KVCache
 
 @jax.tree_util.register_dataclass
 @dataclass
-class Qwen3ModelOutput:
-    """Output type for Qwen3Model.
+class ModelOutput:
+    """Output type for models like Qwen3Model.
 
     Attributes:
         last_hidden_state: The last hidden state from the model.
@@ -29,8 +29,8 @@ class Qwen3ModelOutput:
 
 @jax.tree_util.register_dataclass
 @dataclass
-class Qwen3CausalLMOutput:
-    """Output type for Qwen3ForCausalLM.
+class CausalLMOutput:
+    """Output type for causal language models like Qwen3ForCausalLM.
 
     Attributes:
         logits: The language modeling logits.
