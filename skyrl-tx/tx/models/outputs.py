@@ -1,7 +1,4 @@
-"""Model-specific output dataclasses.
-
-This module contains model-specific output types for various model architectures.
-"""
+"""Model output dataclasses."""
 
 from __future__ import annotations
 from dataclasses import dataclass
