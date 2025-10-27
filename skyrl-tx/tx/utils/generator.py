@@ -81,8 +81,8 @@ def next_token_and_logprobs(
     rng: jax.Array,
     all_logprobs: jax.Array,
     cache_position: int,
-    stop_tokens: jax.Array | None = None,
-    stop_pos: jax.Array | None = None,
+    stop_tokens: jax.Array,
+    stop_pos: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sample next token and compute logprobs, updating the logprobs array."""
     rng, sample_key = jax.random.split(rng)
@@ -93,10 +93,9 @@ def next_token_and_logprobs(
     all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, cache_position))
 
     # Check if sampled token is in stop tokens and update stop position
-    if stop_tokens is not None and stop_pos is not None:
-        is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
-        # Only update stop_pos if not already stopped (stop_pos == -1)
-        stop_pos = jnp.where((stop_pos == -1) & is_stop, cache_position, stop_pos)
+    is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
+    # Only update stop_pos if not already stopped (stop_pos == -1)
+    stop_pos = jnp.where((stop_pos == -1) & is_stop, cache_position, stop_pos)
 
     return rng, next_token, all_logprobs, stop_pos
 
