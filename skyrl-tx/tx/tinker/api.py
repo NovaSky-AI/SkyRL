@@ -16,7 +16,14 @@ import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus
+from tx.tinker.db_models import (
+    CheckpointDB,
+    ModelDB,
+    FutureDB,
+    RequestStatus,
+    CheckpointStatus,
+    get_async_database_url,
+)
 from tx.utils.storage import download_file
 from tx.utils.log import logger
 
@@ -29,7 +36,8 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    app.state.db_engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
+    db_url = get_async_database_url(app.state.engine_config.database_url)
+    app.state.db_engine = create_async_engine(db_url, echo=False)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
