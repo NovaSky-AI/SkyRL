@@ -36,7 +36,6 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    # Get database URL from config or environment
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
 

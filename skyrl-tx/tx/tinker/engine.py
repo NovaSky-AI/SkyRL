@@ -78,8 +78,7 @@ class TinkerEngine:
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
-        db_url = get_database_url(config.database_url)
-        self.db_engine = create_engine(db_url, echo=False)
+        self.db_engine = create_engine(get_database_url(config.database_url), echo=False)
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
