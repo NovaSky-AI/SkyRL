@@ -27,7 +27,6 @@ See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-proje
   - Temperature sampling
   - Stop token support
 - **API**: REST API compatible with Tinker specification
-- **Models**: Support for various transformer architectures
 
 ### 🚧 In Progress
 - Model sharding improvements
