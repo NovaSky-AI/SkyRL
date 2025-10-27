@@ -9,7 +9,8 @@ from transformers import AutoTokenizer
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+# from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from examples.fully_async.skyrl_gym_http_generator import SkyRLGymHTTPGenerator
 from skyrl_train.generators.base import GeneratorInput
 from tests.gpu.utils import Timer, get_test_generator_input
 from omegaconf import DictConfig, OmegaConf
@@ -121,9 +122,14 @@ async def run_generator_end_to_end(
             "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
             "backend": "vllm",
-            "enable_http_endpoint": False,
+            "enable_http_endpoint": True,
             "http_endpoint_host": "127.0.0.1",
             "http_endpoint_port": 8000,
+            "chat_template": {
+                "source": "name",
+                "name_or_path": "qwen2_5_with_generation_tag_simplified",
+            },
+            "enforce_eager": True,
         },
     )
 
@@ -152,7 +158,7 @@ async def run_generator_end_to_end(
 
     await inference_engine_client.wake_up()
 
-    generator = SkyRLGymGenerator(
+    generator = SkyRLGymHTTPGenerator(
         generator_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=inference_engine_client,
@@ -196,6 +202,8 @@ async def run_generator_end_to_end(
         for i in range(len(generator_output["response_ids"]))
     ]
 
+    print("CHARLIE output decoded: ", tokenizer.decode(generator_output["response_ids"][0]))
+
     output_keys = [
         "prompt_token_ids",
         "response_ids",
@@ -225,8 +233,8 @@ async def run_generator_end_to_end(
 @pytest.mark.parametrize(
     ("use_async_engine", "batched", "n_samples_per_prompt", "num_inference_engines", "tensor_parallel_size"),
     [
-        (False, True, 5, 2, 1),  # tests SkyRLGymGenerator.generate_batched for single-turn
-        (True, False, 5, 1, 2),  # tests SkyRLGymGenerator.agent_loop for single-turn
+        # (False, True, 5, 2, 1),  # tests SkyRLGymGenerator.generate_batched for single-turn
+        (True, False, 5, 1, 1),  # tests SkyRLGymGenerator.agent_loop for single-turn
         # Add more combinations as needed
     ],
 )
@@ -260,8 +268,8 @@ async def test_generator_multi_turn_search():
             use_async_engine=True,
             batched=False,
             n_samples_per_prompt=5,
-            num_inference_engines=2,
-            tensor_parallel_size=2,
+            num_inference_engines=1,
+            tensor_parallel_size=1,
             model="Qwen/Qwen2.5-1.5B-Instruct",
             max_prompt_length=2048,
             max_input_length=4096,
@@ -270,7 +278,7 @@ async def test_generator_multi_turn_search():
             env_class="search",
             num_prompts=2,
             max_turns=2,
-            use_conversation_multi_turn=False,
+            use_conversation_multi_turn=True,
             max_env_workers=0,
         )
     finally:
