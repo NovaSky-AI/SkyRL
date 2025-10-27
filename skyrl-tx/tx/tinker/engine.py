@@ -558,6 +558,9 @@ class TinkerEngine:
         if not valid_requests:
             return results
 
+        # Computes prompt_logprobs for all requests even if only one has prompt_logprobs true
+        needs_prompt_logprobs = any(request_data.prompt_logprobs for _, _, request_data in valid_requests)
+
         all_prompts = []
         all_sampling_params = []
         all_adapter_indices = []
@@ -576,7 +579,7 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts)))
+            request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts), request_data))
 
         # Pad sequences to same length
         max_len = max(len(seq) for seq in all_prompts)
@@ -590,7 +593,11 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             result = model.generate(
-                input_ids, attention_mask, sampling_params=all_sampling_params, adapter_indices=all_adapter_indices
+                input_ids,
+                attention_mask,
+                sampling_params=all_sampling_params,
+                adapter_indices=all_adapter_indices,
+                prompt_logprobs=needs_prompt_logprobs
             )
 
         all_sequences = [
@@ -598,9 +605,10 @@ class TinkerEngine:
             for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
         ]
 
-        for request_id, _, start_idx, end_idx in request_batch_slices:
+        for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+            prompt_logprobs = result.prompt_logprobs[start_idx] if result.prompt_logprobs and request_data.prompt_logprobs else []
+            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
         return results
 

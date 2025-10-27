@@ -544,6 +544,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
+            prompt_logprobs=request.prompt_logprobs,
         ),
     )
 

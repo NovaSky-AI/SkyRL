@@ -170,6 +170,7 @@ class SampleInput(BaseModel):
     sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
+    prompt_logprobs: bool = False
 
 
 class GeneratedSequence(BaseModel):

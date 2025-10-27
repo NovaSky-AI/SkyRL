@@ -52,6 +52,7 @@ class GenerateOutput:
     generated_ids: list[list[int]]
     stop_reasons: list[str]
     logprobs: list[list[float]]
+    prompt_logprobs: list[list[float]] | None = None
 
 
 def sample_token(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
@@ -89,6 +90,15 @@ def next_token_and_logprobs(
     return rng, next_token, all_logprobs
 
 
+def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
+      """Compute log probabilities of prompt tokens from prefill logits"""
+      logits_for_prompt = prefill_logits[:, :-1, :]
+      log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
+      prompt_tokens = input_ids[:, 1:]
+      prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
+      return prompt_logprobs
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -99,6 +109,7 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
+        prompt_logprobs: bool = False
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
@@ -122,6 +133,7 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
+        prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
 
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs = carry
@@ -192,4 +204,8 @@ class GeneratorMixin:
                 all_logprobs[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
             ],
+            prompt_logprobs=[
+                prompt_logprobs_array[i, :int(attention_mask[i].sum())-1].tolist()
+                for i in range(batch_size)
+            ] if prompt_logprobs else None
         )
