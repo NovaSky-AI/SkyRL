@@ -44,25 +44,18 @@ def get_async_database_url(db_url: str | None = None) -> str:
         ValueError: If the database scheme is not supported.
     """
     url_str = get_database_url(db_url)
-
-    # Parse the URL using SQLAlchemy's URL utility
     parsed_url = sqlalchemy_url.make_url(url_str)
 
-    # Convert to async driver if needed
-    backend_name = parsed_url.get_backend_name()
-    if backend_name == "sqlite":
-        # Use aiosqlite for async SQLite
-        parsed_url = parsed_url.set(drivername="sqlite+aiosqlite")
-    elif backend_name == "postgresql":
-        # Use asyncpg for async PostgreSQL
-        parsed_url = parsed_url.set(drivername="postgresql+asyncpg")
-    elif "+" in parsed_url.drivername:
-        # Already has an async driver specified, keep it
-        pass
-    else:
-        raise ValueError(f"Unsupported database scheme: {backend_name}")
-
-    return str(parsed_url)
+    match parsed_url.get_backend_name():
+        case "sqlite":
+            return str(parsed_url.set(drivername="sqlite+aiosqlite"))
+        case "postgresql":
+            return str(parsed_url.set(drivername="postgresql+asyncpg"))
+        case _ if "+" in parsed_url.drivername:
+            # Already has an async driver specified, keep it
+            return str(parsed_url)
+        case backend_name:
+            raise ValueError(f"Unsupported database scheme: {backend_name}")
 
 
 class RequestStatus(str, Enum):
