@@ -11,16 +11,11 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError
 import asyncio
-import logging
 import subprocess
 import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-<<<<<<< HEAD
-from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus, get_database_url
-from tx.tinker.migrate import run_migrations_on_startup
-=======
 from tx.tinker.db_models import (
     CheckpointDB,
     ModelDB,
@@ -29,12 +24,9 @@ from tx.tinker.db_models import (
     CheckpointStatus,
     get_async_database_url,
 )
->>>>>>> postgre-support
+from tx.tinker.migrate import run_migrations_on_startup
 from tx.utils.storage import download_file
-
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from tx.utils.log import logger
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -45,27 +37,13 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-<<<<<<< HEAD
     # Run database migrations
     logger.info("Running database migrations...")
     run_migrations_on_startup()
     logger.info("Database migrations completed")
 
     # Get database URL from config or environment
-    db_url = get_database_url()
-    if app.state.engine_config.database_url:
-        db_url = app.state.engine_config.database_url
-    
-    # Convert to async URL
-    if db_url.startswith("sqlite://"):
-        db_url = db_url.replace("sqlite://", "sqlite+aiosqlite://")
-    elif db_url.startswith("postgresql://"):
-        db_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
-    
-=======
-    # Get database URL from config or environment
     db_url = get_async_database_url(app.state.engine_config.database_url)
->>>>>>> postgre-support
     app.state.db_engine = create_async_engine(db_url, echo=False)
 
     async with app.state.db_engine.begin() as conn:

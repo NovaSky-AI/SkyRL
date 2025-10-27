@@ -9,15 +9,7 @@ from sqlalchemy.engine import url as sqlalchemy_url
 
 from tx.tinker import types
 
-# SQLite database path (default)
-DB_PATH = Path(__file__).parent / "tinker.db"
 
-
-<<<<<<< HEAD
-def get_database_url() -> str:
-    """Get database URL from environment or default to SQLite."""
-    return os.environ.get("TINKER_DATABASE_URL", f"sqlite:///{DB_PATH.absolute()}")
-=======
 def get_database_url(db_url: str | None = None) -> str:
     """Get the database URL from environment variable or parameter.
 
@@ -36,13 +28,7 @@ def get_database_url(db_url: str | None = None) -> str:
     if db_url:
         return db_url
 
-    # Check environment variable
-    env_url = os.environ.get("TX_DATABASE_URL")
-    if env_url:
-        return env_url
-
-    # Default to SQLite
-    return f"sqlite:///{DB_PATH}"
+    return os.environ.get("TX_DATABASE_URL", f'sqlite:///{Path(__file__).parent / "tinker.db"}')
 
 
 def get_async_database_url(db_url: str | None = None) -> str:
@@ -57,27 +43,18 @@ def get_async_database_url(db_url: str | None = None) -> str:
     Raises:
         ValueError: If the database scheme is not supported.
     """
-    url_str = get_database_url(db_url)
+    parsed_url = sqlalchemy_url.make_url(get_database_url(db_url))
 
-    # Parse the URL using SQLAlchemy's URL utility
-    parsed_url = sqlalchemy_url.make_url(url_str)
-
-    # Convert to async driver if needed
-    backend_name = parsed_url.get_backend_name()
-    if backend_name == "sqlite":
-        # Use aiosqlite for async SQLite
-        parsed_url = parsed_url.set(drivername="sqlite+aiosqlite")
-    elif backend_name == "postgresql":
-        # Use asyncpg for async PostgreSQL
-        parsed_url = parsed_url.set(drivername="postgresql+asyncpg")
-    elif "+" in parsed_url.drivername:
-        # Already has an async driver specified, keep it
-        pass
-    else:
-        raise ValueError(f"Unsupported database scheme: {backend_name}")
-
-    return str(parsed_url)
->>>>>>> postgre-support
+    match parsed_url.get_backend_name():
+        case "sqlite":
+            return str(parsed_url.set(drivername="sqlite+aiosqlite"))
+        case "postgresql":
+            return str(parsed_url.set(drivername="postgresql+asyncpg"))
+        case _ if "+" in parsed_url.drivername:
+            # Already has an async driver specified, keep it
+            return str(parsed_url)
+        case backend_name:
+            raise ValueError(f"Unsupported database scheme: {backend_name}")
 
 
 class RequestStatus(str, Enum):

@@ -15,12 +15,13 @@ except ImportError:
 def _setup_root_logger() -> None:
     logger = logging.getLogger("tx")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # Prevent propagation to root logger
     handler = RichHandler(
         show_time=False,
         show_level=False,
         markup=True,
     )
-    formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
+    formatter = logging.Formatter("%(levelname)s:     %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 

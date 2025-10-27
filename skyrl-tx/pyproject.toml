@@ -40,12 +40,9 @@ tinker = [
     "sqlalchemy[asyncio]",
     "aiosqlite",
     "asyncpg",
-<<<<<<< HEAD
     "psycopg2-binary",
     "python-dotenv",
     "alembic",
-=======
->>>>>>> postgre-support
 ]
 
 aws = [
