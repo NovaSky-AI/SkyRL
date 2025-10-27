@@ -91,12 +91,12 @@ def next_token_and_logprobs(
 
 
 def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
-      """Compute log probabilities of prompt tokens from prefill logits"""
-      logits_for_prompt = prefill_logits[:, :-1, :]
-      log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
-      prompt_tokens = input_ids[:, 1:]
-      prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
-      return prompt_logprobs
+    """Compute log probabilities of prompt tokens from prefill logits"""
+    logits_for_prompt = prefill_logits[:, :-1, :]
+    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
+    prompt_tokens = input_ids[:, 1:]
+    prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
+    return prompt_logprobs
 
 
 class GeneratorMixin:
@@ -109,7 +109,7 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
-        prompt_logprobs: bool = False
+        prompt_logprobs: bool = False,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
@@ -204,8 +204,9 @@ class GeneratorMixin:
                 all_logprobs[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
             ],
-            prompt_logprobs=[
-                prompt_logprobs_array[i, :int(attention_mask[i].sum())-1].tolist()
-                for i in range(batch_size)
-            ] if prompt_logprobs else None
+            prompt_logprobs=(
+                [prompt_logprobs_array[i, : int(attention_mask[i].sum()) - 1].tolist() for i in range(batch_size)]
+                if prompt_logprobs
+                else None
+            ),
         )

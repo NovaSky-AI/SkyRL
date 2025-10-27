@@ -597,7 +597,7 @@ class TinkerEngine:
                 attention_mask,
                 sampling_params=all_sampling_params,
                 adapter_indices=all_adapter_indices,
-                prompt_logprobs=needs_prompt_logprobs
+                prompt_logprobs=needs_prompt_logprobs,
             )
 
         all_sequences = [
@@ -607,7 +607,9 @@ class TinkerEngine:
 
         for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
-            prompt_logprobs = result.prompt_logprobs[start_idx] if result.prompt_logprobs and request_data.prompt_logprobs else []
+            prompt_logprobs = (
+                result.prompt_logprobs[start_idx] if result.prompt_logprobs and request_data.prompt_logprobs else []
+            )
             results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
         return results
