@@ -66,7 +66,7 @@ def test_qwen3_generate():
                 assert our_tokens[-1] in sampling_param.stop
                 # We need to truncate it manually here since if we use the `eos_token_id`
                 # in huggingface generate, it will pad the sequence with padding tokens
-                hf_tokens_truncated = hf_tokens_truncated[:len(our_tokens)]
+                hf_tokens_truncated = hf_tokens_truncated[: len(our_tokens)]
 
             assert our_tokens == hf_tokens_truncated, (
                 f"Generated tokens for request {i} don't match HuggingFace. "
