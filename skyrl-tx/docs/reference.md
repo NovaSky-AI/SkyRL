@@ -79,10 +79,7 @@ The sampling API supports the following parameters for controlling text generati
 * **`stop`** (list of int, optional): Stop generation when encountering these token IDs.
   - Example: `stop=[2, 13]` - Stop at tokens 2 and 13
   - Note: Requires token IDs (integers). Use your tokenizer to convert strings to token IDs.
-
-#### Parameter Validation
-
-* `temperature` must be >= 0
+    String stopping sequences will be implemented soon.
 
 ### Example API Request
 
