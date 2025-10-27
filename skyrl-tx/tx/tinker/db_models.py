@@ -43,8 +43,7 @@ def get_async_database_url(db_url: str | None = None) -> str:
     Raises:
         ValueError: If the database scheme is not supported.
     """
-    url_str = get_database_url(db_url)
-    parsed_url = sqlalchemy_url.make_url(url_str)
+    parsed_url = sqlalchemy_url.make_url(get_database_url(db_url))
 
     match parsed_url.get_backend_name():
         case "sqlite":
