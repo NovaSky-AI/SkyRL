@@ -354,5 +354,8 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         return await self.engine.tokenizer_manager.flush_cache()
 
+    async def abort_generation(self) -> None:
+        raise NotImplementedError("Abort generation is not supported for SGLang inference engines.")
+
 
 SGLangRayActor = ray.remote(SGLangInferenceEngine)
