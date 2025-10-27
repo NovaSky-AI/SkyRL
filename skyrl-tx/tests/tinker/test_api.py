@@ -183,6 +183,7 @@ def test_sample(service_client, use_lora):
         assert len(sample_result.sequences) == num_samples
         assert len(sample_result.sequences[0].tokens) == max_tokens
 
+
 '''
 def test_sampling_params_validation(service_client):
     """Test parameter validation for sampling parameters."""
