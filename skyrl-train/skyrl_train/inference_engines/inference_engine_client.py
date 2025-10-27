@@ -183,7 +183,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reason: Optional[str] = None
         response_role: Optional[str] = None
 
-        # 1. Loop until the generation is aborted.
+        # 1. Loop until the generation is completed.
         while finish_reason == "abort":
             await self._wait_for_generation_to_resume()
 
