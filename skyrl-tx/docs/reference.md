@@ -56,4 +56,3 @@ $ tx version [OPTIONS]
 **Options**:
 
 * `--help`: Show this message and exit.
-
