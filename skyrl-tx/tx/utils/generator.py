@@ -40,7 +40,7 @@ class KVCache:
 
 
 @dataclass
-class GenerateResult:
+class GenerateOutput:
     """Result from autoregressive text generation.
 
     Attributes:
@@ -99,14 +99,14 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
-    ) -> GenerateResult:
+    ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
         Args:
             max_length: Maximum sequence length for fixed-size buffers (default: 512).
 
         Returns:
-            GenerateResult containing generated_ids, stop_reasons, and optionally scores.
+            GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
         """
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
@@ -182,7 +182,7 @@ class GeneratorMixin:
         )
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
-        return GenerateResult(
+        return GenerateOutput(
             generated_ids=[
                 generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
