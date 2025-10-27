@@ -76,28 +76,13 @@ The sampling API supports the following parameters for controlling text generati
 
 * **`seed`** (int, optional): Random seed for reproducible generation. If not provided, a random seed is generated.
 
-#### Advanced Sampling Parameters
-
-* **`top_k`** (int, default: -1): Limits sampling to the top-k most likely tokens.
-  - `top_k=-1`: No filtering (default)
-  - `top_k=50`: Only consider the 50 most likely tokens
-  - `top_k=1`: Greedy decoding (always select most likely token)
-
-* **`top_p`** (float, default: 1.0): Nucleus sampling - only sample from tokens that make up the top-p probability mass.
-  - `top_p=1.0`: No filtering (default)
-  - `top_p=0.9`: Sample from tokens that make up 90% of probability mass
-  - `top_p=0.1`: Very focused sampling
-
 * **`stop`** (list of int, optional): Stop generation when encountering these token IDs.
   - Example: `stop=[2, 13]` - Stop at tokens 2 and 13
   - Note: Requires token IDs (integers). Use your tokenizer to convert strings to token IDs.
 
 #### Parameter Validation
 
-* `top_k` must be >= -1
-* `top_p` must be > 0 and <= 1
 * `temperature` must be >= 0
-* `top_k` and `top_p` cannot both be set to non-default values simultaneously
 
 ### Example API Request
 
@@ -114,7 +99,6 @@ The sampling API supports the following parameters for controlling text generati
   "sampling_params": {
     "temperature": 0.8,
     "max_tokens": 50,
-    "top_p": 0.9,
     "stop": [2],
     "seed": 42
   },

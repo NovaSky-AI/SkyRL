@@ -157,8 +157,6 @@ class SamplingParams(BaseModel):
     max_tokens: int
     seed: int
     stop: Sequence[int] | None = None
-    top_k: int = -1
-    top_p: float = 1.0
 
 
 class ModelMetadata(BaseModel):

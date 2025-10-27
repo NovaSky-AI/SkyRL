@@ -54,44 +54,6 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
-def apply_top_k(logits: jax.Array, top_k: int) -> jax.Array:
-    """Apply top-k filtering to logits."""
-    if top_k <= 0:
-        if top_k == 0:
-            # top_k=0 means no tokens are allowed, set all to -inf
-            return jnp.full_like(logits, -jnp.inf)
-        return logits
-
-    # Get top-k values and their indices
-    top_k_logits, _ = jax.lax.top_k(logits, top_k)
-    # Set threshold to the k-th largest value
-    threshold = top_k_logits[..., -1, None]
-    # Set all values below threshold to -inf
-    return jnp.where(logits < threshold, -jnp.inf, logits)
-
-
-def apply_top_p(logits: jax.Array, top_p: float) -> jax.Array:
-    """Apply top-p (nucleus) filtering to logits."""
-    if top_p >= 1.0:
-        return logits
-    if top_p <= 0.0:
-        # top_p=0 means no probability mass is allowed, set all to -inf
-        return jnp.full_like(logits, -jnp.inf)
-
-    # Sort logits in descending order
-    sorted_logits = jnp.sort(logits, axis=-1)[..., ::-1]
-    # Compute softmax probabilities
-    sorted_probs = jax.nn.softmax(sorted_logits, axis=-1)
-    # Compute cumulative probabilities
-    cumsum_probs = jnp.cumsum(sorted_probs, axis=-1)
-    # Find cutoff point where cumulative probability exceeds top_p
-    cutoff = jnp.sum(cumsum_probs <= top_p, axis=-1, keepdims=True)
-    # Get threshold value
-    threshold = jnp.take_along_axis(sorted_logits, cutoff, axis=-1)
-    # Set all values below threshold to -inf
-    return jnp.where(logits < threshold, -jnp.inf, logits)
-
-
 def sample_token(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
     """Sample next token from logits using temperatures."""
     temperatures = temperatures[:, None]

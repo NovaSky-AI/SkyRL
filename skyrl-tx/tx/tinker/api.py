@@ -262,24 +262,10 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        # Validate parameter ranges
-        if self.top_k < -1:
-            raise HTTPException(status_code=400, detail="top_k must be >= -1")
-        if self.top_p <= 0 or self.top_p > 1:
-            raise HTTPException(status_code=400, detail="top_p must be greater than 0 and less than or equal to 1")
-        if self.temperature < 0:
-            raise HTTPException(status_code=400, detail="temperature must be >= 0")
-
-        # Validate stop parameter
-        if self.stop is not None:
-            if not isinstance(self.stop, (list, tuple)):
-                raise HTTPException(status_code=400, detail="stop must be a sequence of token IDs")
-            if not all(isinstance(token_id, int) and token_id >= 0 for token_id in self.stop):
-                raise HTTPException(status_code=400, detail="stop must contain only non-negative integer token IDs")
-
-        # Validate that top_k and top_p are not both set to non-default values
-        if self.top_k != -1 and self.top_p != 1.0:
-            raise HTTPException(status_code=400, detail="Cannot use both top_k and top_p simultaneously")
+        if self.top_k != -1:
+            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
+        if self.top_p != 1.0:
+            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
 
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
@@ -289,8 +275,6 @@ class SamplingParams(BaseModel):
             max_tokens=self.max_tokens,
             seed=seed,
             stop=self.stop,
-            top_k=self.top_k,
-            top_p=self.top_p,
         )
 
 
