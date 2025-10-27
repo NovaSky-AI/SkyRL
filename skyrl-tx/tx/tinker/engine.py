@@ -36,7 +36,6 @@ from tx.utils.models import (
 )
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
-from tx.models.outputs import CausalLMOutput
 
 
 @dataclass
