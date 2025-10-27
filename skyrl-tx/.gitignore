@@ -76,3 +76,13 @@ Thumbs.db
 # Local artifacts
 tinker.db
 uv.lock
+
+# Alembic - don't track migrations or pycache
+tx/tinker/alembic/__pycache__/
+tx/tinker/alembic/versions/
+
+# SQLite databases (tracked in git by default, but ignore if created locally)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

@@ -24,7 +24,6 @@ from tx.tinker.db_models import (
     CheckpointStatus,
     get_async_database_url,
 )
-from tx.tinker.migrate import run_migrations_on_startup
 from tx.utils.storage import download_file
 from tx.utils.log import logger
 
@@ -37,15 +36,11 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    # Run database migrations
-    logger.info("Running database migrations...")
-    run_migrations_on_startup()
-    logger.info("Database migrations completed")
-
     # Get database URL from config or environment
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
 
+    # Create tables automatically from SQLModel definitions
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
