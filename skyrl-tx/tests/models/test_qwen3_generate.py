@@ -19,7 +19,7 @@ def test_qwen3_generate():
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
-    inputs = ["My name is", "The capital of France is"]
+    inputs = ["My name is", "The capital of France is", "Test stopping"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     # Generate with HuggingFace (reference)
@@ -46,6 +46,7 @@ def test_qwen3_generate():
         sampling_params = [
             types.SamplingParams(max_tokens=10, temperature=0.0, seed=42),
             types.SamplingParams(max_tokens=20, temperature=0.0, seed=42),
+            types.SamplingParams(max_tokens=50, temperature=0.0, seed=42, stop=[6149]),
         ]
         result = model.generate(
             batch.input_ids.numpy(),
@@ -57,6 +58,12 @@ def test_qwen3_generate():
         for i, (our_tokens, hf_tokens, sampling_param) in enumerate(
             zip(result.generated_ids, hf_output.sequences, sampling_params)
         ):
+            # Skip comparison for sequences with stop tokens (HF doesn't support per-sequence stops)
+            if sampling_param.stop:
+                assert result.stop_reasons[i] == "stop"
+                assert our_tokens[-1] in sampling_param.stop
+                continue
+
             prompt_length = batch.input_ids.shape[1]
             hf_tokens_truncated = hf_tokens[prompt_length : prompt_length + sampling_param.max_tokens].tolist()
             assert our_tokens == hf_tokens_truncated, (
