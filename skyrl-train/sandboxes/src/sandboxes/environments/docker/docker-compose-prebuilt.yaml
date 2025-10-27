@@ -4,15 +4,21 @@ services:
     command: [ "sh", "-c", "sleep infinity" ]
     environment:
       - TEST_DIR=${TEST_DIR}
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - BLIS_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
     volumes:
       - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
       - ${HOST_AGENT_LOGS_PATH}:${ENV_AGENT_LOGS_PATH}
+    pids_limit: 10000
     deploy:
       resources:
         limits:
           cpus: '4.0'
           memory: 4G
-          pids: 100
+          pids: 10000
         reservations:
           cpus: '1'
           memory: 512M
@@ -21,8 +27,8 @@ services:
         soft: 65536
         hard: 65536
       nproc:
-        soft: 2048
-        hard: 4096
+        soft: 65536
+        hard: 65536
     security_opt:
       - no-new-privileges:true
     read_only: false

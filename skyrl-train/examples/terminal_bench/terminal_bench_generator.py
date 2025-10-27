@@ -100,6 +100,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # All LLM requests in this trial will share the same session_id
         session_id = uuid4().hex
 
+        print("trial path: ", self.trials_dir)
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
@@ -131,7 +132,8 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         trial = Trial(trial_config)
         # Run the trial
-        for retry in range(3):
+        # for retry in range(3):
+        while True: 
             try:
                 results = await trial.run()
                 print(f"Results: {results}")
@@ -139,22 +141,26 @@ class TerminalBenchGenerator(GeneratorInterface):
                     print(f"[WARNING] Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
-                
-                if "all_messages" not in results.agent_result.metadata:
+                agent_result = getattr(results, "agent_result", None)
+                metadata = getattr(agent_result, "metadata", None)
+                if agent_result and "all_messages" not in results.agent_result.metadata:
                     print(f"[WARNING] No 'all_messages' in agent_result.metadata for agent. Exception info: {results.agent_result}")
                     continue
 
-                chat_history = results.agent_result.metadata["all_messages"]
-                if len(chat_history) > 0:
+                # chat_history = results.agent_result.metadata["all_messages"]
+                chat_history = metadata.get("all_messages") or []
+                if agent_result and len(chat_history) > 0:
                     break
                 else:
                     print(f"[WARNING] Agent {self.agent_name} did not return a response")
             except Exception as e:
                 print(f"Error running trial: {e}")
+                
                 continue
-        
-        if retry == 2:
-            return None
+
+
+        # if retry == 2:
+        #     return None
 
         # Use the first message as the prompt
         prompt = [chat_history[0]]
@@ -211,8 +217,6 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
-        print("number of reponse tokens", len(response_ids))
-        # import pdb; pdb.set_trace()
 
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:

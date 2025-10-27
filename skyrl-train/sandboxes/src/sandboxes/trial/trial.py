@@ -344,6 +344,7 @@ class Trial:
                 self._maybe_populate_agent_context()
 
             except AgentTimeoutError as e:
+                logger.error(f"AgentTimeoutError occurred: {e}")
                 self._result.exception_info = ExceptionInfo.from_exception(e)
                 self._trial_paths.exception_message_path.write_text(
                     traceback.format_exc()

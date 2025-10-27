@@ -24,7 +24,11 @@ from sandboxes.models.agent.context import AgentContext
 from sandboxes.models.agent.name import AgentName
 from sandboxes.models.trial.paths import EnvironmentPaths
 from sandboxes.utils.logger import logger
+import torch
 
+# import litellm
+# litellm._turn_on_debug()
+# litellm.register_model("https://github.com/Harryllh/SkyRL/blob/liheng-sandboxes/skyrl-train/examples/terminal_bench/litellm.json")
 
 @dataclass
 class Command:
@@ -652,12 +656,17 @@ so ask everything you need to know."""
 
             logging_paths = self._setup_episode_logging(logging_dir, episode)
 
+            num_gpus = torch.cuda.device_count()
+            if num_gpus < 8:
+                print(f"Number of available GPUs: {num_gpus}")
+
             llm_start = time.perf_counter()
             commands, is_task_complete, feedback = await self._handle_llm_interaction(
                 chat, prompt, logging_paths, original_instruction, self._session
             )
             llm_end = time.perf_counter()
             llm_time = llm_end - llm_start
+            self._logger.info(f"Episode {episode}: llm_interaction finished in {llm_time} seconds")
 
             self._context.n_input_tokens += chat.total_input_tokens
             self._context.n_output_tokens += chat.total_output_tokens
