@@ -9,9 +9,6 @@ from sqlalchemy.engine import url as sqlalchemy_url
 
 from tx.tinker import types
 
-# SQLite database path (default)
-DB_PATH = Path(__file__).parent / "tinker.db"
-
 
 def get_database_url(db_url: str | None = None) -> str:
     """Get the database URL from environment variable or parameter.
@@ -31,13 +28,7 @@ def get_database_url(db_url: str | None = None) -> str:
     if db_url:
         return db_url
 
-    # Check environment variable
-    env_url = os.environ.get("TX_DATABASE_URL")
-    if env_url:
-        return env_url
-
-    # Default to SQLite
-    return f"sqlite:///{DB_PATH}"
+    return os.environ.get("TX_DATABASE_URL", f'sqlite:///{Path(__file__).parent / "tinker.db"}')
 
 
 def get_async_database_url(db_url: str | None = None) -> str:
