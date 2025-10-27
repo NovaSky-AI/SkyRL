@@ -40,7 +40,7 @@ class KVCache:
 
 
 @dataclass
-class GenerateResult:
+class GenerateOutput:
     """Result from autoregressive text generation.
 
     Attributes:
@@ -99,14 +99,14 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
-    ) -> GenerateResult:
+    ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
         Args:
             max_length: Maximum sequence length for fixed-size buffers (default: 512).
 
         Returns:
-            GenerateResult containing generated_ids, stop_reasons, and optionally scores.
+            GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
         """
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
@@ -121,7 +121,7 @@ class GeneratorMixin:
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
-        kv_cache = outputs["kv_cache"].pad_to_length(max_length)
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         def scan_fn(carry, _):
             kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs = carry
@@ -145,9 +145,9 @@ class GeneratorMixin:
                 adapter_indices=adapter_indices,
             )
 
-            new_logits = outputs["logits"][:, -1, :]
+            new_logits = outputs.logits[:, -1, :]
             new_carry = (
-                outputs["kv_cache"],
+                outputs.kv_cache,
                 rng,
                 generated_ids,
                 attention_mask,
@@ -161,7 +161,7 @@ class GeneratorMixin:
         pad_length = max_length - prompt_length
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
-        all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs["logits"].dtype)
+        all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
 
         initial_carry = (
             kv_cache,
@@ -169,7 +169,7 @@ class GeneratorMixin:
             generated_ids,
             attention_mask,
             positions[:, -1:],
-            outputs["logits"][:, -1, :],
+            outputs.logits[:, -1, :],
             all_logprobs,
         )
         (kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs), _ = jax.lax.scan(
@@ -182,7 +182,7 @@ class GeneratorMixin:
         )
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
-        return GenerateResult(
+        return GenerateOutput(
             generated_ids=[
                 generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
                 for i, sampling_param in enumerate(sampling_params)
