@@ -23,10 +23,8 @@ See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-proje
 
 ### ✅ Implemented
 - **Training**: LoRA fine-tuning with gradient accumulation
-- **Inference**: Text generation with advanced sampling parameters
+- **Inference**: Text generation with
   - Temperature sampling
-  - Top-k sampling
-  - Top-p (nucleus) sampling
   - Stop token support
 - **API**: REST API compatible with Tinker specification
 - **Models**: Support for various transformer architectures
