@@ -17,6 +17,7 @@ class EngineConfig(BaseModel):
     database_url: str | None = Field(
         default=None,
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
+        json_schema_extra={"argparse_type": str},
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
@@ -55,17 +56,12 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             # For boolean flags, use BooleanOptionalAction to support both --{arg_name} and --no-{arg_name}
             kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": field.default}
         else:
-            # Add type if available
-            if field.annotation is not None:
-                # Handle Union types (e.g., str | None)
-                origin = typing.get_origin(field.annotation)
-                if origin is typing.Union:
-                    # Get the non-None type from the union
-                    args = typing.get_args(field.annotation)
-                    if type(None) in args:
-                        kwargs["type"] = next((arg for arg in args if arg is not type(None)), None)
-                elif callable(field.annotation):
-                    kwargs["type"] = field.annotation
+            # Check if explicit argparse_type is specified in field metadata
+            argparse_type = field.json_schema_extra.get("argparse_type") if field.json_schema_extra else None
+            if argparse_type is not None:
+                kwargs["type"] = argparse_type
+            elif field.annotation is not None:
+                kwargs["type"] = field.annotation
 
             # Check for default value
             if field.is_required():
