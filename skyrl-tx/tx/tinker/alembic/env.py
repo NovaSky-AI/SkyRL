@@ -1,9 +1,7 @@
 from logging.config import fileConfig
-import os
 import sys
 from pathlib import Path
 
-from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
@@ -13,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 # Import SQLModel and database models
 from sqlmodel import SQLModel
-from tx.tinker.db_models import ModelDB, FutureDB, CheckpointDB, get_database_url
+from tx.tinker.db_models import get_database_url
 from dotenv import load_dotenv
 
 # Load .env file if it exists
@@ -73,22 +71,20 @@ def run_migrations_online() -> None:
 
     """
     from sqlalchemy import create_engine
-    
+
     # Get database URL - ignore whatever is in config, use our helper
     db_url = get_database_url()
-    
+
     # Convert async URLs to sync for Alembic
     if "+aiosqlite" in db_url:
         db_url = db_url.replace("+aiosqlite", "")
     elif "+asyncpg" in db_url:
         db_url = db_url.replace("+asyncpg", "")
-    
+
     connectable = create_engine(db_url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()
