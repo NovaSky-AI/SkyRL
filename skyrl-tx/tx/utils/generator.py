@@ -86,10 +86,8 @@ def next_token_and_logprobs(
     stop_pos: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sample next token and compute logprobs, updating the logprobs array."""
-    # Split each per-example key into (next_key, sample_key) in a vectorized way
-    sample_pairs = jax.vmap(lambda k: jax.random.split(k, 2))(rngs)
-    next_rngs, sample_keys = sample_pairs[:, 0, :], sample_pairs[:, 1, :]
-
+    split_keys = jax.vmap(jax.random.split)(rngs)
+    next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
     next_token = batched_sample_token(logits, temperatures=temperatures, sample_keys=sample_keys)
 
     logprobs = jax.nn.log_softmax(logits, axis=-1)
