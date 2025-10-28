@@ -1,11 +1,11 @@
 from types import SimpleNamespace
 
 import jax.numpy as jnp
-import tx.utils.generator
 from tx.tinker.types import SamplingParams
+from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache
 
 
-class DummyModel(tx.utils.generator.GeneratorMixin):
+class DummyModel(GeneratorMixin):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
 
@@ -19,13 +19,11 @@ class DummyModel(tx.utils.generator.GeneratorMixin):
             logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
-            kv_cache = tx.utils.generator.KVCache(keys=keys, values=values, cache_position=seq_len)
+            kv_cache = KVCache(keys=keys, values=values, cache_position=seq_len)
         else:
             # Step: logits vary with cache_position
             logits = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
-            kv_cache = tx.utils.generator.KVCache(
-                keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1
-            )
+            kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
         return SimpleNamespace(logits=logits, kv_cache=kv_cache)
 
@@ -36,12 +34,7 @@ def make_inputs(batch_size: int, prompt_length: int):
     return input_ids, attention_mask
 
 
-def generator_outputs_equal(
-    output1: tx.utils.generator.GenerateOutput,
-    index1: int,
-    output2: tx.utils.generator.GenerateOutput,
-    index2: int,
-) -> bool:
+def generator_outputs_equal(output1: GenerateOutput, index1: int, output2: GenerateOutput, index2: int) -> bool:
     """Check if two GenerateOutput objects are equal at the given indices."""
     return (
         output1.generated_ids[index1] == output2.generated_ids[index2]
