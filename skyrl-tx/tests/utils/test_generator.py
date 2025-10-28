@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import jax.numpy as jnp
 import tx.utils.generator
+from tx.tinker.types import SamplingParams
 
 
 class DummyModel(tx.utils.generator.GeneratorMixin):
@@ -40,15 +41,11 @@ def make_inputs(batch_size: int, prompt_length: int):
     return input_ids, attention_mask
 
 
-def make_sampling_param(max_tokens: int, temperature: float, seed: int, stop=None):
-    return SimpleNamespace(max_tokens=max_tokens, temperature=temperature, seed=seed, stop=stop)
-
-
 def test_deterministic_generation():
     """Repeated generation with same seed should be deterministic."""
     model = DummyModel(vocab_size=8)
     input_ids, attention_mask = make_inputs(batch_size=1, prompt_length=3)
-    sampling = make_sampling_param(max_tokens=4, temperature=1.0, seed=12345)
+    sampling = SamplingParams(max_tokens=4, temperature=1.0, seed=12345)
 
     res1 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
     res2 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
@@ -63,8 +60,8 @@ def test_batch_independence():
     model = DummyModel(vocab_size=12)
     input_ids, attention_mask = make_inputs(batch_size=2, prompt_length=4)
 
-    sp1 = make_sampling_param(max_tokens=5, temperature=1.0, seed=111)
-    sp2 = make_sampling_param(max_tokens=5, temperature=1.0, seed=222)
+    sp1 = SamplingParams(max_tokens=5, temperature=1.0, seed=111)
+    sp2 = SamplingParams(max_tokens=5, temperature=1.0, seed=222)
 
     batch_result = model.generate(input_ids, attention_mask, sampling_params=[sp1, sp2])
 
@@ -80,8 +77,8 @@ def test_greedy_vs_sampled():
     model = DummyModel(vocab_size=10)
     input_ids, attention_mask = make_inputs(batch_size=2, prompt_length=2)
 
-    sp_greedy = make_sampling_param(max_tokens=3, temperature=0.0, seed=999)
-    sp_sample = make_sampling_param(max_tokens=3, temperature=1.0, seed=2020)
+    sp_greedy = SamplingParams(max_tokens=3, temperature=0.0, seed=999)
+    sp_sample = SamplingParams(max_tokens=3, temperature=1.0, seed=2020)
 
     batch_result = model.generate(input_ids, attention_mask, sampling_params=[sp_greedy, sp_sample])
 
