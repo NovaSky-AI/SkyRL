@@ -177,11 +177,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if not getattr(torch.distributed, "_broadcast_no_grad", False):
             _orig_broadcast = torch.distributed.broadcast
-            
+
             def _broadcast_no_grad(*args, **kwargs):
                 with torch.no_grad():
                     return _orig_broadcast(*args, **kwargs)
-            
+
             torch.distributed.broadcast = _broadcast_no_grad
             torch.distributed._broadcast_no_grad = True
 
