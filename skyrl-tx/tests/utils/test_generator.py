@@ -34,14 +34,10 @@ class DummyModel(tx.utils.generator.GeneratorMixin):
             )
 
 
-def make_attention_mask(batch_size: int, prompt_length: int):
-    return jnp.ones((batch_size, prompt_length), dtype=jnp.int32)
-
-
-def make_input_ids(batch_size: int, prompt_length: int):
-    ids = jnp.arange(prompt_length, dtype=jnp.int32)
-    ids = jnp.tile(ids[None, :], (batch_size, 1))
-    return ids
+def make_inputs(batch_size: int, prompt_length: int):
+    input_ids = jnp.tile(jnp.arange(prompt_length, dtype=jnp.int32)[None, :], (batch_size, 1))
+    attention_mask = jnp.ones((batch_size, prompt_length), dtype=jnp.int32)
+    return input_ids, attention_mask
 
 
 def make_sampling_param(max_tokens: int, temperature: float, seed: int, stop=None):
@@ -53,8 +49,7 @@ def test_deterministic_generation():
     model = DummyModel(vocab_size=8)
 
     prompt_len = 3
-    input_ids = make_input_ids(batch_size=1, prompt_length=prompt_len)
-    attention_mask = make_attention_mask(batch_size=1, prompt_length=prompt_len)
+    input_ids, attention_mask = make_inputs(batch_size=1, prompt_length=prompt_len)
 
     sampling = make_sampling_param(max_tokens=4, temperature=1.0, seed=12345)
 
@@ -72,8 +67,7 @@ def test_batch_independence():
 
     prompt_len = 4
     batch_size = 2
-    input_ids = make_input_ids(batch_size=batch_size, prompt_length=prompt_len)
-    attention_mask = make_attention_mask(batch_size=batch_size, prompt_length=prompt_len)
+    input_ids, attention_mask = make_inputs(batch_size=batch_size, prompt_length=prompt_len)
 
     sp1 = make_sampling_param(max_tokens=5, temperature=1.0, seed=111)
     sp2 = make_sampling_param(max_tokens=5, temperature=1.0, seed=222)
@@ -92,8 +86,7 @@ def test_greedy_vs_sampled():
     model = DummyModel(vocab_size=10)
 
     prompt_len = 2
-    input_ids = make_input_ids(batch_size=2, prompt_length=prompt_len)
-    attention_mask = make_attention_mask(batch_size=2, prompt_length=prompt_len)
+    input_ids, attention_mask = make_inputs(batch_size=2, prompt_length=prompt_len)
 
     sp_greedy = make_sampling_param(max_tokens=3, temperature=0.0, seed=999)
     sp_sample = make_sampling_param(max_tokens=3, temperature=1.0, seed=2020)
