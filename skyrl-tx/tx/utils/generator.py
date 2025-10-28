@@ -204,10 +204,11 @@ class GeneratorMixin:
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 
         # Compute end position for each sequence: stop_pos + 1 if stopped, else prompt_length + max_tokens
-        end_positions = [
-            stop_pos[i, 0] + 1 if stop_pos[i, 0] >= 0 else prompt_length + sampling_param.max_tokens
-            for i, sampling_param in enumerate(sampling_params)
-        ]
+        end_positions = jnp.where(
+            stop_pos[:, 0] >= 0,
+            stop_pos[:, 0] + 1,
+            prompt_length + jnp.array([sp.max_tokens for sp in sampling_params]),
+        )
 
         return GenerateOutput(
             generated_ids=[generated_ids[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
