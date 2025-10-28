@@ -15,7 +15,6 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
-from tx import models
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
 
@@ -39,10 +38,11 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
+    import tx.models
 
     for architecture in config.architectures or []:
-        if hasattr(models, architecture):
-            return getattr(models, architecture)
+        if hasattr(tx.models, architecture):
+            return getattr(tx.models, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
@@ -112,7 +112,7 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath):
+def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
@@ -130,7 +130,7 @@ def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, che
 
 
 def save_lora_checkpoint(
-    model: models.Qwen3ForCausalLM, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
+    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
