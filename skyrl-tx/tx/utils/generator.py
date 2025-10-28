@@ -8,7 +8,6 @@ from jax import lax
 import jax.numpy as jnp
 
 from tx.tinker import types
-from tx.utils.cache import KVCache
 from tx.utils.math import round_up_seq_len
 
 
