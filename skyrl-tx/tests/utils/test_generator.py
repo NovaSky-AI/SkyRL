@@ -36,6 +36,20 @@ def make_inputs(batch_size: int, prompt_length: int):
     return input_ids, attention_mask
 
 
+def generator_outputs_equal(
+    output1: tx.utils.generator.GenerateOutput,
+    index1: int,
+    output2: tx.utils.generator.GenerateOutput,
+    index2: int,
+) -> bool:
+    """Check if two GenerateOutput objects are equal at the given indices."""
+    return (
+        output1.generated_ids[index1] == output2.generated_ids[index2]
+        and jnp.allclose(jnp.array(output1.logprobs[index1]), jnp.array(output2.logprobs[index2]))
+        and output1.stop_reasons[index1] == output2.stop_reasons[index2]
+    )
+
+
 def test_deterministic_generation():
     """Repeated generation with same seed should be deterministic."""
     model = DummyModel(vocab_size=8)
@@ -45,9 +59,7 @@ def test_deterministic_generation():
     res1 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
     res2 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
 
-    assert res1.generated_ids == res2.generated_ids
-    assert res1.logprobs == res2.logprobs
-    assert res1.stop_reasons == res2.stop_reasons
+    assert generator_outputs_equal(res1, 0, res2, 0)
 
 
 def test_batch_independence():
@@ -63,8 +75,8 @@ def test_batch_independence():
     res_a = model.generate(input_ids[:1], attention_mask[:1], sampling_params=[sp1])
     res_b = model.generate(input_ids[1:], attention_mask[1:], sampling_params=[sp2])
 
-    assert batch_result.generated_ids[0] == res_a.generated_ids[0]
-    assert batch_result.generated_ids[1] == res_b.generated_ids[0]
+    assert generator_outputs_equal(batch_result, 0, res_a, 0)
+    assert generator_outputs_equal(batch_result, 1, res_b, 0)
 
 
 def test_greedy_vs_sampled():
@@ -80,5 +92,5 @@ def test_greedy_vs_sampled():
     single_greedy = model.generate(input_ids[:1], attention_mask[:1], sampling_params=[sp_greedy])
     single_sample = model.generate(input_ids[1:], attention_mask[1:], sampling_params=[sp_sample])
 
-    assert batch_result.generated_ids[0] == single_greedy.generated_ids[0]
-    assert batch_result.generated_ids[1] == single_sample.generated_ids[0]
+    assert generator_outputs_equal(batch_result, 0, single_greedy, 0)
+    assert generator_outputs_equal(batch_result, 1, single_sample, 0)
