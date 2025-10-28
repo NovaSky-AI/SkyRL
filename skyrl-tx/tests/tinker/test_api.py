@@ -184,7 +184,7 @@ def test_sample(service_client, use_lora):
         assert sample_result is not None
         assert len(sample_result.sequences) == num_samples
         assert len(sample_result.sequences[0].tokens) == max_tokens
-    
+
     # Test stop tokens: generate once, then use the 5th token as a stop token
     initial_result = sampling_client.sample(
         prompt=prompt,
@@ -202,6 +202,7 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
+
 
 def test_database_schema_with_sqlite():
     """Test that SQLModel creates the correct database schema with SQLite."""
@@ -310,4 +311,3 @@ def test_alembic_history():
 
     # Should work even with no migrations
     assert result.returncode == 0, f"Alembic history failed: {result.stderr}"
-    
