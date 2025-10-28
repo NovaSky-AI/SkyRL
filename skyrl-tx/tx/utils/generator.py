@@ -7,8 +7,8 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
+import tx.utils.models
 from tx.tinker import types
-from tx.utils.math import round_up_seq_len
 
 
 @dataclass
@@ -105,7 +105,7 @@ class GeneratorMixin:
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
-        max_length = round_up_seq_len(prompt_length + max_new_tokens)
+        max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
