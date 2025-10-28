@@ -47,10 +47,7 @@ def make_sampling_param(max_tokens: int, temperature: float, seed: int, stop=Non
 def test_deterministic_generation():
     """Repeated generation with same seed should be deterministic."""
     model = DummyModel(vocab_size=8)
-
-    prompt_len = 3
-    input_ids, attention_mask = make_inputs(batch_size=1, prompt_length=prompt_len)
-
+    input_ids, attention_mask = make_inputs(batch_size=1, prompt_length=3)
     sampling = make_sampling_param(max_tokens=4, temperature=1.0, seed=12345)
 
     res1 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
@@ -64,10 +61,7 @@ def test_deterministic_generation():
 def test_batch_independence():
     """Batch generation should be equivalent to individual generation with same seeds."""
     model = DummyModel(vocab_size=12)
-
-    prompt_len = 4
-    batch_size = 2
-    input_ids, attention_mask = make_inputs(batch_size=batch_size, prompt_length=prompt_len)
+    input_ids, attention_mask = make_inputs(batch_size=2, prompt_length=4)
 
     sp1 = make_sampling_param(max_tokens=5, temperature=1.0, seed=111)
     sp2 = make_sampling_param(max_tokens=5, temperature=1.0, seed=222)
@@ -84,9 +78,7 @@ def test_batch_independence():
 def test_greedy_vs_sampled():
     """Greedy and sampled generation should be independent in batch."""
     model = DummyModel(vocab_size=10)
-
-    prompt_len = 2
-    input_ids, attention_mask = make_inputs(batch_size=2, prompt_length=prompt_len)
+    input_ids, attention_mask = make_inputs(batch_size=2, prompt_length=2)
 
     sp_greedy = make_sampling_param(max_tokens=3, temperature=0.0, seed=999)
     sp_sample = make_sampling_param(max_tokens=3, temperature=1.0, seed=2020)
