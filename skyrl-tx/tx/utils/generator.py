@@ -59,13 +59,10 @@ def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_k
     temperatures = temperatures[:, None]
     zero_temp_mask = temperatures == 0.0
     scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
-
     # Draw one sample per example
     sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
-    sampled = sampled[:, None]  # [batch_size] -> [batch_size, 1]
-
-    greedy = jnp.argmax(logits, axis=-1)[:, None]
-    next_token = jnp.where(zero_temp_mask, greedy, sampled)
+    greedy = jnp.argmax(logits, axis=-1)
+    next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
     return next_token
 
 
@@ -82,20 +79,16 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
 def next_token_and_logprobs(
     logits: jax.Array,
     temperatures: jax.Array,
-    rngs: jax.Array,
+    rngs: jax.Array,  # Shape [B, key_dim]
     all_logprobs: jax.Array,
     cache_position: int,
     stop_tokens: jax.Array,
     stop_pos: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Sample next token and compute logprobs, updating the logprobs array.
-
-    Accepts one PRNGKey per batch element (rngs shape [B, key_dim]).
-    """
+    """Sample next token and compute logprobs, updating the logprobs array."""
     # Split each per-example key into (next_key, sample_key) in a vectorized way
     sample_pairs = jax.vmap(lambda k: jax.random.split(k, 2))(rngs)
-    next_rngs = sample_pairs[:, 0, :]
-    sample_keys = sample_pairs[:, 1, :]
+    next_rngs, sample_keys = sample_pairs[:, 0, :], sample_pairs[:, 1, :]
 
     next_token = batched_sample_token(logits, temperatures=temperatures, sample_keys=sample_keys)
 
