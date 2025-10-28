@@ -113,7 +113,7 @@ class GeneratorMixin:
         # per-request streams will be identical.
         seeds = [sampling_param.seed for sampling_param in sampling_params]
         seeds_arr = jnp.array(seeds)
-        rngs = jax.vmap(lambda s: jax.random.PRNGKey(s))(seeds_arr)
+        rngs = jax.vmap(jax.random.PRNGKey)(seeds_arr)
 
         # Extract stop tokens and pad to same length
         max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
