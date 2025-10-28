@@ -57,15 +57,14 @@ def make_datum(tokenizer, prompt: str, completion: str, weight: tuple[float, flo
     all_tokens = prompt_tokens + completion_tokens
     target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
 
-    loss_fn_inputs = {"target_tokens": target_tokens[:-1]}
-
+    loss_fn_inputs = {"target_tokens": target_tokens}
     if weight is not None:
         prompt_weight, completion_weight = weight
-        weights = [prompt_weight] * len(prompt_tokens) + [completion_weight] * len(completion_tokens)
-        loss_fn_inputs["weights"] = weights[:-1]
+        all_weights = [prompt_weight] * len(prompt_tokens) + [completion_weight] * len(completion_tokens)
+        loss_fn_inputs["weights"] = all_weights[1:] + [completion_weight]
 
     return types.Datum(
-        model_input=types.ModelInput.from_ints(all_tokens[:-1]),
+        model_input=types.ModelInput.from_ints(all_tokens),
         loss_fn_inputs=loss_fn_inputs,
     )
 
