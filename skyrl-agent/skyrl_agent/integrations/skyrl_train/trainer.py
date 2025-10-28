@@ -274,8 +274,8 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
-        self.global_step += 1  # start training at global_step 1
         start_epoch = self.global_step // len(self.train_dataloader)
+        self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
