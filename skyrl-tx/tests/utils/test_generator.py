@@ -12,27 +12,21 @@ class DummyModel(tx.utils.generator.GeneratorMixin):
     def __call__(self, input_ids, attention_mask=None, positions=None, kv_cache=None, adapter_indices=None):
         """Simple dummy model for testing generator behavior."""
         batch_size, seq_len = input_ids.shape
+        base = jnp.arange(self.vocab_size, dtype=jnp.float32)
 
         if kv_cache is None:
             # Prefill: deterministic logits
-            base = jnp.arange(self.vocab_size, dtype=jnp.float32)
-            logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1)).astype(jnp.float32)
+            logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
-            cache_position = seq_len
-            return SimpleNamespace(
-                logits=logits,
-                kv_cache=tx.utils.generator.KVCache(keys=keys, values=values, cache_position=cache_position),
-            )
+            kv_cache = tx.utils.generator.KVCache(keys=keys, values=values, cache_position=seq_len)
         else:
             # Step: logits vary with cache_position
-            pos = kv_cache.cache_position
-            base = jnp.arange(self.vocab_size, dtype=jnp.float32) + pos.astype(jnp.float32)
-            logits = jnp.tile(base[None, None, :], (batch_size, 1, 1)).astype(jnp.float32)
-            return SimpleNamespace(
-                logits=logits,
-                kv_cache=tx.utils.generator.KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=pos + 1),
-            )
+            logits = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
+            kv_cache = tx.utils.generator.KVCache(keys=kv_cache.keys, values=kv_cache.values,
+                                                   cache_position=kv_cache.cache_position + 1)
+
+        return SimpleNamespace(logits=logits, kv_cache=kv_cache)
 
 
 def make_inputs(batch_size: int, prompt_length: int):
