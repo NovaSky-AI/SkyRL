@@ -1,11 +1,10 @@
 from types import SimpleNamespace
 
 import jax.numpy as jnp
+import tx.utils.generator
 
-from tx.utils.generator import GeneratorMixin, KVCache
 
-
-class DummyModel(GeneratorMixin):
+class DummyModel(tx.utils.generator.GeneratorMixin):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
 
@@ -21,7 +20,8 @@ class DummyModel(GeneratorMixin):
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             cache_position = seq_len
             return SimpleNamespace(
-                logits=logits, kv_cache=KVCache(keys=keys, values=values, cache_position=cache_position)
+                logits=logits,
+                kv_cache=tx.utils.generator.KVCache(keys=keys, values=values, cache_position=cache_position),
             )
         else:
             # Step: logits vary with cache_position
@@ -29,7 +29,8 @@ class DummyModel(GeneratorMixin):
             base = jnp.arange(self.vocab_size, dtype=jnp.float32) + pos.astype(jnp.float32)
             logits = jnp.tile(base[None, None, :], (batch_size, 1, 1)).astype(jnp.float32)
             return SimpleNamespace(
-                logits=logits, kv_cache=KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=pos + 1)
+                logits=logits,
+                kv_cache=tx.utils.generator.KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=pos + 1),
             )
 
 
