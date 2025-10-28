@@ -2,8 +2,7 @@ from types import SimpleNamespace
 
 import jax.numpy as jnp
 
-from tx.utils.generator import GeneratorMixin
-from tx.utils.cache import KVCache
+from tx.utils.generator import GeneratorMixin, KVCache
 
 
 class DummyModel(GeneratorMixin):

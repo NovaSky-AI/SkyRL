@@ -22,8 +22,10 @@ class KVCache:
 
     def pad_to_length(self, max_length: int) -> KVCache:
         """Pad KV cache to a specified maximum length.
+
         Args:
             max_length: Target length to pad the cache to.
+
         Returns:
             New KVCache with padded keys and values.
         """
@@ -137,8 +139,7 @@ class GeneratorMixin:
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
         # per-request streams will be identical.
         seeds = [sampling_param.seed for sampling_param in sampling_params]
-        seeds_arr = jnp.array(seeds)
-        rngs = jax.vmap(jax.random.PRNGKey)(seeds_arr)
+        rngs = jax.vmap(jax.random.PRNGKey)(jnp.array(seeds))
 
         # Extract stop tokens and pad to same length
         max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
