@@ -7,36 +7,9 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
-import tx.utils.models
 from tx.tinker import types
-
-
-@jax.tree_util.register_dataclass
-@dataclass
-class KVCache:
-    """Key-value cache for all layers, each entry in the list corresponds to one layer."""
-
-    keys: list[jax.Array]
-    values: list[jax.Array]
-    cache_position: int
-
-    def pad_to_length(self, max_length: int) -> KVCache:
-        """Pad KV cache to a specified maximum length.
-
-        Args:
-            max_length: Target length to pad the cache to.
-
-        Returns:
-            New KVCache with padded keys and values.
-        """
-        # k and v have shape [B, T, num_heads, head_dim]
-        cache_pad_length = max_length - self.keys[0].shape[1]
-        pad_spec = ((0, 0), (0, cache_pad_length), (0, 0), (0, 0))
-        return KVCache(
-            keys=[jnp.pad(k, pad_spec) for k in self.keys],
-            values=[jnp.pad(v, pad_spec) for v in self.values],
-            cache_position=self.cache_position,
-        )
+from tx.utils.cache import KVCache
+from tx.utils.math import round_up_seq_len
 
 
 @dataclass
@@ -54,12 +27,16 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
-def sample_token(logits: jax.Array, *, temperatures: jax.Array, key: jax.Array) -> jax.Array:
-    """Sample next token from logits using temperatures."""
+def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
+    """Sample next token per-example using a per-example PRNGKey."""
     temperatures = temperatures[:, None]
     zero_temp_mask = temperatures == 0.0
     scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
-    sampled = jax.random.categorical(key, scaled_logits, axis=-1)[:, None]
+
+    # Draw one sample per example
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
+    sampled = sampled[:, None]  # [batch_size] -> [batch_size, 1]
+
     greedy = jnp.argmax(logits, axis=-1)[:, None]
     next_token = jnp.where(zero_temp_mask, greedy, sampled)
     return next_token
@@ -78,15 +55,22 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
 def next_token_and_logprobs(
     logits: jax.Array,
     temperatures: jax.Array,
-    rng: jax.Array,
+    rngs: jax.Array,
     all_logprobs: jax.Array,
     cache_position: int,
     stop_tokens: jax.Array,
     stop_pos: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Sample next token and compute logprobs, updating the logprobs array."""
-    rng, sample_key = jax.random.split(rng)
-    next_token = sample_token(logits, temperatures=temperatures, key=sample_key)
+    """Sample next token and compute logprobs, updating the logprobs array.
+
+    Accepts one PRNGKey per batch element (rngs shape [B, key_dim]).
+    """
+    # Split each per-example key into (next_key, sample_key) in a vectorized way
+    sample_pairs = jax.vmap(lambda k: jax.random.split(k, 2))(rngs)
+    next_rngs = sample_pairs[:, 0, :]
+    sample_keys = sample_pairs[:, 1, :]
+
+    next_token = batched_sample_token(logits, temperatures=temperatures, sample_keys=sample_keys)
 
     logprobs = jax.nn.log_softmax(logits, axis=-1)
     sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
@@ -97,7 +81,7 @@ def next_token_and_logprobs(
     # Only update stop_pos if not already stopped (stop_pos == -1)
     stop_pos = jnp.where((stop_pos == -1) & is_stop, cache_position, stop_pos)
 
-    return rng, next_token, all_logprobs, stop_pos
+    return next_rngs, next_token, all_logprobs, stop_pos
 
 
 class GeneratorMixin:
@@ -122,12 +106,14 @@ class GeneratorMixin:
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
-        max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
+        max_length = round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+
+        # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
+        # per-request streams will be identical.
         seeds = [sampling_param.seed for sampling_param in sampling_params]
-        # TODO: Implement per-request seeds
-        assert all(seed == seeds[0] for seed in seeds), "All seeds must be the same"
-        rng = jax.random.PRNGKey(seeds[0])
+        seeds_arr = jnp.array(seeds)
+        rngs = jax.vmap(lambda s: jax.random.PRNGKey(s))(seeds_arr)
 
         # Extract stop tokens and pad to same length
         max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
@@ -142,9 +128,9 @@ class GeneratorMixin:
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         def scan_fn(carry, _):
-            kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
-            rng, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-                logits, temperatures, rng, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
+            kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
+            rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
+                logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
             )
 
             # Update generated_ids and attention mask
@@ -166,7 +152,7 @@ class GeneratorMixin:
             new_logits = outputs.logits[:, -1, :]
             new_carry = (
                 outputs.kv_cache,
-                rng,
+                rngs,
                 generated_ids,
                 attention_mask,
                 last_positions,
@@ -185,7 +171,7 @@ class GeneratorMixin:
 
         initial_carry = (
             kv_cache,
-            rng,
+            rngs,
             generated_ids,
             attention_mask,
             positions[:, -1:],
@@ -193,13 +179,13 @@ class GeneratorMixin:
             all_logprobs,
             stop_pos,
         )
-        (kv_cache, rng, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos), _ = (
+        (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos), _ = (
             jax.lax.scan(scan_fn, initial_carry, xs=None, length=max_new_tokens - 1)
         )
 
         # Sample final token
-        rng, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-            logits, temperatures, rng, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
+        rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
+            logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
         )
         generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
 

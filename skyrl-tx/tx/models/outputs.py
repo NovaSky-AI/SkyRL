@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import jax
 
-from tx.utils.generator import KVCache
+from tx.utils.cache import KVCache
 
 
 @jax.tree_util.register_dataclass
