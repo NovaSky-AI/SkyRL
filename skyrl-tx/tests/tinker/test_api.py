@@ -186,3 +186,21 @@ def test_sample(service_client, use_lora):
         assert sample_result is not None
         assert len(sample_result.sequences) == num_samples
         assert len(sample_result.sequences[0].tokens) == max_tokens
+
+    # Test stop tokens: generate once, then use the 5th token as a stop token
+    initial_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=10, seed=42),
+        num_samples=1,
+    ).result()
+
+    stop_token = initial_result.sequences[0].tokens[4]
+    stopped_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=50, seed=42, stop=[stop_token]),
+        num_samples=1,
+    ).result()
+
+    assert len(stopped_result.sequences[0].tokens) == 5
+    assert stopped_result.sequences[0].stop_reason == "stop"
+    assert stopped_result.sequences[0].tokens[-1] == stop_token

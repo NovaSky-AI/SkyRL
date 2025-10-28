@@ -259,7 +259,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: str | Sequence[str] | Sequence[int] | None = None
+    stop: Sequence[int] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
@@ -268,8 +268,6 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        if self.stop is not None:
-            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
         if self.top_k != -1:
             raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
         if self.top_p != 1.0:
@@ -282,6 +280,7 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
+            stop=self.stop,
         )
 
 
