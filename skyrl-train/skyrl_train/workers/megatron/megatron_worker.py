@@ -175,6 +175,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(backend="nccl")
 
+        def _wrap_no_grad(func):
+            def _inner(*args, **kwargs):
+                with torch.no_grad():
+                    return func(*args, **kwargs)
+            return _inner
+
+        _wrap_kernels_no_grad = [
+            "broadcast",
+            "all_reduce",
+            "all_gather",
+        ]
+
+        for _name in _wrap_kernels_no_grad:
+            if hasattr(torch.distributed, _name):
+                setattr(torch.distributed, _name, _wrap_no_grad(getattr(torch.distributed, _name)))
+
+
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.policy.megatron_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
