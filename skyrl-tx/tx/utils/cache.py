@@ -26,7 +26,14 @@ class KVCache:
             New KVCache with padded keys and values.
         """
         # k and v have shape [B, T, num_heads, head_dim]
-        cache_pad_length = max_length - self.keys[0].shape[1]
+        if not self.keys:
+            return self
+
+        current_length = self.keys[0].shape[1]
+        if max_length <= current_length:
+            return self
+
+        cache_pad_length = max_length - current_length
         pad_spec = ((0, 0), (0, cache_pad_length), (0, 0), (0, 0))
         return KVCache(
             keys=[jnp.pad(k, pad_spec) for k in self.keys],
