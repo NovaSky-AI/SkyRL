@@ -48,10 +48,6 @@ def make_sampling_param(max_tokens: int, temperature: float, seed: int, stop=Non
     return SimpleNamespace(max_tokens=max_tokens, temperature=temperature, seed=seed, stop=stop)
 
 
-def extract_generated_lists(result):
-    return [list(map(int, seq)) for seq in result.generated_ids]
-
-
 def test_deterministic_generation():
     """Repeated generation with same seed should be deterministic."""
     model = DummyModel(vocab_size=8)
@@ -65,7 +61,7 @@ def test_deterministic_generation():
     res1 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
     res2 = model.generate(input_ids, attention_mask, sampling_params=[sampling])
 
-    assert extract_generated_lists(res1) == extract_generated_lists(res2)
+    assert res1.generated_ids == res2.generated_ids
     assert res1.logprobs == res2.logprobs
     assert res1.stop_reasons == res2.stop_reasons
 
@@ -87,8 +83,8 @@ def test_batch_independence():
     res_a = model.generate(input_ids[:1], attention_mask[:1], sampling_params=[sp1])
     res_b = model.generate(input_ids[1:], attention_mask[1:], sampling_params=[sp2])
 
-    assert extract_generated_lists(batch_result)[0] == extract_generated_lists(res_a)[0]
-    assert extract_generated_lists(batch_result)[1] == extract_generated_lists(res_b)[0]
+    assert batch_result.generated_ids[0] == res_a.generated_ids[0]
+    assert batch_result.generated_ids[1] == res_b.generated_ids[0]
 
 
 def test_greedy_vs_sampled():
@@ -107,5 +103,5 @@ def test_greedy_vs_sampled():
     single_greedy = model.generate(input_ids[:1], attention_mask[:1], sampling_params=[sp_greedy])
     single_sample = model.generate(input_ids[1:], attention_mask[1:], sampling_params=[sp_sample])
 
-    assert extract_generated_lists(batch_result)[0] == extract_generated_lists(single_greedy)[0]
-    assert extract_generated_lists(batch_result)[1] == extract_generated_lists(single_sample)[0]
+    assert batch_result.generated_ids[0] == single_greedy.generated_ids[0]
+    assert batch_result.generated_ids[1] == single_sample.generated_ids[0]
