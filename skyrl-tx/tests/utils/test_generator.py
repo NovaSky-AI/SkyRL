@@ -23,8 +23,9 @@ class DummyModel(tx.utils.generator.GeneratorMixin):
         else:
             # Step: logits vary with cache_position
             logits = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
-            kv_cache = tx.utils.generator.KVCache(keys=kv_cache.keys, values=kv_cache.values,
-                                                   cache_position=kv_cache.cache_position + 1)
+            kv_cache = tx.utils.generator.KVCache(
+                keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1
+            )
 
         return SimpleNamespace(logits=logits, kv_cache=kv_cache)
 
