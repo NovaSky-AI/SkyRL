@@ -67,6 +67,7 @@ def test_training_workflow(service_client):
     examples = [
         {"prompt": "Question: What is 2+2?\nAnswer:", "completion": " 4"},
         {"prompt": "Question: What color is the sky?\nAnswer:", "completion": " Blue"},
+        {"prompt": "Question: What is 3+3?\nAnswer:", "completion": " 6"},  # Test optional weights
     ]
 
     # Process examples into Datum objects
@@ -81,19 +82,20 @@ def test_training_workflow(service_client):
         if i == 0:
             # First example has all 0 weights
             weights = [0.0] * len(all_tokens)
-        else:
-            # All other examples have weight of 0 for prompt, 1 for completion
+        elif i == 1:
+            # Second example has weight of 0 for prompt, 1 for completion
             weights = [0.0] * len(prompt_tokens) + [1.0] * len(completion_tokens)
+        else:
+            # Third example omits weights - should be auto-filled with all 1s
+            weights = None
 
         # Target tokens are shifted by 1
         target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
-
-        # Create Datum
         datum = types.Datum(
             model_input=types.ModelInput.from_ints(all_tokens[:-1]),
             loss_fn_inputs={
-                "weights": weights[:-1],
                 "target_tokens": target_tokens[:-1],
+                **({"weights": weights[:-1]} if weights else {})
             },
         )
         processed_examples.append(datum)
