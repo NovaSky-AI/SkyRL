@@ -91,6 +91,8 @@ def test_training_workflow(service_client):
 
         # Target tokens are shifted by 1
         target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
+
+        # Create Datum
         datum = types.Datum(
             model_input=types.ModelInput.from_ints(all_tokens[:-1]),
             loss_fn_inputs={
