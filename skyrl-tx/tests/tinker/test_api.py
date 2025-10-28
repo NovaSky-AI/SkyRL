@@ -107,10 +107,16 @@ def test_training_workflow(service_client):
     assert fwdbwd_result is not None
     assert optim_result is not None
     assert fwdbwd_result.loss_fn_output_type == "scalar"
-    assert len(fwdbwd_result.loss_fn_outputs) > 0
+    assert len(fwdbwd_result.loss_fn_outputs) == 3
 
     # The first example has all 0 weights, so all losses should be 0
     assert all(v == 0.0 for v in fwdbwd_result.loss_fn_outputs[0]["elementwise_loss"].data)
+
+    # The second example has default weights (0 for prompt, 1 for completion), so should have non-zero losses
+    assert any(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[1]["elementwise_loss"].data)
+
+    # The third example omits weights (auto-filled with 1s), so all losses should be non-zero
+    assert all(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
 
     # Load the optimizer state and verify another forward_backward pass has the same loss
     training_client.load_state(resume_path)
