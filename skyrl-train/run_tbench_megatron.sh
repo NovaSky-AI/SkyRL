@@ -1,9 +1,9 @@
 set -x
 
 
-sudo chmod -R "$HOME/SkyRL"
-pip uninstall websockets
-pip uninstall aiofiles
+sudo chmod -R 777 "$HOME/SkyRL"
+# pip uninstall websockets
+# pip uninstall aiofiles
 
 # WORK IN PROGRESS
 # Colocated GRPO training+generation for Qwen3-8B on TerminalBench tasks with Megatron on 4 GPUs.
@@ -21,7 +21,7 @@ export WANDB_ENTITY="bespoke-labs"
 export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
 export SKYRL_PYTHONPATH_EXPORT=1
 
-DATA_DIR="$HOME/ez_apex_281"
+DATA_DIR="/data/ez_apex_281"
 NUM_NODES=2
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
@@ -82,7 +82,7 @@ export GLOO_SOCKET_IFNAME=enp210s0f0np0
 # export HYDRA_FULL_ERROR=1
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
-uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
@@ -128,8 +128,8 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with "sandboxes@./s
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=32 \
-  trainer.policy_mini_batch_size=4 \
+  trainer.train_batch_size=4 \
+  trainer.policy_mini_batch_size=2 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=32000 \
@@ -143,7 +143,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with "sandboxes@./s
   generator.batched=true \
   environment.env_class=terminal_bench \
   generator.n_samples_per_prompt=8 \
-  generator.gpu_memory_utilization=0.8 \
+  generator.gpu_memory_utilization=0.95 \
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
   trainer.run_name="ez_apex_281_megatron_docker" \
