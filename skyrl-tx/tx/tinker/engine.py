@@ -119,16 +119,18 @@ class TinkerEngine:
         self._create_loss_and_grad_fn()
 
     @contextmanager
-    def _checkpoint_status_context(self, model_id: str, checkpoint_id: str):
+    def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
         """Context manager to handle checkpoint DB status updates.
 
         Fetches the checkpoint entry, yields it, and updates its status to COMPLETED
         or FAILED based on whether an exception occurred.
         """
         with Session(self.db_engine) as session:
-            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id))
+            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
             if checkpoint_db is None:
-                raise ValueError(f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}'")
+                raise ValueError(
+                    f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'"
+                )
 
             try:
                 yield checkpoint_db
@@ -686,7 +688,7 @@ class TinkerEngine:
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        with self._checkpoint_status_context(model_id, checkpoint_id):
+        with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
             adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
             optimizer_params = extract_adapter_state(
                 adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
@@ -725,7 +727,7 @@ class TinkerEngine:
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        with self._checkpoint_status_context(model_id, checkpoint_id):
+        with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             # Save the LoRA adapter weights and LoRA config as tar.gz
             save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
 
