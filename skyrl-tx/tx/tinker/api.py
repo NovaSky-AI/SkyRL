@@ -204,12 +204,20 @@ class Datum(BaseModel):
     loss_fn_inputs: dict[str, TensorData]
     model_input: ModelInput
 
+
     def to_types(self) -> types.Datum:
         inp = self.loss_fn_inputs
+
+        # Padd weights in case not provided (e.g. RL losses)
+        target = inp["target_tokens"].to_types()
+        weights = types.TensorData(data=[1.0] * len(target.data))
+        if "weights" in inp:
+            weights = inp["weights"].to_types()
+        
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
-                weights=inp["weights"].to_types(),
+                weights=weights,
                 advantages=inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[]),
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
             ),
@@ -611,7 +619,7 @@ async def send_telemetry(request: TelemetryRequest):
 
 async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
     """Validate that a model and checkpoint exist in the database, returning the checkpoint path."""
-    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id))
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, types.CheckpointType.SAMPLER))
 
     if not checkpoint_db:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
