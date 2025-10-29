@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
+import numpy as np
 
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
@@ -53,6 +54,7 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
     DynamicSamplingState,
     build_dataloader,
+    zero_variance_filter,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.evaluate import evaluate
@@ -192,12 +194,16 @@ class RayPPOTrainer:
                             pbar.update(1)
                             continue
 
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
-
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
+                        # since postprocess_generator_output might modify loss masks, check here
+                        if np.concatenate(generator_output["loss_masks"]).sum() == 0:
+                            logger.warning("All outputs are loss masked, skipping this batch and resuming sampling")
+                            continue
+
+                    # if we are not continuing sampling, we sleep the inference engine
+                    asyncio.run(self.inference_engine_client.sleep())
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -594,6 +600,12 @@ class RayPPOTrainer:
             # Token-level rewards: rewards is List[List[float]]
             per_token_rewards = rewards
         else:
+            if self.cfg.trainer.algorithm.zero_variance_filter:
+                kept_indices_set = set(zero_variance_filter(rewards, uids))
+                generator_output["loss_masks"] = [
+                    [0] * len(mask) if i not in kept_indices_set else mask
+                    for i, mask in enumerate(generator_output["loss_masks"])
+                ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
