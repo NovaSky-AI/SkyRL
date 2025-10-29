@@ -591,25 +591,27 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
 
     async with AsyncSession(req.app.state.db_engine) as session:
         while time.perf_counter() < deadline:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-            result = await session.exec(statement)
-            future = result.first()
+            async with session.begin():
+                stmt = (
+                    select(FutureDB)
+                    .where(FutureDB.request_id == int(request.request_id))
+                    .execution_options(populate_existing=True)
+                )
+                result = await session.exec(stmt)
+                future = result.first()
 
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
+                if not future:
+                    raise HTTPException(status_code=404, detail="Future not found")
 
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
+                if future.status == RequestStatus.COMPLETED:
+                    return future.result_data
 
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
-
-            # Make sure no transaction is left open
-            await session.rollback()
+                if future.status == RequestStatus.FAILED:
+                    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                    if future.result_data and "error" in future.result_data:
+                        raise HTTPException(status_code=400, detail=future.result_data["error"])
+                    else:
+                        raise HTTPException(status_code=500, detail="Unknown error")
 
             # Exponential backoff
             await asyncio.sleep(poll)
