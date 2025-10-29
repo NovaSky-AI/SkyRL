@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+uv.lock
 
 # PyInstaller
 *.manifest
@@ -74,3 +75,4 @@ Thumbs.db
 
 # Local artifacts
 tinker.db
+uv.lock

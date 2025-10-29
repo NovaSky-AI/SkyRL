@@ -14,6 +14,11 @@ class EngineConfig(BaseModel):
         default=AnyPath("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
     )
+    database_url: str | None = Field(
+        default=None,
+        description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
+        json_schema_extra={"argparse_type": str},
+    )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
@@ -26,7 +31,10 @@ class EngineConfig(BaseModel):
         default=True,
         description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
     )
-    enable_dummy_sample: bool = Field(default=False, description="Enable dummy sampling for testing")
+    gradient_checkpointing: bool = Field(
+        default=False,
+        description="Whether to use gradient checkpointing (full recomputation strategy)",
+    )
 
 
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
@@ -46,8 +54,11 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             # For boolean flags, use BooleanOptionalAction to support both --{arg_name} and --no-{arg_name}
             kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": field.default}
         else:
-            # Add type if available
-            if field.annotation is not None:
+            # Check if explicit argparse_type is specified in field metadata
+            argparse_type = field.json_schema_extra.get("argparse_type") if field.json_schema_extra else None
+            if argparse_type is not None:
+                kwargs["type"] = argparse_type
+            elif field.annotation is not None:
                 kwargs["type"] = field.annotation
 
             # Check for default value
@@ -71,6 +82,8 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
         if field.annotation is bool:
             argv.append(f"--{arg_name}" if value else f"--no-{arg_name}")
         else:
-            argv.append(f"--{arg_name}")
-            argv.append(str(value))
+            # Skip None values - let them use defaults or environment variables
+            if value is not None:
+                argv.append(f"--{arg_name}")
+                argv.append(str(value))
     return argv

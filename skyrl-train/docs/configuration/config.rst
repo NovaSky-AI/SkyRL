@@ -397,6 +397,11 @@ Algorithm Configuration
         kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
         ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
+      # cispo parameters (only used when policy_loss_type: "cispo")
+      cispo: 
+        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+        cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+
       # value loss parameters
       value_clip: 0.2
 
@@ -429,9 +434,10 @@ Algorithm Configuration
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
-  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
+  - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
@@ -463,6 +469,12 @@ Algorithm Configuration
 
   - ``kl_cov_frac``: Percentage of tokens to apply KL regularization to.
   - ``ppo_kl_coef``: Coefficient for KL regularization term.
+
+- ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
+
+  - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
+  - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
+
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -505,6 +517,7 @@ Generator Configuration
     backend: "vllm"
     weight_sync_backend: "nccl"
     inference_engine_tensor_parallel_size: 4
+    inference_engine_pipeline_parallel_size: 1
     inference_engine_expert_parallel_size: 1  
     inference_engine_data_parallel_size: 1
     n_samples_per_prompt: 5
@@ -582,8 +595,9 @@ Inference Engine Configuration
 - ``generator.model_dtype``: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
 - ``generator.async_engine``:  Whether to use an asynchronous/ offline inference engine. Applicable only when ``backend="vllm"``.
 - ``generator.inference_engine_tensor_parallel_size``: Tensor parallel size for the inference engine.
+- ``generator.inference_engine_pipeline_parallel_size``: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
 - ``generator.inference_engine_expert_parallel_size``: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
-- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
+- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
 - ``generator.gpu_memory_utilization``: GPU memory utilization for the inference engine. Applicable only for ``run_engines_locally=true``.
 - ``generator.vllm_v1_disable_multiproc``: If ``true``, this will set ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
 - ``generator.enable_prefix_caching``: Whether to enable prefix caching for the inference engine. Applicable only when ``backend="vllm"``. This can be left to the default ``true`` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.

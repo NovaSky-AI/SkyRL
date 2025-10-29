@@ -6,7 +6,8 @@ from transformers import Qwen3Config
 
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import Param, prepare_routing
-from tx.utils.generator import GeneratorMixin, KVCache
+from tx.models.outputs import CausalLMOutput, ModelOutput
+from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
 class RMSNorm(nnx.Module):
@@ -100,13 +101,11 @@ class Qwen3Attention(nnx.Module):
         x: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
-
-        # Compute positions from attention mask
-        positions = jnp.maximum(jnp.cumsum(attention_mask, axis=1)[:, -T:] - 1, 0)
 
         # Project and reshape to [B, T, num_heads, head_dim]
         q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
@@ -117,20 +116,15 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Concatenate with cache
+        # Handle KV cache
         if kv_cache is not None:
-            k = jnp.concatenate([kv_cache[0], k], axis=1)
-            v = jnp.concatenate([kv_cache[1], v], axis=1)
+            k_cache, v_cache, cache_position = kv_cache
+            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
+            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
 
-        # Store cache before GQA repetition
         updated_cache = (k, v)
 
-        if self.num_kv_heads != self.num_heads:
-            num_groups = self.num_heads // self.num_kv_heads
-            k = jnp.repeat(k, num_groups, axis=2)
-            v = jnp.repeat(v, num_groups, axis=2)
-
-        # Attention (causal only during prefill)
+        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
         attn_output = jax.nn.dot_product_attention(
             q,
             k,
@@ -311,14 +305,16 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
+            positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
@@ -354,10 +350,11 @@ class Qwen3Model(nnx.Module):
         input_ids: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-    ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
+    ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -373,8 +370,9 @@ class Qwen3Model(nnx.Module):
             hidden_states, (k, v) = layer(
                 hidden_states,
                 attention_mask=attention_mask,
+                positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
+                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
             )
             updated_keys.append(k)
             updated_values.append(v)
@@ -383,11 +381,14 @@ class Qwen3Model(nnx.Module):
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        return {
-            "last_hidden_state": hidden_states,
-            "hidden_states": all_hidden_states,
-            "kv_cache": KVCache(keys=updated_keys, values=updated_values),
-        }
+        # Increment cache_position if cache exists, or use sequence length for new cache
+        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
+
+        return ModelOutput(
+            last_hidden_state=hidden_states,
+            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
+            hidden_states=all_hidden_states if output_hidden_states else None,
+        )
 
 
 class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
@@ -406,26 +407,41 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
                 rngs=rngs,
             )
 
+    @staticmethod
+    def is_lora_param(path: tuple, _value) -> bool:
+        """Return True if a parameter path corresponds to LoRA weights."""
+        return any(name in path for name in ("lora_A", "lora_B"))
+
     def __call__(
         self,
         input_ids: jax.Array,
         *,
         attention_mask: jax.Array,
+        positions: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-    ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
+    ) -> CausalLMOutput:
+        if positions is None:
+            positions = compute_positions(attention_mask)
+
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
+            positions=positions,
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = outputs["last_hidden_state"]
+        hidden_states = outputs.last_hidden_state
         if self.config.tie_word_embeddings:
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
             logits = self.lm_head(hidden_states)
 
-        return {"logits": logits, **outputs}
+        return CausalLMOutput(
+            logits=logits,
+            last_hidden_state=outputs.last_hidden_state,
+            kv_cache=outputs.kv_cache,
+            hidden_states=outputs.hidden_states,
+        )

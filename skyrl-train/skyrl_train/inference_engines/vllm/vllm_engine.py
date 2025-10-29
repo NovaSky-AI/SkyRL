@@ -176,6 +176,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._pp_size = kwargs.get("pipeline_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._is_lora = kwargs.get("enable_lora", False)
 
@@ -184,6 +185,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def tp_size(self):
         return self._tp_size
+
+    def pp_size(self):
+        return self._pp_size
 
     def dp_size(self):
         return self._dp_size
@@ -262,11 +266,20 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
+    async def abort_generation(self) -> None:
+        raise NotImplementedError("Abort generation is only supported for AsyncVLLMInferenceEngine.")
+
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
 
     def _create_engine(self, *args, **kwargs):
+        # Pipeline parallelism requires AsyncLLMEngine
+        if kwargs.get("pipeline_parallel_size", 1) > 1:
+            raise ValueError(
+                "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
+                "Please set `generator.async_engine=true` in your config."
+            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -275,7 +288,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Check if LoRA is enabled and create LoRA requests
         lora_requests = None
         if self._is_lora:
-            lora_int_ids = list(self.llm.list_loras())
+            lora_int_ids = list(self.llm.llm_engine.list_loras())
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
                 batch_size = len(prompt_token_ids)
@@ -333,7 +346,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        result = self.llm.add_lora(lora_request)
+        result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -616,6 +629,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    async def abort_generation(self) -> None:
+        """
+        Abort all running and waiting requests, which make the ongoing requests return the
+        already-generated tokens with a stop_reason of "abort".
+        """
+        engine = self._get_engine()
+        # Collect all request IDs currently tracked by the scheduler/output processor
+        unfinished_request_ids = list(engine.output_processor.request_states.keys())
+        if unfinished_request_ids:
+            await engine.abort(unfinished_request_ids)
+        await engine.reset_prefix_cache()  # avoid KV-cache pollution
+        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
 
 
 class _MinimalRequest:

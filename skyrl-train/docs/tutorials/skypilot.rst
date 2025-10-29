@@ -17,6 +17,7 @@ names (for example ``infra: nebius`` with ``accelerators: L40:2``) to target a
 different cloud.
 
 .. code-block:: bash
+  
     # Install uv if you have not already.
     curl -LsSf https://astral.sh/uv/install.sh | sh
 

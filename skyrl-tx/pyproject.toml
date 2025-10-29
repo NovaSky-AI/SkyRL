@@ -21,6 +21,7 @@ dependencies = [
     "peft",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
+    "jax>=0.8",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,7 @@ tinker = [
     "sqlmodel",
     "sqlalchemy[asyncio]",
     "aiosqlite",
+    "asyncpg",
 ]
 
 aws = [

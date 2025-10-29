@@ -48,9 +48,10 @@ def test_qwen3(tp: int):
         load_safetensors(tmp, config, model)
 
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
-        assert np.allclose(hf_outputs.hidden_states[0], outputs["hidden_states"][0], rtol=1e-6)
-        assert np.allclose(hf_outputs.hidden_states[1], outputs["hidden_states"][1], rtol=1e-3, atol=1e-3)
-        assert np.allclose(hf_outputs.hidden_states[-1], outputs["hidden_states"][-1], rtol=1e-3, atol=1e-3)
+        assert outputs.hidden_states is not None
+        assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
+        assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
+        assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=1e-3, atol=1e-3)
 
 
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
@@ -251,4 +252,4 @@ def test_qwen3_lora():
 
         # Compare outputs with corresponding adapters
         for idx in range(len(lora_adapters)):
-            assert np.allclose(hf_outputs_list[idx].logits[0], outputs["logits"][idx], rtol=1e-3, atol=1e-3)
+            assert np.allclose(hf_outputs_list[idx].logits[0], outputs.logits[idx], rtol=1e-3, atol=1e-3)
