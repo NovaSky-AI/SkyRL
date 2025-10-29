@@ -154,6 +154,8 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
         outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
+        # Capture prompt lengths before attention_mask is modified during generation
+        prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
         prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
 
         def scan_fn(carry, _):
@@ -226,17 +228,11 @@ class GeneratorMixin:
         )
 
         return GenerateOutput(
-            generated_ids=[
-                generated_ids[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
-                for i, sampling_param in enumerate(sampling_params)
-            ],
-            stop_reasons=["length"] * batch_size,
-            logprobs=[
-                all_logprobs[i, prompt_length : prompt_length + sampling_param.max_tokens].tolist()
-                for i, sampling_param in enumerate(sampling_params)
-            ],
+            generated_ids=[generated_ids[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
+            stop_reasons=["stop" if stop_pos[i, 0] >= 0 else "length" for i in range(batch_size)],
+            logprobs=[all_logprobs[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
             prompt_logprobs=(
-                [prompt_logprobs_array[i, : int(attention_mask[i].sum()) - 1].tolist() for i in range(batch_size)]
+                [prompt_logprobs_array[i, : int(prompt_lengths[i]) - 1].tolist() for i in range(batch_size)]
                 if prompt_logprobs
                 else None
             ),
