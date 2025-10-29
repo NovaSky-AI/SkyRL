@@ -175,6 +175,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(backend="nccl")
 
+        # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
+        # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
+        # PyTorch, preventing potential silent errors in future versions.
+        
         if not getattr(torch.distributed, "_skyrl_broadcast_no_grad_patched", False):
             _orig_broadcast = torch.distributed.broadcast
 
