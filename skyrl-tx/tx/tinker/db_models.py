@@ -103,7 +103,7 @@ class CheckpointDB(SQLModel, table=True):
 
     model_id: str = Field(foreign_key="models.model_id", primary_key=True)
     checkpoint_id: str = Field(primary_key=True)
-    checkpoint_type: types.CheckpointType
+    checkpoint_type: types.CheckpointType = Field(primary_key=True)
     status: CheckpointStatus
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None

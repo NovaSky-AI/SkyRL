@@ -82,14 +82,14 @@ def load_safetensors(
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         if "experts" in path:
-            experts_tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
-            tensors[key] = jax.device_put(experts_tensor, param.sharding)
+            tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
         else:
             tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
             tensors[key] = tensors[key].reshape(param.shape)
         assert param.shape == tensors[key].shape, f"shape mismatch for {key}"
-        updates.append((path, tensors[key].astype(param.dtype)))
+        sharded_tensor = jax.device_put(tensors[key].astype(param.dtype), param.sharding)
+        updates.append((path, sharded_tensor))
     nnx.update(model, nnx.from_flat_state(updates))
 
 

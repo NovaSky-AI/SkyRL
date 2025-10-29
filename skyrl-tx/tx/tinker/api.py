@@ -473,7 +473,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
             status_code=400, detail="request.path must be in format tinker://source_model_id/weights/checkpoint_id"
         )
 
-    await validate_checkpoint(req, source_model_id, checkpoint_id, session)
+    await validate_checkpoint(req, source_model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
 
     request_id = await create_future(
         session=session,
@@ -545,7 +545,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
         await get_model(session, model_id)
         # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, session)
+        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     request_id = await create_future(
         session=session,
@@ -616,9 +616,11 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
+async def validate_checkpoint(
+    request: Request, unique_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType, session: AsyncSession
+):
     """Validate that a model and checkpoint exist in the database, returning the checkpoint path."""
-    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id))
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, checkpoint_type))
 
     if not checkpoint_db:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
@@ -641,7 +643,7 @@ async def get_checkpoint_archive_url(
     session: AsyncSession = Depends(get_session),
 ):
     """Return a 302 redirect to the download URL (SDK expects this pattern)"""
-    await validate_checkpoint(request, unique_id, checkpoint_id, session)
+    await validate_checkpoint(request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     # Generate URL to the download endpoint and return 302 redirect
     download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
@@ -660,7 +662,9 @@ async def download_checkpoint_archive(
     session: AsyncSession = Depends(get_session),
 ):
     """Actually download the checkpoint archive bytes"""
-    checkpoint_path = await validate_checkpoint(request, unique_id, checkpoint_id, session)
+    checkpoint_path = await validate_checkpoint(
+        request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session
+    )
 
     file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
 
