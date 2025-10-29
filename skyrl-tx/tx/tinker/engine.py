@@ -19,7 +19,7 @@ import optax
 from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
-from tx.tinker.db_models import FutureDB, DB_PATH, RequestStatus, CheckpointDB, CheckpointStatus
+from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, get_database_url
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
@@ -75,11 +75,10 @@ class TinkerEngine:
     def __init__(
         self,
         config: EngineConfig,
-        db_path=DB_PATH,
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
-        self.db_engine = create_engine(f"sqlite:///{db_path}", echo=False)
+        self.db_engine = create_engine(get_database_url(config.database_url), echo=False)
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}

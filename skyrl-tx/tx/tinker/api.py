@@ -16,7 +16,14 @@ import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus
+from tx.tinker.db_models import (
+    CheckpointDB,
+    ModelDB,
+    FutureDB,
+    RequestStatus,
+    CheckpointStatus,
+    get_async_database_url,
+)
 from tx.utils.storage import download_file
 from tx.utils.log import logger
 
@@ -29,7 +36,8 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    app.state.db_engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
+    db_url = get_async_database_url(app.state.engine_config.database_url)
+    app.state.db_engine = create_async_engine(db_url, echo=False)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
@@ -198,10 +206,16 @@ class Datum(BaseModel):
 
     def to_types(self) -> types.Datum:
         inp = self.loss_fn_inputs
+
+        if "weights" not in inp:
+            weights = types.TensorData(data=[1.0] * len(inp["target_tokens"].data))
+        else:
+            weights = inp["weights"].to_types()
+
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
-                weights=inp["weights"].to_types(),
+                weights=weights,
                 advantages=inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[]),
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
             ),
@@ -245,7 +259,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: str | Sequence[str] | Sequence[int] | None = None
+    stop: Sequence[int] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
@@ -254,8 +268,6 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        if self.stop is not None:
-            raise HTTPException(status_code=501, detail="'stop' parameter is not yet implemented")
         if self.top_k != -1:
             raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
         if self.top_p != 1.0:
@@ -268,6 +280,7 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
+            stop=self.stop,
         )
 
 

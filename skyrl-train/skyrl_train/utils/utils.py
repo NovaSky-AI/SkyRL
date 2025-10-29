@@ -588,12 +588,15 @@ def configure_ray_worker_logging() -> None:
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
     through Loguru so third-party logs match formatting
     """
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+
     # 1) Loguru formatting (force colors)
     logger.remove()
     logger.level("INFO", color="<bold><green>")
     logger.add(
         sys.stderr,
         colorize=True,  # keep ANSI even without a TTY
+        level=level_name,  # ensure Loguru filters below this level
         enqueue=True,
         backtrace=False,
         diagnose=False,
@@ -613,7 +616,6 @@ def configure_ray_worker_logging() -> None:
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
     logging.root.handlers = [_InterceptHandler()]
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.root.setLevel(level)
 
