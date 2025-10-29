@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Literal, Sequence
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -112,6 +112,11 @@ class ForwardBackwardError(BaseModel):
     status: str
 
 
+class SampleError(BaseModel):
+    error: str
+    status: str
+
+
 class OptimStepInput(BaseModel):
     adam_params: AdamParams
 
@@ -151,11 +156,13 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
+    stop: Sequence[int] | None = None
 
 
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+    loaded_checkpoint_id: str | None = None
 
 
 class SampleInput(BaseModel):

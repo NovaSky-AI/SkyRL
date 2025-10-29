@@ -106,6 +106,22 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
         )
+    if endpoint == "/chat/completions" and "messages" not in request_json:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="The field `messages` is required in your `/chat/completions` request.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+    if endpoint == "/chat/completions" and request_json["messages"] == []:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="The field `messages` in `/chat/completions` cannot be an empty list.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
     return None
 
 

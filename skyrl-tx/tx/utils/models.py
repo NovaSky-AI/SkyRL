@@ -15,7 +15,6 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
-from tx import models
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
 
@@ -39,10 +38,11 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
+    import tx.models
 
     for architecture in config.architectures or []:
-        if hasattr(models, architecture):
-            return getattr(models, architecture)
+        if hasattr(tx.models, architecture):
+            return getattr(tx.models, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
@@ -89,7 +89,7 @@ def load_safetensors(
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
             tensors[key] = tensors[key].reshape(param.shape)
         assert param.shape == tensors[key].shape, f"shape mismatch for {key}"
-        updates.append((path, tensors[key]))
+        updates.append((path, tensors[key].astype(param.dtype)))
     nnx.update(model, nnx.from_flat_state(updates))
 
 
@@ -112,7 +112,7 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath):
+def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
@@ -130,7 +130,7 @@ def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, che
 
 
 def save_lora_checkpoint(
-    model: models.Qwen3ForCausalLM, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
+    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
@@ -216,3 +216,26 @@ def insert_adapter_state(
 
     updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
     nnx.update(lora_params, updated)
+
+
+def round_up_seq_len(seq_len: int) -> int:
+    """
+    Rounds a sequence length up to roughly two significant binary digits.
+    We do this to pad sequences, so the Jax JIT compiler needs to
+    compile fewer different shapes.
+    """
+    if seq_len <= 32:
+        return 32
+
+    # Find the position of the most significant bit.
+    msb_pos = seq_len.bit_length() - 1
+    # Create a mask for the two most significant bits.
+    mask = (1 << msb_pos) | (1 << (msb_pos - 1))
+    # Round down to the nearest value with at most two significant bits.
+    result = seq_len & mask
+
+    # If we rounded down, round up to the next bucket boundary.
+    if result < seq_len:
+        result += 1 << (msb_pos - 1)
+
+    return result
