@@ -128,7 +128,9 @@ class TinkerEngine:
         with Session(self.db_engine) as session:
             checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
             if checkpoint_db is None:
-                raise ValueError(f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'")
+                raise ValueError(
+                    f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'"
+                )
 
             try:
                 yield checkpoint_db
