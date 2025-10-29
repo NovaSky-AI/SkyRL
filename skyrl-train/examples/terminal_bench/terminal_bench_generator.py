@@ -8,10 +8,10 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
-from sandbox.models.trial.config import TrialConfig, AgentConfig, LocalTaskConfig
-from sandbox.models.task.id import LocalTaskId
-from sandbox.models.agent.name import AgentName
-from sandbox.trial.trial import Trial
+from sandboxes.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
+from sandboxes.models.environment_type import EnvironmentType
+from sandboxes.models.agent.name import AgentName
+from sandboxes.trial.trial import Trial
 
 
 @dataclass
@@ -47,24 +47,27 @@ class TerminalBenchGenerator(GeneratorInterface):
         # TerminalBench config
         self.trials_dir = terminal_bench_cfg.trials_dir
         self.agent_name = terminal_bench_cfg.agent_name
-        self.sandboxes_dir = terminal_bench_cfg.sandboxes_dir
         self.max_episodes = terminal_bench_cfg.max_episodes
 
         if self.generator_cfg.chat_template.name_or_path is not None:
             raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        # TODO(tgriggs): Plumb the sandboxes task list here instead of using (and ignoring) empty prompts
-        prompts = input_batch["prompts"]
+        
         tasks = []
-        for _ in range(len(prompts)):
+        for prompt in input_batch["prompts"]:
+            # task = asyncio.create_task(self.terminal_bench_agent_loop(prompt=prompt))
+            # tasks.append(task)
+            # await asyncio.sleep(1)
             tasks.append(
                 self.terminal_bench_agent_loop(
-                    prompt="",
+                    prompt=prompt,
                 )
             )
 
         all_outputs = await asyncio.gather(*tasks)
+        
+        all_outputs = [output for output in all_outputs if output is not None]
 
         responses = [output.response_ids for output in all_outputs]
         rewards = [output.reward for output in all_outputs]
@@ -77,7 +80,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": [output.rollout_logprobs for output in all_outputs],
+            "rollout_logprobs": None,
         }
 
         return generator_output
@@ -89,17 +92,22 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
+        # Sleeping to create an overlap between task execution and inferencing
+        import random
+        await asyncio.sleep(random.uniform(1, 60))
+
         # Generate session_id for sticky routing to inference engines
         # All LLM requests in this trial will share the same session_id
         session_id = uuid4().hex
 
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
+                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
-                    model_name=f"{self.model_name}",
+                    model_name=f"hosted_vllm/{self.model_name}",
                     kwargs={
                         "api_base": f"{self.base_url}/v1",
                         "key": "fake_key",
@@ -110,11 +118,12 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
         elif self.agent_name == "oracle":
             trial_config = TrialConfig(
-                task=LocalTaskConfig(id=LocalTaskId(path=f"{self.sandboxes_dir}/examples/tasks/hello-world")),
+                task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
+                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
-                    model_name=self.model_name,
+                    model_name=f"hosted_vllm/{self.model_name}",
                 ),
             )
         else:
@@ -122,14 +131,35 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         trial = Trial(trial_config)
         # Run the trial
-        while True:
-            results = await trial.run()
-            reward = results.verifier_result.rewards
-            chat_history = results.agent_result.all_messages
-            if len(chat_history) > 0:
-                break
-            else:
-                print(f"[WARNING] Agent {self.agent_name} did not return a response")
+        # for retry in range(3):
+        while True: 
+            try:
+                results = await trial.run()
+                print(f"Results: {results}")
+                if not results.verifier_result:
+                    print(f"[WARNING] Exception info: {results.exception_info}")
+                    continue
+                reward = results.verifier_result.reward
+                agent_result = getattr(results, "agent_result", None)
+                metadata = getattr(agent_result, "metadata", None)
+                if agent_result and "all_messages" not in results.agent_result.metadata:
+                    print(f"[WARNING] No 'all_messages' in agent_result.metadata for agent. Exception info: {results.agent_result}")
+                    continue
+
+                # chat_history = results.agent_result.metadata["all_messages"]
+                chat_history = metadata.get("all_messages") or []
+                if agent_result and len(chat_history) > 0:
+                    break
+                else:
+                    print(f"[WARNING] Agent {self.agent_name} did not return a response")
+            except Exception as e:
+                print(f"Error running trial: {e}")
+                
+                continue
+
+
+        # if retry == 2:
+        #     return None
 
         # Use the first message as the prompt
         prompt = [chat_history[0]]
@@ -186,6 +216,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
+
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
@@ -204,3 +235,61 @@ class TerminalBenchGenerator(GeneratorInterface):
             # in case sandboxes doesn't return logprobs, use None
             rollout_logprobs=rollout_logprobs if assistant_logprobs is not None else None,
         )
+
+    
+
+    # async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    #     # For testing, skip the actual async agent loop
+    #     max_response_tokens = (
+    #         self.generator_cfg.sampling_params.max_generate_length
+    #         + self.generator_cfg.max_input_length
+    #     )
+
+    #     fake_output = self.fake_generator_output(
+    #         tokenizer=self.tokenizer,
+    #         input_batch=input_batch,
+    #         max_response_tokens=max_response_tokens,
+    #     )
+
+    #     return fake_output
+    
+
+    # def fake_generator_output(self, tokenizer, input_batch, max_response_tokens: int, batch_size: int = None):
+    #     """
+    #     Create a fake generator_output dict that mimics the structure of a real one.
+
+    #     Args:
+    #         tokenizer: your tokenizer (used to get vocab size)
+    #         input_batch: the same input_batch used in generate()
+    #         max_response_tokens: maximum length of fake responses
+    #         batch_size: optional override for batch size
+    #     """
+    #     import random
+    #     vocab_size = len(tokenizer)
+    #     prompts = input_batch["prompts"]
+    #     batch_size = batch_size or len(prompts)
+
+    #     def random_tokens(length):
+    #         return [random.randint(0, vocab_size - 1) for _ in range(length)]
+
+    #     fake_outputs = []
+    #     for _ in range(batch_size):
+    #         fake_outputs.append({
+    #             "prompt_ids": random_tokens(32),  # arbitrary prompt length
+    #             "response_ids": random_tokens(max_response_tokens),
+    #             "reward": random.uniform(0, 1),
+    #             "loss_mask": [1] * max_response_tokens,
+    #             "stop_reason": "length",
+    #         })
+
+    #     generator_output = {
+    #         "prompt_token_ids": [o["prompt_ids"] for o in fake_outputs],
+    #         "response_ids": [o["response_ids"] for o in fake_outputs],
+    #         "rewards": [o["reward"] for o in fake_outputs],
+    #         "loss_masks": [o["loss_mask"] for o in fake_outputs],
+    #         "stop_reasons": [o["stop_reason"] for o in fake_outputs],
+    #         "rollout_metrics": {"avg_reward": sum(o["reward"] for o in fake_outputs) / batch_size},
+    #         "rollout_logprobs": None,
+    #     }
+
+    #     return generator_output

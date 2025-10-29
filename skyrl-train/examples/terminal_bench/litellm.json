@@ -1,0 +1,62 @@
+{
+    "together_ai/qwen/qwen3-coder-480b-a35b-instruct-fp8": {
+       "input_cost_per_token": 2e-09,
+       "output_cost_per_token": 2e-09,
+       "mode": "chat",
+       "max_tokens": 256000
+    },
+    "hosted_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 64000
+   },
+   "hosted_vllm/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 64000
+   },
+   "hosted_vllm/Qwen/Qwen3-Coder-30B-A3B-Instruct": {
+       "input_cost_per_token": 0.0,
+       "output_cost_per_token": 0.0,
+       "mode": "chat",
+       "max_tokens": 64000
+   },
+   "hosted_vllm/Qwen/Qwen2.5-0.5B-Instruct": {
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0,
+    "mode": "chat",
+    "max_tokens": 32000
+    },
+    "hosted_vllm/Qwen/Qwen3-4B": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 32000
+    },
+    "openai/Qwen/Qwen3-4B": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 32768
+    },
+    "openai/Qwen/Qwen3-8B": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 32768
+    },
+    "hosted_vllm/Qwen/Qwen3-8B": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 32768
+    },
+    "openai/Qwen/Qwen3-Coder-30B-A3B-Instruct": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "mode": "chat",
+        "max_tokens": 64000
+    }
+}
