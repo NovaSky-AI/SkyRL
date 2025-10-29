@@ -74,7 +74,7 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters
         )
 
-        # Apply LoRA using ragged_dot: x @ A @ B
+        # Apply LoRA using ragged_dot: x @ A @ B 
         intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
