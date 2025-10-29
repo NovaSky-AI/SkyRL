@@ -100,12 +100,11 @@ class TerminalBenchGenerator(GeneratorInterface):
         # All LLM requests in this trial will share the same session_id
         session_id = uuid4().hex
 
-        print("trial path: ", self.trials_dir)
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
-                environment=EnvironmentConfig(type=EnvironmentType.DOCKER),
+                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
                     model_name=f"hosted_vllm/{self.model_name}",
@@ -121,7 +120,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
-                environment=EnvironmentConfig(type=EnvironmentType.DOCKER),
+                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
                     model_name=f"hosted_vllm/{self.model_name}",

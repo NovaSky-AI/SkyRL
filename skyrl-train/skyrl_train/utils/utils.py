@@ -577,6 +577,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # and the pyproject.toml file - to resolve these, make sure to specify exact versions of dependencies in the pyproject.toml
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
+        if os.getenv("NCCL_SOCKET_IFNAME"):
+            logger.info(f"Exporting `NCCL_SOCKET_IFNAME` to ray runtime env: {os.environ['NCCL_SOCKET_IFNAME']}")
+            env_vars["NCCL_SOCKET_IFNAME"] = os.environ["NCCL_SOCKET_IFNAME"]
+        
+        if os.getenv("GLOO_SOCKET_IFNAME"):
+            logger.info(f"Exporting `GLOO_SOCKET_IFNAME` to ray runtime env: {os.environ['GLOO_SOCKET_IFNAME']}")
+            env_vars["GLOO_SOCKET_IFNAME"] = os.environ["GLOO_SOCKET_IFNAME"]
+
+
 
     return env_vars
 
