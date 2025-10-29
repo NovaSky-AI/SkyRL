@@ -190,9 +190,10 @@ class RayPPOTrainer:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
-
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
+                    
+                    if self.colocate_all:
+                        # if we are not continuing sampling, we sleep the inference engine
+                        asyncio.run(self.inference_engine_client.sleep())
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
