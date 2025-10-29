@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 import asyncio
 import subprocess
 import random
+import time
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -582,10 +583,14 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    poll_interval = 0.1  # 100ms
+    deadline = time.perf_counter() + timeout
 
-    for _ in range(int(timeout / poll_interval)):
-        async with AsyncSession(req.app.state.db_engine) as session:
+    # Start with 200ms, grow to 2s
+    poll = 0.2
+    max_poll = 2.0
+
+    async with AsyncSession(req.app.state.db_engine) as session:
+        while time.perf_counter() < deadline:
             statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
             result = await session.exec(statement)
             future = result.first()
@@ -603,7 +608,12 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
                 else:
                     raise HTTPException(status_code=500, detail="Unknown error")
 
-        await asyncio.sleep(poll_interval)
+            # Make sure no transaction is left open
+            await session.rollback()
+
+            # Exponential backoff
+            await asyncio.sleep(poll)
+            poll = min(poll * 1.5, max_poll)
 
     raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
