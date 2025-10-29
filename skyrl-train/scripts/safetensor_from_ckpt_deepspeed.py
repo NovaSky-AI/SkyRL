@@ -121,49 +121,19 @@ def copy_auxiliary_files(hf_src_dir: Optional[str], out_dir: str):
                 print(f"Warning: Failed to copy {item}: {e}")
 
 
-def hf_builtin_conversion(ckpt_dir: str, out_dir: str, config_path: str, max_shard_size: str) -> bool:
-    try:
-        config = AutoConfig.from_pretrained(config_path)
-        print(f"Detected model type: {config.model_type}")
-
-        model = AutoModelForCausalLM.from_pretrained(
-            ckpt_dir,
-            config=config,
-            device_map="cpu",
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,  # In case of custom models
-        )
-
-        # Save as safetensors
-        model.save_pretrained(out_dir, safe_serialization=True, max_shard_size=max_shard_size)
-        print(f"Used HuggingFace built-in conversion successfully")
-
-        del model
-        gc.collect()
-        return True
-    except Exception as e:
-        print(f"HF built-in conversion failed: {e}")
-        if "model" in locals():
-            del model
-            gc.collect()
-        return False
-
-
 def main():
     args = parse_args()
     ckpt_dir = os.path.abspath(args.ckpt_dir)
     out_dir = os.path.abspath(args.out_dir)
 
-    config_path = get_hf_config(ckpt_dir, args.config)
-
-    if not hf_builtin_conversion(ckpt_dir, out_dir, config_path, args.max_shard_size):
-        try:
-            state_dict = gather_full_state_dict_zero3(ckpt_dir)
-            apply_tied_embeddings_drop(state_dict, config_path)
-            save_safetensors_and_config(out_dir, state_dict, config_path)
-        except Exception as e:
-            print(f"[FAILURE] ZeRO-3 gather failed: {e}", file=sys.stderr)
-            return
+    try:
+        config_path = get_hf_config(ckpt_dir, args.config)
+        state_dict = gather_full_state_dict_zero3(ckpt_dir)
+        apply_tied_embeddings_drop(state_dict, config_path)
+        save_safetensors_and_config(out_dir, state_dict, config_path)
+    except Exception as e:
+        print(f"[FAILURE] ZeRO-3 gather failed: {e}", file=sys.stderr)
+        return
 
     hf_src_dir = find_hf_dir(ckpt_dir)
     copy_auxiliary_files(hf_src_dir, out_dir)
