@@ -190,7 +190,7 @@ class RayPPOTrainer:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
-                    
+
                     if self.colocate_all:
                         # if we are not continuing sampling, we sleep the inference engine
                         asyncio.run(self.inference_engine_client.sleep())
