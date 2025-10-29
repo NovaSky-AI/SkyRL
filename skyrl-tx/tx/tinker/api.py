@@ -642,7 +642,7 @@ async def get_checkpoint_archive_url(
     session: AsyncSession = Depends(get_session),
 ):
     """Return a 302 redirect to the download URL (SDK expects this pattern)"""
-    await validate_checkpoint(request, unique_id, checkpoint_id, types.CheckpointType.TRAINING, session)
+    await validate_checkpoint(request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     # Generate URL to the download endpoint and return 302 redirect
     download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
@@ -662,7 +662,7 @@ async def download_checkpoint_archive(
 ):
     """Actually download the checkpoint archive bytes"""
     checkpoint_path = await validate_checkpoint(
-        request, unique_id, checkpoint_id, types.CheckpointType.TRAINING, session
+        request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session
     )
 
     file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
