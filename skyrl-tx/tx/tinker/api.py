@@ -208,12 +208,11 @@ class Datum(BaseModel):
     def to_types(self) -> types.Datum:
         inp = self.loss_fn_inputs
 
-        # Padd weights in case not provided (e.g. RL losses)
-        target = inp["target_tokens"].to_types()
-        weights = types.TensorData(data=[1.0] * len(target.data))
-        if "weights" in inp:
+        if "weights" not in inp:
+            weights = types.TensorData(data=[1.0] * len(inp["target_tokens"].data))
+        else:
             weights = inp["weights"].to_types()
-        
+
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
