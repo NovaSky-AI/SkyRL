@@ -65,15 +65,13 @@ class LoRAMixin:
 
         if is_embed:
             (batch_size, seq_len) = x.shape
-            features = base_output.shape[-1]
 
             x_flat = x.reshape(-1, 1)  # (B, S) → (B*S, 1)
             adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
             # Sort tokens to prepare for ragged_dot
             x_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
-                x_flat, adapter_indices_expanded, self.max_lora_adapters,
-                adapter_indices=adapter_indices_expanded
+                x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
             )
             x_sorted = x_sorted.squeeze(-1)  # (B*S, 1) -> (B*S,)
 
@@ -116,7 +114,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
         embedding_init: nnx.Initializer | None = None,
-        rngs: nnx.Rngs
+        rngs: nnx.Rngs,
     ) -> None:
         param_dtype = param_dtype or dtype
 
@@ -126,7 +124,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             dtype=dtype,
             param_dtype=param_dtype,
             embedding_init=embedding_init,
-            rngs=rngs
+            rngs=rngs,
         )
         assert (
             self.embedding.value.sharding is not None
@@ -294,9 +292,9 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
             return value.at[adapter_index].set(scaling)
         if path[-2].key == "lora_A":
             # Zero out columns beyond the rank for this adapter; lora_B is already zero
-            if value.ndim == 3: # LoRAEmbed LoRALinear
+            if value.ndim == 3:  # LoRAEmbed LoRALinear
                 return value.at[adapter_index, :, lora_rank:].set(0.0)
-            elif value.ndim == 4: # LoRAExpert
+            elif value.ndim == 4:  # LoRAExpert
                 return value.at[adapter_index, :, :, lora_rank:].set(0.0)
         return value
 
