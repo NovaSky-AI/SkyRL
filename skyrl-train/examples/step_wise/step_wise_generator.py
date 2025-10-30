@@ -192,7 +192,11 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
             assert len(per_step_output.loss_mask) == len(
                 per_step_output.response_ids
-            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)} and {len(per_step_output.response_ids)}"
+            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} and {len(per_step_output.response_ids)=}"
+            if per_step_output.rollout_logprobs is not None:
+                assert len(per_step_output.rollout_logprobs) == len(
+                    per_step_output.response_ids
+                ), f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
 
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
