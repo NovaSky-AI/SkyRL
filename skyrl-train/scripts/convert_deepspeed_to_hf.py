@@ -37,12 +37,13 @@ uv run --isolated --frozen --extra vllm scripts/convert_deepspeed_to_hf.py --ckp
 
 import json
 import shutil
+import os
 import subprocess
 import argparse
 import torch
 from pathlib import Path
 from safetensors.torch import save_model
-from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForSeq2SeqLM
+from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForSeq2SeqLM, AutoModel
 
 # === Directories ===
 def main(deepspeed_model_path: Path, out_dir:Path = None) -> Path:
