@@ -15,7 +15,6 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
-from tx import models
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
 
@@ -39,10 +38,11 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
+    import tx.models
 
     for architecture in config.architectures or []:
-        if hasattr(models, architecture):
-            return getattr(models, architecture)
+        if hasattr(tx.models, architecture):
+            return getattr(tx.models, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
@@ -82,14 +82,14 @@ def load_safetensors(
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         if "experts" in path:
-            experts_tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
-            tensors[key] = jax.device_put(experts_tensor, param.sharding)
+            tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
         else:
             tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
             tensors[key] = tensors[key].reshape(param.shape)
         assert param.shape == tensors[key].shape, f"shape mismatch for {key}"
-        updates.append((path, tensors[key].astype(param.dtype)))
+        sharded_tensor = jax.device_put(tensors[key].astype(param.dtype), param.sharding)
+        updates.append((path, sharded_tensor))
     nnx.update(model, nnx.from_flat_state(updates))
 
 
@@ -112,7 +112,7 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, checkpoint_path: Path | CloudPath):
+def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
@@ -130,7 +130,7 @@ def load_lora_checkpoint(model: models.Qwen3ForCausalLM, adapter_index: int, che
 
 
 def save_lora_checkpoint(
-    model: models.Qwen3ForCausalLM, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
+    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
 from sqlmodel import SQLModel, Field, JSON
+from sqlalchemy import DateTime
 from sqlalchemy.engine import url as sqlalchemy_url
 
 from tx.tinker import types
@@ -47,12 +48,12 @@ def get_async_database_url(db_url: str | None = None) -> str:
 
     match parsed_url.get_backend_name():
         case "sqlite":
-            return str(parsed_url.set(drivername="sqlite+aiosqlite"))
+            return parsed_url.set(drivername="sqlite+aiosqlite").render_as_string(hide_password=False)
         case "postgresql":
-            return str(parsed_url.set(drivername="postgresql+asyncpg"))
+            return parsed_url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
         case _ if "+" in parsed_url.drivername:
             # Already has an async driver specified, keep it
-            return str(parsed_url)
+            return parsed_url.render_as_string(hide_password=False)
         case backend_name:
             raise ValueError(f"Unsupported database scheme: {backend_name}")
 
@@ -82,7 +83,7 @@ class ModelDB(SQLModel, table=True):
     lora_config: types.LoraConfig = Field(sa_type=JSON)
     status: str
     request_id: int
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
 
 
 class FutureDB(SQLModel, table=True):
@@ -94,8 +95,8 @@ class FutureDB(SQLModel, table=True):
     request_data: dict = Field(sa_type=JSON)  # this is of type types.{request_type}Input
     result_data: dict | None = Field(default=None, sa_type=JSON)  # this is of type types.{request_type}Output
     status: RequestStatus = Field(default=RequestStatus.PENDING, index=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+    completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 
 class CheckpointDB(SQLModel, table=True):
@@ -103,8 +104,8 @@ class CheckpointDB(SQLModel, table=True):
 
     model_id: str = Field(foreign_key="models.model_id", primary_key=True)
     checkpoint_id: str = Field(primary_key=True)
-    checkpoint_type: types.CheckpointType
+    checkpoint_type: types.CheckpointType = Field(primary_key=True)
     status: CheckpointStatus
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+    completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
     error_message: str | None = None

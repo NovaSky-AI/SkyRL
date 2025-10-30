@@ -41,8 +41,6 @@ tinker = [
     "aiosqlite",
     "asyncpg",
     "psycopg2-binary",
-    "python-dotenv",
-    "alembic",
 ]
 
 aws = [

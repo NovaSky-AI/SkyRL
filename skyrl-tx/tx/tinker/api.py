@@ -38,14 +38,18 @@ async def lifespan(app: FastAPI):
 
     # Get database URL from config or environment
     db_url = get_async_database_url(app.state.engine_config.database_url)
-    app.state.db_engine = create_async_engine(db_url, echo=False)
+    app.state.db_engine = create_async_engine(
+        db_url,
+        echo=False,
+    )
 
     # Create tables automatically from SQLModel definitions
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
     # Build subprocess command with engine config parameters
-    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
+    # Use --env-file to ensure the engine subprocess loads .env file
+    cmd = ["uv", "run", "--env-file", ".env", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
@@ -208,10 +212,16 @@ class Datum(BaseModel):
 
     def to_types(self) -> types.Datum:
         inp = self.loss_fn_inputs
+
+        if "weights" not in inp:
+            weights = types.TensorData(data=[1.0] * len(inp["target_tokens"].data))
+        else:
+            weights = inp["weights"].to_types()
+
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
-                weights=inp["weights"].to_types(),
+                weights=weights,
                 advantages=inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[]),
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
             ),
@@ -469,7 +479,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
             status_code=400, detail="request.path must be in format tinker://source_model_id/weights/checkpoint_id"
         )
 
-    await validate_checkpoint(req, source_model_id, checkpoint_id, session)
+    await validate_checkpoint(req, source_model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
 
     request_id = await create_future(
         session=session,
@@ -541,7 +551,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
         await get_model(session, model_id)
         # Validate that the checkpoint exists and is ready
-        await validate_checkpoint(req, model_id, checkpoint_id, session)
+        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     request_id = await create_future(
         session=session,
@@ -611,9 +621,11 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
+async def validate_checkpoint(
+    request: Request, unique_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType, session: AsyncSession
+):
     """Validate that a model and checkpoint exist in the database, returning the checkpoint path."""
-    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id))
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, checkpoint_type))
 
     if not checkpoint_db:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
@@ -636,7 +648,7 @@ async def get_checkpoint_archive_url(
     session: AsyncSession = Depends(get_session),
 ):
     """Return a 302 redirect to the download URL (SDK expects this pattern)"""
-    await validate_checkpoint(request, unique_id, checkpoint_id, session)
+    await validate_checkpoint(request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     # Generate URL to the download endpoint and return 302 redirect
     download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
@@ -655,7 +667,9 @@ async def download_checkpoint_archive(
     session: AsyncSession = Depends(get_session),
 ):
     """Actually download the checkpoint archive bytes"""
-    checkpoint_path = await validate_checkpoint(request, unique_id, checkpoint_id, session)
+    checkpoint_path = await validate_checkpoint(
+        request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session
+    )
 
     file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
 
