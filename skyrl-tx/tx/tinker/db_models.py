@@ -25,14 +25,16 @@ def get_async_database_url(db_url: str) -> str:
 
     match parsed_url.get_backend_name():
         case "sqlite":
-            return parsed_url.set(drivername="sqlite+aiosqlite").render_as_string(hide_password=False)
+            async_url = parsed_url.set(drivername="sqlite+aiosqlite")
         case "postgresql":
-            return parsed_url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+            async_url = parsed_url.set(drivername="postgresql+asyncpg")
         case _ if "+" in parsed_url.drivername:
             # Already has an async driver specified, keep it
-            return parsed_url.render_as_string(hide_password=False)
+            async_url = parsed_url
         case backend_name:
             raise ValueError(f"Unsupported database scheme: {backend_name}")
+
+    return async_url.render_as_string(hide_password=False)
 
 
 class RequestStatus(str, Enum):
