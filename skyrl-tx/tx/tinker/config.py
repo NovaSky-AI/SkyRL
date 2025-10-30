@@ -1,6 +1,8 @@
 """Configuration for the Tinker engine."""
 
 import argparse
+import os
+from pathlib import Path
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, Field
@@ -15,9 +17,9 @@ class EngineConfig(BaseModel):
         description="Base path where checkpoints will be stored",
     )
     database_url: str | None = Field(
-        default=None,
+        default=f'sqlite:///{Path(__file__).parent / "tinker.db"}',
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
-        json_schema_extra={"argparse_type": str},
+        json_schema_extra={"argparse_type": str, "env_var": "TX_DATABASE_URL"},
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
@@ -40,6 +42,9 @@ class EngineConfig(BaseModel):
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
     """Add Pydantic model fields to an ArgumentParser.
 
+    The priorities of how options get handled: 1. Explicitly specified command line options,
+    2. environment variables and 3. default values.
+
     Args:
         parser: The ArgumentParser to add arguments to
         model: The Pydantic model class
@@ -61,13 +66,19 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             elif field.annotation is not None:
                 kwargs["type"] = field.annotation
 
-            # Check for default value
+            # Check for default value, with env_var support
+            default_value = field.default
+            if field.json_schema_extra and "env_var" in field.json_schema_extra:
+                env_value = os.environ.get(field.json_schema_extra["env_var"])
+                if env_value is not None:
+                    default_value = env_value
+
             if field.is_required():
                 # Mark as required in argparse if no default is provided
                 kwargs["required"] = True
             else:
                 # For optional fields, provide the default value to argparse
-                kwargs["default"] = field.default
+                kwargs["default"] = default_value
 
         parser.add_argument(f"--{arg_name}", **kwargs)
 

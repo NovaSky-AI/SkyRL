@@ -1,34 +1,11 @@
 """Database models for the Tinker API."""
 
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from enum import Enum
 from sqlmodel import SQLModel, Field, JSON
 from sqlalchemy.engine import url as sqlalchemy_url
 
 from tx.tinker import types
-
-
-def get_database_url(db_url: str | None = None) -> str:
-    """Get the database URL from environment variable or parameter.
-
-    Args:
-        db_url: Optional database URL to use. If None, uses environment variable
-                or defaults to SQLite.
-
-    Returns:
-        Database URL string for SQLAlchemy.
-
-    Examples:
-        SQLite: sqlite:///path/to/tinker.db
-        PostgreSQL: postgresql://user:password@localhost:5432/tinker
-        PostgreSQL (async): postgresql+asyncpg://user:password@localhost:5432/tinker
-    """
-    if db_url:
-        return db_url
-
-    return os.environ.get("TX_DATABASE_URL", f'sqlite:///{Path(__file__).parent / "tinker.db"}')
 
 
 def get_async_database_url(db_url: str | None = None) -> str:
@@ -43,7 +20,7 @@ def get_async_database_url(db_url: str | None = None) -> str:
     Raises:
         ValueError: If the database scheme is not supported.
     """
-    parsed_url = sqlalchemy_url.make_url(get_database_url(db_url))
+    parsed_url = sqlalchemy_url.make_url(db_url)
 
     match parsed_url.get_backend_name():
         case "sqlite":
