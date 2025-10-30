@@ -39,6 +39,18 @@ class EngineConfig(BaseModel):
     )
 
 
+def convert_env_var(env_name: str, env_value: str, expected_type: type):
+    """Convert environment variable to expected type."""
+    if expected_type is bool:
+        if env_value not in ("0", "1"):
+            raise ValueError(
+                f"Environment variable '{env_name}' for a boolean flag must be '0' or '1', but got '{env_value}'."
+            )
+        return env_value == "1"
+    else:
+        return env_value
+
+
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
     """Add Pydantic model fields to an ArgumentParser.
 
@@ -58,16 +70,9 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         # Check for default value, with env_var support
         default_value = field.default
         if field.json_schema_extra and "env_var" in field.json_schema_extra:
-            env_value = os.environ.get(field.json_schema_extra["env_var"])
-            if env_value is not None:
-                if field.annotation is bool:
-                    if env_value not in ("0", "1"):
-                        raise ValueError(
-                            f"Environment variable '{field.json_schema_extra['env_var']}' for a boolean flag must be '0' or '1', but got '{env_value}'."
-                        )
-                    default_value = env_value == "1"
-                else:
-                    default_value = env_value
+            env_name = field.json_schema_extra["env_var"]
+            if env_value := os.environ.get(env_name):
+                default_value = convert_env_var(env_name, env_value, field.annotation)
 
         if field.annotation is bool:
             # For boolean flags, use BooleanOptionalAction to support both --{arg_name} and --no-{arg_name}
