@@ -8,7 +8,7 @@ from sqlalchemy.engine import url as sqlalchemy_url
 from tx.tinker import types
 
 
-def get_async_database_url(db_url: str | None = None) -> str:
+def get_async_database_url(db_url: str) -> str:
     """Get the async database URL.
 
     Args:

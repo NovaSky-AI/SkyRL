@@ -16,7 +16,7 @@ class EngineConfig(BaseModel):
         default=AnyPath("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
     )
-    database_url: str | None = Field(
+    database_url: str = Field(
         default=f'sqlite:///{Path(__file__).parent / "tinker.db"}',
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
         json_schema_extra={"argparse_type": str, "env_var": "TX_DATABASE_URL"},
