@@ -213,6 +213,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
             )
             stop_strs = current_sampling_params.get("stop", None)
+            added_eos = False
             if (
                 stop_strs is not None
                 and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
@@ -220,6 +221,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
+                    added_eos = True
 
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
@@ -249,7 +251,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             elif self.use_conversation_multi_turn:
                 # b. Token-in-token-out. Follow multi-turn chat history format.
                 input_ids, loss_mask, response_end_idx = self._get_next_input_ids_with_multiturn_chat_template(
-                    input_ids, loss_mask, output_ids, new_obs, done
+                    input_ids, loss_mask, output_ids, new_obs, done, added_eos
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
             else:
@@ -563,6 +565,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         output_ids: List[int],
         new_obs: ConversationType,
         done: bool,
+        added_eos: bool,
     ):
         """
         Update the loss mask and input ids given a new model response and observation, following
@@ -610,7 +613,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         # 1. Directly append generated output
         input_ids += output_ids
         response_end_idx = len(input_ids) - 1
-        loss_mask += [1] * len(output_ids)
+        # if `added_eos` is `True`, then  the EOS token was not generated and only added in the
+        # `agent_loop` function. For consistency with other entities like logprobs , we ignore it in the loss
+        # mask
+        loss_mask += [1] * len(output_ids) if not added_eos else [1] * (len(output_ids) - 1) + [0]
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
