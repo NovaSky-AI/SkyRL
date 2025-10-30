@@ -61,7 +61,10 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             env_value = os.environ.get(field.json_schema_extra["env_var"])
             if env_value is not None:
                 if field.annotation is bool:
-                    assert env_value in ["0", "1"], "boolean env variable must be 0 or 1"
+                    if env_value not in ("0", "1"):
+                        raise ValueError(
+                            f"Environment variable '{field.json_schema_extra['env_var']}' for a boolean flag must be '0' or '1', but got '{env_value}'."
+                        )
                     default_value = env_value == "1"
                 else:
                     default_value = env_value
