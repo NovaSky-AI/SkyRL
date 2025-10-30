@@ -588,8 +588,9 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     for _ in range(int(timeout / poll_interval)):
         async with AsyncSession(req.app.state.db_engine) as session:
             # First, only query the status to avoid deserializing JSON data
-            status_statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
-            status = await session.exec(status_statement).first()
+            statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
+            result = await session.exec(statement)
+            status = result.first()
 
             if not status:
                 raise HTTPException(status_code=404, detail="Future not found")
