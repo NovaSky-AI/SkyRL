@@ -583,48 +583,34 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    deadline = time.perf_counter() + timeout
+    poll_interval = 0.1  # 100ms
 
-    # Start with 200ms, grow to 2s
-    poll = 0.2
-    max_poll = 2.0
+    for _ in range(int(timeout / poll_interval)):
+        async with AsyncSession(req.app.state.db_engine) as session:
+            # First, only query the status to avoid deserializing JSON data
+            status_statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
+            status = await session.exec(status_statement).first()
 
-    async with AsyncSession(req.app.state.db_engine, expire_on_commit=False) as session:
-        while time.perf_counter() < deadline:
-            try:
-                async with session.begin():
-                    # First, only check status (avoid deserializing result_data)
-                    stmt = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
-                    result = await session.exec(stmt)
-                    status = result.first()
+            if not status:
+                raise HTTPException(status_code=404, detail="Future not found")
 
-                    if status is None:
-                        raise HTTPException(status_code=404, detail="Future not found")
+            # Only fetch full record if status is terminal (completed or failed)
+            if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+                statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+                result = await session.exec(statement)
+                future = result.first()
 
-                    # Only fetch result_data if we need it (completed or failed)
-                    if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
-                        stmt = select(FutureDB.result_data).where(FutureDB.request_id == int(request.request_id))
-                        result = await session.exec(stmt)
-                        result_data = result.first()
+                if future.status == RequestStatus.COMPLETED:
+                    return future.result_data
 
-                        if status == RequestStatus.COMPLETED:
-                            return result_data
+                if future.status == RequestStatus.FAILED:
+                    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                    if future.result_data and "error" in future.result_data:
+                        raise HTTPException(status_code=400, detail=future.result_data["error"])
+                    else:
+                        raise HTTPException(status_code=500, detail="Unknown error")
 
-                        if status == RequestStatus.FAILED:
-                            # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                            if result_data and "error" in result_data:
-                                raise HTTPException(status_code=400, detail=result_data["error"])
-                            else:
-                                raise HTTPException(status_code=500, detail="Unknown error")
-            except SATimeoutError:
-                # Pool is busy or transient DB error: back off more aggressively
-                await asyncio.sleep(min(poll * 2, 3.0))
-                poll = min(poll * 1.5, max_poll)
-                continue
-
-            # Exponential backoff
-            await asyncio.sleep(poll)
-            poll = min(poll * 1.5, max_poll)
+        await asyncio.sleep(poll_interval)
 
     raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
