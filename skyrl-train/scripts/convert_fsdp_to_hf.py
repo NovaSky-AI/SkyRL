@@ -179,7 +179,6 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
     for shard in shards_paths:
         sd = load_single_shard(shard)
         for k, v in sd.items():
-            # nk = normalize_key(k)
             nk = k
             if nk in merged:
                 if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
@@ -192,7 +191,7 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
                         f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
                     )
                 else:
-                    ## Merged here
+                    # Merging tensors using merge_two_shards with heuristic fallback
                     merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous())
             else:
                 merged[nk] = v.detach().cpu().contiguous()
@@ -287,7 +286,7 @@ def validate_load(out_dir: Path):
         )
         print("[validate] HF Load OK")
     except Exception as e:
-        print("[validate][error] HF Load failed: {e} ", e)
+        print(f"[validate][error] HF Load failed: {e} ", e)
         raise RuntimeError("HF Load failed")
 
 
