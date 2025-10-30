@@ -1,7 +1,7 @@
 set -e
 
 if command -v uv >/dev/null 2>&1; then
-    uv pip install -q pre-commit
+    uv pip install --system -q pre-commit
 else 
     pip install -q pre-commit
 fi
