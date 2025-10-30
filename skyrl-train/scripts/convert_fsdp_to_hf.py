@@ -179,7 +179,6 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
     for shard in shards_paths:
         sd = load_single_shard(shard)
         for k, v in sd.items():
-            # nk = normalize_key(k)
             nk = k
             if nk in merged:
                 if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
