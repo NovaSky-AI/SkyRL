@@ -57,24 +57,6 @@ def get_model_shards(policy_dir: Path) -> List[Path]:
         raise FileNotFoundError(f"No model shards found under {policy_dir}")
     return shards_paths
 
-
-# Not used at the moment
-def normalize_key(k: str) -> str:
-    """
-    Return a normalized key to ensure consistency across checkpointing frameworks
-    Example - Attention layer training:
-        "module.encoder.layer.0.attention.self.query.weight"
-        "model.module.encoder.layer.0.attention.self.query.weight"
-        "encoder.layer.0.attention.self.query.weight"
-    These 3 should refer to the same thing, so they should be normalized.
-
-    Function takes string and removes all possible prefixes.
-    """
-    k = re.sub(r"^(module|model)\.", "", k)
-    k = k.replace("_fsdp_wrapped_module.", "")
-    return k
-
-
 def load_single_shard(path: Path) -> Dict[str, torch.Tensor]:
     """
     Load a single model shard and return a dictionary of tensors
@@ -182,18 +164,7 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
             # nk = normalize_key(k)
             nk = k
             if nk in merged:
-                if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
-                    print(
-                        f"[error] Key collision with mismatch for '{nk}' between shards "
-                        f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
-                    )
-                    raise ValueError(
-                        f"Key collision with mismatch for '{nk}' between shards "
-                        f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
-                    )
-                else:
-                    ## Merged here
-                    merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous())
+                merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk)
             else:
                 merged[nk] = v.detach().cpu().contiguous()
     if not merged:
@@ -287,7 +258,7 @@ def validate_load(out_dir: Path):
         )
         print("[validate] HF Load OK")
     except Exception as e:
-        print("[validate][error] HF Load failed: {e} ", e)
+        print(f"[validate][error] HF Load failed: {e} ")
         raise RuntimeError("HF Load failed")
 
 
@@ -340,15 +311,13 @@ def main():
     clean_sd = _materialize_for_safetensors(state_dict)
     clean_sd = _untie_shared_tensors(clean_sd)
 
-    # save_file(clean_sd, str(weights_path))
-    # print(f"[success] Saved weights to {weights_path}")
-
     cfg = AutoConfig.from_pretrained(output_dir, local_files_only=True, trust_remote_code=True)
     HFClass = guess_hf_class(cfg)
     hf_model = HFClass.from_config(cfg)
     hf_model.save_pretrained(
         save_directory=output_dir,
         state_dict=clean_sd,
+        safe_serialization=True,
     )
 
     if args.validate_load:

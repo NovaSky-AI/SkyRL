@@ -35,9 +35,9 @@ Example usage:
 uv run --isolated --frozen --extra vllm scripts/convert_deepspeed_to_hf.py --ckpt-dir [local_checkpoint] --out-dir [output_directory]
 """
 
-import os
 import json
 import shutil
+import subprocess
 import argparse
 import torch
 from pathlib import Path
@@ -60,8 +60,8 @@ def main(deepspeed_model_path: Path, out_dir:Path = None) -> Path:
     if not MERGED_FP32.exists():
         print(f"[1/5] Merging ZeRO shards from {POLICY_DIR} ...")
         cmd = f"python {zero2fp32_script} {POLICY_DIR} {MERGED_FP32}"
-        ret = os.system(cmd)
-        if ret != 0:
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
             raise RuntimeError("zero_to_fp32.py merge failed.")
     else:
         print(f"[1/5] Merged model already exists → {MERGED_FP32}")
@@ -135,7 +135,7 @@ def validate_load(out_dir: Path):
         )
         print("[validate] HF Load OK")
     except Exception as e:
-        print("[validate][error] HF Load failed: {e} ", e)
+        print(f"[validate][error] HF Load failed: {e} ")
         raise RuntimeError("HF Load failed")
     
 if __name__ == "__main__":
