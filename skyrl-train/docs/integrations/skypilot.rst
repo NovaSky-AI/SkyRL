@@ -1,12 +1,10 @@
-Launching with Skypilot
-=====================================
-
 Skypilot
--------
+=========
 
 `SkyPilot <https://docs.skypilot.co/en/latest>`_ is a system to run, manage,
 and scale AI workloads on any infrastructure. It handles all of the logic of
 provisioning, setting up, and tearing down clusters on any cloud.
+
 
 Setup Skypilot
 --------------
