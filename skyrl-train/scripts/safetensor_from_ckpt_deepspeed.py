@@ -10,13 +10,12 @@ import gc
 import os
 import shutil
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
-from pathlib import Path
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from safetensors.torch import save_file as safetensors_save_file
-from transformers import AutoModelForCausalLM, AutoConfig
+from transformers import AutoConfig
 
 
 def parse_args() -> argparse.Namespace:

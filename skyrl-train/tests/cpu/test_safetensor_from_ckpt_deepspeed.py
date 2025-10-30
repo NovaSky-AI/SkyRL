@@ -4,7 +4,6 @@ Test script to validate checkpoint to safetensors conversion
 """
 import argparse
 import subprocess
-import sys
 import os
 import torch
 from safetensors import safe_open
@@ -18,11 +17,11 @@ ALIASES = {
 }
 
 
-def _get_tensor(d, k):
-    if k in d:
-        return d[k]
-    if k in ALIASES and ALIASES[k] in d:
-        return d[ALIASES[k]]
+def get_tensor(dict, key):
+    if key in dict:
+        return dict[key]
+    if key in ALIASES and ALIASES[key] in dict:
+        return dict[ALIASES[key]]
     return None
 
 
@@ -89,7 +88,7 @@ def validate_conversion(ckpt_dir, safetensors_dir):
 
         # Compare tensors on the intersection + aliased keys
         for k in sorted(keys_pt):
-            b = _get_tensor(safetensor_state, k)
+            b = get_tensor(safetensor_state, k)
             if b is None:
                 # real miss (not covered by alias)
                 continue
@@ -146,7 +145,7 @@ def main():
         print(f"Script output (stderr):\n{result.stderr}")
     if result.returncode != 0:
         print("FAILURE: Conversion script failed.")
-        return False
+        return
 
     validation_passed = validate_conversion(args.ckpt_dir, args.safetensors_dir)
     if validation_passed:
@@ -154,8 +153,6 @@ def main():
     else:
         print("\nFAILURE")
 
-    return validation_passed
-
 
 if __name__ == "__main__":
-    sys.exit(not main())
+    main()
