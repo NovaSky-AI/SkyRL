@@ -54,7 +54,7 @@ def convert_env_var(env_name: str, env_value: str, expected_type: type):
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
     """Add Pydantic model fields to an ArgumentParser.
 
-    The priorities of how options get handled: 1. Explicitly specified command line options,
+    The priority order of how options are handled: 1. Explicitly specified command line options,
     2. environment variables and 3. default values.
 
     Args:
