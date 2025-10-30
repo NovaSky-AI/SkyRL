@@ -1,3 +1,5 @@
+.. _skypilot:
+
 Skypilot
 =========
 
@@ -5,6 +7,7 @@ Skypilot
 and scale AI workloads on any infrastructure. It handles all of the logic of
 provisioning, setting up, and tearing down clusters on any cloud.
 
+You can also view a detailed tutorial on running SkyRL on Skypilot in the SkyPilot documentation `here <https://docs.skypilot.co/en/latest/examples/training/skyrl.html>`_.
 
 Setup Skypilot
 --------------
