@@ -37,13 +37,17 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
     db_url = get_async_database_url(app.state.engine_config.database_url)
-    app.state.db_engine = create_async_engine(db_url, echo=False)
+    app.state.db_engine = create_async_engine(
+        db_url,
+        echo=False,
+    )
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
     # Build subprocess command with engine config parameters
-    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
+    # Use --env-file to ensure the engine subprocess loads .env file
+    cmd = ["uv", "run", "--env-file", ".env", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
