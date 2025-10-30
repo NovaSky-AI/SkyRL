@@ -286,7 +286,7 @@ def validate_load(out_dir: Path):
         )
         print("[validate] HF Load OK")
     except Exception as e:
-        print("[validate][error] HF Load failed: {e} ", e)
+        print(f"[validate][error] HF Load failed: {e} ", e)
         raise RuntimeError("HF Load failed")
 
 
