@@ -162,8 +162,9 @@ class RayPPOTrainer:
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
+        start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
-        for epoch in range(self.cfg.trainer.epochs):
+        for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
@@ -191,8 +192,9 @@ class RayPPOTrainer:
                             pbar.update(1)
                             continue
 
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
+                    if self.colocate_all:
+                        # if we are not continuing sampling, we sleep the inference engine
+                        asyncio.run(self.inference_engine_client.sleep())
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
