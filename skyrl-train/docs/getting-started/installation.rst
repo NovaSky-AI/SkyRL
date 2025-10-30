@@ -16,7 +16,7 @@ If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-clus
 
 .. tip::
 
-    Interested in easily running SkyRL on a managed platform? See our :ref:`platforms <platforms>` documentation for more information.
+    Interested in easily running SkyRL on a managed platform? See our :doc:`platforms <../platforms/overview>` documentation for more information.
 
 Docker (recommended)
 ---------------------
