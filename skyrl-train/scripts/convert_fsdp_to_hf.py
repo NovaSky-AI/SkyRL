@@ -180,19 +180,19 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
         sd = load_single_shard(shard)
         for k, v in sd.items():
             nk = k
-            if nk in merged:
-                if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
-                    print(
-                        f"[error] Key collision with mismatch for '{nk}' between shards "
-                        f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
-                    )
-                    raise ValueError(
-                        f"Key collision with mismatch for '{nk}' between shards "
-                        f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
-                    )
-                else:
-                    # Merging tensors using merge_two_shards with heuristic fallback
-                    merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous())
+            # if nk in merged:
+            #     if merged[nk].shape != v.shape or merged[nk].dtype != v.dtype:
+            #         print(
+            #             f"[error] Key collision with mismatch for '{nk}' between shards "
+            #             f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
+            #         )
+            #         raise ValueError(
+            #             f"Key collision with mismatch for '{nk}' between shards "
+            #             f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
+            #         )
+            #     else:
+            #         # Merging tensors using merge_two_shards with heuristic fallback
+            merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk)
             else:
                 merged[nk] = v.detach().cpu().contiguous()
     if not merged:
