@@ -7,6 +7,7 @@ Assumes ZeRO-3 is used.
 
 import argparse
 import gc
+import json
 import os
 import shutil
 import sys
@@ -14,7 +15,8 @@ from typing import Dict, Optional
 
 import torch
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-from safetensors.torch import save_file as safetensors_save_file
+from huggingface_hub import split_torch_state_dict_into_shards
+from safetensors.torch import save_file
 from transformers import AutoConfig
 
 
@@ -32,10 +34,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to HF config.json if not present in <ckpt_dir>/huggingface/.",
     )
     parser.add_argument(
-        "--max-safetensor-shard-size",
+        "--max-shard-size",
         dest="max_shard_size",
-        default="2GB",
-        help="Optional maximum shard size for safetensors. Defaults to 2GB.",
+        default=None,
+        help="Optional maximum shard size for safetensors (e.g. '2GB').",
     )
     return parser.parse_args()
 
@@ -93,9 +95,27 @@ def apply_tied_embeddings_drop(state_dict: Dict[str, torch.Tensor], config_path:
         state_dict.pop("lm_head.weight", None)
 
 
-def save_safetensors_and_config(out_dir: str, state_dict: Dict[str, torch.Tensor], config_path: str) -> None:
+def save_safetensors_and_config(
+    out_dir: str, state_dict: Dict[str, torch.Tensor], config_path: str, max_shard_size: str
+) -> None:
     os.makedirs(out_dir, exist_ok=True)
-    safetensors_save_file(state_dict, os.path.join(out_dir, "model.safetensors"))
+
+    state_dict_split = split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size)
+
+    # Save shards as separate safetensors files
+    for filename, tensors in state_dict_split.filename_to_tensors.items():
+        shard = {tensor: state_dict[tensor] for tensor in tensors}
+        save_file(shard, os.path.join(out_dir, filename), metadata={"format": "pt"})
+
+    # Save index file if sharded
+    if state_dict_split.is_sharded:
+        index = {
+            "metadata": state_dict_split.metadata,
+            "weight_map": state_dict_split.tensor_to_filename,
+        }
+        with open(os.path.join(out_dir, "model.safetensors.index.json"), "w") as f:
+            f.write(json.dumps(index, indent=2, sort_keys=True))
+
     cfg = AutoConfig.from_pretrained(config_path)
     cfg.save_pretrained(out_dir)
 
