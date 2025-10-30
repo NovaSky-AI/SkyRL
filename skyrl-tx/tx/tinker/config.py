@@ -55,9 +55,20 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             "help": field.description,
         }
 
+        # Check for default value, with env_var support
+        default_value = field.default
+        if field.json_schema_extra and "env_var" in field.json_schema_extra:
+            env_value = os.environ.get(field.json_schema_extra["env_var"])
+            if env_value is not None:
+                if field.annotation is bool:
+                    assert env_value in ["0", "1"], "boolean env variable must be 0 or 1"
+                    default_value = env_value == "1"
+                else:
+                    default_value = env_value
+
         if field.annotation is bool:
             # For boolean flags, use BooleanOptionalAction to support both --{arg_name} and --no-{arg_name}
-            kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": field.default}
+            kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": default_value}
         else:
             # Check if explicit argparse_type is specified in field metadata
             argparse_type = field.json_schema_extra.get("argparse_type") if field.json_schema_extra else None
@@ -65,13 +76,6 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
                 kwargs["type"] = argparse_type
             elif field.annotation is not None:
                 kwargs["type"] = field.annotation
-
-            # Check for default value, with env_var support
-            default_value = field.default
-            if field.json_schema_extra and "env_var" in field.json_schema_extra:
-                env_value = os.environ.get(field.json_schema_extra["env_var"])
-                if env_value is not None:
-                    default_value = env_value
 
             if field.is_required():
                 # Mark as required in argparse if no default is provided
