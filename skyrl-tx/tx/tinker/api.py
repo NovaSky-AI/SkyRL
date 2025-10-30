@@ -43,7 +43,6 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(SQLModel.metadata.create_all)
 
     # Build subprocess command with engine config parameters
-    # Use --env-file to ensure the engine subprocess loads .env file
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
