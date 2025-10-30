@@ -191,7 +191,7 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
                         f"(existing {merged[nk].shape}/{merged[nk].dtype} vs {v.shape}/{v.dtype})"
                     )
                 else:
-                    ## Merged here
+                    # Merging tensors using merge_two_shards with heuristic fallback
                     merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous())
             else:
                 merged[nk] = v.detach().cpu().contiguous()
