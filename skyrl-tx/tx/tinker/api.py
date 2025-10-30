@@ -593,31 +593,34 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
         while time.perf_counter() < deadline:
             try:
                 async with session.begin():
-                    stmt = (
-                        select(FutureDB)
-                        .where(FutureDB.request_id == int(request.request_id))
-                        .execution_options(populate_existing=True)
-                    )
+                    # First, only check status (avoid deserializing result_data)
+                    stmt = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
                     result = await session.exec(stmt)
-                    future = result.first()
+                    status = result.first()
+
+                    if status is None:
+                        raise HTTPException(status_code=404, detail="Future not found")
+
+                    # Only fetch result_data if we need it (completed or failed)
+                    if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+                        stmt = select(FutureDB.result_data).where(FutureDB.request_id == int(request.request_id))
+                        result = await session.exec(stmt)
+                        result_data = result.first()
+
+                        if status == RequestStatus.COMPLETED:
+                            return result_data
+
+                        if status == RequestStatus.FAILED:
+                            # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                            if result_data and "error" in result_data:
+                                raise HTTPException(status_code=400, detail=result_data["error"])
+                            else:
+                                raise HTTPException(status_code=500, detail="Unknown error")
             except SATimeoutError:
                 # Pool is busy or transient DB error: back off more aggressively
                 await asyncio.sleep(min(poll * 2, 3.0))
                 poll = min(poll * 1.5, max_poll)
                 continue
-
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
-
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
-
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
 
             # Exponential backoff
             await asyncio.sleep(poll)
