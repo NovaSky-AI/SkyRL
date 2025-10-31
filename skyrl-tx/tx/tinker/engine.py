@@ -227,18 +227,11 @@ class TinkerEngine:
             accumulator.add(grad_sum, count)
 
     def _accumulate_non_lora_grads(self, non_lora_grads: nnx.State, example_model_ids: list[str]) -> None:
-        model_ids = set(example_model_ids)
-        if len(model_ids) != 1:
-            raise ValueError("full_finetuning requires single tenant")
-        model_id = next(iter(model_ids))
+        model_id = example_model_ids[0]
         
-        # Filter the gradients to ONLY keep nnx.Param leaves.
-        # This creates a "clean" tree: {'kernel': <grad>}
-        # and drops the {'lora_ranks': None, 'lora_scaling': None}
+        # Filter the gradients to only keep nnx.Param leaves.
         filtered_grads = nnx.state(non_lora_grads, nnx.Param)
-
-        # Now add this clean tree to the accumulator.
-        # The accumulator's simple 'add' function will work perfectly.
+        
         self.accumulated_grads[model_id].add(filtered_grads, len(example_model_ids))
 
 

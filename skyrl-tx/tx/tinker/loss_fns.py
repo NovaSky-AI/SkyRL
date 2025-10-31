@@ -202,35 +202,6 @@ def loss_and_grad_fn_full_finetuning(
     # Differentiate with respect to base model's parameters (argnums=1)
     loss_and_grad_fn = nnx.value_and_grad(loss_full_parameter, argnums=1, has_aux=True, allow_int=True)
     
-
-    from jax.tree_util import tree_map_with_path
-    from flax.nnx.graph import Node  # Import this for cleaning up paths
-
-    def print_integer_leaves(state: nnx.State, name: str):
-        """Recursively traverses a Pytree and prints info about integer-based leaves."""
-        print(f"\n🔍 Checking for integer leaves in: {name}")
-        
-        def check_leaf(path, value):
-            # Check if the leaf is a JAX array or an nnx.Variable/Param
-            if hasattr(value, 'value') and hasattr(value.value, 'dtype'):
-                dtype = value.value.dtype
-                if jnp.issubdtype(dtype, jnp.integer):
-                    # Create a clean string path
-                    path_str = ".".join(
-                        p.key if isinstance(p, Node) else str(p) for p in path
-                    )
-                    var_type = type(value).__name__
-                    shape = value.value.shape
-                    
-                    print(f"  🔴 INTEGER LEAF FOUND: {path_str}")
-                    print(f"      Type: {var_type}, Dtype: {dtype}, Shape: {shape}")
-        
-            # Run the check on every leaf
-            tree_map_with_path(check_leaf, state)
-            print(f"✅ Finished checking: {name}\n")
-            
-    print_integer_leaves(non_lora_params, "non_lora_params in full finetuning loss")
-
     if enforce_eager:
         # Disable JIT compilation for debugging
         return loss_and_grad_fn
