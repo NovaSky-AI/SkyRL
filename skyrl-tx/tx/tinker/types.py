@@ -107,12 +107,7 @@ class ForwardBackwardOutput(BaseModel):
     metrics: dict
 
 
-class ForwardBackwardError(BaseModel):
-    error: str
-    status: str
-
-
-class SampleError(BaseModel):
+class ErrorResponse(BaseModel):
     error: str
     status: str
 

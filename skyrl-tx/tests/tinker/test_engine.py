@@ -14,13 +14,6 @@ from tx.tinker import types
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
-class FutureStub:
-    """Minimal stub with request_id (engine only reads this attribute)."""
-
-    def __init__(self, request_id: int):
-        self.request_id = request_id
-
-
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
     samples = []
     for tokens in token_lists:
@@ -94,10 +87,10 @@ def test_adapter_gradient_calculation():
             [13, 14, 15, 16],
         ]
     )
-    reqs_round1 = [
-        (FutureStub(101), adapter1_id, a1_input),
-        (FutureStub(102), adapter2_id, a2_input1),
-    ]
+    reqs_round1 = {
+        "101": (adapter1_id, a1_input),
+        "102": (adapter2_id, a2_input1),
+    }
 
     # Process round 1 batch
     engine.process_forward_backward_batch(reqs_round1)
@@ -110,10 +103,10 @@ def test_adapter_gradient_calculation():
 
     a1_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8]])
     a2_input2 = make_fwd_bwd_input([[9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20], [21, 22, 23, 24]])
-    reqs_round2 = [
-        (FutureStub(201), adapter1_id, a1_input),
-        (FutureStub(202), adapter2_id, a2_input2),
-    ]
+    reqs_round2 = {
+        "201": (adapter1_id, a1_input),
+        "202": (adapter2_id, a2_input2),
+    }
 
     # Process round 2 batch
     engine.process_forward_backward_batch(reqs_round2)
@@ -160,10 +153,10 @@ def test_micro_batch_grad_accumulation():
         ]
     )
 
-    reqs = [
-        (FutureStub(1001), adapter1_id, a1_input),
-        (FutureStub(1002), adapter2_id, a2_input),
-    ]
+    reqs = {
+        "1001": (adapter1_id, a1_input),
+        "1002": (adapter2_id, a2_input),
+    }
 
     # Run 1: micro-batching enabled
     engine.process_forward_backward_batch(reqs)
@@ -233,7 +226,7 @@ def test_process_optim_step_hyperparams_behavior():
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
 
     def apply_step(request_id: int, model_id: str, request: types.OptimStepInput) -> float:
-        engine.process_forward_backward_batch([(FutureStub(request_id), model_id, make_fwd_bwd_input(tokens))])
+        engine.process_forward_backward_batch({str(request_id): (model_id, make_fwd_bwd_input(tokens))})
         params_before = jax.tree.map(jnp.copy, engine.lora_params)
         engine.process_optim_step(model_id, request)
         delta = jax.tree.map(lambda old, new: (new - old).astype(jnp.float32), params_before, engine.lora_params)
