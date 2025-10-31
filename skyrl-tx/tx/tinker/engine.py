@@ -819,9 +819,7 @@ class TinkerEngine:
                 raise ValueError(f"Unknown request type: {request_type}")
         return result.model_dump()
 
-    def process_batch_requests(
-        self, requests: dict[str, tuple[str, dict]], batch_processor, error_type
-    ):
+    def process_batch_requests(self, requests: dict[str, tuple[str, dict]], batch_processor, error_type):
         """Generic function to process a batch of requests.
 
         Args:
@@ -851,10 +849,7 @@ class TinkerEngine:
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
-            results_to_update = [
-                (request_id, {"error": str(e)}, RequestStatus.FAILED)
-                for request_id in requests
-            ]
+            results_to_update = [(request_id, {"error": str(e)}, RequestStatus.FAILED) for request_id in requests]
             self._update_futures(results_to_update)
 
     def process_pending_requests(self):
@@ -881,13 +876,9 @@ class TinkerEngine:
                     for f in forward_backward_futures
                 }
                 sample_requests = {
-                    f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data))
-                    for f in sample_futures
+                    f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in sample_futures
                 }
-                other_requests = {
-                    f.request_id: (f.model_id, f.request_type, f.request_data)
-                    for f in other_futures
-                }
+                other_requests = {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
             # Process batches outside of session context
             self.process_batch_requests(
