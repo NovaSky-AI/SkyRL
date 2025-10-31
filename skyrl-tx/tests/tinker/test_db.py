@@ -3,7 +3,6 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from sqlalchemy import create_engine, inspect
 
 
 ALEMBIC_CMD_PREFIX = ["uv", "run", "--extra", "dev"]
