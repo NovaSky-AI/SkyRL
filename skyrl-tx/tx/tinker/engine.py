@@ -22,7 +22,7 @@ from huggingface_hub import snapshot_download
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
+from tx.tinker.loss_fns import LOSS_TYPES
 from tx.tinker.loss_fns import loss_and_grad_fn_full_finetuning, loss_and_grad_fn_lora
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
