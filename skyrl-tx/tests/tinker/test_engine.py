@@ -135,7 +135,7 @@ def test_micro_batch_grad_accumulation():
         checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
-        micro_batch_size=4,
+        train_micro_batch_size=4,
     )
     engine = TinkerEngine(config)
 
@@ -182,7 +182,7 @@ def test_micro_batch_grad_accumulation():
         checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
-        micro_batch_size=0,
+        train_micro_batch_size=0,
     )
     engine = TinkerEngine(config)
 
@@ -265,7 +265,7 @@ def test_gradient_checkpointing():
             base_model=BASE_MODEL,
             enforce_eager=False,
             train_batch_size=2,
-            micro_batch_size=1,
+            train_micro_batch_size=1,
             max_lora_adapters=1,
             max_lora_rank=4,
             gradient_checkpointing=use_gradient_checkpointing,
@@ -301,3 +301,65 @@ def test_gradient_checkpointing():
 
     # Check relative difference between losses is small
     assert abs(losses[0] - losses[1]) / abs(losses[0]) < 5e-3
+
+
+def test_sample_max_num_sequences():
+    """
+    Verify sampling with sample_max_num_sequences constraint.
+    """
+    cfg = EngineConfig(
+        base_model=BASE_MODEL,
+        checkpoints_base=AnyPath(""),
+        max_lora_adapters=2,
+        max_lora_rank=32,
+        sample_max_num_sequences=2,  # Set max sample batch size to 2
+    )
+    engine = TinkerEngine(cfg)
+
+    # Five prompts, resulting in 3 batches (2 of size 2, 1 of size 1)
+    prompts = [
+        [1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9],
+        [10, 11, 12, 13, 14],
+        [15, 16, 17],
+    ]
+
+    sampling_params = api.SamplingParams(temperature=0.0, max_tokens=16, seed=42).to_types()
+
+    def make_sample_input(tokens: list[int]) -> types.SampleInput:
+        return types.SampleInput(
+            base_model=BASE_MODEL,  # Sample from base model (no LoRA)
+            prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+            sampling_params=sampling_params,
+            num_samples=1,
+            checkpoint_id="",  # Empty for base model sampling
+        )
+
+    # Build a batch of 5 sample requests
+    reqs = [(FutureStub(request_id), "", make_sample_input(tokens)) for request_id, tokens in enumerate(prompts)]
+
+    # Process sample requests.
+    results = engine.process_sample_batch(reqs)
+
+    # Verify results
+    assert len(results) == len(prompts), f"Expected {len(prompts)} results, got {len(results)}"
+    for request_id in range(len(prompts)):
+        result = results[request_id]
+
+        assert len(result.sequences) == 1, f"Request {request_id}: expected 1 sequence, got {len(result.sequences)}"
+        seq = result.sequences[0]
+        tokens = seq.tokens
+
+        # Should have generated some tokens (max_tokens=16)
+        assert len(tokens) > 0, f"Request {request_id}: no tokens generated"
+        assert len(tokens) <= 16, f"Request {request_id}: generated {len(tokens)} tokens, max was 16"
+
+        # Stop reason should be valid
+        assert seq.stop_reason in ["length", "stop"], f"Request {request_id}: invalid stop_reason '{seq.stop_reason}'"
+
+        # If we have logprobs, they should match the number of tokens
+        if seq.logprobs:
+            assert len(seq.logprobs) == len(
+                tokens
+            ), f"Request {request_id}: {len(tokens)} tokens but {len(seq.logprobs)} logprobs"
