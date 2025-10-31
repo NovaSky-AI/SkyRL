@@ -1,7 +1,9 @@
 """Loss functions for training."""
 
+from collections.abc import Callable
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 
 def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
@@ -48,3 +50,176 @@ LOSS_TYPES = {name: idx for idx, name in enumerate(LOSS_FUNCTION_MAP.keys())}
 
 # List of loss functions in order (for jax.lax.switch)
 LOSS_FUNCTIONS = list(LOSS_FUNCTION_MAP.values())
+
+
+def loss_and_grad_fn_lora(
+    mesh: jax.sharding.Mesh,
+    gradient_checkpointing: bool,
+    graphdef: nnx.GraphDef,
+    enforce_eager: bool,
+    lora_params: nnx.State,
+    non_lora_params: nnx.State,
+) -> Callable:
+    """Compile and cache the loss function to avoid re-jitting on every call."""
+
+    # Wrap the model forward call to use nnx.remat for gradient checkpointing
+    def _model_forward(
+        model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+    ) -> jax.Array:
+        output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+        return output.logits
+
+    if gradient_checkpointing:
+        # policy=None corresponds full activation recomputation
+        _model_forward = nnx.remat(_model_forward, policy=None)
+
+    def loss_for_lora(
+        lora_params: nnx.State,
+        non_lora_params: nnx.State,
+        input_ids: jax.Array,
+        attention_mask: jax.Array,
+        adapter_indices: jax.Array,
+        target_ids: jax.Array,
+        loss_mask: jax.Array,
+        loss_fn_types: jax.Array,
+        sampling_logprobs: jax.Array,
+        advantages: jax.Array,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        model = nnx.merge(graphdef, lora_params, non_lora_params)
+        logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+
+        logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
+        target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
+
+        def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
+            return jax.lax.switch(
+                loss_fn_type,
+                LOSS_FUNCTIONS,
+                target_logprobs,
+                loss_mask,
+                sampling_logprobs,
+                advantages,
+            )
+
+        per_token_losses = jax.vmap(compute_loss_per_example)(
+            loss_fn_types,
+            target_logprobs,
+            loss_mask,
+            sampling_logprobs,
+            advantages,
+        )
+
+        per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
+        # Return sum of losses (we'll divide gradients by per-adapter batch size later)
+        return per_seq_loss.sum(), (logits, per_token_losses)
+
+    # Only differentiate with respect to lora_params (argnums=0)
+    loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
+
+    if enforce_eager:
+        # Disable JIT compilation for debugging
+        return loss_and_grad_fn
+    else:
+        # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
+        lora_shardings = jax.tree.map(
+            lambda spec: jax.NamedSharding(mesh, spec), nnx.get_partition_spec(lora_params)
+        )
+        non_lora_shardings = jax.tree.map(
+            lambda spec: jax.NamedSharding(mesh, spec), nnx.get_partition_spec(non_lora_params)
+        )
+        replicated = jax.NamedSharding(mesh, jax.P(None))
+        scalar = jax.NamedSharding(mesh, jax.P())
+        return jax.jit(
+            loss_and_grad_fn,
+            # One input sharding parameter for each argument of loss_for_lora
+            in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
+            # One output sharding parameter for each return value of loss_for_lora
+            out_shardings=((scalar, (replicated, replicated)), lora_shardings),
+        )
+
+
+def loss_and_grad_fn_full_finetuning(
+    mesh: jax.sharding.Mesh,
+    gradient_checkpointing: bool,
+    graphdef: nnx.GraphDef,
+    enforce_eager: bool,
+    lora_params: nnx.State,
+    non_lora_params: nnx.State,
+) -> Callable:
+    """Compile and cache the loss function to avoid re-jitting on every call."""
+
+    # Wrap the model forward call to use nnx.remat for gradient checkpointing
+    def _model_forward(
+        model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+    ) -> jax.Array:
+        output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+        return output.logits
+
+    if gradient_checkpointing:
+        # policy=None corresponds full activation recomputation
+        _model_forward = nnx.remat(_model_forward, policy=None)
+
+    def loss_full_parameter(
+        lora_params: nnx.State,
+        non_lora_params: nnx.State,
+        input_ids: jax.Array,
+        attention_mask: jax.Array,
+        adapter_indices: jax.Array,
+        target_ids: jax.Array,
+        loss_mask: jax.Array,
+        loss_fn_types: jax.Array,
+        sampling_logprobs: jax.Array,
+        advantages: jax.Array,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        model = nnx.merge(graphdef, lora_params, non_lora_params)
+        logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+
+        logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
+        target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
+
+        def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
+            return jax.lax.switch(
+                loss_fn_type,
+                LOSS_FUNCTIONS,
+                target_logprobs,
+                loss_mask,
+                sampling_logprobs,
+                advantages,
+            )
+
+        per_token_losses = jax.vmap(compute_loss_per_example)(
+            loss_fn_types,
+            target_logprobs,
+            loss_mask,
+            sampling_logprobs,
+            advantages,
+        )
+
+        per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
+        # Return sum of losses (we'll divide gradients by per-adapter batch size later)
+        return per_seq_loss.sum(), (logits, per_token_losses)
+
+    # Differentiate with respect to base model's parameters (argnums=1)
+    loss_and_grad_fn = nnx.value_and_grad(loss_full_parameter, argnums=1, has_aux=True, allow_int=True)
+    
+    if enforce_eager:
+        # Disable JIT compilation for debugging
+        return loss_and_grad_fn
+    else:
+        # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
+        lora_shardings = jax.tree.map(
+            lambda spec: jax.NamedSharding(mesh, spec), nnx.get_partition_spec(lora_params)
+        )
+        non_lora_shardings = jax.tree.map(
+            lambda spec: jax.NamedSharding(mesh, spec), nnx.get_partition_spec(non_lora_params)
+        )
+        replicated = jax.NamedSharding(mesh, jax.P(None))
+        scalar = jax.NamedSharding(mesh, jax.P())
+        
+        return jax.jit(
+            loss_and_grad_fn,
+            # One input sharding parameter for each argument of loss_full_parameter
+            in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
+            # One output sharding parameter for each return value of loss_for_lora
+            out_shardings=((scalar, (replicated, replicated)), non_lora_shardings),
+        )
