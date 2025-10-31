@@ -377,6 +377,26 @@ class TinkerEngine:
 
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
+    def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
+        """Find all requests that need to be processed individually (not batchable).
+
+        Args:
+            session: Database session
+
+        Returns:
+            Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        statement = (
+            select(FutureDB)
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type != types.RequestType.SAMPLE)
+            .order_by(FutureDB.request_id)
+        )
+        other_futures = session.exec(statement).all()
+
+        return {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
+
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
@@ -845,19 +865,10 @@ class TinkerEngine:
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
                 forward_backward_requests = self.find_batchable_forward_backward(session)
+                # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
-                # Get other pending requests (non-forward_backward or those blocked by optim_step)
-                statement = (
-                    select(FutureDB)
-                    .where(FutureDB.status == RequestStatus.PENDING)
-                    .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
-                    .where(FutureDB.request_type != types.RequestType.SAMPLE)
-                    .order_by(FutureDB.request_id)
-                )
-                other_futures = session.exec(statement).all()
-
-                # Convert other futures to requests dict while session is open
-                other_requests = {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
+                # Get other pending requests (non forward_backward and non sampling)
+                other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
             self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
