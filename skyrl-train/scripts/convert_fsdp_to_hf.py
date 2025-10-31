@@ -192,7 +192,8 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
             #         )
             #     else:
             #         # Merging tensors using merge_two_shards with heuristic fallback
-            merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk)
+            if nk in merged:
+                merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk)
             else:
                 merged[nk] = v.detach().cpu().contiguous()
     if not merged:
