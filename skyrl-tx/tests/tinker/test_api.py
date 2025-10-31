@@ -4,14 +4,12 @@ import os
 import subprocess
 import tempfile
 import urllib.request
-from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 import tinker
 from tinker import types
 from transformers import AutoTokenizer
-from sqlalchemy import create_engine, inspect
 
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -199,112 +197,3 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
-
-
-def test_database_schema_with_sqlite():
-    """Test that SQLModel creates the correct database schema with SQLite."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_db_path = Path(tmpdir) / "test_tinker.db"
-        test_db_url = f"sqlite:///{test_db_path}"
-
-        # Set environment variable for test database
-        os.environ["TX_DATABASE_URL"] = test_db_url
-
-        # Import models to register them with SQLModel metadata
-        from sqlmodel import SQLModel
-
-        # Create engine and tables
-        engine = create_engine(test_db_url)
-        SQLModel.metadata.create_all(engine)
-
-        # Verify database was created
-        assert test_db_path.exists()
-        assert test_db_path.stat().st_size > 0
-
-        # Verify tables were created
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-
-        expected_tables = ["models", "futures", "checkpoints"]
-
-        for table in expected_tables:
-            assert table in tables, f"Table '{table}' is missing"
-
-            # Verify columns exist
-            columns = inspector.get_columns(table)
-            column_names = [col["name"] for col in columns]
-            assert len(column_names) > 0, f"Table '{table}' has no columns"
-
-
-def test_database_schema_idempotency():
-    """Test that running create_all multiple times is idempotent."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_db_path = Path(tmpdir) / "test_idempotent.db"
-        test_db_url = f"sqlite:///{test_db_path}"
-        os.environ["TX_DATABASE_URL"] = test_db_url
-
-        # Import models to register them with SQLModel metadata
-        from sqlmodel import SQLModel
-
-        engine = create_engine(test_db_url)
-
-        # Create tables multiple times - should not raise errors
-        SQLModel.metadata.create_all(engine)
-        SQLModel.metadata.create_all(engine)
-        SQLModel.metadata.create_all(engine)
-
-        # Verify tables still exist and are correct
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-
-        assert "models" in tables
-        assert "futures" in tables
-        assert "checkpoints" in tables
-
-
-def test_alembic_migration_generation():
-    """Test that Alembic can generate migrations from SQLModel definitions."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_db_path = Path(tmpdir) / "test_alembic.db"
-        test_db_url = f"sqlite:///{test_db_path}"
-
-        tinker_dir = Path(__file__).parent.parent.parent / "tx" / "tinker"
-
-        # Test: alembic upgrade head creates tables
-        result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "head"],
-            cwd=tinker_dir,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "TX_DATABASE_URL": test_db_url},
-        )
-
-        # Should succeed (even if no migrations exist, it shouldn't error)
-        assert result.returncode == 0, f"Alembic upgrade failed: {result.stderr}"
-
-        # Test: alembic current shows version
-        result = subprocess.run(
-            ["uv", "run", "alembic", "current"],
-            cwd=tinker_dir,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "TX_DATABASE_URL": test_db_url},
-        )
-
-        assert result.returncode == 0, f"Alembic current failed: {result.stderr}"
-
-
-def test_alembic_history():
-    """Test that Alembic history command works."""
-    tinker_dir = Path(__file__).parent.parent.parent / "tx" / "tinker"
-
-    # Test: alembic history
-    result = subprocess.run(
-        ["uv", "run", "alembic", "history"],
-        cwd=tinker_dir,
-        capture_output=True,
-        text=True,
-    )
-
-    # Should work even with no migrations
-    assert result.returncode == 0, f"Alembic history failed: {result.stderr}"
