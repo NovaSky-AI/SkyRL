@@ -61,7 +61,6 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
         parser: The ArgumentParser to add arguments to
         model: The Pydantic model class
     """
-
     for name, field in model.model_fields.items():
         arg_name = name.replace("_", "-")
         kwargs = {
