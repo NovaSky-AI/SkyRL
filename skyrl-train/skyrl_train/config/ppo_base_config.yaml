@@ -169,6 +169,7 @@ trainer:
 
   # YaRN:
   rope_scaling: null
+  rope_theta: null
   # rope_scaling:
   #   rope_type: yarn
   #   factor: 1.0
