@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, func
 
 import jax
@@ -783,16 +784,18 @@ class TinkerEngine:
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)
 
-    def _update_futures(self, results_to_update: list[tuple[str, dict]]):
+    def _update_futures(self, results: dict[str, BaseModel]):
         """Helper method to update multiple futures in the database.
 
         Args:
-            results_to_update: List of tuples (request_id, result_data)
+            results: Dict mapping request_id to result (Pydantic BaseModel)
         """
         with Session(self.db_engine) as session:
-            for request_id, result_data in results_to_update:
+            for request_id, result in results.items():
                 future = session.get(FutureDB, request_id)
                 assert future is not None, f"Future with request_id {request_id} not found in database"
+
+                result_data = result.model_dump()
                 future.result_data = result_data
                 future.status = RequestStatus.FAILED if "error" in result_data else RequestStatus.COMPLETED
                 future.completed_at = datetime.now(timezone.utc)
@@ -801,23 +804,22 @@ class TinkerEngine:
                     logger.info(f"Completed {future.request_type} request {request_id}")
             session.commit()
 
-    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
+    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
         match request_type:
             case types.RequestType.CREATE_MODEL:
-                result = self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+                return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
             case types.RequestType.OPTIM_STEP:
-                result = self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+                return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
-                result = self.process_save_weights_for_sampler(
+                return self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
             case types.RequestType.SAVE_WEIGHTS:
-                result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
+                return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:
-                result = self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+                return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
-        return result.model_dump()
 
     def process_batch_requests(self, requests: dict[str, tuple[str, dict]], batch_processor, error_type):
         """Generic function to process a batch of requests.
@@ -833,17 +835,14 @@ class TinkerEngine:
         try:
             results = batch_processor(requests)
 
-            # Prepare updates for all futures
-            results_to_update = [(request_id, results[request_id].model_dump()) for request_id in requests]
-
             # Update all futures in database
-            self._update_futures(results_to_update)
+            self._update_futures(results)
 
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
-            results_to_update = [(request_id, {"error": str(e)}) for request_id in requests]
-            self._update_futures(results_to_update)
+            error_results = {request_id: error_type(error=str(e), status="failed") for request_id in requests}
+            self._update_futures(error_results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -889,14 +888,15 @@ class TinkerEngine:
             # Process other request types individually (in the future we can also batch independent optim_steps)
             for request_id, (model_id, request_type, request_data) in other_requests.items():
                 try:
-                    result_data = self.process_single_request(request_type, model_id, request_data)
+                    result = self.process_single_request(request_type, model_id, request_data)
 
                 except Exception as e:
                     logger.exception(f"Error processing request {request_id}: {e}")
-                    result_data = {"error": str(e)}
+                    # Use ForwardBackwardError as a generic error type (has same structure as other error types)
+                    result = types.ForwardBackwardError(error=str(e), status="failed")
 
                 # Update database using helper method
-                self._update_futures([(request_id, result_data)])
+                self._update_futures({request_id: result})
 
             # Poll every 100ms
             time.sleep(0.1)
