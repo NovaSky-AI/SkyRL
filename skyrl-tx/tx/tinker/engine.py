@@ -820,19 +820,18 @@ class TinkerEngine:
             # Update each future with its result
             with Session(self.db_engine) as session:
                 for request_id in requests:
-                    if request_id in results:
-                        future = session.get(FutureDB, request_id)
-                        assert future is not None, f"Future with request_id {request_id} not found in database"
+                    future = session.get(FutureDB, request_id)
+                    assert future is not None, f"Future with request_id {request_id} not found in database"
 
-                        result_data = results[request_id]
-                        if isinstance(result_data, error_type):
-                            future.status = RequestStatus.FAILED
-                        else:
-                            future.status = RequestStatus.COMPLETED
-                        future.result_data = result_data.model_dump()
-                        future.completed_at = datetime.now(timezone.utc)
-                        session.add(future)
-                        logger.info(f"Completed {future.request_type} request {request_id}")
+                    result_data = results[request_id]
+                    if isinstance(result_data, error_type):
+                        future.status = RequestStatus.FAILED
+                    else:
+                        future.status = RequestStatus.COMPLETED
+                    future.result_data = result_data.model_dump()
+                    future.completed_at = datetime.now(timezone.utc)
+                    session.add(future)
+                    logger.info(f"Completed {future.request_type} request {request_id}")
 
                 session.commit()
 
