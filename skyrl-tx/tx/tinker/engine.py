@@ -852,6 +852,7 @@ class TinkerEngine:
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
+            # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
                 forward_backward_futures = self.find_batchable_forward_backward(session)
@@ -866,7 +867,7 @@ class TinkerEngine:
                 )
                 other_futures = session.exec(statement).all()
 
-                # Convert futures to requests dict
+                # Convert futures to requests dict while session is open
                 forward_backward_requests = {
                     f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
                     for f in forward_backward_futures
@@ -875,39 +876,47 @@ class TinkerEngine:
                     f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data))
                     for f in sample_futures
                 }
+                other_requests = {
+                    f.request_id: (f.model_id, f.request_type, f.request_data)
+                    for f in other_futures
+                }
 
-                self.process_batch_requests(
-                    forward_backward_requests,
-                    self.process_forward_backward_batch,
-                    types.ForwardBackwardError,
-                )
+            # Process batches outside of session context
+            self.process_batch_requests(
+                forward_backward_requests,
+                self.process_forward_backward_batch,
+                types.ForwardBackwardError,
+            )
 
-                self.process_batch_requests(
-                    sample_requests,
-                    self.process_sample_batch,
-                    types.SampleError,
-                )
+            self.process_batch_requests(
+                sample_requests,
+                self.process_sample_batch,
+                types.SampleError,
+            )
 
-                # Process other request types individually (in the future we can also batch independent optim_steps)
-                for future in other_futures:
-                    try:
-                        future.result_data = self.process_single_request(
-                            future.request_type, future.model_id, future.request_data
-                        )
-                        future.status = RequestStatus.COMPLETED
-                        future.completed_at = datetime.now(timezone.utc)
-                        session.add(future)
-                        session.commit()
+            # Process other request types individually (in the future we can also batch independent optim_steps)
+            for request_id, (model_id, request_type, request_data) in other_requests.items():
+                try:
+                    result_data = self.process_single_request(request_type, model_id, request_data)
+                    status = RequestStatus.COMPLETED
 
-                        logger.info(f"Completed {future.request_type} request {future.request_id}")
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result_data = {"error": str(e)}
+                    status = RequestStatus.FAILED
 
-                    except Exception as e:
-                        logger.exception(f"Error processing request {future.request_id}: {e}")
-                        future.result_data = {"error": str(e)}
-                        future.status = RequestStatus.FAILED
-                        future.completed_at = datetime.now(timezone.utc)
-                        session.add(future)
-                        session.commit()
+                # Update database in separate transaction
+                with Session(self.db_engine) as session:
+                    future = session.get(FutureDB, request_id)
+                    assert future is not None, f"Future with request_id {request_id} not found in database"
+                    future.result_data = result_data
+                    future.status = status
+                    future.completed_at = datetime.now(timezone.utc)
+                    session.add(future)
+                    session.commit()
+
+                    if status == RequestStatus.COMPLETED:
+                        logger.info(f"Completed {request_type} request {request_id}")
 
             # Poll every 100ms
             time.sleep(0.1)
