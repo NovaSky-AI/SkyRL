@@ -286,13 +286,11 @@ class TinkerEngine:
     def _filter_valid_requests(
         self,
         requests: dict[str, tuple[str, any]],
-        error_type: type,
     ) -> tuple[dict[str, any], dict[str, tuple[str, any]]]:
         """Filter out requests with invalid model_ids and return error results for them.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            error_type: Error type class to instantiate for invalid requests
 
         Returns:
             Tuple of (error_results, valid_requests)
@@ -302,7 +300,7 @@ class TinkerEngine:
 
         for request_id, (model_id, request_data) in requests.items():
             if model_id and model_id not in self.models:
-                results[request_id] = error_type(
+                results[request_id] = types.ErrorResponse(
                     error=f"Model {model_id} not loaded",
                     status="failed",
                 )
@@ -424,7 +422,7 @@ class TinkerEngine:
 
     def process_forward_backward_batch(
         self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
-    ) -> dict[str, types.ForwardBackwardOutput | types.ForwardBackwardError]:
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Process multiple forward_backward requests in a single batch.
 
         Args:
@@ -433,7 +431,7 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id -> result_data or error info
         """
-        results, valid_requests = self._filter_valid_requests(requests, types.ForwardBackwardError)
+        results, valid_requests = self._filter_valid_requests(requests)
 
         if not valid_requests:
             return results
@@ -548,7 +546,7 @@ class TinkerEngine:
 
     def process_sample_batch(
         self, requests: dict[str, tuple[str, types.SampleInput]]
-    ) -> dict[str, types.SampleOutput | types.SampleError]:
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Process multiple sample requests in a single batch
 
         Args:
@@ -557,7 +555,7 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id --> result_data or error info
         """
-        results, valid_requests = self._filter_valid_requests(requests, types.SampleError)
+        results, valid_requests = self._filter_valid_requests(requests)
 
         if not valid_requests:
             return results
@@ -823,13 +821,12 @@ class TinkerEngine:
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
-    def process_batch_requests(self, requests: dict[str, tuple[str, dict]], batch_processor, error_type):
+    def process_batch_requests(self, requests: dict[str, tuple[str, dict]], batch_processor):
         """Generic function to process a batch of requests.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
             batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
-            error_type: Error type class to check for failures (e.g., types.ForwardBackwardError)
         """
         if not requests:
             return
@@ -843,7 +840,7 @@ class TinkerEngine:
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
-            error_results = {request_id: error_type(error=str(e), status="failed") for request_id in requests}
+            error_results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
             self._update_futures(error_results)
 
     def process_pending_requests(self):
@@ -868,17 +865,8 @@ class TinkerEngine:
                 other_requests = {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
             # Process batches outside of session context
-            self.process_batch_requests(
-                forward_backward_requests,
-                self.process_forward_backward_batch,
-                types.ForwardBackwardError,
-            )
-
-            self.process_batch_requests(
-                sample_requests,
-                self.process_sample_batch,
-                types.SampleError,
-            )
+            self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
+            self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             for request_id, (model_id, request_type, request_data) in other_requests.items():
@@ -887,8 +875,7 @@ class TinkerEngine:
 
                 except Exception as e:
                     logger.exception(f"Error processing request {request_id}: {e}")
-                    # Use ForwardBackwardError as a generic error type (has same structure as other error types)
-                    result = types.ForwardBackwardError(error=str(e), status="failed")
+                    result = types.ErrorResponse(error=str(e), status="failed")
 
                 # Update database using helper method
                 self._update_futures({request_id: result})
