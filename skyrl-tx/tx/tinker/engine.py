@@ -284,29 +284,29 @@ class TinkerEngine:
 
     def _filter_valid_requests(
         self,
-        requests: list[tuple[FutureDB, str, any]],
+        requests: dict[str, tuple[str, any]],
         error_type: type,
-    ) -> tuple[dict[str, any], list[tuple[FutureDB, str, any]]]:
+    ) -> tuple[dict[str, any], dict[str, tuple[str, any]]]:
         """Filter out requests with invalid model_ids and return error results for them.
 
         Args:
-            requests: List of (future, model_id, request_data) tuples
+            requests: Dict mapping request_id to (model_id, request_data) tuples
             error_type: Error type class to instantiate for invalid requests
 
         Returns:
             Tuple of (error_results, valid_requests)
         """
         results = {}
-        valid_requests = []
+        valid_requests = {}
 
-        for future, model_id, request_data in requests:
+        for request_id, (model_id, request_data) in requests.items():
             if model_id and model_id not in self.models:
-                results[future.request_id] = error_type(
+                results[request_id] = error_type(
                     error=f"Model {model_id} not loaded",
                     status="failed",
                 )
             else:
-                valid_requests.append((future, model_id, request_data))
+                valid_requests[request_id] = (model_id, request_data)
 
         return results, valid_requests
 
@@ -420,12 +420,12 @@ class TinkerEngine:
         )
 
     def process_forward_backward_batch(
-        self, requests: list[tuple[FutureDB, str, types.ForwardBackwardInput]]
+        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
     ) -> dict[str, types.ForwardBackwardOutput | types.ForwardBackwardError]:
         """Process multiple forward_backward requests in a single batch.
 
         Args:
-            requests: List of (future, model_id, request_data) tuples
+            requests: Dict mapping request_id to (model_id, request_data) tuples
 
         Returns:
             Dict mapping request_id -> result_data or error info
@@ -446,7 +446,7 @@ class TinkerEngine:
         all_advantages = []
         all_loss_fn_types = []
 
-        for future, model_id, request_data in valid_requests:
+        for request_id, (model_id, request_data) in valid_requests.items():
             adapter_index = self.models[model_id].adapter_index
             loss_fn_type = LOSS_TYPES[request_data.loss_fn]
 
@@ -463,7 +463,7 @@ class TinkerEngine:
                 example_model_ids.append(model_id)
                 all_loss_fn_types.append(loss_fn_type)
 
-            request_batch_slices.append((future.request_id, model_id, request_start, len(all_input_ids)))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
@@ -544,12 +544,12 @@ class TinkerEngine:
         return results
 
     def process_sample_batch(
-        self, requests: list[tuple[FutureDB, str, types.SampleInput]]
+        self, requests: dict[str, tuple[str, types.SampleInput]]
     ) -> dict[str, types.SampleOutput | types.SampleError]:
         """Process multiple sample requests in a single batch
 
         Args:
-            requests: List of (future, model_id, request_data) tuples
+            requests: Dict mapping request_id to (model_id, request_data) tuples
 
         Returns:
             Dict mapping request_id --> result_data or error info
@@ -566,7 +566,7 @@ class TinkerEngine:
 
         adapter_indices_batch = self.load_sampler_weights(valid_requests)
 
-        for i, (future, model_id, request_data) in enumerate(valid_requests):
+        for i, (request_id, (model_id, request_data)) in enumerate(valid_requests.items()):
             request_start = len(all_prompts)
 
             # Expand requests for num_samples (TODO: Once we have continuous batching /
@@ -577,7 +577,7 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts)))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
 
         # Pad sequences to same length
         max_len = max(len(seq) for seq in all_prompts)
@@ -740,11 +740,11 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, requests: list[tuple[FutureDB, str, types.SampleInput]]) -> jax.Array:
+    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> jax.Array:
         """Load sampler weights for all requests and return full adapter indices array.
 
         Args:
-            requests: List of (future, model_id, request_data) tuples for the batch
+            requests: Dict mapping request_id to (model_id, request_data) tuples for the batch
 
         Returns:
             The adapter_indices array for LoRA sampling [batch_size]
@@ -752,7 +752,7 @@ class TinkerEngine:
         """
         adapter_indices_list = []
 
-        for _, model_id, request_data in requests:
+        for _, (model_id, request_data) in requests.items():
             if request_data.base_model is None:
                 # This code path is for sampling from a LoRA adapter
                 assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
@@ -818,7 +818,7 @@ class TinkerEngine:
 
         try:
             results = batch_processor(
-                [(f, f.model_id, request_input_type.model_validate(f.request_data)) for f in futures]
+                {f.request_id: (f.model_id, request_input_type.model_validate(f.request_data)) for f in futures}
             )
 
             # Update each future with its result
