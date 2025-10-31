@@ -781,8 +781,8 @@ class TinkerEngine:
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)
 
-    def _update_futures(self, results: dict[str, BaseModel]):
-        """Helper method to update multiple futures in the database.
+    def _complete_futures(self, results: dict[str, BaseModel]):
+        """Helper method to complete multiple futures in the database.
 
         Args:
             results: Dict mapping request_id to result (Pydantic BaseModel)
@@ -794,7 +794,9 @@ class TinkerEngine:
 
                 result_data = result.model_dump()
                 future.result_data = result_data
-                future.status = RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
+                future.status = (
+                    RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
+                )
                 future.completed_at = datetime.now(timezone.utc)
                 session.add(future)
                 if future.status == RequestStatus.COMPLETED:
@@ -827,18 +829,14 @@ class TinkerEngine:
         """
         if not requests:
             return
-
         try:
             results = batch_processor(requests)
-
-            # Update all futures in database
-            self._update_futures(results)
-
+            self._complete_futures(results)
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
-            # Mark all requests in the batch as failed
-            error_results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
-            self._update_futures(error_results)
+            self._complete_futures(
+                {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+            )
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -875,7 +873,7 @@ class TinkerEngine:
                     result = types.ErrorResponse(error=str(e), status="failed")
                 other_results[request_id] = result
 
-            self._update_futures(other_results)
+            self._complete_futures(other_results)
 
             # Poll every 100ms
             time.sleep(0.1)
