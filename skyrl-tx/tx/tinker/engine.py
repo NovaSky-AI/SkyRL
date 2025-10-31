@@ -311,7 +311,7 @@ class TinkerEngine:
 
         return results, valid_requests
 
-    def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
+    def find_batchable_forward_backward(self, session: Session) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
         """Find all forward_backward ops that come before any destructive update for their model.
 
         Uses look-ahead scheduling: for each model, only returns forward_backward operations
@@ -321,7 +321,7 @@ class TinkerEngine:
             session: Database session
 
         Returns:
-            List of FutureDB objects that can be safely batched together
+            Dict mapping request_id to (model_id, request_data) tuples
         """
         # Find the earliest pending optim_step or load_weights per model (these act as barriers)
         barriers_query = (
@@ -347,9 +347,11 @@ class TinkerEngine:
         # Filter: only include ops that come before their model's barrier
         batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
-        return batchable
+        return {
+            f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
+        }
 
-    def find_batchable_sample(self, session: Session) -> list[FutureDB]:
+    def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
 
         Returns sample operations ensuring that each model_id has only one checkpoint_id
@@ -359,7 +361,7 @@ class TinkerEngine:
             session: Database session
 
         Returns:
-            List of FutureDB objects that can be safely batched together
+            Dict mapping request_id to (model_id, request_data) tuples
         """
         sample_query = (
             select(FutureDB)
@@ -378,7 +380,7 @@ class TinkerEngine:
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
 
-        return batchable
+        return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
@@ -850,8 +852,8 @@ class TinkerEngine:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
-                forward_backward_futures = self.find_batchable_forward_backward(session)
-                sample_futures = self.find_batchable_sample(session)
+                forward_backward_requests = self.find_batchable_forward_backward(session)
+                sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non-forward_backward or those blocked by optim_step)
                 statement = (
                     select(FutureDB)
@@ -862,14 +864,7 @@ class TinkerEngine:
                 )
                 other_futures = session.exec(statement).all()
 
-                # Convert futures to requests dict while session is open
-                forward_backward_requests = {
-                    f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
-                    for f in forward_backward_futures
-                }
-                sample_requests = {
-                    f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in sample_futures
-                }
+                # Convert other futures to requests dict while session is open
                 other_requests = {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
             # Process batches outside of session context
