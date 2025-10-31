@@ -840,7 +840,7 @@ class TinkerEngine:
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
-    def process_batch_requests(self, requests: dict[str, tuple[str, dict]], batch_processor):
+    def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
 
         Args:
