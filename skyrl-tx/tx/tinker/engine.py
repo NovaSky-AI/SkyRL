@@ -783,21 +783,21 @@ class TinkerEngine:
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)
 
-    def _update_futures(self, results_to_update: list[tuple[str, dict, RequestStatus]]):
+    def _update_futures(self, results_to_update: list[tuple[str, dict]]):
         """Helper method to update multiple futures in the database.
 
         Args:
-            results_to_update: List of tuples (request_id, result_data, status)
+            results_to_update: List of tuples (request_id, result_data)
         """
         with Session(self.db_engine) as session:
-            for request_id, result_data, status in results_to_update:
+            for request_id, result_data in results_to_update:
                 future = session.get(FutureDB, request_id)
                 assert future is not None, f"Future with request_id {request_id} not found in database"
                 future.result_data = result_data
-                future.status = status
+                future.status = RequestStatus.FAILED if "error" in result_data else RequestStatus.COMPLETED
                 future.completed_at = datetime.now(timezone.utc)
                 session.add(future)
-                if status == RequestStatus.COMPLETED:
+                if future.status == RequestStatus.COMPLETED:
                     logger.info(f"Completed {future.request_type} request {request_id}")
             session.commit()
 
@@ -834,14 +834,7 @@ class TinkerEngine:
             results = batch_processor(requests)
 
             # Prepare updates for all futures
-            results_to_update = []
-            for request_id in requests:
-                result_data = results[request_id]
-                if isinstance(result_data, error_type):
-                    status = RequestStatus.FAILED
-                else:
-                    status = RequestStatus.COMPLETED
-                results_to_update.append((request_id, result_data.model_dump(), status))
+            results_to_update = [(request_id, results[request_id].model_dump()) for request_id in requests]
 
             # Update all futures in database
             self._update_futures(results_to_update)
@@ -849,7 +842,7 @@ class TinkerEngine:
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
-            results_to_update = [(request_id, {"error": str(e)}, RequestStatus.FAILED) for request_id in requests]
+            results_to_update = [(request_id, {"error": str(e)}) for request_id in requests]
             self._update_futures(results_to_update)
 
     def process_pending_requests(self):
@@ -897,15 +890,13 @@ class TinkerEngine:
             for request_id, (model_id, request_type, request_data) in other_requests.items():
                 try:
                     result_data = self.process_single_request(request_type, model_id, request_data)
-                    status = RequestStatus.COMPLETED
 
                 except Exception as e:
                     logger.exception(f"Error processing request {request_id}: {e}")
                     result_data = {"error": str(e)}
-                    status = RequestStatus.FAILED
 
                 # Update database using helper method
-                self._update_futures([(request_id, result_data, status)])
+                self._update_futures([(request_id, result_data)])
 
             # Poll every 100ms
             time.sleep(0.1)
