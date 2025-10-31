@@ -11,6 +11,7 @@ from skyrl_train.utils import validate_cfg
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+from skyrl_train.inference_engines.colocated_remote_engine import create_colocated_remote_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
@@ -77,6 +78,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
     # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
+    # TODO: change this
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
         model_name=cfg.trainer.policy.model.path,
@@ -267,12 +269,19 @@ class BasePPOExp:
         if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
         else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+            # When colocating with HTTP engines (vLLM/SGLang), spin servers inside Ray and point clients to them
+            if self.cfg.trainer.placement.colocate_all:
+                inference_engines = create_colocated_remote_engines(self.cfg, tokenizer, self.colocate_pg)
+            else:
+                inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
 
+        print("Obtained engines. Creating client...")
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
+        print("Creating generator...")
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
+        print("Getting trainer...")
         trainer = self.get_trainer(
             cfg=self.cfg,
             tracker=tracker,
@@ -285,12 +294,14 @@ class BasePPOExp:
         )
 
         # Build the models
+        print("Building models")
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
         trainer = self._setup_trainer()
         # Start the training loop
+        print("Starting training")
         trainer.train()
 
 
