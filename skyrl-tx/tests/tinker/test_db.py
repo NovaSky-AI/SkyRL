@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 
 
-
 ALEMBIC_CMD_PREFIX = ["uv", "run", "--extra", "dev"]
 
 
