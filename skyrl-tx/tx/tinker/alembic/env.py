@@ -12,12 +12,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 # Import SQLModel and database models
 from sqlmodel import SQLModel
-from dotenv import load_dotenv
-
-# Load .env file if it exists
-env_file = Path(__file__).parent.parent.parent.parent / ".env"
-if env_file.exists():
-    load_dotenv(env_file)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

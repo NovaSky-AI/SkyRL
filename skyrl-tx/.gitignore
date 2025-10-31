@@ -77,9 +77,8 @@ Thumbs.db
 tinker.db
 uv.lock
 
-# Alembic - don't track migrations or pycache
+# Alembic - don't track pycache
 tx/tinker/alembic/__pycache__/
-tx/tinker/alembic/versions/
 
 # SQLite databases (tracked in git by default, but ignore if created locally)
 *.db
