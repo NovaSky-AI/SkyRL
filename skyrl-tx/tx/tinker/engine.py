@@ -802,49 +802,52 @@ class TinkerEngine:
         return result.model_dump()
 
     def process_batch_requests(
-        self, session: Session, futures: list[FutureDB], batch_processor, request_input_type, error_type
+        self, requests: dict[str, tuple[str, dict]], batch_processor, error_type
     ):
         """Generic function to process a batch of requests.
 
         Args:
-            session: Database session
-            futures: List of FutureDB objects to process
+            requests: Dict mapping request_id to (model_id, request_data) tuples
             batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
-            request_input_type: Pydantic model class for parsing request_data (e.g., types.ForwardBackwardInput)
             error_type: Error type class to check for failures (e.g., types.ForwardBackwardError)
         """
-        if not futures:
+        if not requests:
             return
 
         try:
-            results = batch_processor(
-                {f.request_id: (f.model_id, request_input_type.model_validate(f.request_data)) for f in futures}
-            )
+            results = batch_processor(requests)
 
             # Update each future with its result
-            for future in futures:
-                if future.request_id in results:
-                    result_data = results[future.request_id]
-                    if isinstance(result_data, error_type):
-                        future.status = RequestStatus.FAILED
-                    else:
-                        future.status = RequestStatus.COMPLETED
-                    future.result_data = result_data.model_dump()
-                    future.completed_at = datetime.now(timezone.utc)
-                    session.add(future)
-                    logger.info(f"Completed {future.request_type} request {future.request_id}")
+            with Session(self.db_engine) as session:
+                for request_id in requests:
+                    if request_id in results:
+                        future = session.get(FutureDB, request_id)
+                        assert future is not None, f"Future with request_id {request_id} not found in database"
 
-            session.commit()
+                        result_data = results[request_id]
+                        if isinstance(result_data, error_type):
+                            future.status = RequestStatus.FAILED
+                        else:
+                            future.status = RequestStatus.COMPLETED
+                        future.result_data = result_data.model_dump()
+                        future.completed_at = datetime.now(timezone.utc)
+                        session.add(future)
+                        logger.info(f"Completed {future.request_type} request {request_id}")
+
+                session.commit()
 
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
-            for future in futures:
-                future.result_data = {"error": str(e)}
-                future.status = RequestStatus.FAILED
-                future.completed_at = datetime.now(timezone.utc)
-                session.add(future)
-            session.commit()
+            with Session(self.db_engine) as session:
+                for request_id in requests:
+                    future = session.get(FutureDB, request_id)
+                    assert future is not None, f"Future with request_id {request_id} not found in database"
+                    future.result_data = {"error": str(e)}
+                    future.status = RequestStatus.FAILED
+                    future.completed_at = datetime.now(timezone.utc)
+                    session.add(future)
+                session.commit()
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -863,19 +866,25 @@ class TinkerEngine:
                 )
                 other_futures = session.exec(statement).all()
 
+                # Convert futures to requests dict
+                forward_backward_requests = {
+                    f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
+                    for f in forward_backward_futures
+                }
+                sample_requests = {
+                    f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data))
+                    for f in sample_futures
+                }
+
                 self.process_batch_requests(
-                    session,
-                    forward_backward_futures,
+                    forward_backward_requests,
                     self.process_forward_backward_batch,
-                    types.ForwardBackwardInput,
                     types.ForwardBackwardError,
                 )
 
                 self.process_batch_requests(
-                    session,
-                    sample_futures,
+                    sample_requests,
                     self.process_sample_batch,
-                    types.SampleInput,
                     types.SampleError,
                 )
 
