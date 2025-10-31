@@ -616,8 +616,8 @@ class TinkerEngine:
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
     
-    def process_full_finetune_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepInput:
-        """Process an optim_step request and apply accumulated gradients for lora."""
+    def process_full_finetune_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+        """Process an optim_step request and apply accumulated gradients for full finetuning."""
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
