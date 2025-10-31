@@ -1,8 +1,6 @@
 """Database models for the Tinker API."""
 
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from enum import Enum
 from sqlmodel import SQLModel, Field, JSON
 from sqlalchemy import DateTime
@@ -11,28 +9,7 @@ from sqlalchemy.engine import url as sqlalchemy_url
 from tx.tinker import types
 
 
-def get_database_url(db_url: str | None = None) -> str:
-    """Get the database URL from environment variable or parameter.
-
-    Args:
-        db_url: Optional database URL to use. If None, uses environment variable
-                or defaults to SQLite.
-
-    Returns:
-        Database URL string for SQLAlchemy.
-
-    Examples:
-        SQLite: sqlite:///path/to/tinker.db
-        PostgreSQL: postgresql://user:password@localhost:5432/tinker
-        PostgreSQL (async): postgresql+asyncpg://user:password@localhost:5432/tinker
-    """
-    if db_url:
-        return db_url
-
-    return os.environ.get("TX_DATABASE_URL", f'sqlite:///{Path(__file__).parent / "tinker.db"}')
-
-
-def get_async_database_url(db_url: str | None = None) -> str:
+def get_async_database_url(db_url: str) -> str:
     """Get the async database URL.
 
     Args:
@@ -44,18 +21,20 @@ def get_async_database_url(db_url: str | None = None) -> str:
     Raises:
         ValueError: If the database scheme is not supported.
     """
-    parsed_url = sqlalchemy_url.make_url(get_database_url(db_url))
+    parsed_url = sqlalchemy_url.make_url(db_url)
 
     match parsed_url.get_backend_name():
         case "sqlite":
-            return parsed_url.set(drivername="sqlite+aiosqlite").render_as_string(hide_password=False)
+            async_url = parsed_url.set(drivername="sqlite+aiosqlite")
         case "postgresql":
-            return parsed_url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+            async_url = parsed_url.set(drivername="postgresql+asyncpg")
         case _ if "+" in parsed_url.drivername:
             # Already has an async driver specified, keep it
-            return parsed_url.render_as_string(hide_password=False)
+            async_url = parsed_url
         case backend_name:
             raise ValueError(f"Unsupported database scheme: {backend_name}")
+
+    return async_url.render_as_string(hide_password=False)
 
 
 class RequestStatus(str, Enum):

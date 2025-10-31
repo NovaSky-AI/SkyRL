@@ -1,6 +1,8 @@
 """Configuration for the Tinker engine."""
 
 import argparse
+import os
+from pathlib import Path
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, Field
@@ -14,10 +16,10 @@ class EngineConfig(BaseModel):
         default=AnyPath("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
     )
-    database_url: str | None = Field(
-        default=None,
+    database_url: str = Field(
+        default=f'sqlite:///{Path(__file__).parent / "tinker.db"}',
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
-        json_schema_extra={"argparse_type": str},
+        json_schema_extra={"argparse_type": str, "env_var": "TX_DATABASE_URL"},
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
@@ -37,8 +39,23 @@ class EngineConfig(BaseModel):
     )
 
 
+def convert_env_var(env_name: str, env_value: str, expected_type: type):
+    """Convert environment variable to expected type."""
+    if expected_type is bool:
+        if env_value not in ("0", "1"):
+            raise ValueError(
+                f"Environment variable '{env_name}' for a boolean flag must be '0' or '1', but got '{env_value}'."
+            )
+        return env_value == "1"
+    else:
+        return env_value
+
+
 def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
     """Add Pydantic model fields to an ArgumentParser.
+
+    The priority order of how options are handled: 1. Explicitly specified command line options,
+    2. environment variables and 3. default values.
 
     Args:
         parser: The ArgumentParser to add arguments to
@@ -51,9 +68,16 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             "help": field.description,
         }
 
+        # Check for default value, with env_var support
+        default_value = field.default
+        if field.json_schema_extra and "env_var" in field.json_schema_extra:
+            env_name = field.json_schema_extra["env_var"]
+            if env_value := os.environ.get(env_name):
+                default_value = convert_env_var(env_name, env_value, field.annotation)
+
         if field.annotation is bool:
             # For boolean flags, use BooleanOptionalAction to support both --{arg_name} and --no-{arg_name}
-            kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": field.default}
+            kwargs = {**kwargs, "action": argparse.BooleanOptionalAction, "dest": name, "default": default_value}
         else:
             # Check if explicit argparse_type is specified in field metadata
             argparse_type = field.json_schema_extra.get("argparse_type") if field.json_schema_extra else None
@@ -62,13 +86,12 @@ def add_model(parser: argparse.ArgumentParser, model: type[BaseModel]) -> None:
             elif field.annotation is not None:
                 kwargs["type"] = field.annotation
 
-            # Check for default value
             if field.is_required():
                 # Mark as required in argparse if no default is provided
                 kwargs["required"] = True
             else:
                 # For optional fields, provide the default value to argparse
-                kwargs["default"] = field.default
+                kwargs["default"] = default_value
 
         parser.add_argument(f"--{arg_name}", **kwargs)
 
