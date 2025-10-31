@@ -866,16 +866,16 @@ class TinkerEngine:
             self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
+            other_results = {}
             for request_id, (model_id, request_type, request_data) in other_requests.items():
                 try:
                     result = self.process_single_request(request_type, model_id, request_data)
-
                 except Exception as e:
                     logger.exception(f"Error processing request {request_id}: {e}")
                     result = types.ErrorResponse(error=str(e), status="failed")
+                other_results[request_id] = result
 
-                # Update database using helper method
-                self._update_futures({request_id: result})
+            self._update_futures(other_results)
 
             # Poll every 100ms
             time.sleep(0.1)
