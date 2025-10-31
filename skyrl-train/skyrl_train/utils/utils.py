@@ -772,3 +772,38 @@ def update_model_config(module_config, override_config_kwargs):
             update_model_config(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
+
+
+def _normalize_rope_scaling(rope_scaling):
+    """Return a plain dict for rope_scaling if possible, else original value.
+
+    Accepts Hydra/OmegaConf mapping-like objects or plain dicts.
+    """
+    if rope_scaling is None:
+        return None
+    # OmegaConf DictConfig acts like a mapping
+    if isinstance(rope_scaling, dict):
+        return rope_scaling
+    if hasattr(rope_scaling, "items"):
+        try:
+            return dict(rope_scaling)
+        except Exception:
+            # Fallback to original object if conversion isn't supported
+            return rope_scaling
+    return rope_scaling
+
+
+def apply_rope_scaling_to_config(config, rope_scaling) -> None:
+    """Apply RoPE scaling to a HF config in a safe, centralized way.
+
+    This simply sets `config.rope_scaling` when provided. We normalize common
+    DictConfig/Mapping inputs to plain dict for consistency.
+    """
+    normalized = _normalize_rope_scaling(rope_scaling)
+    if normalized is None:
+        return
+    try:
+        setattr(config, "rope_scaling", normalized)
+    except AttributeError:
+        # Some custom configs may block attribute assignment; silently skip.
+        pass

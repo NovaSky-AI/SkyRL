@@ -61,12 +61,13 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     }
 
     # Thread generator.rope_scaling to engine kwargs if provided and not explicitly overridden
+    # Thread generator.rope_scaling to engine kwargs if provided and not explicitly overridden
     try:
         rope_scaling = cfg.generator.get("rope_scaling", None)
         if rope_scaling is not None and "rope_scaling" not in engine_kwargs["engine_init_kwargs"]:
             engine_kwargs["engine_init_kwargs"] = {**engine_kwargs["engine_init_kwargs"], "rope_scaling": rope_scaling}
-    except Exception:
-        # If cfg is not a DictConfig or rope_scaling missing, ignore
+    except AttributeError:
+        # If cfg.generator or fields are missing in older configs, ignore
         pass
 
     # Conditionally add LoRA parameters if LoRA is enabled

@@ -19,6 +19,7 @@ from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, 
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
+from skyrl_train.utils.utils import apply_rope_scaling_to_config
 
 
 class HFModelWrapper(nn.Module):
@@ -112,15 +113,8 @@ class HFModelWrapper(nn.Module):
             except Exception:
                 pass
 
-            if rope_scaling is not None:
-                try:
-                    # Convert OmegaConf DictConfig to a plain dict if needed
-                    if hasattr(rope_scaling, "items") and not isinstance(rope_scaling, dict):
-                        rope_scaling = dict(rope_scaling)
-                    config.rope_scaling = rope_scaling
-                except Exception:
-                    # If the model/config doesn't support RoPE scaling, proceed silently
-                    pass
+            # Apply optional RoPE scaling (e.g., YaRN)
+            apply_rope_scaling_to_config(config, rope_scaling)
 
             if use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
@@ -566,13 +560,8 @@ def get_llm_for_sequence_regression(
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
-    if rope_scaling is not None:
-        try:
-            if hasattr(rope_scaling, "items") and not isinstance(rope_scaling, dict):
-                rope_scaling = dict(rope_scaling)
-            config.rope_scaling = rope_scaling
-        except Exception:
-            pass
+    # Apply optional RoPE scaling (e.g., YaRN)
+    apply_rope_scaling_to_config(config, rope_scaling)
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__

@@ -23,7 +23,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import freeze_moe_router, print_model_size
-from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
+from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id, apply_rope_scaling_to_config
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
@@ -63,14 +63,8 @@ class MegatronWorker:
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
         # Apply optional RoPE scaling (e.g., YaRN) if provided in policy model config
-        try:
-            rope_scaling = self.cfg.trainer.policy.model.get("rope_scaling", None)
-            if rope_scaling is not None:
-                if hasattr(rope_scaling, "items") and not isinstance(rope_scaling, dict):
-                    rope_scaling = dict(rope_scaling)
-                hf_config.rope_scaling = rope_scaling
-        except Exception:
-            pass
+        rope_scaling = self.cfg.trainer.policy.model.get("rope_scaling", None)
+        apply_rope_scaling_to_config(hf_config, rope_scaling)
 
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
