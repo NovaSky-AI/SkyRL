@@ -797,6 +797,8 @@ class TinkerEngine:
                 future.status = status
                 future.completed_at = datetime.now(timezone.utc)
                 session.add(future)
+                if status == RequestStatus.COMPLETED:
+                    logger.info(f"Completed {future.request_type} request {request_id}")
             session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
@@ -842,7 +844,6 @@ class TinkerEngine:
                 else:
                     status = RequestStatus.COMPLETED
                 results_to_update.append((request_id, result_data.model_dump(), status))
-                logger.info(f"Completed request {request_id}")
 
             # Update all futures in database
             self._update_futures(results_to_update)
@@ -914,9 +915,6 @@ class TinkerEngine:
 
                 # Update database using helper method
                 self._update_futures([(request_id, result_data, status)])
-
-                if status == RequestStatus.COMPLETED:
-                    logger.info(f"Completed {request_type} request {request_id}")
 
             # Poll every 100ms
             time.sleep(0.1)
