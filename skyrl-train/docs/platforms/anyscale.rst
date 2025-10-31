@@ -1,6 +1,6 @@
 .. _anyscale:
 
-Anyscale 
+Anyscale
 =========
 
 `Anyscale <https://www.anyscale.com>`_ is a managed, multi-cloud platform developed by the creators of Ray.
