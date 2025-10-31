@@ -23,6 +23,7 @@ from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, Checkpoin
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
+from tx.tinker.loss_fns import loss_and_grad_fn_full_finetuning, loss_and_grad_fn_lora
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
     get_dtype,
@@ -96,6 +97,7 @@ class TinkerEngine:
         self.model_config.max_lora_adapters = self.config.max_lora_adapters
         self.model_config.max_lora_rank = self.config.max_lora_rank
         self.model_config.shard_attention_heads = self.config.shard_attention_heads
+        self.full_finetuning = self.config.full_finetuning
 
         model_class = get_model_class(self.model_config)
 
@@ -148,80 +150,20 @@ class TinkerEngine:
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        # Wrap the model forward call to use nnx.remat for gradient checkpointing
-        def _model_forward(
-            model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
-        ) -> jax.Array:
-            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            return output.logits
-
-        if self.config.gradient_checkpointing:
-            # policy=None corresponds full activation recomputation
-            _model_forward = nnx.remat(_model_forward, policy=None)
-
-        def loss_for_lora(
-            lora_params: nnx.State,
-            non_lora_params: nnx.State,
-            input_ids: jax.Array,
-            attention_mask: jax.Array,
-            adapter_indices: jax.Array,
-            target_ids: jax.Array,
-            loss_mask: jax.Array,
-            loss_fn_types: jax.Array,
-            sampling_logprobs: jax.Array,
-            advantages: jax.Array,
-        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
-
-            logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
-            target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
-
-            def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
-                return jax.lax.switch(
-                    loss_fn_type,
-                    LOSS_FUNCTIONS,
-                    target_logprobs,
-                    loss_mask,
-                    sampling_logprobs,
-                    advantages,
-                )
-
-            per_token_losses = jax.vmap(compute_loss_per_example)(
-                loss_fn_types,
-                target_logprobs,
-                loss_mask,
-                sampling_logprobs,
-                advantages,
-            )
-
-            per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
-            # Return sum of losses (we'll divide gradients by per-adapter batch size later)
-            return per_seq_loss.sum(), (logits, per_token_losses)
-
-        # Only differentiate with respect to lora_params (argnums=0)
-        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
-
-        if self.config.enforce_eager:
-            # Disable JIT compilation for debugging
-            self._loss_and_grad_fn = loss_and_grad_fn
+        if self.full_finetuning:
+            self._loss_and_grad_fn = loss_and_grad_fn_full_finetuning(self.mesh,
+                                                                      self.config.gradient_checkpointing,
+                                                                      self.graphdef,
+                                                                      self.config.enforce_eager,
+                                                                      self.lora_params,
+                                                                      self.non_lora_params)
         else:
-            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
-            lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
-            )
-            non_lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
-            )
-            replicated = jax.NamedSharding(self.mesh, jax.P(None))
-            scalar = jax.NamedSharding(self.mesh, jax.P())
-            self._loss_and_grad_fn = jax.jit(
-                loss_and_grad_fn,
-                # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
-            )
+            self._loss_and_grad_fn = loss_and_grad_fn_lora(self.mesh,
+                                                           self.config.gradient_checkpointing,
+                                                           self.graphdef,
+                                                           self.config.enforce_eager,
+                                                           self.lora_params,
+                                                           self.non_lora_params)
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -255,21 +197,23 @@ class TinkerEngine:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
-            (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
+            call_adapter_indices = None if self.full_finetuning else adapter_indices
+            (_, (logits, per_token_losses)), grads = self._loss_and_grad_fn(
                 self.lora_params,
                 self.non_lora_params,
                 input_ids,
                 attention_mask,
-                adapter_indices,
+                call_adapter_indices,
                 target_ids,
                 loss_mask,
                 loss_fn_types,
                 sampling_logprobs,
                 advantages,
             )
+            
         logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
-        return per_token_losses, target_logprobs, lora_grads
+        return per_token_losses, target_logprobs, grads
 
     def _accumulate_grads(self, lora_grads: nnx.State, example_model_ids: list[str]) -> None:
         """
@@ -281,6 +225,22 @@ class TinkerEngine:
             grad_sum = jax.tree.map(lambda g: g[idx], lora_grads)
             accumulator = self.accumulated_grads[model_id]
             accumulator.add(grad_sum, count)
+
+    def _accumulate_non_lora_grads(self, non_lora_grads: nnx.State, example_model_ids: list[str]) -> None:
+        model_ids = set(example_model_ids)
+        if len(model_ids) != 1:
+            raise ValueError("full_finetuning requires single tenant")
+        model_id = next(iter(model_ids))
+        
+        # Filter the gradients to ONLY keep nnx.Param leaves.
+        # This creates a "clean" tree: {'kernel': <grad>}
+        # and drops the {'lora_ranks': None, 'lora_scaling': None}
+        filtered_grads = nnx.state(non_lora_grads, nnx.Param)
+
+        # Now add this clean tree to the accumulator.
+        # The accumulator's simple 'add' function will work perfectly.
+        self.accumulated_grads[model_id].add(filtered_grads, len(example_model_ids))
+
 
     def _filter_valid_requests(
         self,
@@ -382,8 +342,11 @@ class TinkerEngine:
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Assign adapter index for this model_id
-        adapter_index = max((m.adapter_index for m in self.models.values()), default=0) + 1
-
+        if len(self.models):
+            adapter_index = max((m.adapter_index for m in self.models.values()), default=0) + 1
+        else:
+            adapter_index = 0
+        
         if adapter_index >= self.config.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
 
@@ -404,10 +367,14 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
             tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
-            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
+            if self.full_finetuning:
+                self.optimizers[model_id] = nnx.Optimizer(self.non_lora_params, tx, wrt=nnx.Param)
+            else:
+                self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
-        # Update the adapter's rank and scaling in all LoRA layers
-        update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
+        if not self.full_finetuning:
+            # Update the adapter's rank and scaling in all LoRA layers
+            update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
 
         logger.info(
             f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}"
@@ -510,7 +477,11 @@ class TinkerEngine:
                 L = seq_lens[i_global]
                 token_losses_out[i_global] = per_token_losses[i_local, :L].astype(jnp.float32)
                 logprobs_out[i_global] = target_logprobs[i_local, :L].astype(jnp.float32)
-            self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+            
+            if self.full_finetuning:
+                self._accumulate_non_lora_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+            else:
+                self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
@@ -607,6 +578,14 @@ class TinkerEngine:
 
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
+
+        if self.full_finetuning:
+            return self.process_full_finetune_optim_step(model_id, request_data)
+        else:
+            return self.process_lora_optim_step(model_id, request_data)
+
+    def process_lora_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+        """Process an optim_step request and apply accumulated gradients for lora."""
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
@@ -642,6 +621,35 @@ class TinkerEngine:
         self.accumulated_grads[model_id].reset()
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
+        return types.OptimStepOutput()
+    
+    def process_full_finetune_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepInput:
+        """Process an optim_step request and apply accumulated gradients for lora."""
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not loaded")
+
+
+        # Get accumulated gradients for this adapter
+        accumulator = self.accumulated_grads[model_id]
+        if accumulator.grad_sum is None or accumulator.denominator == 0:
+            logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
+            return types.OptimStepOutput()
+
+        # Average over all examples for this adapter
+        non_lora_grads = accumulator.get_mean()
+        # Apply optimizer update with hyperparameters from the request
+        hp = self.optimizers[model_id].opt_state.hyperparams
+        hp["learning_rate"][...] = request_data.adam_params.learning_rate
+        hp["b1"][...] = request_data.adam_params.beta1
+        hp["b2"][...] = request_data.adam_params.beta2
+        hp["eps"][...] = request_data.adam_params.eps
+        grads_to_update = nnx.state(non_lora_grads, nnx.Param)
+        self.optimizers[model_id].update(self.non_lora_params, grads_to_update)
+
+        # Clear accumulated gradients
+        self.accumulated_grads[model_id].reset()
+
+        logger.info(f"Applied optimizer step for model {model_id}")
         return types.OptimStepOutput()
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
