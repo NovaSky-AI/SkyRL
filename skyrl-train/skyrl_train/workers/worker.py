@@ -36,7 +36,7 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -297,7 +297,7 @@ class Worker(DistributedTorchRayActor):
                 asyncio.to_thread(
                     init_custom_process_group,
                     backend=backend,
-                    init_method=f"tcp://{master_addr}:{master_port}",
+                    init_method=get_tcp_url(master_addr, master_port),
                     world_size=world_size,
                     rank=0,
                     group_name=group_name,
