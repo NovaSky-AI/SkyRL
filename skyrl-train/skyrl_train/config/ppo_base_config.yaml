@@ -26,6 +26,13 @@ trainer:
   policy:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      # Optional RoPE scaling (e.g., YaRN). If set, will be applied to HF model configs
+      # Example:
+      # rope_scaling:
+      #   type: "yarn"
+      #   factor: 4.0
+      #   original_max_position_embeddings: 32768
+      rope_scaling: null
       lora:
           rank: 0
           alpha: 16
@@ -59,6 +66,8 @@ trainer:
   critic:
     model:
       path: null
+      # Optional RoPE scaling (e.g., YaRN). If set, will be applied to HF model configs
+      rope_scaling: null
       lora:
         rank: 0
         alpha: 16
@@ -199,6 +208,14 @@ generator:
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
   max_turns: 1
+
+  # If specified, passes RoPE scaling to local inference engines (vLLM/SGLang)
+  # Example:
+  # rope_scaling:
+  #   type: "yarn"
+  #   factor: 4.0
+  #   original_max_position_embeddings: 32768
+  rope_scaling: null
 
   # chat template configuration
   chat_template:

@@ -73,6 +73,9 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   +trainer.policy.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage=$MEGATRON_LAST_PIPELINE_STAGE_LAYER \
   +generator.engine_init_kwargs.max_model_len=$INFERENCE_ENGINE_MAX_MODEL_LEN \
+  # Example: enable 4x RoPE extension with YaRN for Qwen3 (uncomment one of the following)
+  # trainer.policy.model.rope_scaling='{"type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
+  # generator.rope_scaling='{"type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \

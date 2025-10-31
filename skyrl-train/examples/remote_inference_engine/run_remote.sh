@@ -22,6 +22,8 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     generator.remote_inference_engine_urls="['127.0.0.1:8001']" \
     generator.inference_engine_tensor_parallel_size="$INF_ENGINE_TP" \
     generator.backend="$BACKEND" \
+    # Example: enable 4x RoPE extension with YaRN for Qwen (uncomment and adjust as needed)
+    # generator.rope_scaling='{"type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
     generator.sampling_params.temperature=0.6 \
     generator.sampling_params.top_p=0.95 \
     trainer.algorithm.advantage_estimator="grpo" \

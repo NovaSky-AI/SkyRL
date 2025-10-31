@@ -254,6 +254,13 @@ This section configures the policy model used for training, including optimizer,
    policy:
      model:
        path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
+       # Optional: RoPE scaling (e.g., YaRN). Enables longer context windows for models that support it.
+       # Example:
+       # rope_scaling:
+       #   type: "yarn"
+       #   factor: 4.0
+       #   original_max_position_embeddings: 32768
+       rope_scaling: null
        lora:
          rank: 0                    # LoRA rank (0 = disabled)
          alpha: 16                  # LoRA scaling parameter
@@ -306,6 +313,8 @@ We support similar configuration options as the policy model, including LoRA.
     critic:
       model:
         path: null
+        # Optional: RoPE scaling (e.g., YaRN)
+        rope_scaling: null
         lora:
           rank: 0                    # LoRA rank (0 = disabled)
           alpha: 16                  # LoRA scaling parameter
@@ -593,6 +602,7 @@ Inference Engine Configuration
 
 - ``generator.backend``: Backend to use for the inference engine. We support ``vllm`` and ``sglang``. ``sglang`` is supported only for remote inference engines at the moment.
 - ``generator.model_dtype``: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
+- ``generator.rope_scaling``: Optional RoPE scaling dict passed directly to local vLLM/SGLang engines (equivalent to ``--rope-scaling``). If set, this is merged into ``generator.engine_init_kwargs`` unless a ``rope_scaling`` key already exists there.
 - ``generator.async_engine``:  Whether to use an asynchronous/ offline inference engine. Applicable only when ``backend="vllm"``.
 - ``generator.inference_engine_tensor_parallel_size``: Tensor parallel size for the inference engine.
 - ``generator.inference_engine_pipeline_parallel_size``: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.

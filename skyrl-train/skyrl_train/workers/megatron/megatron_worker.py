@@ -62,6 +62,16 @@ class MegatronWorker:
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
+        # Apply optional RoPE scaling (e.g., YaRN) if provided in policy model config
+        try:
+            rope_scaling = self.cfg.trainer.policy.model.get("rope_scaling", None)
+            if rope_scaling is not None:
+                if hasattr(rope_scaling, "items") and not isinstance(rope_scaling, dict):
+                    rope_scaling = dict(rope_scaling)
+                hf_config.rope_scaling = rope_scaling
+        except Exception:
+            pass
+
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"

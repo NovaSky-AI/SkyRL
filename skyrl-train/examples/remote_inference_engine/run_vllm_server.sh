@@ -9,6 +9,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.infer
     --port 8001 \
     --seed 42 \
     --max-model-len 4096 \
+    # Example: enable 4x RoPE extension with YaRN for Qwen (uncomment and adjust as needed)
+    # --rope-scaling '{"type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
     --enable-prefix-caching \
     --enable-chunked-prefill \
     --dtype bfloat16 \

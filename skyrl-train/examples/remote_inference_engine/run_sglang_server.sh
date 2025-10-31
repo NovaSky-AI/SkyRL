@@ -9,4 +9,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra sglang -m \
     --host 127.0.0.1 \
     --port 8001 \
     --context-length 4096 \
+    # Example: enable 4x RoPE extension with YaRN for Qwen (uncomment and adjust as needed)
+    # --rope-scaling '{"type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
     --dtype bfloat16

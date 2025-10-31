@@ -63,6 +63,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
             use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
+            rope_scaling=self.cfg.trainer.policy.model.get("rope_scaling", None),
         )
 
         # configure optimizer
@@ -287,6 +288,7 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
             init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
+            rope_scaling=self.cfg.trainer.critic.model.get("rope_scaling", None),
         )
         # configure optimizer
         critic_optim = strategy.create_optimizer(
@@ -349,6 +351,7 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             ds_config=strategy.get_ds_eval_config(),
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
+            rope_scaling=self.cfg.trainer.policy.model.get("rope_scaling", None),
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

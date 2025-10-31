@@ -63,6 +63,7 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
         use_torch_compile: bool = False,
+        rope_scaling: dict | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -102,6 +103,25 @@ class HFModelWrapper(nn.Module):
             else:
                 nf4_config = None
 
+            # Prepare HF config to apply attention implementation and optional RoPE scaling
+            config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            # Set attention implementation preference on config (still also passed to from_pretrained below)
+            try:
+                # Some configs use private field name per HF convention
+                config._attn_implementation = self.attn_implementation
+            except Exception:
+                pass
+
+            if rope_scaling is not None:
+                try:
+                    # Convert OmegaConf DictConfig to a plain dict if needed
+                    if hasattr(rope_scaling, "items") and not isinstance(rope_scaling, dict):
+                        rope_scaling = dict(rope_scaling)
+                    config.rope_scaling = rope_scaling
+                except Exception:
+                    # If the model/config doesn't support RoPE scaling, proceed silently
+                    pass
+
             if use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
 
@@ -113,6 +133,7 @@ class HFModelWrapper(nn.Module):
                 pretrain_or_model,
                 trust_remote_code=True,
                 attn_implementation=self.attn_implementation,
+                config=config,
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
@@ -525,6 +546,7 @@ def get_llm_for_sequence_regression(
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    rope_scaling: dict | None = None,
     **kwargs,
 ) -> nn.Module:
     """Get transformer with a sequence classification head on top (linear layer).
@@ -544,6 +566,13 @@ def get_llm_for_sequence_regression(
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    if rope_scaling is not None:
+        try:
+            if hasattr(rope_scaling, "items") and not isinstance(rope_scaling, dict):
+                rope_scaling = dict(rope_scaling)
+            config.rope_scaling = rope_scaling
+        except Exception:
+            pass
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__

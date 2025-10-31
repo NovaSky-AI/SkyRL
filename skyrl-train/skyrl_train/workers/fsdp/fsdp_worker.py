@@ -77,6 +77,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
+                rope_scaling=self.cfg.trainer.policy.model.get("rope_scaling", None),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -334,6 +335,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
                 sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
+                rope_scaling=self.cfg.trainer.critic.model.get("rope_scaling", None),
             )
             self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
@@ -397,6 +399,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 bf16=self.cfg.trainer.bf16,
                 sequence_parallel_size=self.cfg.trainer.ref.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
+                rope_scaling=self.cfg.trainer.policy.model.get("rope_scaling", None),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
