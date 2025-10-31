@@ -102,7 +102,7 @@ class WorkerWrap:
 
         self._model_update_group = init_custom_process_group(
             backend=backend,
-            init_method=get_tcp_url(master_addr, master_port),
+            init_method=get_tcp_url(master_address, master_port),
             world_size=world_size,
             rank=rank,
             group_name=group_name,
