@@ -300,10 +300,7 @@ class TinkerEngine:
 
         for request_id, (model_id, request_data) in requests.items():
             if model_id and model_id not in self.models:
-                results[request_id] = types.ErrorResponse(
-                    error=f"Model {model_id} not loaded",
-                    status="failed",
-                )
+                results[request_id] = types.ErrorResponse(error=f"Model {model_id} not loaded", status="failed")
             else:
                 valid_requests[request_id] = (model_id, request_data)
 
@@ -797,7 +794,7 @@ class TinkerEngine:
 
                 result_data = result.model_dump()
                 future.result_data = result_data
-                future.status = RequestStatus.FAILED if "error" in result_data else RequestStatus.COMPLETED
+                future.status = RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
                 future.completed_at = datetime.now(timezone.utc)
                 session.add(future)
                 if future.status == RequestStatus.COMPLETED:
