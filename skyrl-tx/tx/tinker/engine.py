@@ -783,6 +783,22 @@ class TinkerEngine:
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)
 
+    def _update_futures(self, results_to_update: list[tuple[str, dict, RequestStatus]]):
+        """Helper method to update multiple futures in the database.
+
+        Args:
+            results_to_update: List of tuples (request_id, result_data, status)
+        """
+        with Session(self.db_engine) as session:
+            for request_id, result_data, status in results_to_update:
+                future = session.get(FutureDB, request_id)
+                assert future is not None, f"Future with request_id {request_id} not found in database"
+                future.result_data = result_data
+                future.status = status
+                future.completed_at = datetime.now(timezone.utc)
+                session.add(future)
+            session.commit()
+
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
         match request_type:
             case types.RequestType.CREATE_MODEL:
@@ -817,36 +833,28 @@ class TinkerEngine:
         try:
             results = batch_processor(requests)
 
-            # Update each future with its result
-            with Session(self.db_engine) as session:
-                for request_id in requests:
-                    future = session.get(FutureDB, request_id)
-                    assert future is not None, f"Future with request_id {request_id} not found in database"
+            # Prepare updates for all futures
+            results_to_update = []
+            for request_id in requests:
+                result_data = results[request_id]
+                if isinstance(result_data, error_type):
+                    status = RequestStatus.FAILED
+                else:
+                    status = RequestStatus.COMPLETED
+                results_to_update.append((request_id, result_data.model_dump(), status))
+                logger.info(f"Completed request {request_id}")
 
-                    result_data = results[request_id]
-                    if isinstance(result_data, error_type):
-                        future.status = RequestStatus.FAILED
-                    else:
-                        future.status = RequestStatus.COMPLETED
-                    future.result_data = result_data.model_dump()
-                    future.completed_at = datetime.now(timezone.utc)
-                    session.add(future)
-                    logger.info(f"Completed {future.request_type} request {request_id}")
-
-                session.commit()
+            # Update all futures in database
+            self._update_futures(results_to_update)
 
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
             # Mark all requests in the batch as failed
-            with Session(self.db_engine) as session:
-                for request_id in requests:
-                    future = session.get(FutureDB, request_id)
-                    assert future is not None, f"Future with request_id {request_id} not found in database"
-                    future.result_data = {"error": str(e)}
-                    future.status = RequestStatus.FAILED
-                    future.completed_at = datetime.now(timezone.utc)
-                    session.add(future)
-                session.commit()
+            results_to_update = [
+                (request_id, {"error": str(e)}, RequestStatus.FAILED)
+                for request_id in requests
+            ]
+            self._update_futures(results_to_update)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -904,18 +912,11 @@ class TinkerEngine:
                     result_data = {"error": str(e)}
                     status = RequestStatus.FAILED
 
-                # Update database in separate transaction
-                with Session(self.db_engine) as session:
-                    future = session.get(FutureDB, request_id)
-                    assert future is not None, f"Future with request_id {request_id} not found in database"
-                    future.result_data = result_data
-                    future.status = status
-                    future.completed_at = datetime.now(timezone.utc)
-                    session.add(future)
-                    session.commit()
+                # Update database using helper method
+                self._update_futures([(request_id, result_data, status)])
 
-                    if status == RequestStatus.COMPLETED:
-                        logger.info(f"Completed {request_type} request {request_id}")
+                if status == RequestStatus.COMPLETED:
+                    logger.info(f"Completed {request_type} request {request_id}")
 
             # Poll every 100ms
             time.sleep(0.1)
