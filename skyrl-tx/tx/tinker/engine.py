@@ -271,14 +271,20 @@ class TinkerEngine:
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
         return per_token_losses, target_logprobs, lora_grads
 
+    @staticmethod
+    @jax.jit
+    def _extract_grad_by_index(lora_grads: nnx.State, idx: int) -> nnx.State:
+        """Extract gradients for a specific adapter index (JIT-compiled)."""
+        return jax.tree.map(lambda g: g[idx], lora_grads)
+
     def _accumulate_grads(self, lora_grads: nnx.State, example_model_ids: list[str]) -> None:
         """
         Accumulate adapter-wise gradient sums and example counts.
         """
         for model_id, count in Counter(example_model_ids).items():
             idx = self.models[model_id].adapter_index
-            # Extract gradient sum for this adapter
-            grad_sum = jax.tree.map(lambda g: g[idx], lora_grads)
+            # Extract gradient sum for this adapter (JIT-compiled)
+            grad_sum = self._extract_grad_by_index(lora_grads, idx)
             accumulator = self.accumulated_grads[model_id]
             accumulator.add(grad_sum, count)
 
