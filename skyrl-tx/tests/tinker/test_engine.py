@@ -262,7 +262,7 @@ def test_gradient_checkpointing():
     losses = []
     for use_gradient_checkpointing in (False, True):
         cfg = EngineConfig(
-            base_model="Qwen/Qwen3-0.6B",
+            base_model=BASE_MODEL,
             enforce_eager=False,
             train_batch_size=2,
             micro_batch_size=1,
