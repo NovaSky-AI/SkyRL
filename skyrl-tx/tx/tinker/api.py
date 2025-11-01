@@ -303,46 +303,35 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        # TODO: Implement top_k and top_p in the engine
-        # For now, we silently ignore these parameters
-        # if self.top_k != -1:
-        #     raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
-        # if self.top_p != 1.0:
-        #     raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
+        if self.top_k != -1:
+            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
+        if self.top_p != 1.0:
+            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
 
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
-        # Convert stop tokens: the engine only supports integer token IDs
+        # Engine only supports integer token IDs
         stop_tokens: Sequence[int] | None = None
         if self.stop is not None:
             if isinstance(self.stop, str):
-                # Single string - tokenize it
                 if tokenizer is None:
                     raise HTTPException(
                         status_code=500, detail="Tokenizer not available for string stop sequence conversion"
                     )
-                # Encode the string and get the token IDs
                 stop_tokens = tokenizer.encode(self.stop, add_special_tokens=False)
-            elif len(self.stop) > 0 and isinstance(self.stop[0], str):
-                # Sequence of strings - tokenize each one
+            elif self.stop and isinstance(self.stop[0], str):
                 if tokenizer is None:
                     raise HTTPException(
                         status_code=500, detail="Tokenizer not available for string stop sequence conversion"
                     )
+                # Only keep single-token results (multi-token stop sequences not yet supported)
                 stop_tokens = []
                 for stop_str in self.stop:
-                    # Encode each string - if it's a single token, use that token ID
-                    # If it's multiple tokens, we silently ignore it for now
                     tokens = tokenizer.encode(stop_str, add_special_tokens=False)
                     if len(tokens) == 1:
                         stop_tokens.append(tokens[0])
-                    # else:
-                    #     # Multi-token stop sequences not supported by the engine yet
-                    #     # TODO: Implement multi-token stop sequence support
-                    #     pass
             else:
-                # Sequence of integers - supported
                 stop_tokens = self.stop
 
         return types.SamplingParams(
