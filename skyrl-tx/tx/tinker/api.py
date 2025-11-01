@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence
+from typing import Literal, Any, AsyncGenerator, Sequence, Annotated, Union
 from datetime import datetime, timedelta
 from uuid import uuid4
 from contextlib import asynccontextmanager
@@ -16,6 +16,7 @@ import random
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
+from transformers import AutoTokenizer
 from tx.tinker.db_models import (
     CheckpointDB,
     ModelDB,
@@ -37,13 +38,17 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
     db_url = get_async_database_url(app.state.engine_config.database_url)
-    app.state.db_engine = create_async_engine(db_url, echo=False)
+    app.state.db_engine = create_async_engine(
+        db_url,
+        echo=False,
+    )
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
     # Build subprocess command with engine config parameters
-    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
+    # Use --env-file to ensure the engine subprocess loads .env file
+    cmd = ["uv", "run", "--env-file", ".env", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
@@ -179,11 +184,27 @@ class TrainingRun(BaseModel):
     user_metadata: dict[str, str] | None = None
 
 
-class ModelInputChunk(BaseModel):
+class EncodedTextChunk(BaseModel):
     tokens: list[int]
+    type: Literal["encoded_text"] = "encoded_text"
 
     def to_types(self) -> types.ModelInputChunk:
         return types.ModelInputChunk(tokens=self.tokens)
+
+
+class ImageAssetPointerChunk(BaseModel):
+    asset_pointer: str
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+
+    def to_types(self) -> types.ModelInputChunk:
+        # Note: This will need proper implementation when image support is added
+        # For now, we'll return an empty text chunk to avoid breaking the API
+        # TODO: Implement proper image support
+        return types.EncodedTextChunk(tokens=[])
+
+
+# ModelInputChunk is a discriminated union
+ModelInputChunk = Annotated[Union[EncodedTextChunk, ImageAssetPointerChunk], Field(discriminator="type")]
 
 
 class ModelInput(BaseModel):
@@ -259,12 +280,12 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | None = None
+    stop: str | Sequence[str] | Sequence[int] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
 
-    def to_types(self) -> types.SamplingParams:
+    def to_types(self, tokenizer=None) -> types.SamplingParams:
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
@@ -276,11 +297,34 @@ class SamplingParams(BaseModel):
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
+        # Engine only supports integer token IDs
+        stop_tokens: Sequence[int] | None = None
+        if self.stop is not None:
+            if isinstance(self.stop, str):
+                if tokenizer is None:
+                    raise HTTPException(
+                        status_code=500, detail="Tokenizer not available for string stop sequence conversion"
+                    )
+                stop_tokens = tokenizer.encode(self.stop, add_special_tokens=False)
+            elif self.stop and isinstance(self.stop[0], str):
+                if tokenizer is None:
+                    raise HTTPException(
+                        status_code=500, detail="Tokenizer not available for string stop sequence conversion"
+                    )
+                # Only keep single-token results (multi-token stop sequences not yet supported)
+                stop_tokens = []
+                for stop_str in self.stop:
+                    tokens = tokenizer.encode(stop_str, add_special_tokens=False)
+                    if len(tokens) == 1:
+                        stop_tokens.append(tokens[0])
+            else:
+                stop_tokens = self.stop
+
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=self.stop,
+            stop=stop_tokens,
         )
 
 
@@ -536,16 +580,37 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
+    logger.info(
+        f"Received asample request: base_model={request.base_model}, model_path={request.model_path}, num_samples={request.num_samples}"
+    )
+    logger.info(f"Prompt chunks: {len(request.prompt.chunks)} chunks")
+    for i, chunk in enumerate(request.prompt.chunks):
+        logger.info(
+            f"  Chunk {i}: type={type(chunk).__name__}, tokens_len={len(chunk.tokens) if hasattr(chunk, 'tokens') else 'N/A'}"
+        )
+
     if request.base_model:
         model_id = checkpoint_id = ""
+        base_model_name = request.base_model
     else:
         assert request.model_path is not None
         path = types.TinkerPath.parse(request.model_path)
         if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
             raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
-        await get_model(session, model_id)
+        model_db = await get_model(session, model_id)
+        base_model_name = model_db.base_model
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
+
+    # Load tokenizer if needed for string stop sequences
+    tokenizer = None
+    if request.sampling_params.stop is not None:
+        needs_tokenizer = isinstance(request.sampling_params.stop, str) or (
+            len(request.sampling_params.stop) > 0 and isinstance(request.sampling_params.stop[0], str)
+        )
+        if needs_tokenizer:
+            # Use the base model from the request or from the model DB
+            tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 
     request_id = await create_future(
         session=session,
@@ -554,7 +619,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         request_data=types.SampleInput(
             base_model=request.base_model,
             prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
+            sampling_params=request.sampling_params.to_types(tokenizer=tokenizer),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
         ),
