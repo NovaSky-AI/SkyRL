@@ -42,8 +42,8 @@ from tx.utils.log import logger
 class AccumulatedGradients:
     """Stores accumulated gradients for a LoRA adapter."""
 
-    grad_sum: nnx.State | None
-    denominator: int
+    grad_sum: nnx.State | None = None
+    denominator: int = 0
 
     @staticmethod
     @jax.jit
@@ -404,7 +404,7 @@ class TinkerEngine:
             adapter_index=adapter_index,
             lora_config=request_data.lora_config,
         )
-        self.accumulated_grads[model_id] = AccumulatedGradients(grad_sum=None, denominator=0)
+        self.accumulated_grads[model_id] = AccumulatedGradients()
 
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
