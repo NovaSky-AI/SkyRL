@@ -759,8 +759,9 @@ class PolicyWorkerBase(Worker):
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
-        # entropy
-        with torch.no_grad():
+
+        # entropy loss
+        with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
             # batch_size, seqlen
             entropy_BS = output["entropy"]
             entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
@@ -779,7 +780,7 @@ class PolicyWorkerBase(Worker):
         else:
             kl_loss = torch.tensor(0.0)
 
-        loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+        loss = policy_loss + (kl_loss * self.cfg.trainer.algorithm.kl_loss_coef) + (-self.cfg.trainer.algorithm.entropy_loss_coef * entropy)
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 

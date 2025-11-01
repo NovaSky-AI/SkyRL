@@ -348,7 +348,7 @@ class HFModelWrapper(nn.Module):
                 entropy_mask = attention_mask_fwd
 
             entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=False, attention_mask=entropy_mask
+                logits_BSV, requires_grad=True, attention_mask=entropy_mask
             )
 
             if self.sequence_parallel_size > 1:
