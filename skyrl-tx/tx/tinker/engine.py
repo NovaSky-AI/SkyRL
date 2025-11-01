@@ -48,12 +48,11 @@ class AccumulatedGradients:
     @staticmethod
     @jax.jit
     def _extract_and_add_grads(lora_grads: nnx.State, adapter_index: int, grad_sum: nnx.State | None) -> nnx.State:
-        """Extract gradients by adpater index and add to grad_sum."""
-        grad = jax.tree.map(lambda g: g[adapter_index], lora_grads)
+        """Extract gradients by adapter index and add to grad_sum."""
         if grad_sum is None:
-            return grad
+            return jax.tree.map(lambda g: g[adapter_index], lora_grads)
         else:
-            return jax.tree.map(lambda a, b: a + b, grad_sum, grad)
+            return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
 
     def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
         """Accumulate gradients and increment denominator."""
