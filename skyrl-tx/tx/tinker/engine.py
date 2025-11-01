@@ -1,6 +1,7 @@
 """Background engine for processing training requests."""
 
 import argparse
+import functools
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -46,7 +47,7 @@ class AccumulatedGradients:
     denominator: int = 0
 
     @staticmethod
-    @jax.jit(static_argnames=('adapter_index',))
+    @functools.partial(jax.jit, static_argnames=('adapter_index',))
     def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> nnx.State:
         """Extracts gradients and adds them to the sum."""
         return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
