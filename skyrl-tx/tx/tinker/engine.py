@@ -45,14 +45,20 @@ class AccumulatedGradients:
     grad_sum: nnx.State | None
     denominator: int
 
-    def add(self, grad: nnx.State, count: int) -> None:
-        """Accumulate gradients and increment denominator."""
-        if self.grad_sum is None:
-            self.grad_sum = grad
-            self.denominator = count
+    @staticmethod
+    @jax.jit
+    def _extract_and_add_grads(lora_grads: nnx.State, adapter_index: int, grad_sum: nnx.State | None) -> nnx.State:
+        """Extract gradients by adpater index and add to grad_sum."""
+        grad = jax.tree.map(lambda g: g[adapter_index], lora_grads)
+        if grad_sum is None:
+            return grad
         else:
-            self.grad_sum = jax.tree.map(lambda a, b: a + b, self.grad_sum, grad)
-            self.denominator += count
+            return jax.tree.map(lambda a, b: a + b, grad_sum, grad)
+
+    def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
+        """Accumulate gradients and increment denominator."""
+        self.grad_sum = self._extract_and_add_grads(lora_grads, adapter_index, self.grad_sum)
+        self.denominator += count
 
     def get_mean(self) -> nnx.State:
         """Compute mean gradients."""
@@ -271,22 +277,15 @@ class TinkerEngine:
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
         return per_token_losses, target_logprobs, lora_grads
 
-    @staticmethod
-    @jax.jit
-    def _extract_grad_by_index(lora_grads: nnx.State, idx: int) -> nnx.State:
-        """Extract gradients for a specific adapter index (JIT-compiled)."""
-        return jax.tree.map(lambda g: g[idx], lora_grads)
-
     def _accumulate_grads(self, lora_grads: nnx.State, example_model_ids: list[str]) -> None:
         """
         Accumulate adapter-wise gradient sums and example counts.
         """
         for model_id, count in Counter(example_model_ids).items():
-            idx = self.models[model_id].adapter_index
-            # Extract gradient sum for this adapter (JIT-compiled)
-            grad_sum = self._extract_grad_by_index(lora_grads, idx)
+            adapter_index = self.models[model_id].adapter_index
             accumulator = self.accumulated_grads[model_id]
-            accumulator.add(grad_sum, count)
+            # Extract and accumulate gradients for this adapter
+            accumulator.add(lora_grads, adapter_index, count)
 
     def _filter_valid_requests(
         self,
