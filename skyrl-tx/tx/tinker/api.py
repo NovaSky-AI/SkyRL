@@ -1,7 +1,6 @@
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
-from fastapi.exceptions import RequestValidationError
+from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Any, AsyncGenerator, Sequence, Annotated, Union
 from datetime import datetime, timedelta
@@ -69,19 +68,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Log validation errors for debugging."""
-    body = await request.body()
-    logger.error(f"Validation error on {request.url.path}")
-    logger.error(f"Request body: {body.decode('utf-8')}")
-    logger.error(f"Validation errors: {exc.errors()}")
-    return JSONResponse(
-        status_code=422,
-        content={"detail": exc.errors()},
-    )
 
 
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
