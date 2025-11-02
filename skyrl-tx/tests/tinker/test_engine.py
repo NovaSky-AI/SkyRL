@@ -330,14 +330,14 @@ def test_sample_max_num_sequences():
         )
 
     # Build a batch of 5 sample requests
-    reqs = [(FutureStub(request_id), "", make_sample_input(tokens)) for request_id, tokens in enumerate(prompts)]
+    reqs = {str(request_id): ("", make_sample_input(tokens)) for request_id, tokens in enumerate(prompts)}
 
     # Process sample requests.
     results = engine.process_sample_batch(reqs)
 
     # Verify results
     assert len(results) == len(prompts), f"Expected {len(prompts)} results, got {len(results)}"
-    for request_id in range(len(prompts)):
+    for request_id in reqs.keys():
         result = results[request_id]
 
         assert len(result.sequences) == 1, f"Request {request_id}: expected 1 sequence, got {len(result.sequences)}"
