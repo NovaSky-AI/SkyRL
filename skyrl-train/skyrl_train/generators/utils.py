@@ -141,9 +141,10 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
     """
-    Used in eval to concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches.
 
-    `rollout_metrics` are not concatenated because they are already aggregated.
+    We only aggregate rollout metrics the can deduced by responses and rewards, but not
+    those that use `env_metrics` or `env_classes`.
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -156,14 +157,17 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
         "rewards": sum([output["rewards"] for output in generator_outputs], []),
         "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "stop_reasons": (
+            sum([output["stop_reasons"] for output in generator_outputs], [])
+            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
+            else None
+        ),
         "rollout_logprobs": (
             sum([output["rollout_logprobs"] for output in generator_outputs], [])
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
     }
-    if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
-        result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -173,6 +177,22 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
         result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+
+    # Re-aggregate rollout metrics
+    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    result["rollout_metrics"] = rollout_metrics
+
+    # We validate the generator output here using a dummy generator input, since we do not have
+    # access to it and the validation only requires the number of prompts, which we assume to be correct.
+    # Import here to avoid circular dependency.
+    from skyrl_train.utils.trainer_utils import validate_generator_output
+
+    num_prompts = len(result["prompt_token_ids"])
+    dummy_generator_input: GeneratorInput = {
+        "prompts": [[] for _ in range(num_prompts)],
+        "env_classes": ["" for _ in range(num_prompts)],
+    }
+    validate_generator_output(dummy_generator_input, result)
 
     return result
 
