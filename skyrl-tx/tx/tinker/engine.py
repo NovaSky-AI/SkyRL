@@ -225,7 +225,7 @@ class TinkerEngine:
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
-        mb = self.config.micro_batch_size
+        mb = self.config.train_micro_batch_size
         return total if mb <= 0 else max(1, min(mb, total))
 
     @contextmanager
@@ -579,25 +579,43 @@ class TinkerEngine:
 
             request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts)))
 
-        # Pad sequences to same length
-        max_len = max(len(seq) for seq in all_prompts)
-
-        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32)
-        attention_mask = jnp.array(
-            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32
+        total_batch_size = len(all_prompts)
+        max_batch_size = (
+            self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
-        all_adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
+
+        # Collect generated sequences across batches
+        all_sequences: list[types.GeneratedSequence] = []
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
-            result = model.generate(
-                input_ids, attention_mask, sampling_params=all_sampling_params, adapter_indices=all_adapter_indices
-            )
+            for batch_start in range(0, total_batch_size, max_batch_size):
+                batch_end = min(batch_start + max_batch_size, total_batch_size)
+                batch_prompts = all_prompts[batch_start:batch_end]
 
-        all_sequences = [
-            types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
-            for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
-        ]
+                # Pad sequences to same length within the batch to minimize memory usage.
+                max_len = max(len(seq) for seq in batch_prompts) if batch_prompts else 0
+                input_ids = jnp.array(
+                    [seq + [0] * (max_len - len(seq)) for seq in batch_prompts],
+                    dtype=jnp.int32,
+                )
+                attention_mask = jnp.array(
+                    [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in batch_prompts],
+                    dtype=jnp.int32,
+                )
+                adapter_indices = jnp.array(all_adapter_indices[batch_start:batch_end], dtype=jnp.int32)
+                sampling_params = all_sampling_params[batch_start:batch_end]
+
+                result = model.generate(
+                    input_ids,
+                    attention_mask,
+                    sampling_params=sampling_params,
+                    adapter_indices=adapter_indices,
+                )
+                all_sequences.extend(
+                    types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
+                    for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
+                )
 
         for request_id, _, start_idx, end_idx in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
