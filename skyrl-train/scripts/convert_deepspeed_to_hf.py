@@ -35,7 +35,6 @@ Example usage:
 uv run --isolated --frozen --extra vllm scripts/convert_deepspeed_to_hf.py --ckpt-dir [local_checkpoint] --out-dir [output_directory]
 """
 
-import json
 import shutil
 import os
 import subprocess
@@ -45,13 +44,14 @@ from pathlib import Path
 from safetensors.torch import save_model
 from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForSeq2SeqLM, AutoModel
 
+
 # === Directories ===
-def main(deepspeed_model_path: Path, out_dir:Path = None) -> Path:
+def main(deepspeed_model_path: Path, out_dir: Path = None) -> Path:
     ROOT = deepspeed_model_path
     POLICY_DIR = ROOT / "policy"
     HF_BASE = POLICY_DIR / "huggingface"
     OUT_DIR = POLICY_DIR / "huggingface_converted" if not out_dir else out_dir
-    MERGED_FP32 = OUT_DIR / "merged_model" # directory that will store the ultimate pytorch weights. 
+    MERGED_FP32 = OUT_DIR / "merged_model"  # directory that will store the ultimate pytorch weights.
 
     OUT_DIR.mkdir(exist_ok=True, parents=True)
 
@@ -102,11 +102,14 @@ def main(deepspeed_model_path: Path, out_dir:Path = None) -> Path:
     # === Summary ===
     print("\n✅ Conversion complete!")
     print(f"→ Hugging Face safetensors model located at: {OUT_DIR.resolve()}")
-    print(f"→ Load it via:\n\n"
+    print(
+        f"→ Load it via:\n\n"
         f"from transformers import AutoModelForCausalLM, AutoTokenizer\n"
         f"model = AutoModelForCausalLM.from_pretrained('{OUT_DIR}')\n"
-        f"tokenizer = AutoTokenizer.from_pretrained('{OUT_DIR}')\n")
+        f"tokenizer = AutoTokenizer.from_pretrained('{OUT_DIR}')\n"
+    )
     return Path(OUT_DIR)
+
 
 def guess_hf_class(cfg: AutoConfig):
     """
@@ -123,6 +126,7 @@ def guess_hf_class(cfg: AutoConfig):
         return AutoModelForCausalLM
     return AutoModel
 
+
 def validate_load(out_dir: Path):
     """
     Optional: sanity-load with HF to ensure the saved safetensors is consumable
@@ -138,14 +142,20 @@ def validate_load(out_dir: Path):
     except Exception as e:
         print(f"[validate][error] HF Load failed: {e} ")
         raise RuntimeError("HF Load failed")
-    
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Convert Deepspeed checkpoint shards to a HuggingFace safetensors model.")
     ap.add_argument(
-        "--ckpt-dir", type=str, required=True, help="Path to the checkpoint directory, containing the trainer_state.pt file"
+        "--ckpt-dir",
+        type=str,
+        required=True,
+        help="Path to the checkpoint directory, containing the trainer_state.pt file",
     )
     ap.add_argument("--out-dir", type=str, default=None, help="Output for HF model folder")
-    ap.add_argument("--validate-load", action="store_true", help="Try loading with the Transformers Module after saving")
+    ap.add_argument(
+        "--validate-load", action="store_true", help="Try loading with the Transformers Module after saving"
+    )
     args = ap.parse_args()
     ckpt_dir = Path(args.ckpt_dir).resolve()
     output_dir = Path(args.out_dir).resolve()
