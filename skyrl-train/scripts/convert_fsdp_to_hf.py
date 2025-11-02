@@ -192,9 +192,24 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
             #         )
             #     else:
             #         # Merging tensors using merge_two_shards with heuristic fallback
+            try:
+                from torch.distributed.tensor import DTensor
+            except (ImportError, AttributeError):
+                DTensor = None
+            try:
+                from torch.distributed.tensor import ShardedTensor
+            except (ImportError, AttributeError):
+                ShardedTensor = None
+            if DTensor is not None and isinstance(v, DTensor):
+                v = v.to_local()
+            if ShardedTensor is not None and isinstance(v, ShardedTensor):
+                v = v.local_tensor()
+            
             if nk in merged:
-                merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk)
+                print(f"Tensors to be merged: (original) with shape {merged[nk].shape} and (newly added) with shape {v.shape}")
+                merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk, merge_type="default")
             else:
+                print(f"Current tensor shape: {v.shape}")
                 merged[nk] = v.detach().cpu().contiguous()
     if not merged:
         print("[error] No tensors found in shards")
