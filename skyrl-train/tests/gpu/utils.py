@@ -110,7 +110,6 @@ def get_test_deepspeed_strategy(cfg):
     return DeepspeedStrategy(
         seed=42,
         micro_train_batch_size_per_gpu=1,
-        train_batch_size=128,
         zero_stage=3,
         bf16=True,
         cfg=cfg,
@@ -124,7 +123,6 @@ def get_test_fsdp_strategy(cfg):
         seed=42,
         max_norm=1.0,
         micro_train_batch_size_per_gpu=1,
-        train_batch_size=128,
         cfg=cfg,
     )
 

@@ -47,7 +47,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -308,7 +307,6 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -383,7 +381,6 @@ class FSDPRefWorkerBase(RefWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
         )
         strategy.setup_distributed()
         self.strategy = strategy
