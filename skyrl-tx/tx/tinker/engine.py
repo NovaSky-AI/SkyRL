@@ -1,6 +1,7 @@
 """Background engine for processing training requests."""
 
 import argparse
+import functools
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -43,17 +44,22 @@ from tx.utils.log import logger
 class AccumulatedGradients:
     """Stores accumulated gradients for a LoRA adapter."""
 
-    grad_sum: nnx.State | None
-    denominator: int
+    grad_sum: nnx.State | None = None
+    denominator: int = 0
 
-    def add(self, grad: nnx.State, count: int) -> None:
+    @staticmethod
+    @functools.partial(jax.jit, static_argnames=("adapter_index",))
+    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> nnx.State:
+        """Extracts gradients and adds them to the sum."""
+        return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
+
+    def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
         """Accumulate gradients and increment denominator."""
         if self.grad_sum is None:
-            self.grad_sum = grad
-            self.denominator = count
+            self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
         else:
-            self.grad_sum = jax.tree.map(lambda a, b: a + b, self.grad_sum, grad)
-            self.denominator += count
+            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index)
+        self.denominator += count
 
     def get_mean(self) -> nnx.State:
         """Compute mean gradients."""
@@ -277,11 +283,10 @@ class TinkerEngine:
         Accumulate adapter-wise gradient sums and example counts.
         """
         for model_id, count in Counter(example_model_ids).items():
-            idx = self.models[model_id].adapter_index
-            # Extract gradient sum for this adapter
-            grad_sum = jax.tree.map(lambda g: g[idx], lora_grads)
+            adapter_index = self.models[model_id].adapter_index
             accumulator = self.accumulated_grads[model_id]
-            accumulator.add(grad_sum, count)
+            # Extract and accumulate gradients for this adapter
+            accumulator.add(lora_grads, adapter_index, count)
 
     def _filter_valid_requests(
         self,
@@ -417,7 +422,7 @@ class TinkerEngine:
             adapter_index=adapter_index,
             lora_config=request_data.lora_config,
         )
-        self.accumulated_grads[model_id] = AccumulatedGradients(grad_sum=None, denominator=0)
+        self.accumulated_grads[model_id] = AccumulatedGradients()
 
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
