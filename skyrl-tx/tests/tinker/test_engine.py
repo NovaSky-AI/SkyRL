@@ -337,7 +337,7 @@ def test_sample_max_num_sequences():
 
     # Verify results
     assert len(results) == len(prompts), f"Expected {len(prompts)} results, got {len(results)}"
-    for request_id in reqs.keys():
+    for request_id in reqs:
         result = results[request_id]
 
         assert len(result.sequences) == 1, f"Request {request_id}: expected 1 sequence, got {len(result.sequences)}"
