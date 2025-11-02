@@ -204,9 +204,11 @@ def merge_shards(shards_paths: List[Path]) -> Dict[str, torch.Tensor]:
                 v = v.to_local()
             if ShardedTensor is not None and isinstance(v, ShardedTensor):
                 v = v.local_tensor()
-            
+
             if nk in merged:
-                print(f"Tensors to be merged: (original) with shape {merged[nk].shape} and (newly added) with shape {v.shape}")
+                print(
+                    f"Tensors to be merged: (original) with shape {merged[nk].shape} and (newly added) with shape {v.shape}"
+                )
                 merged[nk] = merge_two_shards(merged[nk], v.detach().cpu().contiguous(), key=nk, merge_type="default")
             else:
                 print(f"Current tensor shape: {v.shape}")
@@ -336,7 +338,9 @@ def main():
         "--ckpt-dir", type=str, required=True, help="Path to the checkpoint directory, containing trainer_state.pt"
     )
     ap.add_argument("--out-dir", type=str, required=True, help="Output for HF model folder")
-    ap.add_argument("--validate-load", action="store_true", help="Try loading with the Transformers Module after saving")
+    ap.add_argument(
+        "--validate-load", action="store_true", help="Try loading with the Transformers Module after saving"
+    )
     args = ap.parse_args()
     ckpt_dir = Path(args.ckpt_dir).resolve()
     output_dir = Path(args.out_dir).resolve()
