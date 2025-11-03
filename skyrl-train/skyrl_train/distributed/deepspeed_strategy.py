@@ -42,7 +42,6 @@ class DeepspeedStrategy(DistributedStrategy):
         deepspeed_config,
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
-        train_batch_size=1,
         zero_stage=3,
         bf16=True,
     ) -> None:
@@ -50,7 +49,6 @@ class DeepspeedStrategy(DistributedStrategy):
 
         self.deepspeed_config = deepspeed_config
         self.stage = zero_stage
-        self.train_batch_size = train_batch_size
         self.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         self.bf16 = bf16
         self.seed = seed
@@ -73,7 +71,6 @@ class DeepspeedStrategy(DistributedStrategy):
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         deepspeed.init_distributed(timeout=timeout)
         self.world_size = dist.get_world_size()
-        self.accumulated_gradient = self.train_batch_size // self.micro_train_batch_size_per_gpu // self.world_size
 
     def create_optimizer(self, model, offload_after_step=True, **kwargs) -> Optimizer:
         if isinstance(model, HFModelWrapper):
