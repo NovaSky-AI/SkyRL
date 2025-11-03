@@ -144,9 +144,14 @@ class GeneratorMixin:
             if sp.stop:
                 stop_tokens = stop_tokens.at[i, : len(sp.stop)].set(jnp.array(sp.stop))
 
+        # Pad inputs to max_length before prefill
+        pad_length = max_length - prompt_length
+        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
+        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
+
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
-        outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
+        outputs = self._prefill_fn(self, generated_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         def scan_fn(carry, _):
@@ -184,10 +189,6 @@ class GeneratorMixin:
             )
             return new_carry, None
 
-        # Pad inputs to max_length
-        pad_length = max_length - prompt_length
-        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
-        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
         all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
         stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
 
@@ -196,8 +197,8 @@ class GeneratorMixin:
             rngs,
             generated_ids,
             attention_mask,
-            positions[:, -1:],
-            outputs.logits[:, -1, :],
+            positions[:, prompt_length - 1 : prompt_length],
+            outputs.logits[:, prompt_length - 1, :],
             all_logprobs,
             stop_pos,
         )
