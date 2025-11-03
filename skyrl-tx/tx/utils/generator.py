@@ -129,7 +129,12 @@ class GeneratorMixin:
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
+
+        # Round up prompt_length for prefill JIT efficiency
+        rounded_prompt_length = tx.utils.models.round_up_seq_len(prompt_length)
+        # Round up total length for decode JIT efficiency
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
+
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
@@ -144,15 +149,20 @@ class GeneratorMixin:
             if sp.stop:
                 stop_tokens = stop_tokens.at[i, : len(sp.stop)].set(jnp.array(sp.stop))
 
-        # Pad inputs to max_length before prefill
-        pad_length = max_length - prompt_length
-        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
-        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
+        # Pad inputs to rounded_prompt_length for prefill
+        prefill_pad_length = rounded_prompt_length - prompt_length
+        attention_mask_prefill = jnp.pad(attention_mask, ((0, 0), (0, prefill_pad_length)))
+        input_ids_prefill = jnp.pad(input_ids, ((0, 0), (0, prefill_pad_length)))
 
         # Prefill: process full prompt
-        positions = compute_positions(attention_mask)
-        outputs = self._prefill_fn(self, generated_ids, attention_mask, positions, adapter_indices)
+        positions = compute_positions(attention_mask_prefill)
+        outputs = self._prefill_fn(self, input_ids_prefill, attention_mask_prefill, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
+
+        # Pad inputs to max_length for decode
+        decode_pad_length = max_length - prompt_length
+        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, decode_pad_length)))
+        generated_ids = jnp.pad(input_ids, ((0, 0), (0, decode_pad_length)))
 
         def scan_fn(carry, _):
             kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
