@@ -102,6 +102,59 @@ def next_token_and_logprobs(
     return next_rngs, next_token, all_logprobs, stop_pos
 
 
+def decode_fn(carry, _):
+    """Decode one token step for use with jax.lax.scan.
+
+    Args:
+        carry: Tuple of (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits,
+                        all_logprobs, stop_pos, model, temperatures, stop_tokens, adapter_indices)
+        _: Unused scan input
+
+    Returns:
+        Tuple of (new_carry, None) where new_carry has the same structure as carry
+    """
+    (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos,
+     model, temperatures, stop_tokens, adapter_indices) = carry
+    batch_size = generated_ids.shape[0]
+
+    rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
+        logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
+    )
+
+    # Update generated_ids and attention mask
+    generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
+    attention_mask = lax.dynamic_update_slice(
+        attention_mask, jnp.ones((batch_size, 1), dtype=attention_mask.dtype), (0, kv_cache.cache_position)
+    )
+    last_positions = last_positions + 1
+
+    # Run decoder step
+    outputs = model(
+        next_token,
+        attention_mask=attention_mask,
+        positions=last_positions,
+        kv_cache=kv_cache,
+        adapter_indices=adapter_indices,
+    )
+
+    new_logits = outputs.logits[:, -1, :]
+    new_carry = (
+        outputs.kv_cache,
+        rngs,
+        generated_ids,
+        attention_mask,
+        last_positions,
+        new_logits,
+        all_logprobs,
+        stop_pos,
+        model,
+        temperatures,
+        stop_tokens,
+        adapter_indices,
+    )
+    return new_carry, None
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -164,41 +217,6 @@ class GeneratorMixin:
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, decode_pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, decode_pad_length)))
 
-        def scan_fn(carry, _):
-            kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
-            rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-                logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
-            )
-
-            # Update generated_ids and attention mask
-            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
-            attention_mask = lax.dynamic_update_slice(
-                attention_mask, jnp.ones((batch_size, 1), dtype=attention_mask.dtype), (0, kv_cache.cache_position)
-            )
-            last_positions = last_positions + 1
-
-            # Run decoder step
-            outputs = self(
-                next_token,
-                attention_mask=attention_mask,
-                positions=last_positions,
-                kv_cache=kv_cache,
-                adapter_indices=adapter_indices,
-            )
-
-            new_logits = outputs.logits[:, -1, :]
-            new_carry = (
-                outputs.kv_cache,
-                rngs,
-                generated_ids,
-                attention_mask,
-                last_positions,
-                new_logits,
-                all_logprobs,
-                stop_pos,
-            )
-            return new_carry, None
-
         all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
         stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
 
@@ -211,9 +229,14 @@ class GeneratorMixin:
             outputs.logits[:, prompt_length - 1, :],
             all_logprobs,
             stop_pos,
+            self,
+            temperatures,
+            stop_tokens,
+            adapter_indices,
         )
-        (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos), _ = (
-            jax.lax.scan(scan_fn, initial_carry, xs=None, length=max_new_tokens - 1)
+        (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos,
+         _, _, _, _), _ = (
+            jax.lax.scan(decode_fn, initial_carry, xs=None, length=max_new_tokens - 1)
         )
 
         # Sample final token
