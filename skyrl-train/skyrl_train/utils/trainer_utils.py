@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from collections import defaultdict
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
@@ -556,13 +556,17 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     return filtered
 
 
-def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
-    """Validate the generator output."""
+def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput):
+    """Validate the generator output.
+
+    Args:
+        num_prompts: Number of input prompts used to produce this output.
+        generator_output: The generated output batch to validate.
+    """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
 
     # check that input prompts, response ids, and prompt token ids are all the same length
-    num_prompts = len(input_batch["prompts"])
     num_responses = len(generator_output["response_ids"])
     num_prompt_tokens = len(generator_output["prompt_token_ids"])
     assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"

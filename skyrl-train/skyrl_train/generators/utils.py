@@ -182,17 +182,12 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
     result["rollout_metrics"] = rollout_metrics
 
-    # We validate the generator output here using a dummy generator input, since we do not have
-    # access to it and the validation only requires the number of prompts, which we assume to be correct.
+    # Validate the generator output using the number of prompts
     # Import here to avoid circular dependency.
     from skyrl_train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    dummy_generator_input: GeneratorInput = {
-        "prompts": [[] for _ in range(num_prompts)],
-        "env_classes": ["" for _ in range(num_prompts)],
-    }
-    validate_generator_output(dummy_generator_input, result)
+    validate_generator_output(num_prompts, result)
 
     return result
 
