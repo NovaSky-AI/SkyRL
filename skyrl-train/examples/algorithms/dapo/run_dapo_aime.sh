@@ -5,7 +5,7 @@ set -x
 # bash examples/algorithms/dapo/run_dapo_aime.sh
 
 # download the model from huggingface and modify the max_position_embeddings in config.json to 32768
-# hf download Qwen/Qwen2.5-Math-7B --local-dir $HOME/models/Qwen2.5-Math-7B
+# hf download Qwen/Qwen2.5-Math-7B --local-dir $HOME/qwen2.5-math
 MODEL_NAME="$HOME/qwen2.5-math"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"

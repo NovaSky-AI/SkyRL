@@ -5,7 +5,7 @@ set -x
 # bash examples/algorithms/dapo/run_dapo_qwen2.5_32b_aime.sh
 
 MODEL_NAME="Qwen/Qwen2.5-32B"
-DATA_DIR="/mnt/cluster_storage/data/dapo"
+DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=2
@@ -45,9 +45,6 @@ EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
 MICRO_FORWARD_BATCH_SIZE_PER_GPU=4
 MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
-
-export SKYRL_LD_LIBRARY_PATH_EXPORT=true
-export LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -103,9 +100,9 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="aime" \
-  trainer.run_name="qwen_2_5_32b_aime_eval_fixed_no_cuda_graphs" \
+  trainer.project_name="dapo_aime" \
+  trainer.run_name="dapo_qwen_2.5_32b" \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/qwen_2.5_32b_aime_ckpt_eval_fixed_no_cuda_graphs" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen_2.5_32b" \
   $@
