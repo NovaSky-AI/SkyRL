@@ -50,6 +50,8 @@ trainer:
     # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
   ref:
+    model:
+      path: ${trainer.policy.model.path}
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
