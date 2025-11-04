@@ -331,6 +331,8 @@ Reference Model Configuration
 .. code-block:: yaml
 
     ref:
+      model:
+        path: ${trainer.policy.model.path}
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
         cpu_offload: false
@@ -338,6 +340,7 @@ Reference Model Configuration
         fsdp_size: -1
       sequence_parallel_size: 1
 
+- ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
