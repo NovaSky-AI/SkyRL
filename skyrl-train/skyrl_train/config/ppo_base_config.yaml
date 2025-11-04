@@ -37,8 +37,8 @@ trainer:
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
-      offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
-      num_warmup_steps: 0
+      offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
+      num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
       scheduler: "constant_with_warmup"   
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
@@ -71,8 +71,8 @@ trainer:
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
-      offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
-      num_warmup_steps: 0
+      offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
+      num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
       scheduler: "constant_with_warmup"
     fsdp_config:
       cpu_offload: false
