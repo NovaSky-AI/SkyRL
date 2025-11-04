@@ -4,7 +4,9 @@ set -x
 # uv run examples/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/algorithms/dapo/run_dapo_aime.sh
 
-MODEL_NAME="/mnt/local_storage/qwen2.5-math"
+# download the model from huggingface and modify the max_position_embeddings in config.json to 32768
+# hf download Qwen/Qwen2.5-Math-7B --local-dir $HOME/models/Qwen2.5-Math-7B
+MODEL_NAME="$HOME/qwen2.5-math"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
@@ -94,9 +96,9 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="aime" \
-  trainer.run_name="qwen_2_5_math_7b_aime_eval_fixed_no_cuda_graphs" \
+  trainer.project_name="dapo_aime" \
+  trainer.run_name="dapo_qwen_2.5_math_7b" \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/qwen_2.5_math_7b_aime_ckpt_eval_fixed_no_cuda_graphs" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen_2.5_math_7b" \
   $@

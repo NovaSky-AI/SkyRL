@@ -7,5 +7,5 @@ The maximum sequence length is simply `generator.max_input_length` + `generator.
 ## Usage
 
 ```bash
-bash scripts/full_context/run_full_ctx.sh
+bash scripts/full_context/run.sh
 ```

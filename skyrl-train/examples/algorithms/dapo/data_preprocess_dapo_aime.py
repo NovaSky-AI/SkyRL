@@ -3,7 +3,7 @@ import polars as pl
 from pathlib import Path
 
 # Define input and output files
-DATA_DIR = "/mnt/cluster_storage/data/dapo"
+DATA_DIR = Path.home() / "data/dapo"
 FILES = {
     "dapo-math-17k": "dapo-math-17k.parquet",
     "aime-2024": "aime-2024.parquet",
