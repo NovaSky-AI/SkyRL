@@ -9,6 +9,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tx.models import Qwen3ForCausalLM
+from tx.tinker import types
 from tx.utils.models import load_safetensors
 
 
@@ -18,7 +19,7 @@ def test_qwen3_generate():
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
-    inputs = ["My name is", "The capital of France is"]
+    inputs = ["My name is", "The capital of France is", "Test stopping"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     # Generate with HuggingFace (reference)
@@ -26,7 +27,7 @@ def test_qwen3_generate():
         hf_output = hf_model.generate(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            max_new_tokens=10,
+            max_new_tokens=20,
             do_sample=False,
             return_dict_in_generate=True,
             output_scores=True,
@@ -42,24 +43,48 @@ def test_qwen3_generate():
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
+        sampling_params = [
+            types.SamplingParams(max_tokens=10, temperature=0.0, seed=42),
+            types.SamplingParams(max_tokens=20, temperature=0.0, seed=42),
+            types.SamplingParams(max_tokens=50, temperature=0.0, seed=42, stop=[6149]),
+        ]
         result = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
-            max_new_tokens=10,
-            temperature=0.0,
-            seed=42,
-            return_scores=True,
+            sampling_params=sampling_params,
         )
 
-        assert jnp.array_equal(
-            result.generated_ids, hf_output.sequences.numpy()
-        ), "Generated tokens don't match HuggingFace"
+        # Compare generated tokens
+        for i, (our_tokens, hf_tokens, sampling_param) in enumerate(
+            zip(result.generated_ids, hf_output.sequences, sampling_params)
+        ):
+            prompt_length = batch.input_ids.shape[1]
+            hf_tokens_truncated = hf_tokens[prompt_length : prompt_length + sampling_param.max_tokens].tolist()
 
-        # Compare scores (logits) for each generated token
-        for step_idx, (hf_score, our_score) in enumerate(zip(hf_output.scores, result.scores)):
-            assert np.allclose(
-                hf_score.numpy(), our_score, rtol=1e-3, atol=1e-3
-            ), f"Step {step_idx}: Logits don't match HuggingFace. Max diff: {np.abs(hf_score.numpy() - our_score).max()}"
+            if sampling_param.stop:
+                assert result.stop_reasons[i] == "stop"
+                assert our_tokens[-1] in sampling_param.stop
+                # We need to truncate it manually here since if we use the `eos_token_id`
+                # in huggingface generate, it will pad the sequence with padding tokens
+                hf_tokens_truncated = hf_tokens_truncated[: len(our_tokens)]
+
+            assert our_tokens == hf_tokens_truncated, (
+                f"Generated tokens for request {i} don't match HuggingFace. "
+                f"Ours: {our_tokens}, HF: {hf_tokens_truncated}"
+            )
+
+        # Compare logprobs for sampled tokens
+        for i, (our_tokens, our_logprobs) in enumerate(zip(result.generated_ids, result.logprobs)):
+            # Compute expected logprobs from HF scores
+            for step_idx, (token_id, our_logprob) in enumerate(zip(our_tokens, our_logprobs)):
+                hf_logits = hf_output.scores[step_idx][i]
+                hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
+                expected_logprob = float(hf_logprobs[token_id])
+
+                assert np.isclose(our_logprob, expected_logprob, rtol=1e-3, atol=1e-3), (
+                    f"Request {i}, step {step_idx}: Logprob mismatch. "
+                    f"Ours: {our_logprob}, HF: {expected_logprob}, diff: {abs(our_logprob - expected_logprob)}"
+                )
 
 
 def test_qwen3_generate_speed():
@@ -89,16 +114,14 @@ def test_qwen3_generate_speed():
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
+        sampling_params = [types.SamplingParams(max_tokens=50, temperature=0.0, seed=42) for i in range(len(inputs))]
 
         # Warmup
-        warmup = model.generate(
+        model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
-            max_new_tokens=10,
-            temperature=0.0,
-            seed=42,
+            sampling_params=sampling_params,
         )
-        warmup.generated_ids.block_until_ready()
 
         runs = 1
         times = []
@@ -108,12 +131,8 @@ def test_qwen3_generate_speed():
             result = model.generate(
                 batch.input_ids.numpy(),
                 batch.attention_mask.numpy(),
-                max_new_tokens=50,
-                temperature=0.0,
-                seed=42 + i,  # Different seed every run
-                return_scores=True,
+                sampling_params=sampling_params,
             )
-            result.generated_ids.block_until_ready()
             elapsed = time.perf_counter() - start
             times.append(elapsed)
 
@@ -121,8 +140,7 @@ def test_qwen3_generate_speed():
         mean_time = times.mean()
         std_time = times.std()
 
-        batch_size, _ = result.generated_ids.shape
-        total_new_tokens = batch_size * 50
+        total_new_tokens = len(result.generated_ids) * 50
 
     print(f"Generation stats (50 tokens, {runs} runs):")
     print(f"Mean time: {mean_time*1000:.2f} ± {std_time*1000:.2f} ms")

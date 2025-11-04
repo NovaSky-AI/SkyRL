@@ -155,7 +155,13 @@ class DistributedTorchRayActor:
                 ("maskp", POINTER(c_ulong)),
             ]
 
-        LIBNUMA = CDLL(find_library("numa"))
+        try:
+            LIBNUMA = CDLL(find_library("numa"))
+        except Exception as e:
+            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
+            _SET_AFFINITY = True
+            return
+
         LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
@@ -260,12 +266,13 @@ class Worker(DistributedTorchRayActor):
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
 
-            num_inference_engines, tensor_parallel_size, data_parallel_size = (
+            num_inference_engines, tensor_parallel_size, pipeline_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
                 self.cfg.generator.inference_engine_tensor_parallel_size,
+                self.cfg.generator.inference_engine_pipeline_parallel_size,
                 self.cfg.generator.inference_engine_data_parallel_size,
             )
-            world_size = num_inference_engines * tensor_parallel_size * data_parallel_size + 1
+            world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
             backend = self.cfg.generator.weight_sync_backend
 

@@ -162,7 +162,7 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     assert torch.allclose(data["advantages"], mock_advantages)
     assert torch.allclose(data["returns"], mock_returns)
     assert isinstance(metrics, dict)
-    assert "avg_rewards" in metrics
+    assert "avg_final_rewards" in metrics
     assert "avg_response_length" in metrics
     assert "avg_advantages_abs" in metrics
     assert metrics["avg_advantages"] == approx(

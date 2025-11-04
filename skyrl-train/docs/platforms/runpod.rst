@@ -1,5 +1,8 @@
-Installation and Quick Start on Runpod
-==========================================
+RunPod
+======
+
+`RunPod <https://www.runpod.io>`_ is an end-to-end AI cloud that simplifies building and deploying models. You can easily launch a GPU pod in seconds and run training jobs or inference workloads.
+
 
 Use the following steps to run SkyRL-Train on Runpod. You can customize them to your needs.
 These instructions were tested end-to-end on a single A40 GPU on Runpod, training on the
