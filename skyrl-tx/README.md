@@ -18,7 +18,7 @@ stands for "cross-platform".
 
 ## Getting Started
 See the following SkyRL tx blog posts for more info and examples:
-- [initial blog post](https://novasky-ai.notion.site/skyrl-tx) with the piglatin training example
+- [Initial blog post](https://novasky-ai.notion.site/skyrl-tx) with the piglatin training example
 - [v0.0.2 release](https://novasky-ai.notion.site/skyrl-tx-v002) with a `Qwen/Qwen3-4B` training example
 - [v0.0.3 release](https://novasky-ai.notion.site/skyrl-tx-003) with a `Qwen/Qwen3-Coder-30B-A3B` training and a sampling example
 - [v0.1.0 release](https://novasky-ai.notion.site/skyrl-tx-v010) with an end-to-end RL example
