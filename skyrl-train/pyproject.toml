@@ -77,7 +77,6 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'vllm'" }
 ]
 
-
 [project.optional-dependencies]
 deepspeed = [
     "deepspeed==0.17.6"
@@ -150,6 +149,7 @@ miniswe = [
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
 
 [tool.setuptools]
 include-package-data = true

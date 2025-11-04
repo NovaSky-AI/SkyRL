@@ -1,4 +1,4 @@
-save_path=$HOME/data/searchR1
+save_path=/workspaces/nearaiml/data/searchR1
 
 index_file=$save_path/e5_Flat.index
 corpus_file=$save_path/wiki-18.jsonl

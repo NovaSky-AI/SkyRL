@@ -9,7 +9,7 @@ set -x
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="/workspaces/nearaiml/data/searchR1"
 
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -44,23 +44,24 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.batched=false \
   generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
-  generator.max_turns=4 \
+  generator.max_turns=6 \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   generator.sampling_params.stop='["</search>", "</answer>"]' \
-  environment.env_class="search" \
-  environment.skyrl_gym.max_env_workers=16 \
-  environment.skyrl_gym.search.log_requests=false \
-  environment.skyrl_gym.search.search_url="http://127.0.0.1:8000/retrieve" \
-  environment.skyrl_gym.search.topk=3 \
+  environment.env_class="browse" \
+  environment.skyrl_gym.max_env_workers=8 \
+  +environment.skyrl_gym.browse.log_requests=false \
+  +environment.skyrl_gym.browse.search_url="http://127.0.0.1:8000/retrieve" \
+  +environment.skyrl_gym.browse.topk=3 \
+  +environment.skyrl_gym.browse.timeout=30 \
   trainer.logger="wandb" \
-  trainer.project_name="skyrl-search" \
-  trainer.run_name="skyrl-search_4turns_maxgeneratelen_500" \
+  trainer.project_name="skyrl-browse" \
+  trainer.run_name="skyrl-browse_8turns_maxgeneratelen_500" \
   trainer.ckpt_interval=20 \
   trainer.hf_save_interval=100 \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/skyrl-search_4turns_maxgeneratelen_500" \
+  trainer.ckpt_path="$HOME/skyrl-browse_8turns_maxgeneratelen_500" \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
