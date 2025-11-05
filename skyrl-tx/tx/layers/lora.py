@@ -62,12 +62,10 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        batch_size = adapter_indices.shape[0]
-        seq_len = x.shape[1]
+        (batch_size, seq_len, *rest) = x.shape
+        assert adapter_indices.shape[0] == batch_size
 
-        # Normalize input to 2D: (B*S, features)
-        # For embeddings (2D input), keep indices; for linear (3D input), flatten features
-        x_flat = x.reshape(-1, 1 if x.ndim == 2 else x.shape[2])
+        x_flat = x.reshape(-1, rest[0] if rest else 1)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Sort tokens to prepare for ragged_dot
@@ -76,13 +74,13 @@ class LoRAMixin:
         )
 
         # Compute intermediate: for embeddings use gather, for linear use matmul
-        if x.ndim == 2:
-            # Embedding path: gather from lora_A using indices
+        if rest:
+            # Linear path: x @ A @ B
+            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
+        else:
+            # Embedding path: A[x] @ B
             x_indices = x_sorted.squeeze(-1).astype(jnp.int32)
             intermediate = self.lora_A.value[adapter_indices_sorted, x_indices, :]
-        else:
-            # Linear path: matmul with lora_A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
 
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
