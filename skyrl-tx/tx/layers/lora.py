@@ -73,13 +73,13 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
+        # Apply LoRA using ragged_dot: x @ A @ B
         if isinstance(self, nnx.Linear):
-            # Linear path: x @ A @ B
+            # Linear path: x @ A
             intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         else:
-            # Embedding path: A[x] @ B
+            # Embedding path: A[x]
             intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
-
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
         # Unsort, reshape, scale
