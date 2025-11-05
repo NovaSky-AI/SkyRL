@@ -64,9 +64,7 @@ class LoRAMixin:
 
         (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
-        assert (isinstance(self, nnx.Embed) and len(dims) == 0) or (
-            isinstance(self, nnx.Linear) and tuple(dims) == self.lora_A.value.shape[1:-1]
-        )
+        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A.value.shape[1:-1]
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(-1, *dims)
@@ -78,12 +76,12 @@ class LoRAMixin:
         )
 
         # Apply LoRA using ragged_dot: x @ A @ B
-        if isinstance(self, nnx.Linear):
-            # Linear path: x @ A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
-        else:
+        if isinstance(self, nnx.Embed):
             # Embedding path: A[x]
             intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
+        else:
+            # Linear path: x @ A
+            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
         # Unsort, reshape, scale
