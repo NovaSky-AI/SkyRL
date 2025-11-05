@@ -63,6 +63,10 @@ class LoRAMixin:
             return base_output
 
         (batch_size, seq_len, *rest) = x.shape
+        assert len(self.lora_A.shape) == 3
+        assert (isinstance(self, nnx.Embed) and len(rest) == 0) or (
+            isinstance(self, nnx.Linear) and self.lora_A.value.shape[1:-1] == tuple(rest)
+        )
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(-1, *rest)
