@@ -65,7 +65,7 @@ class LoRAMixin:
         (batch_size, seq_len, *rest) = x.shape
         assert adapter_indices.shape[0] == batch_size
 
-        x_flat = x.reshape(-1, rest[0] if rest else 1)
+        x_flat = x.reshape(-1, *rest)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Sort tokens to prepare for ragged_dot
@@ -79,7 +79,7 @@ class LoRAMixin:
             intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         else:
             # Embedding path: A[x] @ B
-            x_indices = x_sorted.squeeze(-1).astype(jnp.int32)
+            x_indices = x_sorted.astype(jnp.int32)
             intermediate = self.lora_A.value[adapter_indices_sorted, x_indices, :]
 
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
