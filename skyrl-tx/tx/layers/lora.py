@@ -62,14 +62,14 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        (batch_size, seq_len, *rest) = x.shape
+        (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
-        assert (isinstance(self, nnx.Embed) and len(rest) == 0) or (
-            isinstance(self, nnx.Linear) and self.lora_A.value.shape[1:-1] == tuple(rest)
+        assert (isinstance(self, nnx.Embed) and len(dims) == 0) or (
+            isinstance(self, nnx.Linear) and tuple(dims) == self.lora_A.value.shape[1:-1]
         )
         assert adapter_indices.shape[0] == batch_size
 
-        x_flat = x.reshape(-1, *rest)
+        x_flat = x.reshape(-1, *dims)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Sort tokens to prepare for ragged_dot
