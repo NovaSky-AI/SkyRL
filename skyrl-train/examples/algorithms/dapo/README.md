@@ -2,7 +2,7 @@
 
 ## Reproduction Runs
 | Recipe  | Model  |  AIME24 Pass@32 | AIME24 Avg Score | Hardware  | Training Steps | WandB |
-|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 |  DAPO (w/o Dynamic Sampling) | Qwen/Qwen-2.5-7B-Math  |  0.633 |  -0.304 | 8xH100 | 320 | [Link](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q) |
 |  DAPO (w/o Dynamic Sampling) | Qwen/Qwen3-1.7B |  0.4 |  -0.702 | 8xH100 | 225 | [Link](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q) |
 |  DAPO (w/o Dynamic Sampling) | Qwen/Qwen3-4B  |  0.6 |  -0.51 | 8xH100 | 90 | [Link](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q) |
