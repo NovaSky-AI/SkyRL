@@ -73,16 +73,16 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
-        # Compute intermediate: for embeddings use gather, for linear use matmul
-        if rest:
+        if isinstance(self, nnx.Linear):
             # Linear path: x @ A @ B
             intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         else:
             # Embedding path: A[x] @ B
-            x_indices = x_sorted.astype(jnp.int32)
-            intermediate = self.lora_A.value[adapter_indices_sorted, x_indices, :]
+            intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
 
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
+
+        # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
         lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
         return base_output + lora_output.reshape(base_output.shape)
