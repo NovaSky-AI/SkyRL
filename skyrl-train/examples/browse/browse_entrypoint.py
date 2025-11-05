@@ -24,13 +24,14 @@ from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 import multiprocessing as mp
 from skyrl_gym.envs import register
+
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
 # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
 # A common culprit is Pytorch dataloaders which use `fork` by default.
 mp.set_start_method("spawn", force=True)
 
-config_dir = str(Path(__file__).parent.parent / "config")
+config_dir = str(Path(__file__).parent.parent.parent / "skyrl_train" / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
@@ -263,9 +264,9 @@ class BasePPOExp:
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
-        print('self.cfg.environment.env_class',self.cfg.environment.env_class)
+        print("self.cfg.environment.env_class", self.cfg.environment.env_class)
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
-        print('GOT TO GENERATOR')
+        print("GOT TO GENERATOR")
 
         trainer = self.get_trainer(
             cfg=self.cfg,

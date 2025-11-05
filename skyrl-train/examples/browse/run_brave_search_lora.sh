@@ -7,6 +7,8 @@ set -x
 # bash examples/search/run_search.sh
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
+export HYDRA_FULL_ERROR=1
+
 DATA_DIR="/workspaces/nearaiml/data/searchR1"
 
 uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.browse.browse_entrypoint \
