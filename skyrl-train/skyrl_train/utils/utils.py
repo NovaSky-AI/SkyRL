@@ -287,11 +287,6 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-
-        if not cfg.generator.batched:
-            raise ValueError(
-                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
-            )
         assert cfg.trainer.algorithm.policy_loss_type in [
             "regular",
             "dual_clip",
@@ -309,6 +304,7 @@ def validate_cfg(cfg: DictConfig):
         num_rollout_gpus = (
             cfg.generator.num_inference_engines
             * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
             * cfg.generator.inference_engine_data_parallel_size
         )
         assert (
@@ -382,10 +378,6 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.logprobs > 0:
             raise ValueError(
                 f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
-            )
-        if not cfg.generator.batched:
-            raise NotImplementedError(
-                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
             )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
@@ -587,12 +579,15 @@ def configure_ray_worker_logging() -> None:
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
     through Loguru so third-party logs match formatting
     """
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+
     # 1) Loguru formatting (force colors)
     logger.remove()
     logger.level("INFO", color="<bold><green>")
     logger.add(
         sys.stderr,
         colorize=True,  # keep ANSI even without a TTY
+        level=level_name,  # ensure Loguru filters below this level
         enqueue=True,
         backtrace=False,
         diagnose=False,
@@ -612,7 +607,6 @@ def configure_ray_worker_logging() -> None:
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
     logging.root.handlers = [_InterceptHandler()]
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.root.setLevel(level)
 

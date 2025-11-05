@@ -198,6 +198,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
     def tp_size(self):
         return self._tp_size
 
+    def pp_size(self):
+        # Pipeline parallelism not supported for SGLang
+        return 1
+
     def dp_size(self):
         # TODO(tgriggs): EP/DP not yet supported for SGLang
         return 1
@@ -349,6 +353,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """Reset prefix cache in SGLang engine."""
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         return await self.engine.tokenizer_manager.flush_cache()
+
+    async def abort_generation(self) -> None:
+        raise NotImplementedError("Abort generation is not supported for SGLang inference engines.")
 
 
 SGLangRayActor = ray.remote(SGLangInferenceEngine)

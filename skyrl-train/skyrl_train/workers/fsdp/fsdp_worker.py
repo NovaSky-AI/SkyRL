@@ -1,6 +1,7 @@
 import asyncio
 from typing import Dict, List
 
+from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray
 import torch
 import torch.distributed
@@ -46,7 +47,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -77,6 +77,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
+                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                rope_theta=get_rope_theta_config(self.cfg.trainer),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -305,7 +307,6 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -380,7 +381,6 @@ class FSDPRefWorkerBase(RefWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
         )
         strategy.setup_distributed()
         self.strategy = strategy
@@ -397,6 +397,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 bf16=self.cfg.trainer.bf16,
                 sequence_parallel_size=self.cfg.trainer.ref.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
+                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                rope_theta=get_rope_theta_config(self.cfg.trainer),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

@@ -22,6 +22,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         engine_backend: str,
         tokenizer: PreTrainedTokenizerBase,
         tp_size: Optional[int] = None,
+        pp_size: Optional[int] = None,
         dp_size: Optional[int] = None,
         ep_size: Optional[int] = None,
     ):
@@ -30,12 +31,16 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         self.model_name = model_name
         self.engine_backend = engine_backend
         self._tp_size = tp_size
+        self._pp_size = pp_size
         self._dp_size = dp_size
         self._ep_size = ep_size
         self.tokenizer = tokenizer
 
     def tp_size(self) -> int:
         return self._tp_size
+
+    def pp_size(self) -> int:
+        return self._pp_size
 
     def dp_size(self) -> int:
         return self._dp_size
@@ -241,6 +246,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             resp = await session.post(f"{self.url}/destroy_weights_update_group")
             return await resp.json()
 
+    async def abort_generation(self) -> None:
+        raise NotImplementedError("Abort generation is not supported for remote inference engines.")
+
 
 def create_remote_inference_engines(
     urls: List[str],
@@ -248,6 +256,7 @@ def create_remote_inference_engines(
     engine_backend: str,
     tokenizer: PreTrainedTokenizerBase,
     tensor_parallel_size: Optional[int] = None,
+    pipeline_parallel_size: Optional[int] = None,
     data_parallel_size: Optional[int] = None,
     expert_parallel_size: Optional[int] = None,
 ):
@@ -258,6 +267,7 @@ def create_remote_inference_engines(
             tokenizer=tokenizer,
             engine_backend=engine_backend,
             tp_size=tensor_parallel_size,
+            pp_size=pipeline_parallel_size,
             dp_size=data_parallel_size,
             ep_size=expert_parallel_size,
         )

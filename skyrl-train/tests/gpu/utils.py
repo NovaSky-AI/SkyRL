@@ -104,31 +104,6 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
     )
 
 
-def get_test_deepspeed_strategy(cfg):
-    from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
-
-    return DeepspeedStrategy(
-        seed=42,
-        micro_train_batch_size_per_gpu=1,
-        train_batch_size=128,
-        zero_stage=3,
-        bf16=True,
-        cfg=cfg,
-    )
-
-
-def get_test_fsdp_strategy(cfg):
-    from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-
-    return FSDPStrategy(
-        seed=42,
-        max_norm=1.0,
-        micro_train_batch_size_per_gpu=1,
-        train_batch_size=128,
-        cfg=cfg,
-    )
-
-
 def import_worker(strategy: str, worker_type: str):
     if strategy == "deepspeed":
         module_path = "skyrl_train.workers.deepspeed.deepspeed_worker"
@@ -383,6 +358,7 @@ def init_inference_engines(
     num_inference_engines=1,
     sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
     enable_lora=False,
+    max_num_seqs=1024,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -410,7 +386,7 @@ def init_inference_engines(
         inference_engine_enable_sleep=sleep,
         async_engine=async_engine,
         max_num_batched_tokens=8192,
-        max_num_seqs=1024,
+        max_num_seqs=max_num_seqs,
         tokenizer=tokenizer,
         backend=backend,
         sleep_level=sleep_level,

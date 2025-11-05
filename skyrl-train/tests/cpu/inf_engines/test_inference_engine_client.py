@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 import asyncio
 import pytest
 import random
+from copy import deepcopy
 
 # -------------------------------------------
 # tests for postprocess_completion_request
@@ -409,3 +410,287 @@ def test_route_prompts_to_engines_validation_errors():
     route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=[1, 2])
     route_prompts_to_engines(num_prompts=2, num_inference_engines=1, session_ids=None)
     route_prompts_to_engines(num_prompts=1, num_inference_engines=1, session_ids=None)
+
+
+# -------------------------------------------
+# tests for InferenceEngineClient.chat_completion retry logic
+# --------------------------------------------
+
+
+def _make_min_cfg():
+    return OmegaConf.create(
+        {
+            "trainer": {
+                "policy": {"model": {"path": "dummy-model"}},
+            },
+            "generator": {
+                "backend": "vllm",
+                "enable_http_endpoint": False,
+                "http_endpoint_host": "127.0.0.1",
+                "http_endpoint_port": 0,
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_retry_accumulates_and_sends_continuations():
+    """
+    First response aborts with tokens; second aborts with 0 tokens (ignored);
+    third finishes. Assert:
+    - Continuation requests append accumulated assistant content with correct role
+    - continue_final_message/add_generation_prompt flags are set
+    - remaining max_tokens decreases by accumulated completion tokens
+    - Final response accumulates content, logprobs, token_ids and recomputes usage correctly
+    - Each retry request is what we expect the engine to receive
+    """
+
+    class MockEngine:
+        def __init__(self):
+            self.calls = []  # capture full request payloads {"json":..., "headers":...}
+            # Pre-programmed partial responses
+            self.responses = [
+                # 1) abort with 1 token "A"
+                {
+                    "id": "cmpl-1",
+                    "object": "chat.completion",
+                    "model": "dummy-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "A"},
+                            "finish_reason": "abort",
+                            "logprobs": {
+                                "content": [
+                                    {
+                                        "token": "token_id:11",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:11", "logprob": -0.1, "bytes": [116]}],
+                                    },
+                                ]
+                            },
+                            "token_ids": [11],
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+                },
+                # 2) abort with 0 tokens (should be ignored for accumulation)
+                {
+                    "id": "cmpl-2",
+                    "object": "chat.completion",
+                    "model": "dummy-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": ""},
+                            "finish_reason": "abort",
+                            "logprobs": {"content": []},
+                            "token_ids": [],
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5},
+                },
+                # 3) finish with 1 token "B"
+                {
+                    "id": "cmpl-3",
+                    "object": "chat.completion",
+                    "model": "dummy-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "B"},
+                            "finish_reason": "stop",
+                            "logprobs": {
+                                "content": [
+                                    {
+                                        "token": "token_id:12",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:12", "logprob": -0.1, "bytes": [116]}],
+                                    },
+                                ]
+                            },
+                            "token_ids": [12],
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+                },
+            ]
+
+        async def chat_completion(self, request_payload):
+            self.calls.append(deepcopy(request_payload))
+            idx = len(self.calls) - 1
+            assert idx < len(self.responses), f"Unexpected extra call {idx}"
+            return deepcopy(self.responses[idx])
+
+    engines = [MockEngine()]
+    cfg = _make_min_cfg()
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
+
+    original = {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 8,
+            # ask for structures that the client can accumulate
+            "logprobs": True,
+            "top_logprobs": 1,
+            "return_tokens_as_token_ids": True,
+        },
+        "headers": {"Content-Type": "application/json"},
+    }
+
+    out = await client.chat_completion(original)
+
+    # Verify engine received 3 calls
+    assert len(engines[0].calls) == 3
+    first_call = engines[0].calls[0]
+    second_call = engines[0].calls[1]
+    third_call = engines[0].calls[2]
+
+    # First call should be identical to original json (no continuation flags)
+    assert first_call["json"] == original["json"]
+    assert first_call["headers"] == original["headers"]
+    assert first_call["json"].get("continue_final_message") is None
+    assert first_call["json"].get("add_generation_prompt") is None
+    assert first_call["json"]["messages"] == [{"role": "user", "content": "Hi"}]
+    assert first_call["json"]["max_tokens"] == 8
+
+    # Second/third calls should be continuation requests
+    for call in (second_call, third_call):
+        assert call["headers"] == original["headers"]
+        # Flags
+        assert call["json"].get("continue_final_message") is True
+        assert call["json"].get("add_generation_prompt") is False
+        # Accumulated assistant message appended with content "A"
+        assert call["json"]["messages"][-1] == {"role": "assistant", "content": "A"}
+        # Original user message preserved
+        assert call["json"]["messages"][0] == {"role": "user", "content": "Hi"}
+        # Remaining max_tokens reduced by 1 (we already generated one token)
+        assert call["json"].get("max_tokens") == 7
+        # Other params preserved
+        assert call["json"]["model"] == "dummy-model"
+        assert call["json"]["logprobs"] is True
+        assert call["json"]["top_logprobs"] == 1
+        assert call["json"]["return_tokens_as_token_ids"] is True
+
+    # Final response should accumulate content/logprobs/token_ids and usage
+    choice = out["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "AB"
+    assert len(choice["logprobs"]["content"]) == 2
+    assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
+    assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
+    assert choice["token_ids"] == [11, 12]
+
+    # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
+    assert out["usage"]["prompt_tokens"] == 5
+    assert out["usage"]["completion_tokens"] == 2
+    assert out["usage"]["total_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_retry_resends_original_when_no_tokens_generated_yet():
+    """
+    First response aborts with 0 tokens, so the next request should resend the original
+    payload unchanged. Second response finishes; client returns it directly.
+    """
+
+    class MockEngine:
+        def __init__(self):
+            self.calls = []  # capture full payloads
+            self.responses = [
+                # 1) abort with 0 tokens
+                {
+                    "id": "cmpl-a1",
+                    "object": "chat.completion",
+                    "model": "dummy-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": ""},
+                            "finish_reason": "abort",
+                            "logprobs": {"content": []},
+                            "token_ids": [],
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+                },
+                # 2) finish with tokens "XYZ" (3 tokens)
+                {
+                    "id": "cmpl-a2",
+                    "object": "chat.completion",
+                    "model": "dummy-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "XYZ"},
+                            "finish_reason": "stop",
+                            "logprobs": {
+                                "content": [
+                                    {
+                                        "token": "token_id:21",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:21", "logprob": -0.1, "bytes": [116]}],
+                                    },
+                                    {
+                                        "token": "token_id:22",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:22", "logprob": -0.1, "bytes": [116]}],
+                                    },
+                                    {
+                                        "token": "token_id:23",
+                                        "logprob": -0.1,
+                                        "bytes": [84, 111],
+                                        "top_logprobs": [{"token": "token_id:23", "logprob": -0.1, "bytes": [116]}],
+                                    },
+                                ]
+                            },
+                            "token_ids": [21, 22, 23],
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+                },
+            ]
+
+        async def chat_completion(self, request_payload):
+            self.calls.append(deepcopy(request_payload))
+            return deepcopy(self.responses[len(self.calls) - 1])
+
+    engines = [MockEngine()]
+    cfg = _make_min_cfg()
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
+
+    original = {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 16,
+            "logprobs": True,
+            "top_logprobs": 1,
+        },
+        "headers": {"Content-Type": "application/json"},
+    }
+
+    out = await client.chat_completion(original)
+
+    # Two calls should have been made
+    assert len(engines[0].calls) == 2
+    first_call = engines[0].calls[0]
+    second_call = engines[0].calls[1]
+
+    # After 0-token abort, the next call should resend the original unchanged
+    assert first_call["json"] == original["json"]
+    assert second_call["json"] == original["json"]
+    assert first_call["headers"] == original["headers"]
+    assert second_call["headers"] == original["headers"]
+    # No continuation flags should appear
+    assert first_call["json"].get("continue_final_message") is None
+    assert second_call["json"].get("continue_final_message") is None
+
+    # Since finish_reason != abort on the second call and base_response was None,
+    # client should return the second response directly (no accumulation)
+    assert out == engines[0].responses[1]
