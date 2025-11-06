@@ -162,6 +162,46 @@ class GeneratorMixin:
     @jax.jit
     def _prefill_fn(model, input_ids, attention_mask, positions, adapter_indices):
         return model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+    
+    def generate_padded(
+        self,
+        input_ids: jax.Array,
+        attention_mask: jax.Array,
+        *,
+        sampling_params: list[types.SamplingParams],
+        adapter_indices: jax.Array | None = None,
+    ) -> GenerateOutput:
+        batch_size, prompt_length = input_ids.shape
+        rounded_batch_size = tx.utils.models.round_up_seq_len(batch_size)
+
+        # Pad batch dimension
+        batch_pad_size = rounded_batch_size - batch_size
+        input_ids_padded = jnp.pad(input_ids, ((0, batch_pad_size), (0, 0)))
+        attention_mask_padded = jnp.pad(attention_mask, ((0, batch_pad_size), (0, 0)))
+
+        # Pad sampling_params by duplicating the last element
+        sampling_params_padded = sampling_params + [sampling_params[-1]] * batch_pad_size
+
+        # Pad adapter_indices if provided
+        if adapter_indices is not None:
+            adapter_indices_padded = jnp.pad(adapter_indices, ((0, batch_pad_size),))
+        else:
+            adapter_indices_padded = None
+
+        # Generate with padded batch
+        output = self.generate(
+            input_ids_padded,
+            attention_mask_padded,
+            sampling_params=sampling_params_padded,
+            adapter_indices=adapter_indices_padded,
+        )
+
+        # Extract only the original batch results
+        return GenerateOutput(
+            generated_ids=output.generated_ids[:batch_size],
+            stop_reasons=output.stop_reasons[:batch_size],
+            logprobs=output.logprobs[:batch_size],
+        )
 
     def generate(
         self,
