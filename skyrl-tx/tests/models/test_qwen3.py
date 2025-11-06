@@ -169,7 +169,7 @@ def test_qwen3_moe_layer_lora():
 def test_qwen3_lora():
     """Test multi-LoRA implementation by comparing with HuggingFace PEFT model using two different adapters."""
     base_model_name = "Qwen/Qwen3-0.6B"
-    lora_adapters = ["pcmoritz/qwen3-0.6b-lora-random", "pcmoritz/qwen3-0.6b-lora-random"]
+    lora_adapters = ["pcmoritz/qwen3-0.6b-lora-random", "pcmoritz/qwen3-0.6b-lora-random2"]
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     # Use two different inputs to test with different adapters
@@ -189,7 +189,16 @@ def test_qwen3_lora():
         lora_configs = []
         for adapter_name in lora_adapters:
             lora_config = LoraConfig.from_pretrained(adapter_name)
-            lora_config.target_modules = ["embed_tokens", "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            lora_config.target_modules = [
+                "embed_tokens",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ]
             lora_configs.append(lora_config)
 
             hf_model = get_peft_model(
