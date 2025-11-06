@@ -106,11 +106,6 @@ class TinkerEngine:
 
         model_class = get_model_class(self.model_config)
 
-        # Initialize tokenizer for converting string stop sequences to token IDs
-        from transformers import AutoTokenizer
-
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.base_model)
-
         # Download model weights from HuggingFace
         checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
@@ -602,31 +597,7 @@ class TinkerEngine:
             for _ in range(request_data.num_samples):
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
-
-                # Convert string stop sequences to token IDs
-                sampling_params = request_data.sampling_params
-                if sampling_params.stop is not None and len(sampling_params.stop) > 0:
-                    # Check if stop sequences are strings or integers
-                    if isinstance(sampling_params.stop[0], str):
-                        # Tokenize string stop sequences
-                        stop_token_ids = []
-                        for stop_str in sampling_params.stop:
-                            # Encode the stop string and get the token IDs
-                            # add_special_tokens=False to avoid adding BOS/EOS tokens
-                            tokens = self.tokenizer.encode(stop_str, add_special_tokens=False)
-                            # For multi-token stop sequences, we'll use the first token as a simple approximation
-                            # A more sophisticated implementation would need to handle multi-token sequences
-                            if tokens:
-                                stop_token_ids.append(tokens[0])
-                        # Create new SamplingParams with tokenized stop sequences
-                        sampling_params = types.SamplingParams(
-                            temperature=sampling_params.temperature,
-                            max_tokens=sampling_params.max_tokens,
-                            seed=sampling_params.seed,
-                            stop=stop_token_ids if stop_token_ids else None,
-                        )
-
-                all_sampling_params.append(sampling_params)
+                all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
             request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
