@@ -446,7 +446,7 @@ class RayPPOTrainer:
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
-                refs.extend(ref_model.async_init_model(cfg.trainer.policy.model.path))
+                refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
@@ -464,7 +464,7 @@ class RayPPOTrainer:
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.policy.model.path))
+                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
                 ref_model.offload_to_cpu()
             ray.get(
                 policy_model.async_init_model(
@@ -570,7 +570,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
         return generator_output
 

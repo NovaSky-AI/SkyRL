@@ -169,7 +169,7 @@ def test_qwen3_moe_layer_lora():
 def test_qwen3_lora():
     """Test multi-LoRA implementation by comparing with HuggingFace PEFT model using two different adapters."""
     base_model_name = "Qwen/Qwen3-0.6B"
-    lora_adapters = ["charent/self_cognition_Alice", "charent/self_cognition_Bob"]
+    lora_adapters = ["pcmoritz/qwen3-0.6b-lora-random", "pcmoritz/qwen3-0.6b-lora-random2"]
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     # Use two different inputs to test with different adapters
@@ -189,7 +189,16 @@ def test_qwen3_lora():
         lora_configs = []
         for adapter_name in lora_adapters:
             lora_config = LoraConfig.from_pretrained(adapter_name)
-            lora_config.target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            lora_config.target_modules = [
+                "embed_tokens",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ]
             lora_configs.append(lora_config)
 
             hf_model = get_peft_model(
@@ -223,8 +232,20 @@ def test_qwen3_lora():
                 hf_outputs_list.append(hf_output)
 
         # Load LoRA adapter weights from all adapters
-        for i, layer in enumerate(model.model.layers):
-            for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
+        for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
+            # Load embed_tokens LoRA weights
+            hf_embed_tokens = hf_model.base_model.model.model.embed_tokens
+            load_lora_weights(
+                model.model.embed_tokens,
+                adapter_idx=adapter_idx,
+                lora_A_weights=hf_embed_tokens.lora_embedding_A["default"].detach().numpy().T,
+                lora_B_weights=hf_embed_tokens.lora_embedding_B["default"].detach().numpy().T,
+                scaling=lora_config.lora_alpha / lora_config.r,
+                rank=lora_config.r,
+            )
+
+            # Load layer LoRA weights
+            for i, layer in enumerate(model.model.layers):
                 hf_layer = hf_model.base_model.model.model.layers[i]
                 for module, projections in [
                     ("mlp", ["gate_proj", "up_proj", "down_proj"]),

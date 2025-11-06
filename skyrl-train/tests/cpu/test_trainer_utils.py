@@ -674,15 +674,15 @@ def test_validate_generator_output_valid_case():
     )
 
     # Should not raise any exceptions
-    validate_generator_output(input_batch, generator_output)
+    validate_generator_output(len(input_batch["prompts"]), generator_output)
 
     # per trajectory rewards should work too
     generator_output["rewards"] = [0.5, 0.6, 0.7]
-    validate_generator_output(input_batch, generator_output)
+    validate_generator_output(len(input_batch["prompts"]), generator_output)
 
     # valid rollout logprobs
     generator_output["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
-    validate_generator_output(input_batch, generator_output)
+    validate_generator_output(len(input_batch["prompts"]), generator_output)
 
 
 def test_validate_generator_output_empty_response_ids():
@@ -699,7 +699,7 @@ def test_validate_generator_output_empty_response_ids():
     )
 
     with pytest.raises(RuntimeError, match="No outputs generated"):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
 
 def test_validate_generator_output_mismatched_prompts_responses():
@@ -721,7 +721,7 @@ def test_validate_generator_output_mismatched_prompts_responses():
     )
 
     with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
 
 def test_validate_generator_output_all_loss_masked():
@@ -741,7 +741,7 @@ def test_validate_generator_output_all_loss_masked():
 
     # Capture log output to verify warning is issued
     with patch("skyrl_train.utils.trainer_utils.logger") as mock_logger:
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
         mock_logger.warning.assert_called_once_with(
             "All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
         )
@@ -763,7 +763,7 @@ def test_validate_generator_output_mismatched_list_lengths():
     )
 
     with pytest.raises(AssertionError, match="Generator output rewards length must be equal to response_ids length"):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
 
 def test_validate_generator_output_element_length_mismatch():
@@ -786,12 +786,12 @@ def test_validate_generator_output_element_length_mismatch():
     )
 
     with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
     generator_output["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
     generator_output["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
     with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
     generator_output = GeneratorOutput(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
@@ -803,7 +803,7 @@ def test_validate_generator_output_element_length_mismatch():
     )
 
     with pytest.raises(AssertionError, match="Response ids and rollout logprobs must have the same length"):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
 
 def test_build_dataloader_seeding(dummy_config):
@@ -881,10 +881,10 @@ def test_validate_generator_output_invalid_rewards():
         AssertionError,
         match=re.escape("rewards must be `List[float]` or `List[List[float]]`"),
     ):
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
     generator_output["rewards"] = [0.5, 0.7]
-    validate_generator_output(input_batch, generator_output)
+    validate_generator_output(len(input_batch["prompts"]), generator_output)
 
     generator_output["rewards"] = [[0.5, 0.6], [0.7, 0.8]]
-    validate_generator_output(input_batch, generator_output)
+    validate_generator_output(len(input_batch["prompts"]), generator_output)

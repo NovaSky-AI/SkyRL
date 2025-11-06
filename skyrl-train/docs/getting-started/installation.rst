@@ -14,6 +14,10 @@ If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-clus
 
     ⚠️ We do not recommend using Ray 2.47.0 and 2.47.1 for SkyRL due to known issues in the uv+ray integration.
 
+.. tip::
+
+    Interested in easily running SkyRL on a managed platform? See our :doc:`platforms <../platforms/overview>` documentation for more information.
+
 Docker (recommended)
 ---------------------
 

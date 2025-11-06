@@ -44,7 +44,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             self.cfg.trainer.policy.deepspeed_config,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             zero_stage=self.zero_stage,
             bf16=self.cfg.trainer.bf16,
         )
@@ -266,7 +265,6 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
             self.cfg.trainer.critic.deepspeed_config,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             zero_stage=self.zero_stage,
             bf16=self.cfg.trainer.bf16,
         )
@@ -338,7 +336,6 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             self.cfg.trainer.ref.deepspeed_config,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             zero_stage=self.zero_stage,
             bf16=self.cfg.trainer.bf16,
         )
