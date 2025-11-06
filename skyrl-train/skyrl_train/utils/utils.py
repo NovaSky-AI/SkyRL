@@ -789,6 +789,6 @@ def get_tcp_url(host: str, port: int) -> str:
         if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
             return f"tcp://[{host}]:{port}"
     except ValueError:
-         # not a literal IP, probably a hostname
+        # not a literal IP, probably a hostname
         pass
     return f"tcp://{host}:{port}"
