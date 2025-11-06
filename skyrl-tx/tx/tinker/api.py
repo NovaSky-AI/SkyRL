@@ -259,7 +259,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | None = None
+    stop: Sequence[int] | Sequence[str] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
