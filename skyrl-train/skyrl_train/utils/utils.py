@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import time
 import sys
@@ -772,3 +773,22 @@ def update_model_config(module_config, override_config_kwargs):
             update_model_config(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
+
+
+def get_tcp_url(host: str, port: int) -> str:
+    """
+    Formats the TCP URL for the given host and port,
+    handling IPv6 addresses correctly.
+    Args:
+        host (str): The hostname or IP address.
+        port (int): The port number.
+    Returns:
+        str: The formatted TCP URL.
+    """
+    try:
+        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+            return f"tcp://[{host}]:{port}"
+    except ValueError:
+        # not a literal IP, probably a hostname
+        pass
+    return f"tcp://{host}:{port}"
