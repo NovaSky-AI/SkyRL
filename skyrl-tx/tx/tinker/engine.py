@@ -615,6 +615,10 @@ class TinkerEngine:
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
                 batch_prompts = all_prompts[batch_start:batch_end]
+                current_batch_size = len(batch_prompts)
+
+                # Pad batch_prompts to max_batch_size
+                batch_prompts = batch_prompts + [[]] * (max_batch_size - current_batch_size)
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
@@ -627,8 +631,13 @@ class TinkerEngine:
                     [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in batch_prompts],
                     dtype=jnp.int32,
                 )
-                adapter_indices = jnp.array(all_adapter_indices[batch_start:batch_end], dtype=jnp.int32)
-                sampling_params = all_sampling_params[batch_start:batch_end]
+                adapter_indices = jnp.array(
+                    all_adapter_indices[batch_start:batch_end] + [0] * (max_batch_size - current_batch_size),
+                    dtype=jnp.int32,
+                )
+                sampling_params = all_sampling_params[batch_start:batch_end] + [all_sampling_params[batch_start]] * (
+                    max_batch_size - current_batch_size
+                )
 
                 result = model.generate(
                     input_ids,
@@ -636,9 +645,14 @@ class TinkerEngine:
                     sampling_params=sampling_params,
                     adapter_indices=adapter_indices,
                 )
+                # Only take the actual results, not the padded ones
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
-                    for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
+                    for stop_reason, tokens, logprobs in zip(
+                        result.stop_reasons[:current_batch_size],
+                        result.generated_ids[:current_batch_size],
+                        result.logprobs[:current_batch_size],
+                    )
                 )
 
         for request_id, _, start_idx, end_idx in request_batch_slices:
