@@ -332,7 +332,6 @@ class Worker(DistributedTorchRayActor):
             micro_batch_iterator = BalancedBatchIterator(
                 data=data,
                 max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
-                sync_num_batches=True,
             )
             micro_batches = list(micro_batch_iterator)
         else:
