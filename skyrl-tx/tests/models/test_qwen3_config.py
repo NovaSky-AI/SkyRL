@@ -31,7 +31,7 @@ def test_config_requires_all_params():
 
     # Should fail without all required parameters
     try:
-        config = Qwen3Config(hf_config)
+        Qwen3Config(hf_config)
         assert False, "Should have raised TypeError for missing parameters"
     except TypeError as e:
         assert "max_lora_adapters" in str(e) or "missing" in str(e)
