@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from tx.models import Qwen3ForCausalLM
+from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.tinker import types
 from tx.utils.models import load_safetensors
 
@@ -36,7 +36,7 @@ def test_qwen3_generate():
     # Generate with our implementation
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        config = AutoConfig.from_pretrained(model_name)
+        config = Qwen3Config.from_pretrained_with_lora(model_name)
 
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
         with jax.set_mesh(mesh):
@@ -92,7 +92,7 @@ def test_qwen3_generate_speed():
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-    config = AutoConfig.from_pretrained(model_name)
+    config = Qwen3Config.from_pretrained_with_lora(model_name)
 
     inputs = [
         "Why do humans need sleep and what happens when we dream",

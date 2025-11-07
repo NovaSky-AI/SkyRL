@@ -12,7 +12,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock
 
 from tx.layers.lora import LoRAMixin
-from tx.models import Qwen3ForCausalLM
+from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.models.qwen3 import Qwen3MoeSparseMoeBlock
 from tx.utils.models import load_safetensors
 
@@ -41,7 +41,7 @@ def test_qwen3(tp: int):
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
-        config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
+        config = Qwen3Config.from_pretrained_with_lora("Qwen/Qwen3-0.6B")
         mesh = jax.make_mesh((1, tp), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
@@ -66,7 +66,11 @@ def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: H
 def test_qwen3_moe_layer():
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-    config = AutoConfig.from_pretrained(model_name)
+    config = Qwen3Config.from_pretrained_with_lora(
+        model_name,
+        max_lora_adapters=0,
+        max_lora_rank=0
+    )
 
     hf_moe_layer = hf_model.model.layers[0].mlp
     x = torch.randn(4, 2, config.hidden_size)
@@ -109,11 +113,11 @@ def test_qwen3_moe_layer_lora():
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-    config = AutoConfig.from_pretrained(model_name)
-
-    # Enable LoRA
-    config.max_lora_adapters = 3
-    config.max_lora_rank = 4
+    config = Qwen3Config.from_pretrained_with_lora(
+        model_name,
+        max_lora_adapters=3,
+        max_lora_rank=4
+    )
 
     hf_moe_layer = hf_model.model.layers[0].mlp
     x = torch.randn(3, 4, config.hidden_size)
@@ -182,8 +186,6 @@ def test_qwen3_lora():
         )
         base_hf_model.save_pretrained(base_tmp, safe_serialization=True)
 
-        config = AutoConfig.from_pretrained(base_model_name)
-
         # Create HF models with different adapters
         hf_lora_models = []
         lora_configs = []
@@ -202,8 +204,11 @@ def test_qwen3_lora():
             hf_model.load_adapter(adapter_name, adapter_name="default")
             hf_lora_models.append(hf_model)
 
-        config.max_lora_adapters = len(lora_adapters)
-        config.max_lora_rank = max(cfg.r for cfg in lora_configs)
+        config = Qwen3Config.from_pretrained_with_lora(
+            base_model_name,
+            max_lora_adapters=len(lora_adapters),
+            max_lora_rank=max(cfg.r for cfg in lora_configs)
+        )
 
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
         with jax.set_mesh(mesh):

@@ -18,9 +18,9 @@ from flax.training import checkpoints
 
 
 import optax
-from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
+from tx.models.configs import Qwen3Config
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
@@ -96,13 +96,13 @@ class TinkerEngine:
         # Metrics recorded in the engine
         self.metrics = types.EngineMetrics()
 
-        # Initialize the shared base model
-        self.model_config = AutoConfig.from_pretrained(self.config.base_model)
-
-        # Configure LoRA settings
-        self.model_config.max_lora_adapters = self.config.max_lora_adapters
-        self.model_config.max_lora_rank = self.config.max_lora_rank
-        self.model_config.shard_attention_heads = self.config.shard_attention_heads
+        # Initialize the shared base model with LoRA config
+        self.model_config = Qwen3Config.from_pretrained_with_lora(
+            self.config.base_model,
+            max_lora_adapters=self.config.max_lora_adapters,
+            max_lora_rank=self.config.max_lora_rank,
+            shard_attention_heads=self.config.shard_attention_heads,
+        )
 
         model_class = get_model_class(self.model_config)
 

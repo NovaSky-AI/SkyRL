@@ -9,10 +9,10 @@ from cloudpathlib import CloudPath, implementation_registry
 from cloudpathlib.local import local_s3_implementation
 from flax import nnx
 from peft import PeftModel
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 from tx.layers.lora import update_adapter_config
-from tx.models import Qwen3ForCausalLM
+from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils import models
 from tx.utils.storage import download_and_unpack
@@ -20,15 +20,17 @@ from tx.utils.storage import download_and_unpack
 
 def create_test_model(rank: int, alpha: int, adapter_index: int):
     """Create a small Qwen3 model for testing with LoRA enabled."""
-    config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config.from_pretrained_with_lora(
+        "Qwen/Qwen3-0.6B",
+        max_lora_adapters=5,
+        max_lora_rank=32
+    )
     # Make it smaller for testing
     config.num_hidden_layers = 1
     config.hidden_size = 64
     config.intermediate_size = 128
     config.num_attention_heads = 2
     config.num_key_value_heads = 2
-    config.max_lora_adapters = 5
-    config.max_lora_rank = 32
 
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
@@ -68,7 +70,18 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 
     # Load with peft and verify
     with download_and_unpack(output_path) as extracted_dir:
-        base_model = AutoModelForCausalLM.from_config(config)
+        # Convert to base Qwen3Config for HuggingFace compatibility
+        from transformers import Qwen3Config
+        config_dict = config.to_dict()
+        # Remove LoRA-specific fields that Qwen3Config doesn't know about
+        config_dict.pop("max_lora_adapters", None)
+        config_dict.pop("max_lora_rank", None)
+        config_dict.pop("shard_attention_heads", None)
+        # Fix layer_types to match num_hidden_layers
+        if config_dict.get("num_hidden_layers") != len(config_dict.get("layer_types", [])):
+            config_dict["layer_types"] = None
+        base_config = Qwen3Config(**config_dict)
+        base_model = AutoModelForCausalLM.from_config(base_config)
         peft_model = PeftModel.from_pretrained(base_model, extracted_dir)
 
         assert peft_model.peft_config["default"].r == rank
