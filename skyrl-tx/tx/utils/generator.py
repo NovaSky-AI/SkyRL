@@ -127,27 +127,47 @@ def next_token_and_logprobs(
 def decode_fn(state: DecodeState, _) -> tuple[DecodeState, None]:
     """Decode one token step for use with jax.lax.scan."""
     rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-        state.logits, state.temperatures, state.rngs, state.all_logprobs,
-        state.kv_cache.cache_position, state.stop_tokens, state.stop_pos,
+        state.logits,
+        state.temperatures,
+        state.rngs,
+        state.all_logprobs,
+        state.kv_cache.cache_position,
+        state.stop_tokens,
+        state.stop_pos,
     )
 
     generated_ids = lax.dynamic_update_slice(state.generated_ids, next_token, (0, state.kv_cache.cache_position))
     attention_mask = lax.dynamic_update_slice(
-        state.attention_mask, jnp.ones((state.generated_ids.shape[0], 1), dtype=state.attention_mask.dtype),
+        state.attention_mask,
+        jnp.ones((state.generated_ids.shape[0], 1), dtype=state.attention_mask.dtype),
         (0, state.kv_cache.cache_position),
     )
 
     outputs = state.model(
-        next_token, attention_mask=attention_mask, positions=state.last_positions + 1,
-        kv_cache=state.kv_cache, adapter_indices=state.adapter_indices,
+        next_token,
+        attention_mask=attention_mask,
+        positions=state.last_positions + 1,
+        kv_cache=state.kv_cache,
+        adapter_indices=state.adapter_indices,
     )
 
-    return DecodeState(
-        model=state.model, temperatures=state.temperatures, stop_tokens=state.stop_tokens,
-        adapter_indices=state.adapter_indices, kv_cache=outputs.kv_cache, rngs=rngs,
-        generated_ids=generated_ids, attention_mask=attention_mask, last_positions=state.last_positions + 1,
-        logits=outputs.logits[:, -1, :], all_logprobs=all_logprobs, stop_pos=stop_pos,
-    ), None
+    return (
+        DecodeState(
+            model=state.model,
+            temperatures=state.temperatures,
+            stop_tokens=state.stop_tokens,
+            adapter_indices=state.adapter_indices,
+            kv_cache=outputs.kv_cache,
+            rngs=rngs,
+            generated_ids=generated_ids,
+            attention_mask=attention_mask,
+            last_positions=state.last_positions + 1,
+            logits=outputs.logits[:, -1, :],
+            all_logprobs=all_logprobs,
+            stop_pos=stop_pos,
+        ),
+        None,
+    )
 
 
 class GeneratorMixin:
