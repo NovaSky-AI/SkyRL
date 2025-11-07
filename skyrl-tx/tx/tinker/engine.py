@@ -629,7 +629,7 @@ class TinkerEngine:
                 adapter_indices = jnp.array(all_adapter_indices[batch_start:batch_end], dtype=jnp.int32)
                 sampling_params = all_sampling_params[batch_start:batch_end]
 
-                result = model.generate(
+                result = model.generate_padded(
                     input_ids,
                     attention_mask,
                     sampling_params=sampling_params,
