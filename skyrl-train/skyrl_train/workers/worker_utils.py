@@ -73,6 +73,39 @@ class BatchIterator:
         return exp
 
 
+def greedy_binpacking(token_counts: List[int], max_tokens_per_microbatch: int) -> List[List[int]]:
+    """Greedily chunk a list of token counts into microbatches so that each microbatch's total token count
+    does not exceed `max_tokens_per_microbatch`.
+
+    Args:
+        token_counts: List of token counts for each sample.
+        max_tokens_per_microbatch: Maximum total tokens allowed per microbatch.
+
+    Returns:
+        A list of microbatches, where each microbatch is a list of indices (ints)
+        referring to entries in `token_counts`.
+    """
+    microbatch_indices: List[List[int]] = []
+    current_microbatch_indices: List[int] = []
+    current_tokens = 0
+
+    for i, tokens in enumerate(token_counts):
+        # Start a new microbatch if adding this sample exceeds the max
+        # TODO: Handle max(token_counts) > max_tokens_per_microbatch
+        if current_tokens + tokens > max_tokens_per_microbatch:
+            microbatch_indices.append(current_microbatch_indices)
+            current_microbatch_indices = []
+            current_tokens = 0
+
+        current_microbatch_indices.append(i)
+        current_tokens += tokens
+
+    if current_microbatch_indices:
+        microbatch_indices.append(current_microbatch_indices)
+
+    return microbatch_indices
+
+
 class BalancedBatchIterator:
     """
     An iterator that chunks batches based on token count rather than sample count.
@@ -86,80 +119,57 @@ class BalancedBatchIterator:
         self,
         data: TrainingInputBatch,
         max_tokens_per_microbatch: int,
-        sync_num_batches: bool = True,
     ):
         """
         Args:
             data: The training input batch to chunk
             max_tokens_per_microbatch: Maximum number of tokens per microbatch
-            sync_num_batches: If True, synchronize the number of batches across DP workers
         """
-        self.data = data
-        self.max_tokens_per_microbatch = max_tokens_per_microbatch
-        self.sync_num_batches = sync_num_batches
+        self._data = data
+        self._max_tokens_per_microbatch = max_tokens_per_microbatch
 
         # Compute token counts per sample using attention_mask
         attention_mask = data["attention_mask"]
         # Count non-padding tokens per sample
-        self.token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
+        self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
 
-        # Create chunks based on token count
-        self._chunks = self._create_token_based_chunks()
+        # Create microbatches based on token count
+        self._microbatches = greedy_binpacking(self._token_counts, self._max_tokens_per_microbatch)
 
-        # Synchronize number of batches across DP workers if needed
-        if self.sync_num_batches and dist.is_initialized():
-            self._sync_num_batches()
+        # Synchronize the number of microbatches across all DP workers
+        if dist.is_initialized():
+            max_num_microbatches = self._sync_num_microbatches()
+        else:
+            max_num_microbatches = len(self._microbatches)
 
-        self._iter = iter(self._chunks)
-        self.num_micro_batches = len(self._chunks)
+        self._num_padding_microbatches = max_num_microbatches - len(self._microbatches)
 
-    def _create_token_based_chunks(self) -> List[TrainingInputBatch]:
-        """Create chunks by packing samples up to max_tokens_per_microbatch."""
-        chunks = []
-        current_chunk_indices = []
-        current_token_count = 0
-
-        for idx in range(self.data.batch_size):
-            sample_token_count = self.token_counts[idx]
-
-            # If adding this sample would exceed the limit, start a new chunk
-            if current_chunk_indices and current_token_count + sample_token_count > self.max_tokens_per_microbatch:
-                # Create chunk from accumulated indices
-                chunk = self._create_chunk_from_indices(current_chunk_indices)
-                chunks.append(chunk)
-                current_chunk_indices = [idx]
-                current_token_count = sample_token_count
-            else:
-                # Add sample to current chunk
-                current_chunk_indices.append(idx)
-                current_token_count += sample_token_count
-
-        # Add final chunk if there are remaining samples
-        if current_chunk_indices:
-            chunk = self._create_chunk_from_indices(current_chunk_indices)
-            chunks.append(chunk)
-
-        return chunks
-
-    def _create_chunk_from_indices(self, indices: List[int]) -> TrainingInputBatch:
+    def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
         """Create a TrainingInputBatch from a list of sample indices."""
-        chunk_data = {}
-        for key, value in self.data.items():
-            if value is not None:
-                if isinstance(value, torch.Tensor):
-                    chunk_data[key] = value[indices]
-                else:
-                    raise ValueError(f"Unsupported type {type(value)} for key {key}")
-            else:
-                chunk_data[key] = value
+        # TODO: Support list indexing for TrainingInputBatch
+        return TrainingInputBatch.cat([self._data[i] for i in indices])
 
-        chunk = self.data.__class__(chunk_data)
-        chunk.metadata = self.data.metadata
-        return chunk
+    def _create_padding_microbatch(self) -> TrainingInputBatch:
+        """Create a padding microbatch."""
+        data = TrainingInputBatch(
+            {
+                "sequences": torch.ones((1, 1), dtype=int, device="cpu"),
+                "attention_mask": torch.zeros((1, 1), dtype=int, device="cpu"),
+                "action_log_probs": torch.zeros((1, 1), device="cpu"),
+                "base_action_log_probs": torch.zeros((1, 1), device="cpu"),
+                "values": torch.zeros((1, 1), device="cpu"),
+                "returns": torch.zeros((1, 1), device="cpu"),
+                "advantages": torch.zeros((1, 1), device="cpu"),
+                "loss_mask": torch.zeros((1, 1), dtype=int, device="cpu"),
+                "response_mask": torch.zeros((1, 1), dtype=int, device="cpu"),
+            }
+        )
+        data.metadata = self._data.metadata
+        return data
 
-    def _sync_num_batches(self):
+    def _sync_num_microbatches(self) -> int:
         """Ensure all DP workers have the same number of micro batches."""
-        num_batches = len(self._chunks)
+        local_num_microbatches = len(self._microbatches)
 
         # Get the maximum number of batches across all DP workers
         # Handle case where CUDA might not be available
@@ -167,50 +177,15 @@ class BalancedBatchIterator:
             device = torch.cuda.current_device()
         else:
             device = torch.device("cpu")
-        num_batches_tensor = torch.tensor(num_batches, dtype=torch.long, device=device)
-        dist.all_reduce(num_batches_tensor, op=dist.ReduceOp.MAX)
-        max_num_batches = num_batches_tensor.item()
-
-        # If this worker has fewer batches, pad with empty batches
-        if num_batches < max_num_batches:
-            num_padding_batches = max_num_batches - num_batches
-            padding_batches = self._create_padding_batches(num_padding_batches)
-            self._chunks.extend(padding_batches)
-
-    def _create_padding_batches(self, num_batches: int) -> List[TrainingInputBatch]:
-        """Create empty padding batches to match the number of batches on other workers."""
-        padding_batches = []
-        for _ in range(num_batches):
-            # Create an empty batch (batch_size=0) with the same structure
-            chunk_data = {}
-            for key, value in self.data.items():
-                if value is not None:
-                    if isinstance(value, torch.Tensor):
-                        # Create empty tensor with same shape except batch dimension
-                        shape = list(value.shape)
-                        shape[0] = 0  # batch_size = 0
-                        chunk_data[key] = torch.empty(shape, dtype=value.dtype, device=value.device)
-                    else:
-                        raise ValueError(f"Unsupported type {type(value)} for key {key}")
-                else:
-                    chunk_data[key] = value
-
-            chunk = self.data.__class__(chunk_data)
-            chunk.metadata = self.data.metadata
-            padding_batches.append(chunk)
-
-        return padding_batches
+        num_microbatches_tensor = torch.tensor(local_num_microbatches, dtype=torch.long, device=device)
+        dist.all_reduce(num_microbatches_tensor, op=dist.ReduceOp.MAX)
+        return num_microbatches_tensor.item()
 
     def __len__(self):
-        return self.num_micro_batches
+        return len(self._microbatches) + self._num_padding_microbatches
 
     def __iter__(self):
-        return self
-
-    def __next__(self) -> TrainingInputBatch:
-        try:
-            batch = next(self._iter)
-            return batch
-        except StopIteration:
-            self._iter = iter(self._chunks)
-            raise StopIteration
+        for microbatch in self._microbatches:
+            yield self._create_microbatch_from_indices(microbatch)
+        for _ in range(self._num_padding_microbatches):
+            yield self._create_padding_microbatch()
