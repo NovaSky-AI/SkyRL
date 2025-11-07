@@ -50,9 +50,10 @@ class DecodeState:
     temperatures: jax.Array
     stop_tokens: jax.Array
     adapter_indices: jax.Array
+
     # Updated each iteration:
     kv_cache: KVCache
-    rngs: jax.Array
+    rngs: jax.Array  # of shape [B, key_dim]
     generated_ids: jax.Array
     attention_mask: jax.Array
     last_positions: jax.Array
@@ -98,37 +99,27 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
-def next_token_and_logprobs(
-    logits: jax.Array,
-    temperatures: jax.Array,
-    rngs: jax.Array,  # Shape [B, key_dim]
-    all_logprobs: jax.Array,
-    cache_position: int,
-    stop_tokens: jax.Array,
-    stop_pos: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sample next token and compute logprobs, updating the logprobs array."""
-    split_keys = jax.vmap(jax.random.split)(rngs)
+    split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(logits, temperatures=temperatures, sample_keys=sample_keys)
+    next_token = batched_sample_token(s.logits, temperatures=s.temperatures, sample_keys=sample_keys)
 
-    logprobs = jax.nn.log_softmax(logits, axis=-1)
+    logprobs = jax.nn.log_softmax(s.logits, axis=-1)
     sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
-    all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, cache_position))
+    all_logprobs = lax.dynamic_update_slice(s.all_logprobs, sampled_logprobs, (0, s.kv_cache.cache_position))
 
     # Check if sampled token is in stop tokens and update stop position
-    is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
+    is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
     # Only update stop_pos if not already stopped (stop_pos == -1)
-    stop_pos = jnp.where((stop_pos == -1) & is_stop, cache_position, stop_pos)
+    stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
 
     return next_rngs, next_token, all_logprobs, stop_pos
 
 
 def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     """Decode one token step for use with jax.lax.scan."""
-    rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-        s.logits, s.temperatures, s.rngs, s.all_logprobs, s.kv_cache.cache_position, s.stop_tokens, s.stop_pos
-    )
+    rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(s)
 
     generated_ids = lax.dynamic_update_slice(s.generated_ids, next_token, (0, s.kv_cache.cache_position))
     attention_mask = lax.dynamic_update_slice(
@@ -237,15 +228,7 @@ class GeneratorMixin:
         final_state, _ = jax.lax.scan(decode_fn, initial_state, xs=None, length=max_new_tokens - 1)
 
         # Sample final token
-        rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-            final_state.logits,
-            final_state.temperatures,
-            final_state.rngs,
-            final_state.all_logprobs,
-            final_state.kv_cache.cache_position,
-            final_state.stop_tokens,
-            final_state.stop_pos,
-        )
+        rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(final_state)
         generated_ids = lax.dynamic_update_slice(
             final_state.generated_ids, next_token, (0, final_state.kv_cache.cache_position)
         )
