@@ -57,12 +57,15 @@ def main(deepspeed_model_path: Path, out_dir: Path = None) -> Path:
 
     # === 1. Merge ZeRO shards into single FP32 checkpoint ===
     zero2fp32_script = POLICY_DIR / "zero_to_fp32.py"
+    if not zero2fp32_script.exists():
+        raise FileNotFoundError(f"Conversion script not found at {zero2fp32_script}")
 
     if not MERGED_FP32.exists():
         print(f"[1/5] Merging ZeRO shards from {POLICY_DIR} ...")
-        cmd = f"python {zero2fp32_script} {POLICY_DIR} {MERGED_FP32}"
-        result = subprocess.run(cmd)
+        cmd = ["python", str(zero2fp32_script), str(POLICY_DIR), str(MERGED_FP32)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            print(f"Error running zero_to_fp32.py:\n{result.stderr}")
             raise RuntimeError("zero_to_fp32.py merge failed.")
     else:
         print(f"[1/5] Merged model already exists → {MERGED_FP32}")
@@ -85,7 +88,7 @@ def main(deepspeed_model_path: Path, out_dir: Path = None) -> Path:
 
     # === 3. Load HF config and initialize model ===
     print("[3/5] Initializing Hugging Face model ...")
-    model = AutoModelForCausalLM.from_pretrained(HF_BASE, torch_dtype=torch.float16)
+    model = AutoModelForCausalLM.from_pretrained(HF_BASE, torch_dtype=torch.bfloat16)
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"    → Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
 
@@ -158,7 +161,7 @@ if __name__ == "__main__":
     )
     args = ap.parse_args()
     ckpt_dir = Path(args.ckpt_dir).resolve()
-    output_dir = Path(args.out_dir).resolve()
+    output_dir = Path(args.out_dir).resolve() if args.out_dir is not None else None
     out_path = main(ckpt_dir, output_dir)
     if args.validate_load:
         validate_load(out_path)
