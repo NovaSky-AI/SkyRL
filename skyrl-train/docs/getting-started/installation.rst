@@ -41,6 +41,14 @@ We provide a docker image with the base dependencies ``novaskyai/skyrl-train-ray
 
 That is it! You should now be able to run our :doc:`quick start example <quickstart>`.
 
+.. warning::
+
+    The older docker image ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8`` is compatible with SkyRL only till commit https://github.com/NovaSky-AI/SkyRL/commit/0ee61a70a71344fbf15e0c6a603cdcc8b4d0cad5
+    We recommend upgrading to the new docker image ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8``.
+    
+    If you wish to use SkyRL with ray != 2.51.1, see the guide :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`
+
+
 Install without Dockerfile
 --------------------------
 
@@ -162,10 +170,10 @@ Running on an existing Ray cluster
 
 For running on an existing Ray cluster, you need to first make sure that the python version used is 3.12. 
 
-Ray >= 2.51.1
+Ray >= 2.48.0
 ~~~~~~~~~~~~~
 
-We recommend using Ray version 2.51.1 and above for the best experience. In this case, you can simply use the ``uv run`` command to get training started.
+We recommend using Ray version 2.48.0 and above for the best experience. In this case, you can simply use the ``uv run`` command to get training started.
 
 .. code-block:: bash
 
