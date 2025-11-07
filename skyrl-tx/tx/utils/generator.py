@@ -158,7 +158,7 @@ class GeneratorMixin:
 
     @staticmethod
     @jax.jit
-    def _prefill_fn(model, input_ids, attention_mask, positions, adapter_indices):
+    def _prefill_fn(model, input_ids: jax.Array, attention_mask: jax.Array, positions: jax.Array, adapter_indices: jax.Array | None):
         return model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
     def generate(
