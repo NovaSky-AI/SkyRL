@@ -780,7 +780,11 @@ class PolicyWorkerBase(Worker):
         else:
             kl_loss = torch.tensor(0.0)
 
-        loss = policy_loss + (kl_loss * self.cfg.trainer.algorithm.kl_loss_coef) + (-self.cfg.trainer.algorithm.entropy_loss_coef * entropy)
+        loss = (
+            policy_loss
+            + (kl_loss * self.cfg.trainer.algorithm.kl_loss_coef)
+            + (-self.cfg.trainer.algorithm.entropy_loss_coef * entropy)
+        )
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
@@ -875,7 +879,6 @@ class PolicyWorkerBase(Worker):
 
 
 class CriticWorkerBase(Worker):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None

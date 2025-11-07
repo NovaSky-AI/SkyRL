@@ -50,22 +50,24 @@ class MegatronModelWrapper:
     def eval(self):
         [module.eval() for module in self.actor_module]
 
-    def compute_entropy_from_logits(self, logits: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-         """
-         Compute per-token entropy from logits.
+    def compute_entropy_from_logits(
+        self, logits: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Compute per-token entropy from logits.
 
-         Returns per-token entropy with same leading dims as token positions (e.g., [B, S]).
-         """
-         # logits expected shape [B, S, V]
-         log_probs = F.log_softmax(logits, dim=-1)
-         probs = log_probs.exp()
-         token_entropy = -(probs * log_probs).sum(dim=-1)  # shape [B, S]
+        Returns per-token entropy with same leading dims as token positions (e.g., [B, S]).
+        """
+        # logits expected shape [B, S, V]
+        log_probs = F.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
+        token_entropy = -(probs * log_probs).sum(dim=-1)  # shape [B, S]
 
-         # Zero out masked positions
-         if attention_mask is not None:
-             # ensure float mask
-             token_entropy = token_entropy * attention_mask.to(dtype=token_entropy.dtype)
-         return token_entropy
+        # Zero out masked positions
+        if attention_mask is not None:
+            # ensure float mask
+            token_entropy = token_entropy * attention_mask.to(dtype=token_entropy.dtype)
+        return token_entropy
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
