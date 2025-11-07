@@ -135,24 +135,21 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
         kv_cache=s.kv_cache,
         adapter_indices=s.adapter_indices,
     )
-
-    return (
-        DecodeState(
-            model=s.model,
-            temperatures=s.temperatures,
-            stop_tokens=s.stop_tokens,
-            adapter_indices=s.adapter_indices,
-            kv_cache=outputs.kv_cache,
-            rngs=rngs,
-            generated_ids=generated_ids,
-            attention_mask=attention_mask,
-            last_positions=s.last_positions + 1,
-            logits=outputs.logits[:, -1, :],
-            all_logprobs=all_logprobs,
-            stop_pos=stop_pos,
-        ),
-        None,
+    next_state = DecodeState(
+        model=s.model,
+        temperatures=s.temperatures,
+        stop_tokens=s.stop_tokens,
+        adapter_indices=s.adapter_indices,
+        kv_cache=outputs.kv_cache,
+        rngs=rngs,
+        generated_ids=generated_ids,
+        attention_mask=attention_mask,
+        last_positions=s.last_positions + 1,
+        logits=outputs.logits[:, -1, :],
+        all_logprobs=all_logprobs,
+        stop_pos=stop_pos,
     )
+    return next_state, None
 
 
 class GeneratorMixin:
