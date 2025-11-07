@@ -8,7 +8,7 @@ Requirements
 
 We use `uv <https://docs.astral.sh/uv/>`_ to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
 
-If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`, we suggest using Ray 2.48.0 and Python 3.12. However, we support Ray versions >= 2.44.0. 
+If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`, we suggest using Ray 2.51.1 and Python 3.12. However, we support Ray versions >= 2.44.0. 
 
 .. warning::
 
@@ -21,7 +21,7 @@ If you're :ref:`running on an existing Ray cluster <running-on-existing-ray-clus
 Docker (recommended)
 ---------------------
 
-We provide a docker image with the base dependencies ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8`` for quick setup. 
+We provide a docker image with the base dependencies ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8`` for quick setup. 
 
 1. Make sure to have `NVIDIA Container Runtime <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>`_ installed.
 
@@ -29,7 +29,7 @@ We provide a docker image with the base dependencies ``novaskyai/skyrl-train-ray
 
 .. code-block:: bash
 
-    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8 /bin/bash
+    docker run -it  --runtime=nvidia --gpus all --shm-size=8g --name skyrl-train novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8 /bin/bash
 
 3. Inside the launched container, setup the latest version of the project:
 
@@ -48,7 +48,7 @@ For installation without the Dockerfile, make sure you meet the pre-requisities:
 
 - CUDA 12.8
 - `uv <https://docs.astral.sh/uv/>`_
-- `ray <https://docs.ray.io/en/latest/>`_ 2.48.0
+- `ray <https://docs.ray.io/en/latest/>`_ 2.51.1
 
 
 .. _system-dependencies:
@@ -162,16 +162,16 @@ Running on an existing Ray cluster
 
 For running on an existing Ray cluster, you need to first make sure that the python version used is 3.12. 
 
-Ray >= 2.48.0
+Ray >= 2.51.1
 ~~~~~~~~~~~~~
 
-We recommend using Ray version 2.48.0 and above for the best experience. In this case, you can simply use the ``uv run`` command to get training started.
+We recommend using Ray version 2.51.1 and above for the best experience. In this case, you can simply use the ``uv run`` command to get training started.
 
 .. code-block:: bash
 
     uv run ... --with ray==2.xx.yy -m skyrl_train.entrypoints.main_base ...
 
-Ray < 2.48.0
+Ray < 2.51.1
 ~~~~~~~~~~~~
 SkyRL-Train is compatible with any Ray version 2.44.0 and above (except 2.47.0 and 2.47.1 -- which we do not recommend due to an issue in the uv + Ray integration). 
 Since we use a uv lockfile to pin dependencies, the best way to run SkyRL-Train on a custom Ray version (say 2.46.0) would be to override the version at runtime with the ``--with`` flag. 
@@ -181,7 +181,7 @@ For example, to run with Ray 2.46.0, you can do:
 
     uv run .... --with ray==2.46.0 -m skyrl_train.entrypoints.main_base ...
 
-For ray versions >= 2.44.0 but < 2.48.0, you additionally need to install vllm in the base pip environment, and then re-install ray to your desired version to ensure that the uv + Ray integration works as expected. 
+For ray versions >= 2.44.0 but < 2.51.1, you additionally need to install vllm in the base pip environment, and then re-install ray to your desired version to ensure that the uv + Ray integration works as expected. 
 We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <https://github.com/NovaSky-AI/SkyRL/blob/main/docker/Dockerfile.ray244>`_, or you can install them manually:
 
 .. code-block:: bash
