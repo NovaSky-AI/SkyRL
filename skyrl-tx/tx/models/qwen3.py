@@ -45,7 +45,8 @@ class Qwen3Attention(nnx.Module):
         tp_shard = "tp" if shard_attention_heads else None
 
         self.head_dim = config.head_dim if hasattr(config, "head_dim") and config.head_dim else config.hidden_size // self.num_heads
-        max_lora_adapters = config.max_lora_adapters
+        # Conditionally enable LoRA on attention layers based on config.train_attn
+        max_lora_adapters = config.max_lora_adapters if config.train_attn else 0
         max_lora_rank = config.max_lora_rank
 
         self.q_proj = LoRALinear(
@@ -141,7 +142,8 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        max_lora_adapters = config.max_lora_adapters
+        # Conditionally enable LoRA on MLP layers based on config.train_mlp
+        max_lora_adapters = config.max_lora_adapters if config.train_mlp else 0
         max_lora_rank = config.max_lora_rank
         self.gate_proj = LoRALinear(
             config.hidden_size,
@@ -187,7 +189,8 @@ class Qwen3Experts(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        max_lora_adapters = config.max_lora_adapters
+        # Conditionally enable LoRA on MoE expert layers based on config.train_mlp
+        max_lora_adapters = config.max_lora_adapters if config.train_mlp else 0
         max_lora_rank = config.max_lora_rank
 
         self.gate_proj = LoRAExpert(
@@ -397,13 +400,17 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
         if not self.config.tie_word_embeddings:
-            self.lm_head = nnx.Linear(
+            # Conditionally enable LoRA on unembedding/LM head layer based on config.train_unembed
+            max_lora_adapters = config.max_lora_adapters if config.train_unembed else 0
+            self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
                 kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+                max_lora_adapters=max_lora_adapters,
+                max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
 
@@ -437,7 +444,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         if self.config.tie_word_embeddings:
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(
             logits=logits,

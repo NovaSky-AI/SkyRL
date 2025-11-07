@@ -23,6 +23,9 @@ class EngineConfig(BaseModel):
     )
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
+    train_attn: bool = Field(default=True, description="Whether to train attention layers with LoRA")
+    train_mlp: bool = Field(default=True, description="Whether to train MLP layers with LoRA")
+    train_unembed: bool = Field(default=False, description="Whether to train unembedding/LM head layer with LoRA")
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
     train_micro_batch_size: int = Field(
         default=0,

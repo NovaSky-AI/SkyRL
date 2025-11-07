@@ -50,3 +50,36 @@ def test_config_preserves_moe_config():
     # Check that MoE-specific attributes are preserved
     assert hasattr(config, "num_experts")
     assert config.num_experts > 0
+
+
+def test_config_train_flags_defaults():
+    """Test that train_attn, train_mlp, train_unembed have correct defaults."""
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config(
+        hf_config,
+        max_lora_adapters=32,
+        max_lora_rank=32,
+        shard_attention_heads=True
+    )
+    # Check defaults
+    assert config.train_attn is True
+    assert config.train_mlp is True
+    assert config.train_unembed is False
+
+
+def test_config_train_flags_custom():
+    """Test setting custom values for train flags."""
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config(
+        hf_config,
+        max_lora_adapters=32,
+        max_lora_rank=32,
+        shard_attention_heads=True,
+        train_attn=False,
+        train_mlp=False,
+        train_unembed=True
+    )
+    # Check custom values were set
+    assert config.train_attn is False
+    assert config.train_mlp is False
+    assert config.train_unembed is True

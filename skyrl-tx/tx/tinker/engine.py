@@ -104,6 +104,9 @@ class TinkerEngine:
             max_lora_adapters=self.config.max_lora_adapters,
             max_lora_rank=self.config.max_lora_rank,
             shard_attention_heads=self.config.shard_attention_heads,
+            train_attn=self.config.train_attn,
+            train_mlp=self.config.train_mlp,
+            train_unembed=self.config.train_unembed,
         )
 
         model_class = get_model_class(self.model_config)
