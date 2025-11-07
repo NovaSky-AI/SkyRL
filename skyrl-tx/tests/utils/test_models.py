@@ -9,7 +9,7 @@ from cloudpathlib import CloudPath, implementation_registry
 from cloudpathlib.local import local_s3_implementation
 from flax import nnx
 from peft import PeftModel
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 from tx.layers.lora import update_adapter_config
 from tx.models import Qwen3Config, Qwen3ForCausalLM
@@ -20,11 +20,8 @@ from tx.utils.storage import download_and_unpack
 
 def create_test_model(rank: int, alpha: int, adapter_index: int):
     """Create a small Qwen3 model for testing with LoRA enabled."""
-    config = Qwen3Config.from_pretrained_with_lora(
-        "Qwen/Qwen3-0.6B",
-        max_lora_adapters=5,
-        max_lora_rank=32
-    )
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config(hf_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
     # Make it smaller for testing
     config.num_hidden_layers = 1
     config.hidden_size = 64

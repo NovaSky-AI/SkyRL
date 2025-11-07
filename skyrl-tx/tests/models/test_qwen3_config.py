@@ -1,29 +1,14 @@
 """Tests for Qwen3Config."""
 
 from tx.models.configs import Qwen3Config
-from transformers import Qwen3Config as HfQwen3Config
+from transformers import PretrainedConfig
 
 
-def test_config_inherits_from_qwen3config():
-    """Test that Qwen3Config properly inherits from HuggingFace Qwen3Config."""
-    config = Qwen3Config()
-    assert isinstance(config, HfQwen3Config)
-
-
-def test_config_has_lora_defaults():
-    """Test that default LoRA parameters are set correctly."""
-    config = Qwen3Config()
-    assert config.max_lora_adapters == 32
-    assert config.max_lora_rank == 32
-    assert config.shard_attention_heads is True
-
-
-def test_from_pretrained_with_lora():
-    """Test factory method for loading from HuggingFace."""
-    # Note: This test requires network access
-    # Using a small model for faster testing
-    config = Qwen3Config.from_pretrained_with_lora(
-        "Qwen/Qwen3-0.6B",
+def test_config_wraps_pretrained_config():
+    """Test that Qwen3Config wraps a PretrainedConfig and adds LoRA params."""
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config(
+        hf_config,
         max_lora_adapters=8,
         max_lora_rank=16,
         shard_attention_heads=False
@@ -34,7 +19,34 @@ def test_from_pretrained_with_lora():
     assert config.max_lora_rank == 16
     assert config.shard_attention_heads is False
 
-    # Check base config was loaded
+    # Check base config attributes were copied
     assert config.vocab_size > 0
     assert config.hidden_size > 0
     assert config.num_hidden_layers > 0
+
+
+def test_config_requires_all_params():
+    """Test that all LoRA parameters are required (no defaults)."""
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+
+    # Should fail without all required parameters
+    try:
+        config = Qwen3Config(hf_config)
+        assert False, "Should have raised TypeError for missing parameters"
+    except TypeError as e:
+        assert "max_lora_adapters" in str(e) or "missing" in str(e)
+
+
+def test_config_preserves_moe_config():
+    """Test that MoE-specific configs are preserved."""
+    hf_config = PretrainedConfig.from_pretrained("trl-internal-testing/tiny-Qwen3MoeForCausalLM")
+    config = Qwen3Config(
+        hf_config,
+        max_lora_adapters=3,
+        max_lora_rank=4,
+        shard_attention_heads=True
+    )
+
+    # Check that MoE-specific attributes are preserved
+    assert hasattr(config, "num_experts")
+    assert config.num_experts > 0
