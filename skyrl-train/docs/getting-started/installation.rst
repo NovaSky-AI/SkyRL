@@ -43,9 +43,9 @@ That is it! You should now be able to run our :doc:`quick start example <quickst
 
 .. warning::
 
-    The older docker image ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8`` is compatible with SkyRL only till commit https://github.com/NovaSky-AI/SkyRL/commit/0ee61a70a71344fbf15e0c6a603cdcc8b4d0cad5
+    ⚠️ The older docker image ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8`` is compatible with SkyRL only till commit https://github.com/NovaSky-AI/SkyRL/commit/0ee61a70a71344fbf15e0c6a603cdcc8b4d0cad5
     We recommend upgrading to the new docker image ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8``.
-    
+
     If you wish to use SkyRL with ray != 2.51.1, see the guide :ref:`running on an existing Ray cluster <running-on-existing-ray-cluster>`
 
 
