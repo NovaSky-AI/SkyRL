@@ -152,6 +152,7 @@ trainer:
   critic_mini_batch_size: 256
   micro_train_batch_size_per_gpu: 1
   micro_forward_batch_size_per_gpu: 1
+  max_tokens_per_microbatch: -1  # TODO: Maybe split this between forward and train; -1 means no token-based chunking
   update_ref_every_epoch: false
   use_sample_packing: true
   eval_batch_size: 1024

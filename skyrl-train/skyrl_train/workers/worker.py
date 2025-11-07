@@ -32,7 +32,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, BalancedBatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -322,11 +322,22 @@ class Worker(DistributedTorchRayActor):
     ) -> TrainingOutputBatch:
         """Run forward pass on the input batch in inference mode.
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
+        This is a wrapper around `_forward_micro_batch` that runs in micro batches.
+        Uses token-based chunking if `max_tokens_per_microbatch` is configured, otherwise
+        falls back to sample-based chunking with `micro_forward_batch_size_per_gpu`.
         """
-        # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
-        # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        # Check if token-based chunking is enabled
+        if self.cfg.trainer.max_tokens_per_microbatch > 0:
+            # Use token-based chunking
+            micro_batch_iterator = BalancedBatchIterator(
+                data=data,
+                max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
+                sync_num_batches=True,
+            )
+            micro_batches = list(micro_batch_iterator)
+        else:
+            # Fall back to sample-based chunking
+            micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
 
         outputs = []
         for micro_batch in micro_batches:
