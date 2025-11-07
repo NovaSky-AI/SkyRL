@@ -140,6 +140,12 @@ class RayPPOTrainer:
             with Timer("load_checkpoints"):
                 self.global_step = self.load_checkpoints()
 
+        # with Timer("save_hf_model", self.all_timings):
+        #     self.save_models()
+        #     logger.info("Saved final model.")
+
+        # exit()
+
         if self.colocate_all:
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
             asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
@@ -257,15 +263,27 @@ class RayPPOTrainer:
                         with Timer("update_ref_with_policy", self.all_timings):
                             self.update_ref_with_policy()
 
+                    from skyrl_train.utils.utils import print_mem
                     # 7. sync weights to inference engines
                     if self.colocate_all:
                         self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+                        memory = memory[0]
+                        print_mem("memory after offloading optimizer", memory)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
+                    
+                    memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+                    memory = memory[0]
+                    print_mem("memory after waking up weights", memory)
+                    
                     with Timer("sync_weights", self.all_timings):
                         ray.get(self.sync_policy_weights_to_inference_engines())
                     if self.colocate_all:
                         with Timer("offload_policy_model_to_cpu"):
                             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+                        memory = ray.get(self.policy_model.async_run_ray_method("pass_through", "get_cuda_memory"))
+                        memory = memory[0]
+                        print_mem("memory after offloading policy", memory)
                         asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
                 # 8. set logs

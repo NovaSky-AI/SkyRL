@@ -455,6 +455,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine."""
+        print("!!!!!! generate", input_batch)
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
         tasks = []
@@ -556,9 +557,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def _handle_openai_request(self, request_payload: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
         """Handle OpenAI API request."""
         assert endpoint in ["/chat/completions", "/completions"]
-
+        start_time = time.time()
+        logger.info(f"_handle_openai_request start endpoint={endpoint}")
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+        # Avoid logging full bodies; log shape/keys for safety
+        logger.debug(
+            "request payload summary | endpoint=%s body_keys=%s headers_keys=%s",
+            endpoint,
+            list(body.keys()) if isinstance(body, dict) else type(body).__name__,
+            list(headers.keys()) if isinstance(headers, dict) else type(headers).__name__,
+        )
 
         # 1. Build request
         try:
@@ -568,6 +577,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
+            logger.exception("failed to parse OpenAI request | endpoint=%s error=%s", endpoint, str(e))
             return ErrorResponse(
                 # error=ErrorInfo(
                 message=str(e),
@@ -586,10 +596,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             else:
                 generator = await self.openai_serving_completion.create_completion(request, minimal_request)
                 assert isinstance(generator, (CompletionResponse, ErrorResponse))
+            is_error = isinstance(generator, ErrorResponse)
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "_handle_openai_request done endpoint=%s error=%s duration_ms=%d",
+                endpoint,
+                is_error,
+                duration_ms,
+            )
             return generator.model_dump()
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
+            logger.exception("vLLM call failed | endpoint=%s error=%s", endpoint, str(e))
             return ErrorResponse(
                 # error=ErrorInfo(
                 message=str(e),

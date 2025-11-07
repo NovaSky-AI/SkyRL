@@ -21,6 +21,8 @@ from sandboxes.models.environment_type import EnvironmentType
 from sandboxes.models.task.config import EnvironmentConfig
 from sandboxes.models.trial.paths import EnvironmentPaths, TrialPaths
 
+import os
+os.environ["DAYTONA_API_KEY"] = "dtn_19b26f08b6a7f295e341c23e64096af54fb2b008e38415c4221f2264f17ff791"
 
 class DaytonaEnvironment(BaseEnvironment):
     def __init__(

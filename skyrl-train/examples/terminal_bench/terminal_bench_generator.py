@@ -94,7 +94,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         # Sleeping to create an overlap between task execution and inferencing
         import random
-        await asyncio.sleep(random.uniform(1, 60))
+        await asyncio.sleep(random.uniform(1, 10))
 
         # Generate session_id for sticky routing to inference engines
         # All LLM requests in this trial will share the same session_id
@@ -132,7 +132,9 @@ class TerminalBenchGenerator(GeneratorInterface):
         trial = Trial(trial_config)
         # Run the trial
         # for retry in range(3):
+        num_retries = 0
         while True: 
+            print(f"Running blabla {num_retries} times")
             try:
                 results = await trial.run()
                 print(f"Results: {results}")
@@ -154,7 +156,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     print(f"[WARNING] Agent {self.agent_name} did not return a response")
             except Exception as e:
                 print(f"Error running trial: {e}")
-                
+                num_retries += 1
                 continue
 
 

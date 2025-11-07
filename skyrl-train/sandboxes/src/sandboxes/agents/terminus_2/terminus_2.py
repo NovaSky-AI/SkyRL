@@ -393,15 +393,18 @@ so ask everything you need to know."""
     ) -> str:
         logging_path, prompt_path, response_path = logging_paths
 
+        # import pdb; pdb.set_trace()
         if prompt_path is not None:
             prompt_path.write_text(prompt)
 
         try:
             start_time = time.time()
+            print("!!!!!! chat.chat")
             response = await chat.chat(
                 prompt,
                 logging_path=logging_path,
             )
+            print("!!!!!! chat.chat done")
             end_time = time.time()
             request_time_ms = (end_time - start_time) * 1000
             self._api_request_times.append(request_time_ms)
@@ -657,8 +660,9 @@ so ask everything you need to know."""
             logging_paths = self._setup_episode_logging(logging_dir, episode)
 
             num_gpus = torch.cuda.device_count()
+            have_gpus = torch.cuda.is_available()
             if num_gpus < 8:
-                print(f"Number of available GPUs: {num_gpus}")
+                print(f"Number of available GPUs: {num_gpus}. Have GPUs: {have_gpus}")
 
             llm_start = time.perf_counter()
             commands, is_task_complete, feedback = await self._handle_llm_interaction(

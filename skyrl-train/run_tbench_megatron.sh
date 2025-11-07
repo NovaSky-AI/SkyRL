@@ -1,7 +1,7 @@
 set -x
 
 
-sudo chmod -R "$HOME/SkyRL"
+sudo chmod -R 777 "$HOME/SkyRL"
 pip uninstall websockets
 pip uninstall aiofiles
 
@@ -21,8 +21,8 @@ export WANDB_ENTITY="bespoke-labs"
 export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
 export SKYRL_PYTHONPATH_EXPORT=1
 
-DATA_DIR="$HOME/ez_apex_281"
-NUM_NODES=2
+DATA_DIR="/data/ez_apex_281"
+NUM_NODES=3
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
@@ -34,14 +34,14 @@ INFERENCE_BACKEND="vllm"  # currently only vLLM is supported for Megatron in thi
 
 # Megatron parallelism (4 GPUs total => 2x TP, 2x PP, 1x CP)
 MEGATRON_TP=2
-MEGATRON_PP=2
+MEGATRON_PP=3
 MEGATRON_CP=4
 
 MEGATRON_EP=8
 MEGATRON_ETP=1
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=16
+NUM_INFERENCE_ENGINES=24
 INFERENCE_ENGINE_TP=1
 
 
@@ -128,8 +128,8 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with "sandboxes@./s
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=32 \
-  trainer.policy_mini_batch_size=4 \
+  trainer.train_batch_size=48 \
+  trainer.policy_mini_batch_size=6 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=32000 \
@@ -143,7 +143,7 @@ uv run --isolated --extra $INFERENCE_BACKEND --extra mcore --with "sandboxes@./s
   generator.batched=true \
   environment.env_class=terminal_bench \
   generator.n_samples_per_prompt=8 \
-  generator.gpu_memory_utilization=0.8 \
+  generator.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="terminal_bench" \
   trainer.run_name="ez_apex_281_megatron_docker" \
