@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import jax
 from jax import lax
 import jax.numpy as jnp
+from flax import nnx
 
 import tx.utils.models
 from tx.tinker import types
@@ -37,6 +38,27 @@ class KVCache:
             values=[jnp.pad(v, pad_spec) for v in self.values],
             cache_position=self.cache_position,
         )
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class DecodeState:
+    """State of the decode loop."""
+
+    # Config (constant throughout decode loop)
+    model: nnx.Module
+    temperatures: jax.Array
+    stop_tokens: jax.Array
+    adapter_indices: jax.Array
+    # State (updated each iteration)
+    kv_cache: KVCache
+    rngs: jax.Array
+    generated_ids: jax.Array
+    attention_mask: jax.Array
+    last_positions: jax.Array
+    logits: jax.Array
+    all_logprobs: jax.Array
+    stop_pos: jax.Array
 
 
 @dataclass
@@ -102,67 +124,30 @@ def next_token_and_logprobs(
     return next_rngs, next_token, all_logprobs, stop_pos
 
 
-def decode_fn(carry, _):
-    """Decode one token step for use with jax.lax.scan.
-    Args:
-        carry: Tuple of (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits,
-                        all_logprobs, stop_pos, model, temperatures, stop_tokens, adapter_indices)
-        _: Unused scan input
-    Returns:
-        Tuple of (new_carry, None) where new_carry has the same structure as carry
-    """
-    (
-        kv_cache,
-        rngs,
-        generated_ids,
-        attention_mask,
-        last_positions,
-        logits,
-        all_logprobs,
-        stop_pos,
-        model,
-        temperatures,
-        stop_tokens,
-        adapter_indices,
-    ) = carry
-    batch_size = generated_ids.shape[0]
-
+def decode_fn(state: DecodeState, _) -> tuple[DecodeState, None]:
+    """Decode one token step for use with jax.lax.scan."""
     rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-        logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
+        state.logits, state.temperatures, state.rngs, state.all_logprobs,
+        state.kv_cache.cache_position, state.stop_tokens, state.stop_pos,
     )
 
-    # Update generated_ids and attention mask
-    generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
+    generated_ids = lax.dynamic_update_slice(state.generated_ids, next_token, (0, state.kv_cache.cache_position))
     attention_mask = lax.dynamic_update_slice(
-        attention_mask, jnp.ones((batch_size, 1), dtype=attention_mask.dtype), (0, kv_cache.cache_position)
-    )
-    last_positions = last_positions + 1
-
-    # Run decoder step
-    outputs = model(
-        next_token,
-        attention_mask=attention_mask,
-        positions=last_positions,
-        kv_cache=kv_cache,
-        adapter_indices=adapter_indices,
+        state.attention_mask, jnp.ones((state.generated_ids.shape[0], 1), dtype=state.attention_mask.dtype),
+        (0, state.kv_cache.cache_position),
     )
 
-    new_logits = outputs.logits[:, -1, :]
-    new_carry = (
-        outputs.kv_cache,
-        rngs,
-        generated_ids,
-        attention_mask,
-        last_positions,
-        new_logits,
-        all_logprobs,
-        stop_pos,
-        model,
-        temperatures,
-        stop_tokens,
-        adapter_indices,
+    outputs = state.model(
+        next_token, attention_mask=attention_mask, positions=state.last_positions + 1,
+        kv_cache=state.kv_cache, adapter_indices=state.adapter_indices,
     )
-    return new_carry, None
+
+    return DecodeState(
+        model=state.model, temperatures=state.temperatures, stop_tokens=state.stop_tokens,
+        adapter_indices=state.adapter_indices, kv_cache=outputs.kv_cache, rngs=rngs,
+        generated_ids=generated_ids, attention_mask=attention_mask, last_positions=state.last_positions + 1,
+        logits=outputs.logits[:, -1, :], all_logprobs=all_logprobs, stop_pos=stop_pos,
+    ), None
 
 
 class GeneratorMixin:
@@ -221,40 +206,35 @@ class GeneratorMixin:
         all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
         stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
 
-        initial_carry = (
-            kv_cache,
-            rngs,
-            generated_ids,
-            attention_mask,
-            positions[:, -1:],
-            outputs.logits[:, -1, :],
-            all_logprobs,
-            stop_pos,
-            self,
-            temperatures,
-            stop_tokens,
-            adapter_indices,
+        initial_state = DecodeState(
+            model=self,
+            temperatures=temperatures,
+            stop_tokens=stop_tokens,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            rngs=rngs,
+            generated_ids=generated_ids,
+            attention_mask=attention_mask,
+            last_positions=positions[:, -1:],
+            logits=outputs.logits[:, -1, :],
+            all_logprobs=all_logprobs,
+            stop_pos=stop_pos,
         )
-        (
-            kv_cache,
-            rngs,
-            generated_ids,
-            attention_mask,
-            last_positions,
-            logits,
-            all_logprobs,
-            stop_pos,
-            model,
-            temperatures,
-            stop_tokens,
-            adapter_indices,
-        ), _ = jax.lax.scan(decode_fn, initial_carry, xs=None, length=max_new_tokens - 1)
+        final_state, _ = jax.lax.scan(decode_fn, initial_state, xs=None, length=max_new_tokens - 1)
 
         # Sample final token
         rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-            logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
+            final_state.logits,
+            final_state.temperatures,
+            final_state.rngs,
+            final_state.all_logprobs,
+            final_state.kv_cache.cache_position,
+            final_state.stop_tokens,
+            final_state.stop_pos,
         )
-        generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
+        generated_ids = lax.dynamic_update_slice(
+            final_state.generated_ids, next_token, (0, final_state.kv_cache.cache_position)
+        )
 
         # Compute end position for each sequence: stop_pos + 1 if stopped, else prompt_length + max_tokens
         end_positions = jnp.where(
