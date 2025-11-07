@@ -603,7 +603,7 @@ class TinkerEngine:
             request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
 
         total_batch_size = len(all_prompts)
-        max_batch_size = (
+        max_batch_size = round_up_seq_len(
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
 
