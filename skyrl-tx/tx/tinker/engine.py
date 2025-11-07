@@ -603,7 +603,7 @@ class TinkerEngine:
             request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
 
         total_batch_size = len(all_prompts)
-        max_batch_size = round_up_seq_len(
+        max_batch_size = (
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
 
@@ -617,8 +617,9 @@ class TinkerEngine:
                 batch_prompts = all_prompts[batch_start:batch_end]
                 current_batch_size = len(batch_prompts)
 
-                # Pad batch_prompts to max_batch_size
-                batch_prompts = batch_prompts + [[]] * (max_batch_size - current_batch_size)
+                # Round batch size and pad batch_prompts to padded_batch_size
+                padded_batch_size = round_up_seq_len(current_batch_size)
+                batch_prompts = batch_prompts + [[]] * (padded_batch_size - current_batch_size)
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
@@ -632,11 +633,11 @@ class TinkerEngine:
                     dtype=jnp.int32,
                 )
                 adapter_indices = jnp.array(
-                    all_adapter_indices[batch_start:batch_end] + [0] * (max_batch_size - current_batch_size),
+                    all_adapter_indices[batch_start:batch_end] + [0] * (padded_batch_size - current_batch_size),
                     dtype=jnp.int32,
                 )
                 sampling_params = all_sampling_params[batch_start:batch_end] + [all_sampling_params[batch_start]] * (
-                    max_batch_size - current_batch_size
+                    padded_batch_size - current_batch_size
                 )
 
                 result = model.generate(
