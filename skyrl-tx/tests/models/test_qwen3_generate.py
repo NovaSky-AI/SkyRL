@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.tinker import types

@@ -8,7 +8,7 @@ import numpy as np
 from peft import LoraConfig, get_peft_model
 import pytest
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock
 
 from tx.layers.lora import LoRAMixin

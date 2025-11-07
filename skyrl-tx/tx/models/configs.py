@@ -57,9 +57,8 @@ class Qwen3Config(HfQwen3Config):
         base_config = HfQwen3Config.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
-        return cls(
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
-            shard_attention_heads=shard_attention_heads,
-            **base_config.to_dict()
-        )
+        # Add LoRA parameters directly to the loaded config object
+        base_config.max_lora_adapters = max_lora_adapters
+        base_config.max_lora_rank = max_lora_rank
+        base_config.shard_attention_heads = shard_attention_heads
+        return base_config

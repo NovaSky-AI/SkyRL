@@ -15,7 +15,7 @@ def test_config_has_lora_defaults():
     config = Qwen3Config()
     assert config.max_lora_adapters == 32
     assert config.max_lora_rank == 32
-    assert config.shard_attention_heads == True
+    assert config.shard_attention_heads is True
 
 
 def test_from_pretrained_with_lora():
@@ -32,7 +32,7 @@ def test_from_pretrained_with_lora():
     # Check LoRA params were set
     assert config.max_lora_adapters == 8
     assert config.max_lora_rank == 16
-    assert config.shard_attention_heads == False
+    assert config.shard_attention_heads is False
 
     # Check base config was loaded
     assert config.vocab_size > 0
