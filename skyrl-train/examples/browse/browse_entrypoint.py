@@ -293,7 +293,7 @@ class BasePPOExp:
 def skyrl_entrypoint(cfg: DictConfig):
     register(
         id="browse",
-        entry_point="examples.browse.browse_env:BrowseEnv",
+        entry_point="examples.browse.browse_env:NativeBrowseEnv",
     )
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)

@@ -8,12 +8,11 @@ set -x
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 export HYDRA_FULL_ERROR=1
-
 DATA_DIR="/workspaces/nearaiml/data/searchR1"
 
 uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.browse.browse_entrypoint \
-  data.train_data="['${DATA_DIR}/train.parquet']" \
-  data.val_data="['${DATA_DIR}/validation.parquet']" \
+  data.train_data="['${DATA_DIR}/train_brave_search.parquet']" \
+  data.val_data="['${DATA_DIR}/validation_brave_search.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.optimizer_config.lr=1.0e-5 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
@@ -47,7 +46,7 @@ uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.
   generator.sampling_params.max_generate_length=500 \
   generator.async_engine=true \
   generator.batched=false \
-  generator.use_conversation_multi_turn=false \
+  generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=6 \
   generator.sampling_params.temperature=1.0 \
@@ -71,7 +70,7 @@ uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
-  trainer.export_path="$HOME/skyrl-search_4turns_maxgeneratelen_500_lora/exports" \
+  trainer.export_path="$HOME/skyrl-search_8turns_maxgeneratelen_500_lora/exports" \
   trainer.eval_interval=50 \
   $@
   

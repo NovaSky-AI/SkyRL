@@ -124,6 +124,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
+        tool_specs: Optional[List[Dict[str, Any]]] = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -170,6 +171,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
+
         input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
@@ -177,6 +179,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             add_generation_prompt=not retokenize_chat_history,
             chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
+            tools=tool_specs,
             **self.generator_cfg.chat_template_kwargs,
         )
 
@@ -244,7 +247,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             if retokenize_chat_history:
                 # a. We always re-tokenize the entire chat history every turn and at the end.
                 chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
-                    chat_history, chat_end_index, output, new_obs
+                    chat_history, chat_end_index, output, new_obs, tool_specs
                 )
                 # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
                 per_step_rewards.append((step_reward, None))
@@ -267,6 +270,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = env.get_metrics()
         # Close the environment
         await self._run_in_executor_if_available(env.close)
+
+        # decoded_text = self.tokenizer.decode(input_ids)
 
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
@@ -334,6 +339,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_tokens: int,
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
+        tool_specs: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> GeneratorOutput:
         """
         Single-turn batched generation (can use the synchronous offline engine)
@@ -345,6 +351,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_tokens: int
             max_input_length: int --> Currently unused as we assume batched is used only for single-turn.
             sampling_params: Optional[Dict[str, Any]]
+            tool_specs: Optional[List[List[Dict[str, Any]]]]
         Returns:
             GeneratorOutput
         """
@@ -360,7 +367,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        engine_output = await self.inference_engine_client.generate(engine_input)
+        engine_output = await self.inference_engine_client.generate(engine_input, tool_specs=tool_specs)
         responses = engine_output["responses"]
         all_response_ids = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
@@ -425,6 +432,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompts = input_batch["prompts"]
         env_classes = input_batch["env_classes"]
         env_extras = input_batch["env_extras"]
+        tool_specs = [extra.get("tool_specs", None) for extra in env_extras]
         trajectory_ids = input_batch.get("trajectory_ids", None)
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
@@ -432,7 +440,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if self.batched:
             return await self.generate_batched(
-                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
+                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params, tool_specs
             )
 
         # Async agent loop to generate trajectories in parallel.
@@ -447,6 +455,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     max_input_length,
                     sampling_params=sampling_params,
                     trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
+                    tool_specs=tool_specs[i],
                 )
             )
 
@@ -521,6 +530,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         chat_end_index: int,
         output: str,
         new_obs: ConversationType,
+        tool_specs: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         Update the chat history and input ids given a new model response and observation by retokenizing
@@ -554,6 +564,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_template=self.custom_chat_template,
             add_generation_prompt=False,
             tokenize=True,
+            tools=tool_specs,
             **self.generator_cfg.chat_template_kwargs,
         )
         return chat_history, chat_end_index, input_ids

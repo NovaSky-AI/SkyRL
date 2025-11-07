@@ -1,11 +1,11 @@
 import json
 import logging
 import requests
-import uuid
 import time
 import threading
-from typing import Tuple, Optional, Any, Dict, List, Union
+from typing import Optional, Dict, List, Union
 from urllib.parse import urlparse
+
 # from inference_utils.tools import BraveSearch
 from skyrl_gym.tools.core import tool, ToolGroup
 import random
@@ -62,10 +62,10 @@ class BraveSearchToolGroup(ToolGroup):
         super().__init__(name="BraveSearchToolGroup")
 
     @tool
-    def browse(self, query: str) -> str:
-        results = self._search(query, max_results=self.topk)
-        return json.dumps({"result": results})
-    
+    def brave_search(self, keywords: str, max_results: Optional[int] = 10, region: Optional[str] = "wt-wt") -> str:
+        results = self._search(keywords, max_results, region)
+        return json.dumps(results)
+
     def _search(
         self,
         keywords: str,
@@ -156,37 +156,87 @@ class BraveSearchToolGroup(ToolGroup):
             Or a dict with 'error' key if an error occurred.
         """
         brave_api_key = os.getenv("BRAVE_API_KEY")
-        
+
         if not brave_api_key:
             return {"error": "No BRAVE_API_KEY environment variable found. Please set it to use this function."}
-        
+
         backoff = 2  # initial back-off in seconds
 
         # Map region codes to Brave Search country codes (ISO 3166-1 alpha-2)
         region_mapping = {
-            "xa-ar": "SA", "xa-en": "SA", "ar-es": "AR", "au-en": "AU", "at-de": "AT",
-            "be-fr": "BE", "be-nl": "BE", "br-pt": "BR", "bg-bg": "BG", "ca-en": "CA",
-            "ca-fr": "CA", "ct-ca": "ES", "cl-es": "CL", "cn-zh": "CN", "co-es": "CO",
-            "hr-hr": "HR", "cz-cs": "CZ", "dk-da": "DK", "ee-et": "EE", "fi-fi": "FI",
-            "fr-fr": "FR", "de-de": "DE", "gr-el": "GR", "hk-tzh": "HK", "hu-hu": "HU",
-            "in-en": "IN", "id-id": "ID", "id-en": "ID", "ie-en": "IE", "il-he": "IL",
-            "it-it": "IT", "jp-jp": "JP", "kr-kr": "KR", "lv-lv": "LV", "lt-lt": "LT",
-            "xl-es": "MX", "my-ms": "MY", "my-en": "MY", "mx-es": "MX", "nl-nl": "NL",
-            "nz-en": "NZ", "no-no": "NO", "pe-es": "PE", "ph-en": "PH", "ph-tl": "PH",
-            "pl-pl": "PL", "pt-pt": "PT", "ro-ro": "RO", "ru-ru": "RU", "sg-en": "SG",
-            "sk-sk": "SK", "sl-sl": "SI", "za-en": "ZA", "es-es": "ES", "se-sv": "SE",
-            "ch-de": "CH", "ch-fr": "CH", "ch-it": "CH", "tw-tzh": "TW", "th-th": "TH",
-            "tr-tr": "TR", "ua-uk": "UA", "uk-en": "GB", "us-en": "US", "ue-es": "US",
-            "ve-es": "VE", "vn-vi": "VN", "wt-wt": "ALL"
+            "xa-ar": "SA",
+            "xa-en": "SA",
+            "ar-es": "AR",
+            "au-en": "AU",
+            "at-de": "AT",
+            "be-fr": "BE",
+            "be-nl": "BE",
+            "br-pt": "BR",
+            "bg-bg": "BG",
+            "ca-en": "CA",
+            "ca-fr": "CA",
+            "ct-ca": "ES",
+            "cl-es": "CL",
+            "cn-zh": "CN",
+            "co-es": "CO",
+            "hr-hr": "HR",
+            "cz-cs": "CZ",
+            "dk-da": "DK",
+            "ee-et": "EE",
+            "fi-fi": "FI",
+            "fr-fr": "FR",
+            "de-de": "DE",
+            "gr-el": "GR",
+            "hk-tzh": "HK",
+            "hu-hu": "HU",
+            "in-en": "IN",
+            "id-id": "ID",
+            "id-en": "ID",
+            "ie-en": "IE",
+            "il-he": "IL",
+            "it-it": "IT",
+            "jp-jp": "JP",
+            "kr-kr": "KR",
+            "lv-lv": "LV",
+            "lt-lt": "LT",
+            "xl-es": "MX",
+            "my-ms": "MY",
+            "my-en": "MY",
+            "mx-es": "MX",
+            "nl-nl": "NL",
+            "nz-en": "NZ",
+            "no-no": "NO",
+            "pe-es": "PE",
+            "ph-en": "PH",
+            "ph-tl": "PH",
+            "pl-pl": "PL",
+            "pt-pt": "PT",
+            "ro-ro": "RO",
+            "ru-ru": "RU",
+            "sg-en": "SG",
+            "sk-sk": "SK",
+            "sl-sl": "SI",
+            "za-en": "ZA",
+            "es-es": "ES",
+            "se-sv": "SE",
+            "ch-de": "CH",
+            "ch-fr": "CH",
+            "ch-it": "CH",
+            "tw-tzh": "TW",
+            "th-th": "TH",
+            "tr-tr": "TR",
+            "ua-uk": "UA",
+            "uk-en": "GB",
+            "us-en": "US",
+            "ue-es": "US",
+            "ve-es": "VE",
+            "vn-vi": "VN",
+            "wt-wt": "ALL",
         }
-        
+
         country = region_mapping.get(region, "ALL")
 
-        headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": brave_api_key
-        }
+        headers = {"Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": brave_api_key}
 
         params = {
             "q": keywords,
@@ -199,10 +249,7 @@ class BraveSearchToolGroup(ToolGroup):
         while True:
             try:
                 response = requests.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    headers=headers,
-                    params=params,
-                    timeout=30
+                    "https://api.search.brave.com/res/v1/web/search", headers=headers, params=params, timeout=30
                 )
                 response.raise_for_status()
                 break  # Success
@@ -231,10 +278,12 @@ class BraveSearchToolGroup(ToolGroup):
         # Convert the search results to the desired format
         results = []
         for result in web_results[:max_results]:
-            results.append({
-                "title": result.get("title", ""),
-                "href": result.get("url", ""),
-                "body": result.get("description", ""),
-            })
-        
+            results.append(
+                {
+                    "title": result.get("title", ""),
+                    "href": result.get("url", ""),
+                    "body": result.get("description", ""),
+                }
+            )
+
         return results
