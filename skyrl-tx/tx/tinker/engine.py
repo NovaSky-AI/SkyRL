@@ -248,7 +248,7 @@ class TinkerEngine:
             seq_len: The sequence length being compiled
             mode: Either 'train' or 'sample' to track separately
         """
-        jit_times = self.metrics.train_seq_len_jit_times if mode == 'train' else self.metrics.sample_seq_len_jit_times
+        jit_times = self.metrics.train_seq_len_jit_times if mode == "train" else self.metrics.sample_seq_len_jit_times
         if not self.config.enforce_eager and seq_len not in jit_times:
             logger.info(f"JIT compiling for {mode} seq_len={seq_len} in progress...")
             start_time = time.time()
@@ -272,7 +272,7 @@ class TinkerEngine:
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
-        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode='train'):
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
                 self.lora_params,
                 self.non_lora_params,
@@ -642,7 +642,7 @@ class TinkerEngine:
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
                 )
 
-                with self._jit_timing_context(max_len, mode='sample'):
+                with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
                         input_ids,
                         attention_mask,
