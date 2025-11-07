@@ -105,6 +105,11 @@ def next_token_and_logprobs(
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
+    @staticmethod
+    @jax.jit
+    def _prefill_fn(model, input_ids, attention_mask, positions, adapter_indices):
+        return model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+
     def generate(
         self,
         input_ids: jax.Array,
@@ -141,10 +146,10 @@ class GeneratorMixin:
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
-        outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+        outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
-        def scan_fn(carry, _):
+        def decode_fn(carry, _):
             kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
             rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
                 logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
@@ -197,7 +202,7 @@ class GeneratorMixin:
             stop_pos,
         )
         (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos), _ = (
-            jax.lax.scan(scan_fn, initial_carry, xs=None, length=max_new_tokens - 1)
+            jax.lax.scan(decode_fn, initial_carry, xs=None, length=max_new_tokens - 1)
         )
 
         # Sample final token

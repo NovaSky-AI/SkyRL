@@ -617,7 +617,8 @@ class TinkerEngine:
                 batch_prompts = all_prompts[batch_start:batch_end]
 
                 # Pad sequences to same length within the batch to minimize memory usage.
-                max_len = max(len(seq) for seq in batch_prompts) if batch_prompts else 0
+                # Also bin it so the JIT has to compile fewer kernels.
+                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = jnp.array(
                     [seq + [0] * (max_len - len(seq)) for seq in batch_prompts],
                     dtype=jnp.int32,
