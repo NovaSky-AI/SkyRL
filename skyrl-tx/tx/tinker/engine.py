@@ -40,6 +40,11 @@ from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+def pad(xs, pad_to: int, fill):
+    """Pad a list to a specified length with a fill value."""
+    return xs + ([fill] * (pad_to - len(xs)))
+
+
 @dataclass
 class AccumulatedGradients:
     """Stores accumulated gradients for a LoRA adapter."""
@@ -491,23 +496,19 @@ class TinkerEngine:
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
-        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
-        target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
+        input_ids = jnp.array([pad(seq, max_len, 0) for seq in all_input_ids], dtype=jnp.int32)
+        target_ids = jnp.array([pad(seq, max_len, 0) for seq in all_targets], dtype=jnp.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
         loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = jnp.array(
-            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32
-        )
+        attention_mask = jnp.array([pad([1] * len(seq), max_len, 0) for seq in all_input_ids], dtype=jnp.int32)
         loss_mask = jnp.array(
-            [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
+            [pad(all_token_weights[i], max_len, 0) for i in range(len(all_token_weights))],
             dtype=jnp.float32,
         )
-        sampling_logprobs = jnp.array(
-            [seq + [0.0] * (max_len - len(seq)) for seq in all_sampling_logprobs], dtype=jnp.float32
-        )
-        advantages = jnp.array([seq + [0.0] * (max_len - len(seq)) for seq in all_advantages], dtype=jnp.float32)
+        sampling_logprobs = jnp.array([pad(seq, max_len, 0.0) for seq in all_sampling_logprobs], dtype=jnp.float32)
+        advantages = jnp.array([pad(seq, max_len, 0.0) for seq in all_advantages], dtype=jnp.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
@@ -614,29 +615,25 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_prompts = all_prompts[batch_start:batch_end]
-                current_batch_size = len(batch_prompts)
-
-                # Pad batch_prompts to max_batch_size
-                batch_prompts = batch_prompts + [[]] * (max_batch_size - current_batch_size)
+                batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, [])
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = jnp.array(
-                    [seq + [0] * (max_len - len(seq)) for seq in batch_prompts],
+                    [pad(seq, max_len, 0) for seq in batch_prompts],
                     dtype=jnp.int32,
                 )
                 attention_mask = jnp.array(
-                    [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in batch_prompts],
+                    [pad([1] * len(seq), max_len, 0) for seq in batch_prompts],
                     dtype=jnp.int32,
                 )
                 adapter_indices = jnp.array(
-                    all_adapter_indices[batch_start:batch_end] + [0] * (max_batch_size - current_batch_size),
+                    pad(all_adapter_indices[batch_start:batch_end], max_batch_size, 0),
                     dtype=jnp.int32,
                 )
-                sampling_params = all_sampling_params[batch_start:batch_end] + [all_sampling_params[batch_start]] * (
-                    max_batch_size - current_batch_size
+                sampling_params = pad(
+                    all_sampling_params[batch_start:batch_end], max_batch_size, all_sampling_params[batch_start]
                 )
 
                 result = model.generate(
@@ -646,12 +643,13 @@ class TinkerEngine:
                     adapter_indices=adapter_indices,
                 )
                 # Only take the actual results, not the padded ones
+                batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
                     for stop_reason, tokens, logprobs in zip(
-                        result.stop_reasons[:current_batch_size],
-                        result.generated_ids[:current_batch_size],
-                        result.logprobs[:current_batch_size],
+                        result.stop_reasons[:batch_size],
+                        result.generated_ids[:batch_size],
+                        result.logprobs[:batch_size],
                     )
                 )
 

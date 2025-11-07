@@ -111,8 +111,20 @@ def decode_fn(carry, _):
     Returns:
         Tuple of (new_carry, None) where new_carry has the same structure as carry
     """
-    (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos,
-     model, temperatures, stop_tokens, adapter_indices) = carry
+    (
+        kv_cache,
+        rngs,
+        generated_ids,
+        attention_mask,
+        last_positions,
+        logits,
+        all_logprobs,
+        stop_pos,
+        model,
+        temperatures,
+        stop_tokens,
+        adapter_indices,
+    ) = carry
     batch_size = generated_ids.shape[0]
 
     rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
@@ -158,7 +170,9 @@ class GeneratorMixin:
 
     @staticmethod
     @jax.jit
-    def _prefill_fn(model, input_ids: jax.Array, attention_mask: jax.Array, positions: jax.Array, adapter_indices: jax.Array | None):
+    def _prefill_fn(
+        model, input_ids: jax.Array, attention_mask: jax.Array, positions: jax.Array, adapter_indices: jax.Array | None
+    ):
         return model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
     def generate(
@@ -221,10 +235,20 @@ class GeneratorMixin:
             stop_tokens,
             adapter_indices,
         )
-        (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos,
-         model, temperatures, stop_tokens, adapter_indices), _ = (
-            jax.lax.scan(decode_fn, initial_carry, xs=None, length=max_new_tokens - 1)
-        )
+        (
+            kv_cache,
+            rngs,
+            generated_ids,
+            attention_mask,
+            last_positions,
+            logits,
+            all_logprobs,
+            stop_pos,
+            model,
+            temperatures,
+            stop_tokens,
+            adapter_indices,
+        ), _ = jax.lax.scan(decode_fn, initial_carry, xs=None, length=max_new_tokens - 1)
 
         # Sample final token
         rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
