@@ -45,12 +45,12 @@ class KVCache:
 class DecodeState:
     """State of the decode loop."""
 
-    # Config (constant throughout decode loop)
+    # Constant throughout decode loop:
     model: nnx.Module
     temperatures: jax.Array
     stop_tokens: jax.Array
     adapter_indices: jax.Array
-    # State (updated each iteration)
+    # Updated each iteration:
     kv_cache: KVCache
     rngs: jax.Array
     generated_ids: jax.Array
@@ -124,44 +124,38 @@ def next_token_and_logprobs(
     return next_rngs, next_token, all_logprobs, stop_pos
 
 
-def decode_fn(state: DecodeState, _) -> tuple[DecodeState, None]:
+def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     """Decode one token step for use with jax.lax.scan."""
     rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-        state.logits,
-        state.temperatures,
-        state.rngs,
-        state.all_logprobs,
-        state.kv_cache.cache_position,
-        state.stop_tokens,
-        state.stop_pos,
+        s.logits, s.temperatures, s.rngs, s.all_logprobs, s.kv_cache.cache_position, s.stop_tokens, s.stop_pos
     )
 
-    generated_ids = lax.dynamic_update_slice(state.generated_ids, next_token, (0, state.kv_cache.cache_position))
+    generated_ids = lax.dynamic_update_slice(s.generated_ids, next_token, (0, s.kv_cache.cache_position))
     attention_mask = lax.dynamic_update_slice(
-        state.attention_mask,
-        jnp.ones((state.generated_ids.shape[0], 1), dtype=state.attention_mask.dtype),
-        (0, state.kv_cache.cache_position),
+        s.attention_mask,
+        jnp.ones((s.generated_ids.shape[0], 1), dtype=s.attention_mask.dtype),
+        (0, s.kv_cache.cache_position),
     )
 
-    outputs = state.model(
+    outputs = s.model(
         next_token,
         attention_mask=attention_mask,
-        positions=state.last_positions + 1,
-        kv_cache=state.kv_cache,
-        adapter_indices=state.adapter_indices,
+        positions=s.last_positions + 1,
+        kv_cache=s.kv_cache,
+        adapter_indices=s.adapter_indices,
     )
 
     return (
         DecodeState(
-            model=state.model,
-            temperatures=state.temperatures,
-            stop_tokens=state.stop_tokens,
-            adapter_indices=state.adapter_indices,
+            model=s.model,
+            temperatures=s.temperatures,
+            stop_tokens=s.stop_tokens,
+            adapter_indices=s.adapter_indices,
             kv_cache=outputs.kv_cache,
             rngs=rngs,
             generated_ids=generated_ids,
             attention_mask=attention_mask,
-            last_positions=state.last_positions + 1,
+            last_positions=s.last_positions + 1,
             logits=outputs.logits[:, -1, :],
             all_logprobs=all_logprobs,
             stop_pos=stop_pos,
