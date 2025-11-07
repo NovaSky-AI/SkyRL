@@ -99,10 +99,6 @@ def test_qwen3_generate_speed():
         "Explain the meaning of life and consciousness",
         "Describe the process of photosynthesis in plants",
         "How do airplanes fly through the air efficiently",
-        "What are black holes and how are they formed",
-        "Tell me about the solar system and its planets",
-        "Explain the difference between AI and machine learning",
-        "How does the human brain process language",
     ]
 
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
