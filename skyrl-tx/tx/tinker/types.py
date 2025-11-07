@@ -181,4 +181,5 @@ class SampleOutput(BaseModel):
 
 # Metrics tracked in the engine
 class EngineMetrics(BaseModel):
-    seq_len_jit_times: dict[int, float] = {}
+    train_seq_len_jit_times: dict[int, float] = {}
+    sample_seq_len_jit_times: dict[int, float] = {}

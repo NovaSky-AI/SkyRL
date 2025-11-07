@@ -241,15 +241,21 @@ class TinkerEngine:
         return total if mb <= 0 else max(1, min(mb, total))
 
     @contextmanager
-    def _jit_timing_context(self, seq_len: int):
-        """Context manager to track JIT compilation times for different sequence lengths."""
-        if not self.config.enforce_eager and seq_len not in self.metrics.seq_len_jit_times:
-            logger.info(f"JIT compiling for seq_len={seq_len} in progress...")
+    def _jit_timing_context(self, seq_len: int, mode: str):
+        """Context manager to track JIT compilation times for different sequence lengths.
+
+        Args:
+            seq_len: The sequence length being compiled
+            mode: Either 'train' or 'sample' to track separately
+        """
+        jit_times = self.metrics.train_seq_len_jit_times if mode == 'train' else self.metrics.sample_seq_len_jit_times
+        if not self.config.enforce_eager and seq_len not in jit_times:
+            logger.info(f"JIT compiling for {mode} seq_len={seq_len} in progress...")
             start_time = time.time()
             yield
             elapsed = time.time() - start_time
-            self.metrics.seq_len_jit_times[seq_len] = elapsed
-            logger.info(f"JIT compilation for seq_len={seq_len} took {elapsed:.2f}s")
+            jit_times[seq_len] = elapsed
+            logger.info(f"JIT compilation for {mode} seq_len={seq_len} took {elapsed:.2f}s")
         else:
             yield
 
@@ -266,7 +272,7 @@ class TinkerEngine:
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
-        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode='train'):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
                 self.lora_params,
                 self.non_lora_params,
@@ -636,12 +642,13 @@ class TinkerEngine:
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
                 )
 
-                result = model.generate(
-                    input_ids,
-                    attention_mask,
-                    sampling_params=sampling_params,
-                    adapter_indices=adapter_indices,
-                )
+                with self._jit_timing_context(max_len, mode='sample'):
+                    result = model.generate(
+                        input_ids,
+                        attention_mask,
+                        sampling_params=sampling_params,
+                        adapter_indices=adapter_indices,
+                    )
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
                 all_sequences.extend(
