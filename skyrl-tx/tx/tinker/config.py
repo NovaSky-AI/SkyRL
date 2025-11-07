@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from cloudpathlib import AnyPath
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EngineConfig(BaseModel):
@@ -41,6 +41,20 @@ class EngineConfig(BaseModel):
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
     )
+    full_finetuning: bool = Field(
+        default=False,
+        description="Whether to fine-tune all model parameters instead of just LoRA adapters",
+    )
+
+    @model_validator(mode="after")
+    def validate_full_finetuning(self) -> "EngineConfig":
+        """Validate that full_finetuning only allows single client."""
+        if self.full_finetuning and self.max_lora_adapters != 1:
+            raise ValueError(
+                "full_finetuning=True requires max_lora_adapters=1 (single client only). "
+                f"Got max_lora_adapters={self.max_lora_adapters}"
+            )
+        return self
 
 
 def convert_env_var(env_name: str, env_value: str, expected_type: type):
