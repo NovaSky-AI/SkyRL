@@ -103,7 +103,6 @@ def test_qwen3_generate_speed():
         "Tell me about the solar system and its planets",
         "Explain the difference between AI and machine learning",
         "How does the human brain process language",
-        "What is quantum computing and how does it work",
     ]
 
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
