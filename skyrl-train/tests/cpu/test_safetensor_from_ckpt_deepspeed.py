@@ -25,12 +25,12 @@ def get_tensor(dict, key):
     return None
 
 
-def validate_conversion(ckpt_dir, safetensors_dir):
+def validate_conversion(ckpt_dir, out_dir):
     """Compare weights between original and converted checkpoints."""
     print("\nStarting validation...")
 
-    safetensor_path = os.path.join(safetensors_dir, "model.safetensors")
-    config_path = os.path.join(safetensors_dir, "config.json")
+    safetensor_path = os.path.join(out_dir, "model.safetensors")
+    config_path = os.path.join(out_dir, "config.json")
 
     if not os.path.exists(safetensor_path):
         print(f"Safetensor file not found: {safetensor_path}")
@@ -131,13 +131,13 @@ def validate_conversion(ckpt_dir, safetensors_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt-dir", type=str, required=True)
-    parser.add_argument("--safetensors-dir", type=str, required=True)
+    parser.add_argument("--out-dir", type=str, required=True)
     args = parser.parse_args()
 
-    print(f"Testing conversion from {args.ckpt_dir} to {args.safetensors_dir}")
+    print(f"Testing conversion from {args.ckpt_dir} to {args.out_dir}")
 
     result = subprocess.run(
-        ["python3", CONVERSION_SCRIPT_PATH, "--ckpt-dir", args.ckpt_dir, "--out-dir", args.safetensors_dir],
+        ["python3", CONVERSION_SCRIPT_PATH, "--ckpt-dir", args.ckpt_dir, "--out-dir", args.out_dir],
         capture_output=True,
         text=True,
     )
@@ -147,7 +147,7 @@ def main():
         print("FAILURE: Conversion script failed.")
         return
 
-    validation_passed = validate_conversion(args.ckpt_dir, args.safetensors_dir)
+    validation_passed = validate_conversion(args.ckpt_dir, args.out_dir)
     if validation_passed:
         print("\nSUCCESS")
     else:
