@@ -19,10 +19,7 @@ from tx.utils.storage import download_and_unpack
 
 
 def create_test_model(rank: int, alpha: int, adapter_index: int):
-    """Create a small Qwen3 model for testing with LoRA enabled.
-
-    Returns both the tx Qwen3Config and the base HuggingFace config for testing.
-    """
+    """Create a small Qwen3 model for testing with LoRA enabled."""
     base_config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
     # Make it smaller for testing
     base_config.num_hidden_layers = 1
@@ -31,7 +28,6 @@ def create_test_model(rank: int, alpha: int, adapter_index: int):
     base_config.num_attention_heads = 2
     base_config.num_key_value_heads = 2
 
-    # Create tx config from the modified hf_config
     config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
