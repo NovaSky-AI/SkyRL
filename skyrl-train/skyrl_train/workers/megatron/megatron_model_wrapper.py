@@ -2,7 +2,6 @@ from typing import Optional, Callable, List
 from functools import partial
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
