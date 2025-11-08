@@ -54,16 +54,16 @@ class AccumulatedGradients:
 
     @staticmethod
     @functools.partial(jax.jit, static_argnames=("adapter_index",))
-    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> None:
+    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> nnx.State:
         """Extracts gradients and adds them to the sum in-place."""
-        jax.tree.map(lambda accum, g: accum.at[:].add(g[adapter_index]), grad_sum, lora_grads)
+        return jax.tree.map(lambda accum, g: accum.at[:].add(g[adapter_index]), grad_sum, lora_grads)
 
     def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
         """Accumulate gradients and increment denominator."""
         if self.grad_sum is None:
             self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
         else:
-            self._accumulate(self.grad_sum, lora_grads, adapter_index)
+            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index)
         self.denominator += count
 
     def get_mean(self) -> nnx.State:
