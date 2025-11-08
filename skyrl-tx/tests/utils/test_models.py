@@ -9,7 +9,7 @@ from cloudpathlib import CloudPath, implementation_registry
 from cloudpathlib.local import local_s3_implementation
 from flax import nnx
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from tx.layers.lora import update_adapter_config
 from tx.models import Qwen3Config, Qwen3ForCausalLM
@@ -23,7 +23,7 @@ def create_test_model(rank: int, alpha: int, adapter_index: int):
 
     Returns both the tx Qwen3Config and the base HuggingFace config for testing.
     """
-    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    hf_config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
     # Make it smaller for testing - modify hf_config directly
     hf_config.num_hidden_layers = 1
     hf_config.hidden_size = 64
@@ -72,11 +72,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 
     # Load with peft and verify
     with download_and_unpack(output_path) as extracted_dir:
-        # Use the original HuggingFace config to create the base model
-        from transformers import Qwen3Config
-
-        base_config = Qwen3Config(**hf_config.to_dict())
-        base_model = AutoModelForCausalLM.from_config(base_config)
+        base_model = AutoModelForCausalLM.from_config(hf_config)
         peft_model = PeftModel.from_pretrained(base_model, extracted_dir)
 
         assert peft_model.peft_config["default"].r == rank

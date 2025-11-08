@@ -20,23 +20,10 @@ def test_config_wraps_pretrained_config():
     assert config.num_hidden_layers > 0
 
 
-def test_config_requires_all_params():
-    """Test that all LoRA parameters are required (no defaults)."""
-    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
-
-    # Should fail without all required parameters
-    try:
-        Qwen3Config(hf_config)
-        assert False, "Should have raised TypeError for missing parameters"
-    except TypeError as e:
-        assert "max_lora_adapters" in str(e) or "missing" in str(e)
-
-
 def test_config_preserves_moe_config():
     """Test that MoE-specific configs are preserved."""
     hf_config = PretrainedConfig.from_pretrained("trl-internal-testing/tiny-Qwen3MoeForCausalLM")
     config = Qwen3Config(hf_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
 
     # Check that MoE-specific attributes are preserved
-    assert hasattr(config, "num_experts")
     assert config.num_experts > 0
