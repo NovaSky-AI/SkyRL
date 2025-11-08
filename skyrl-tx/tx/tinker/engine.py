@@ -518,11 +518,11 @@ class TinkerEngine:
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
-        seq_lens = [len(seq) for seq in all_input_ids]  # Keep as Python list
+        seq_lens = [len(seq) for seq in all_input_ids]
 
         # Collect full padded arrays on device, slice after transfer
-        token_losses_device_list = []
-        logprobs_device_list = []
+        token_losses_device = []
+        logprobs_device = []
 
         for mb_start in range(0, total_bs, micro_bs):
             mb_end = min(mb_start + micro_bs, total_bs)
@@ -537,13 +537,13 @@ class TinkerEngine:
                 advantages[mb_start:mb_end],
             )
             # Store full padded arrays - no slicing on device
-            token_losses_device_list.append(per_token_losses)
-            logprobs_device_list.append(target_logprobs)
+            token_losses_device.append(per_token_losses)
+            logprobs_device.append(target_logprobs)
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
 
         # Single batched device-to-host transfer for all arrays
-        token_losses_host = jax.device_get(token_losses_device_list)
-        logprobs_host = jax.device_get(logprobs_device_list)
+        token_losses_host = jax.device_get(token_losses_device)
+        logprobs_host = jax.device_get(logprobs_device)
 
         # Flatten microbatches and slice to actual sequence lengths
         token_losses_out = []
@@ -551,8 +551,8 @@ class TinkerEngine:
         idx = 0
         for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
             for i in range(mb_losses.shape[0]):
-                token_losses_out.append(mb_losses[i, :seq_lens[idx]].astype(jnp.float32))
-                logprobs_out.append(mb_logprobs[i, :seq_lens[idx]].astype(jnp.float32))
+                token_losses_out.append(mb_losses[i, : seq_lens[idx]].astype(jnp.float32))
+                logprobs_out.append(mb_logprobs[i, : seq_lens[idx]].astype(jnp.float32))
                 idx += 1
 
         # Compute per-request results
