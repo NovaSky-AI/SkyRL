@@ -138,8 +138,6 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        max_lora_adapters = config.max_lora_adapters
-        max_lora_rank = config.max_lora_rank
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
@@ -147,8 +145,8 @@ class Qwen3MLP(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
         self.up_proj = LoRALinear(
@@ -158,8 +156,8 @@ class Qwen3MLP(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
@@ -169,8 +167,8 @@ class Qwen3MLP(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
 
@@ -184,15 +182,12 @@ class Qwen3Experts(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        max_lora_adapters = config.max_lora_adapters
-        max_lora_rank = config.max_lora_rank
-
         self.gate_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
@@ -201,8 +196,8 @@ class Qwen3Experts(nnx.Module):
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
             rngs=rngs,
@@ -211,8 +206,8 @@ class Qwen3Experts(nnx.Module):
             config.num_experts,
             config.moe_intermediate_size,
             config.hidden_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp", None)),
             rngs=rngs,
