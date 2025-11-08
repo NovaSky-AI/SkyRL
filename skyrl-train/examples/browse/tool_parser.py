@@ -57,12 +57,11 @@ class GLM4ToolParser:
                     arg_dct[arg_key] = arg_val
                 tool_calls.append({"name": tc_name, "arguments": arg_dct})
         except Exception:
-            return {"tools_called": False, "tool_calls": [], "content": model_output}
+            return {"tools_called": False, "tool_calls": []}
         else:
             if len(tool_calls) > 0:
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
-                return {"tools_called": True, "tool_calls": tool_calls, "content": content}
-            return {"tools_called": False, "tool_calls": [], "content": model_output}
+                return {"tools_called": True, "tool_calls": tool_calls}
+            return {"tools_called": False, "tool_calls": []}
 
 
 class Qwen3ToolParser:
@@ -85,7 +84,7 @@ class Qwen3ToolParser:
         result = self.func_call_regex.findall(model_output)
 
         if not result:
-            return {"tools_called": False, "tool_calls": [], "content": model_output}
+            return {"tools_called": False, "tool_calls": []}
 
         else:
             tool_calls = []
@@ -101,6 +100,4 @@ class Qwen3ToolParser:
                 if evaled_tool_dict and evaled_tool_dict.get("name") and evaled_tool_dict.get("arguments"):
                     tool_calls.append(evaled_tool_dict)
 
-                content = model_output[: model_output.find(self.tool_call_start_token)]
-
-            return {"tools_called": bool(tool_calls), "tool_calls": tool_calls, "content": content}
+            return {"tools_called": bool(tool_calls), "tool_calls": tool_calls}
