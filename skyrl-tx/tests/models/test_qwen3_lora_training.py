@@ -12,8 +12,8 @@ from tx.layers.lora import update_adapter_config
 
 def test_lora_training():
     base_model = "Qwen/Qwen3-0.6B"
-    hf_config = PretrainedConfig.from_pretrained(base_model)
-    config = Qwen3Config(hf_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
+    base_config = PretrainedConfig.from_pretrained(base_model)
+    config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))

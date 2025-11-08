@@ -199,9 +199,9 @@ def test_qwen3_lora():
             hf_model.load_adapter(adapter_name, adapter_name="default")
             hf_lora_models.append(hf_model)
 
-        hf_config = PretrainedConfig.from_pretrained(base_model_name)
+        base_config = PretrainedConfig.from_pretrained(base_model_name)
         config = Qwen3Config(
-            hf_config,
+            base_config,
             max_lora_adapters=len(lora_adapters),
             max_lora_rank=max(cfg.r for cfg in lora_configs),
             shard_attention_heads=True,
