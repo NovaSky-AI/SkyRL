@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 
@@ -5,6 +6,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -87,6 +89,7 @@ def test_qwen3_generate():
                 )
 
 
+@pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
 def test_qwen3_generate_speed():
     """Profile batched text generation with KV caching."""
     model_name = "Qwen/Qwen3-0.6B"
