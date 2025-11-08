@@ -44,7 +44,9 @@ class Qwen3Attention(nnx.Module):
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         tp_shard = "tp" if shard_attention_heads else None
 
-        self.head_dim = config.head_dim if hasattr(config, "head_dim") and config.head_dim else config.hidden_size // self.num_heads
+        self.head_dim = (
+            config.head_dim if hasattr(config, "head_dim") and config.head_dim else config.hidden_size // self.num_heads
+        )
         max_lora_adapters = config.max_lora_adapters
         max_lora_rank = config.max_lora_rank
 

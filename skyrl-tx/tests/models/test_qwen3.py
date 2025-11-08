@@ -204,7 +204,7 @@ def test_qwen3_lora():
             hf_config,
             max_lora_adapters=len(lora_adapters),
             max_lora_rank=max(cfg.r for cfg in lora_configs),
-            shard_attention_heads=True
+            shard_attention_heads=True,
         )
 
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))

@@ -19,22 +19,27 @@ from tx.utils.storage import download_and_unpack
 
 
 def create_test_model(rank: int, alpha: int, adapter_index: int):
-    """Create a small Qwen3 model for testing with LoRA enabled."""
+    """Create a small Qwen3 model for testing with LoRA enabled.
+
+    Returns both the tx Qwen3Config and the base HuggingFace config for testing.
+    """
     hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    # Make it smaller for testing - modify hf_config directly
+    hf_config.num_hidden_layers = 1
+    hf_config.hidden_size = 64
+    hf_config.intermediate_size = 128
+    hf_config.num_attention_heads = 2
+    hf_config.num_key_value_heads = 2
+
+    # Create tx config from the modified hf_config
     config = Qwen3Config(hf_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
-    # Make it smaller for testing
-    config.num_hidden_layers = 1
-    config.hidden_size = 64
-    config.intermediate_size = 128
-    config.num_attention_heads = 2
-    config.num_key_value_heads = 2
 
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         update_adapter_config(model, adapter_index=adapter_index, lora_rank=rank, lora_alpha=alpha)
 
-    return config, model
+    return config, hf_config, model
 
 
 @pytest.mark.parametrize("storage_type", ["local", "cloud"])
@@ -48,7 +53,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
         output_path = tmp_path / "checkpoint.tar.gz"
 
     rank, alpha, adapter_index = 8, 16, 2
-    config, model = create_test_model(rank, alpha, adapter_index)
+    config, hf_config, model = create_test_model(rank, alpha, adapter_index)
     adapter_config = LoraConfig(rank=rank, alpha=alpha)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
@@ -67,17 +72,10 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 
     # Load with peft and verify
     with download_and_unpack(output_path) as extracted_dir:
-        # Convert to base Qwen3Config for HuggingFace compatibility
+        # Use the original HuggingFace config to create the base model
         from transformers import Qwen3Config
-        config_dict = config.to_dict()
-        # Remove LoRA-specific fields that Qwen3Config doesn't know about
-        config_dict.pop("max_lora_adapters", None)
-        config_dict.pop("max_lora_rank", None)
-        config_dict.pop("shard_attention_heads", None)
-        # Fix layer_types to match num_hidden_layers
-        if config_dict.get("num_hidden_layers") != len(config_dict.get("layer_types", [])):
-            config_dict["layer_types"] = None
-        base_config = Qwen3Config(**config_dict)
+
+        base_config = Qwen3Config(**hf_config.to_dict())
         base_model = AutoModelForCausalLM.from_config(base_config)
         peft_model = PeftModel.from_pretrained(base_model, extracted_dir)
 
