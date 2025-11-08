@@ -59,6 +59,7 @@ dev = [
     "mkdocs",
     "mkdocs-material",
     "pytest",
+    "pytest-xdist",
     "torch",
     "ty",
     "cloudpathlib[s3]",
