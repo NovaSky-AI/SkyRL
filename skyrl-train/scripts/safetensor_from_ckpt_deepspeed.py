@@ -20,7 +20,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt-dir", required=True, type=str)
     parser.add_argument("--out-dir", required=True, type=str)
-    parser.add_argument("--config", default=None, type=str)
     parser.add_argument("--validate-load", action="store_true", help="Validate conversion by loading model")
     return parser.parse_args()
 
@@ -34,13 +33,7 @@ def find_hf_dir(ckpt_dir: Path) -> Optional[Path]:
     return None
 
 
-def get_hf_config(ckpt_dir: Path, user_config_path: Optional[str]) -> Path:
-    if user_config_path:
-        config_path = Path(user_config_path)
-        if config_path.is_file():
-            return config_path
-        raise FileNotFoundError(f"Provided --config does not exist: {user_config_path}")
-
+def get_hf_config(ckpt_dir: Path) -> Path:
     hf_dir = find_hf_dir(ckpt_dir)
     if hf_dir:
         cfg = hf_dir / "config.json"
@@ -141,7 +134,7 @@ def main():
     ckpt_dir = Path(args.ckpt_dir).resolve()
     out_dir = Path(args.out_dir).resolve()
 
-    config_path = get_hf_config(ckpt_dir, args.config)
+    config_path = get_hf_config(ckpt_dir)
 
     if not convert_and_save_safetensor(ckpt_dir, out_dir, config_path):
         print("\n[FAILURE] safetensors conversion failed")
