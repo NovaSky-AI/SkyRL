@@ -518,7 +518,7 @@ class TinkerEngine:
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
-        seq_lens = [len(seq) for seq in all_input_ids]
+        seq_lens = jax.array([len(seq) for seq in all_input_ids])
 
         # Used to collect per-example outputs (by global row index)
         token_losses_device = [None] * total_bs
