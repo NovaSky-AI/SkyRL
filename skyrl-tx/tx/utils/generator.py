@@ -237,8 +237,14 @@ class GeneratorMixin:
             prompt_length + jnp.array([sp.max_tokens for sp in sampling_params]),
         )
 
+        # Single device-to-host transfer for all data
+        generated_ids_host = jax.device_get(generated_ids[:, prompt_length:])
+        stop_pos_host = jax.device_get(stop_pos)
+        all_logprobs_host = jax.device_get(all_logprobs[:, prompt_length:])
+        end_positions_host = jax.device_get(end_positions - prompt_length)
+
         return GenerateOutput(
-            generated_ids=[generated_ids[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
-            stop_reasons=["stop" if stop_pos[i, 0] >= 0 else "length" for i in range(batch_size)],
-            logprobs=[all_logprobs[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
+            generated_ids=[generated_ids_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            stop_reasons=["stop" if stop_pos_host[i, 0] >= 0 else "length" for i in range(batch_size)],
+            logprobs=[all_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
         )
