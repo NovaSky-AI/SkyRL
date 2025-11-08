@@ -518,11 +518,11 @@ class TinkerEngine:
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
-        seq_lens = jnp.array([len(seq) for seq in all_input_ids])
+        seq_lens = [len(seq) for seq in all_input_ids]  # Keep as Python list
 
-        # Used to collect per-example outputs (by global row index)
-        token_losses_device = [None] * total_bs
-        logprobs_device = [None] * total_bs
+        # Collect full padded arrays on device, slice after transfer
+        token_losses_device_list = []
+        logprobs_device_list = []
 
         for mb_start in range(0, total_bs, micro_bs):
             mb_end = min(mb_start + micro_bs, total_bs)
@@ -536,16 +536,19 @@ class TinkerEngine:
                 sampling_logprobs[mb_start:mb_end],
                 advantages[mb_start:mb_end],
             )
-            # Store device arrays, defer transfer until after all microbatches
-            for i_local, i_global in enumerate(range(mb_start, mb_end)):
-                L = seq_lens[i_global]
-                token_losses_device[i_global] = per_token_losses[i_local, :L]
-                logprobs_device[i_global] = target_logprobs[i_local, :L]
+            # Store full padded arrays - no slicing on device
+            for i_local in range(per_token_losses.shape[0]):
+                token_losses_device_list.append(per_token_losses[i_local])
+                logprobs_device_list.append(target_logprobs[i_local])
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
 
-        # Single device-to-host transfer for all results at once
-        token_losses_out = [jax.device_get(arr).astype(jnp.float32) for arr in token_losses_device]
-        logprobs_out = [jax.device_get(arr).astype(jnp.float32) for arr in logprobs_device]
+        # Single batched device-to-host transfer for all arrays
+        token_losses_host = jax.device_get(token_losses_device_list)
+        logprobs_host = jax.device_get(logprobs_device_list)
+
+        # Slice to actual sequence lengths and convert dtype
+        token_losses_out = [token_losses_host[i][:seq_lens[i]].astype(jnp.float32) for i in range(total_bs)]
+        logprobs_out = [logprobs_host[i][:seq_lens[i]].astype(jnp.float32) for i in range(total_bs)]
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
