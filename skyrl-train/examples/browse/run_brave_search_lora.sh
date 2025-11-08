@@ -19,7 +19,7 @@ uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.
   trainer.policy.optimizer_config.num_warmup_steps=94 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.policy.model.path="Qwen/Qwen3-4B-Instruct-2507" \
+  trainer.policy.model.path="Qwen/Qwen3-8B" \
   trainer.policy.model.lora.rank=32 \
   trainer.policy.model.lora.alpha=32 \
   trainer.policy.model.lora.lora_sync_path="/tmp/skyrl_lora_sync" \
@@ -41,9 +41,9 @@ uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.
   trainer.policy_mini_batch_size=256 \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
-  trainer.max_prompt_length=2048 \
-  generator.max_input_length=4096 \
-  generator.sampling_params.max_generate_length=500 \
+  trainer.max_prompt_length=4096 \
+  generator.max_input_length=8192 \
+  generator.sampling_params.max_generate_length=1536 \
   generator.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=true \
@@ -54,23 +54,20 @@ uv run --with /workspaces/nearaiml --isolated --frozen --extra vllm -m examples.
   generator.sampling_params.stop='["</search>", "</answer>"]' \
   environment.env_class="browse" \
   environment.skyrl_gym.max_env_workers=8 \
-  +environment.skyrl_gym.browse.log_requests=false \
-  +environment.skyrl_gym.browse.search_url="http://127.0.0.1:8000/retrieve" \
-  +environment.skyrl_gym.browse.topk=3 \
-  +environment.skyrl_gym.browse.timeout=30 \
+  environment.skyrl_gym.browse.tool_call_parser="qwen3" \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-browse" \
-  trainer.run_name="skyrl-browse_8turns_maxgeneratelen_500_lora" \
+  trainer.run_name="skyrl-browse_6turns_maxgeneratelen_1536_Qwen3-8B_lora" \
   trainer.ckpt_interval=20 \
   trainer.hf_save_interval=100 \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/skyrl-browse_8turns_maxgeneratelen_500_lora" \
+  trainer.ckpt_path="$HOME/skyrl-browse_6turns_maxgeneratelen_1536_Qwen3-8B_lora" \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
-  trainer.export_path="$HOME/skyrl-search_8turns_maxgeneratelen_500_lora/exports" \
+  trainer.export_path="$HOME/skyrl-search_6turns_maxgeneratelen_1536_Qwen3-8B_lora/exports" \
   trainer.eval_interval=50 \
   $@
   

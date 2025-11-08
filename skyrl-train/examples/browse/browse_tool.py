@@ -1,72 +1,45 @@
-import json
-import logging
+import os
 import requests
 import time
-import threading
-from typing import Optional, Dict, List, Union
-from urllib.parse import urlparse
-
-# from inference_utils.tools import BraveSearch
-from skyrl_gym.tools.core import tool, ToolGroup
 import random
-import os
+from typing import Optional, Union, Dict, List, Any
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+class BraveSearch:
+    def __init__(self, api_key: Optional[str] = None):
 
-DEFAULT_TIMEOUT = 30
-MAX_RETRIES = 10
-INITIAL_RETRY_DELAY = 1
+        if api_key:
+            self.api_key = api_key
+        else:
+            self.api_key = os.getenv("BRAVE_API_KEY")
 
+    def get_function_spec(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "brave_search",
+                "description": "Search the web using Brave Search API for the provided keywords and region",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keywords": {"type": "string", "description": "The keywords to search for"},
+                        "max_results": {
+                            "type": "integer",
+                            "description": "The maximum number of search results to return",
+                            "default": 5,
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "The region to search in. Examples: 'us-en' for United States, 'uk-en' for United Kingdom, 'wt-wt' for No region",
+                            "default": "wt-wt",
+                        },
+                    },
+                    "required": ["keywords"],
+                },
+            },
+        }
 
-class BraveSearchToolGroup(ToolGroup):
-    # Class-level session pool shared across all instances
-    _session_pool = {}
-    _session_lock = threading.Lock()
-
-    @classmethod
-    def _get_shared_session(cls, base_url: str) -> requests.Session:
-        """Get or create a shared session for the given base URL"""
-        with cls._session_lock:
-            if base_url not in cls._session_pool:
-                session = requests.Session()
-                # Configure connection pooling
-                adapter = requests.adapters.HTTPAdapter(
-                    pool_connections=20,  # Number of connection pools
-                    pool_maxsize=20,  # Max connections per pool
-                    max_retries=0,  # We handle retries ourselves
-                    pool_block=False,  # Don't block if pool is full
-                )
-                session.mount("http://", adapter)
-                session.mount("https://", adapter)
-                cls._session_pool[base_url] = session
-                logger.info(f"Created shared session pool for {base_url}")
-            return cls._session_pool[base_url]
-
-    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_requests=True):
-        self.search_url = search_url
-        self.topk = topk
-        self.timeout = timeout
-        self.log_requests = log_requests
-
-        # Extract base URL for session sharing
-        parsed_url = urlparse(self.search_url)
-        self.base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-
-        # Get shared session for this base URL
-        self.session = self._get_shared_session(self.base_url)
-        if self.log_requests:
-            logger.info(f"BraveSearchToolGroup initialized using shared session pool for {self.base_url}")
-
-        super().__init__(name="BraveSearchToolGroup")
-
-    @tool
-    def brave_search(self, keywords: str, max_results: Optional[int] = 10, region: Optional[str] = "wt-wt") -> str:
-        results = self._search(keywords, max_results, region)
-        return json.dumps(results)
-
-    def _search(
+    def search(
         self,
         keywords: str,
         max_results: Optional[int] = 10,
