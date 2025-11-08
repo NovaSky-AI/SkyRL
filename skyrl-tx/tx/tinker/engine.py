@@ -537,18 +537,23 @@ class TinkerEngine:
                 advantages[mb_start:mb_end],
             )
             # Store full padded arrays - no slicing on device
-            for i_local in range(per_token_losses.shape[0]):
-                token_losses_device_list.append(per_token_losses[i_local])
-                logprobs_device_list.append(target_logprobs[i_local])
+            token_losses_device_list.append(per_token_losses)
+            logprobs_device_list.append(target_logprobs)
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host = jax.device_get(token_losses_device_list)
         logprobs_host = jax.device_get(logprobs_device_list)
 
-        # Slice to actual sequence lengths and convert dtype
-        token_losses_out = [token_losses_host[i][:seq_lens[i]].astype(jnp.float32) for i in range(total_bs)]
-        logprobs_out = [logprobs_host[i][:seq_lens[i]].astype(jnp.float32) for i in range(total_bs)]
+        # Flatten microbatches and slice to actual sequence lengths
+        token_losses_out = []
+        logprobs_out = []
+        idx = 0
+        for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
+            for i in range(mb_losses.shape[0]):
+                token_losses_out.append(mb_losses[i, :seq_lens[idx]].astype(jnp.float32))
+                logprobs_out.append(mb_logprobs[i, :seq_lens[idx]].astype(jnp.float32))
+                idx += 1
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
