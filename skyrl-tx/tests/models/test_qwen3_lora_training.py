@@ -2,19 +2,18 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import optax
-from transformers import AutoConfig
 from huggingface_hub import snapshot_download
+from transformers import PretrainedConfig
 
-from tx.models import Qwen3ForCausalLM
+from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
 
 
 def test_lora_training():
     base_model = "Qwen/Qwen3-0.6B"
-    config = AutoConfig.from_pretrained(base_model)
-    config.max_lora_adapters = 5
-    config.max_lora_rank = 32
+    base_config = PretrainedConfig.from_pretrained(base_model)
+    config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
