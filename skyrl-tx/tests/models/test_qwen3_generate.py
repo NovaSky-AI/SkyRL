@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 
@@ -5,6 +6,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -87,6 +89,7 @@ def test_qwen3_generate():
                 )
 
 
+@pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
 def test_qwen3_generate_speed():
     """Profile batched text generation with KV caching."""
     model_name = "Qwen/Qwen3-0.6B"
@@ -99,6 +102,11 @@ def test_qwen3_generate_speed():
         "Explain the meaning of life and consciousness",
         "Describe the process of photosynthesis in plants",
         "How do airplanes fly through the air efficiently",
+        "What are black holes and how are they formed",
+        "Tell me about the solar system and its planets",
+        "Explain the difference between AI and machine learning",
+        "How does the human brain process language",
+        "What is quantum computing and how does it work",
     ]
 
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
