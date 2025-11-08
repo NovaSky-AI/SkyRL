@@ -118,7 +118,7 @@ def validate_conversion(ckpt_dir, out_dir):
                 print(f"Keys only in original: {only_in_pt}")
                 print(f"Keys only in safetensors: {only_in_st}")
             else:
-                print(f"All tensors match and key sets align.")
+                print("All tensors match and key sets align.")
             return True
         else:
             print(f"Found {mismatches} mismatches.")

@@ -150,7 +150,7 @@ def main():
     hf_src_dir = find_hf_dir(ckpt_dir)
     copy_auxiliary_files(hf_src_dir, out_dir)
 
-    print(f"\n[SUCCESS] safetensors conversion completed!")
+    print("\n[SUCCESS] safetensors conversion completed!")
 
     if args.validate_load:
         validate_load(out_dir)
