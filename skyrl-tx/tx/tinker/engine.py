@@ -521,8 +521,8 @@ class TinkerEngine:
         seq_lens = [len(seq) for seq in all_input_ids]
 
         # Used to collect per-example outputs (by global row index)
-        token_losses_out = [None] * total_bs
-        logprobs_out = [None] * total_bs
+        token_losses_device = [None] * total_bs
+        logprobs_device = [None] * total_bs
 
         for mb_start in range(0, total_bs, micro_bs):
             mb_end = min(mb_start + micro_bs, total_bs)
@@ -536,14 +536,16 @@ class TinkerEngine:
                 sampling_logprobs[mb_start:mb_end],
                 advantages[mb_start:mb_end],
             )
-            # Single device-to-host transfer for the microbatch, convert to float32 on CPU
-            per_token_losses_host = jax.device_get(per_token_losses)
-            target_logprobs_host = jax.device_get(target_logprobs)
+            # Store device arrays, defer transfer until after all microbatches
             for i_local, i_global in enumerate(range(mb_start, mb_end)):
                 L = seq_lens[i_global]
-                token_losses_out[i_global] = per_token_losses_host[i_local, :L].astype(jnp.float32)
-                logprobs_out[i_global] = target_logprobs_host[i_local, :L].astype(jnp.float32)
+                token_losses_device[i_global] = per_token_losses[i_local, :L]
+                logprobs_device[i_global] = target_logprobs[i_local, :L]
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+
+        # Single device-to-host transfer for all results at once
+        token_losses_out = [jax.device_get(arr).astype(jnp.float32) for arr in token_losses_device]
+        logprobs_out = [jax.device_get(arr).astype(jnp.float32) for arr in logprobs_device]
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
