@@ -186,10 +186,9 @@ class HFModelWrapper(nn.Module):
         )
 
     @torch.no_grad()
-    def generate(self, input_ids: torch.Tensor, **kwargs) -> Union[
-        Tuple[torch.LongTensor, torch.LongTensor],
-        Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],
-    ]:
+    def generate(
+        self, input_ids: torch.Tensor, **kwargs
+    ) -> Union[Tuple[torch.LongTensor, torch.LongTensor], Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],]:
         generate_args = {
             "input_ids": input_ids,
             "top_k": kwargs.get("top_k", None),
@@ -269,6 +268,7 @@ class HFModelWrapper(nn.Module):
         temperature: float = 1.0,
         return_output=False,
         compute_entropy=False,
+        entropy_requires_grad=True,
     ) -> torch.Tensor:
         """Returns action log probs"""
         position_ids = attention_mask.long().cumsum(-1) - 1
@@ -338,7 +338,6 @@ class HFModelWrapper(nn.Module):
             ).squeeze(-1)
 
         if compute_entropy:
-            # entropy calculation as a metric - we use no grad
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
             # For non-sample packing: pass the attention mask to exclude padding tokens
             entropy_mask = None
@@ -348,7 +347,7 @@ class HFModelWrapper(nn.Module):
                 entropy_mask = attention_mask_fwd
 
             entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=True, attention_mask=entropy_mask
+                logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
             )
 
             if self.sequence_parallel_size > 1:

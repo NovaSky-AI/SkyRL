@@ -748,6 +748,7 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.generator.sampling_params.temperature,
                 return_output=True,
                 compute_entropy=True,
+                entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
             )
             # loss function
             # TODO: recompute advantages
