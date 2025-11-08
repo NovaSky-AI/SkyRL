@@ -536,13 +536,13 @@ class TinkerEngine:
                 sampling_logprobs[mb_start:mb_end],
                 advantages[mb_start:mb_end],
             )
-            # Single device-to-host transfer for the microbatch
-            per_token_losses_host = jax.device_get(per_token_losses.astype(jnp.float32))
-            target_logprobs_host = jax.device_get(target_logprobs.astype(jnp.float32))
+            # Single device-to-host transfer for the microbatch, convert to float32 on CPU
+            per_token_losses_host = jax.device_get(per_token_losses)
+            target_logprobs_host = jax.device_get(target_logprobs)
             for i_local, i_global in enumerate(range(mb_start, mb_end)):
                 L = seq_lens[i_global]
-                token_losses_out[i_global] = per_token_losses_host[i_local, :L]
-                logprobs_out[i_global] = target_logprobs_host[i_local, :L]
+                token_losses_out[i_global] = per_token_losses_host[i_local, :L].astype(jnp.float32)
+                logprobs_out[i_global] = target_logprobs_host[i_local, :L].astype(jnp.float32)
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
 
         # Compute per-request results
