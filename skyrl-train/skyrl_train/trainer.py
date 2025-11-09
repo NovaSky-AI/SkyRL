@@ -1080,16 +1080,13 @@ class RayPPOTrainer:
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
         cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
 
-    def load_checkpoints(self, skip_loading_dataloader_state: bool = False) -> Tuple[int, str]:
+    def load_checkpoints(self) -> Tuple[int, str]:
         """
         Load complete checkpoint state and return the global_step to resume from.
         Returns 0 if no checkpoint is loaded.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
 
-        Args:
-            skip_loading_dataloader_state: If True, skip loading the dataloader state. Used for fully async training.
-        
         Returns:
             global_step: The global step to resume from.
             checkpoint_path: The path to the checkpoint.
@@ -1159,7 +1156,7 @@ class RayPPOTrainer:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
         # 2. Load dataloader state if available
-        if io.exists(dataloader_state_path) and not skip_loading_dataloader_state:
+        if io.exists(dataloader_state_path):
             try:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
