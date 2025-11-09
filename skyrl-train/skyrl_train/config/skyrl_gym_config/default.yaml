@@ -15,5 +15,5 @@ search:
   topk: 3
   timeout: 30
 
-search_native:
+browse:
   tool_call_parser: "qwen3"
