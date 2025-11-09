@@ -542,10 +542,14 @@ class TinkerEngine:
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
 
         # Flatten microbatches and slice to actual sequence lengths
-        all_losses = jnp.concatenate(token_losses_host, axis=0)
-        all_logprobs = jnp.concatenate(logprobs_host, axis=0)
-        token_losses_out = [all_losses[i, :L].astype(jnp.float32) for i, L in enumerate(seq_lens)]
-        logprobs_out = [all_logprobs[i, :L].astype(jnp.float32) for i, L in enumerate(seq_lens)]
+        token_losses_out = []
+        logprobs_out = []
+        idx = 0
+        for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
+            for i in range(mb_losses.shape[0]):
+                token_losses_out.append(mb_losses[i, : seq_lens[idx]].astype(jnp.float32))
+                logprobs_out.append(mb_logprobs[i, : seq_lens[idx]].astype(jnp.float32))
+                idx += 1
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
