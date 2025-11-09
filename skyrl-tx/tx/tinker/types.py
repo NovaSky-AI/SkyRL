@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal, Sequence
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -151,7 +151,7 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
-    stop: Sequence[int] | None = None
+    stop: list[int] | None = None
 
 
 class ModelMetadata(BaseModel):

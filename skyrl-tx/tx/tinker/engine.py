@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import functools
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -54,12 +53,12 @@ class AccumulatedGradients:
     denominator: int = 0
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("adapter_index",))
-    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> nnx.State:
+    @jax.jit
+    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: jax.Array) -> nnx.State:
         """Extracts gradients and adds them to the sum."""
         return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
 
-    def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
+    def add(self, lora_grads: nnx.State, adapter_index: jax.Array, count: int) -> None:
         """Accumulate gradients and increment denominator."""
         if self.grad_sum is None:
             self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
@@ -296,9 +295,8 @@ class TinkerEngine:
         Accumulate adapter-wise gradient sums and example counts.
         """
         for model_id, count in Counter(example_model_ids).items():
-            adapter_index = self.models[model_id].adapter_index
+            adapter_index = jnp.array(self.models[model_id].adapter_index, dtype=jnp.int32)
             accumulator = self.accumulated_grads[model_id]
-            # Extract and accumulate gradients for this adapter
             accumulator.add(lora_grads, adapter_index, count)
 
     def _filter_valid_requests(
@@ -522,9 +520,9 @@ class TinkerEngine:
         micro_bs = self._micro_batch_size(total_bs)
         seq_lens = [len(seq) for seq in all_input_ids]
 
-        # Used to collect per-example outputs (by global row index)
-        token_losses_out = [None] * total_bs
-        logprobs_out = [None] * total_bs
+        # Collect full padded arrays on device, slice after transfer
+        token_losses_device = []
+        logprobs_device = []
 
         for mb_start in range(0, total_bs, micro_bs):
             mb_end = min(mb_start + micro_bs, total_bs)
@@ -538,11 +536,22 @@ class TinkerEngine:
                 sampling_logprobs[mb_start:mb_end],
                 advantages[mb_start:mb_end],
             )
-            for i_local, i_global in enumerate(range(mb_start, mb_end)):
-                L = seq_lens[i_global]
-                token_losses_out[i_global] = per_token_losses[i_local, :L].astype(jnp.float32)
-                logprobs_out[i_global] = target_logprobs[i_local, :L].astype(jnp.float32)
+            token_losses_device.append(per_token_losses)
+            logprobs_device.append(target_logprobs)
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+
+        # Single batched device-to-host transfer for all arrays
+        token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
+
+        # Flatten microbatches and slice to actual sequence lengths
+        token_losses_out = []
+        logprobs_out = []
+        idx = 0
+        for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
+            for i in range(mb_losses.shape[0]):
+                token_losses_out.append(mb_losses[i, : seq_lens[idx]].astype(jnp.float32))
+                logprobs_out.append(mb_logprobs[i, : seq_lens[idx]].astype(jnp.float32))
+                idx += 1
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
