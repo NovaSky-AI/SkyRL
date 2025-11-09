@@ -61,6 +61,9 @@ class StepWiseGenerator(SkyRLGymGenerator):
         if not self.use_conversation_multi_turn:
             raise ValueError("`StepWiseGenerator` doesn't support `use_conversation_multi_turn=False`")
 
+    def _validate_cfg(self, generator_cfg: DictConfig):
+        pass
+
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -137,6 +140,9 @@ class StepWiseGenerator(SkyRLGymGenerator):
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
+            response_logprobs = engine_output.get("response_logprobs", None)
+            if response_logprobs is not None:
+                response_logprobs = response_logprobs[0]
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
@@ -144,12 +150,14 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
             )
             stop_strs = current_sampling_params.get("stop", None)
+            added_eos = False
             if (
                 stop_strs is not None
                 and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
                 and self.use_conversation_multi_turn
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                    added_eos = True
                     output_ids.append(self.tokenizer.eos_token_id)
 
             # 2. Environment step
@@ -162,11 +170,10 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
             # Follow multi-turn chat history format.
             input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
-                input_ids,
-                output_ids,
-                new_obs,
-                done,
+                input_ids, output_ids, new_obs, done, added_eos
             )
+            if response_logprobs is not None:
+                response_logprobs += [0] * (len(loss_mask) - len(response_logprobs))
 
             if retokenize_chat_history:
                 # update the chat history
@@ -179,13 +186,17 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 reward=step_reward,
                 loss_mask=copy.deepcopy(loss_mask),
                 prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
-                rollout_logprobs=None,
+                rollout_logprobs=response_logprobs,
                 stop_reason=stop_reason,
             )
 
             assert len(per_step_output.loss_mask) == len(
                 per_step_output.response_ids
-            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)} and {len(per_step_output.response_ids)}"
+            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} and {len(per_step_output.response_ids)=}"
+            if per_step_output.rollout_logprobs is not None:
+                assert len(per_step_output.rollout_logprobs) == len(
+                    per_step_output.response_ids
+                ), f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
 
             if len(input_ids) > max_input_length:
                 stop_reason = "length"
@@ -271,7 +282,9 @@ class StepWiseGenerator(SkyRLGymGenerator):
             get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
 
         if get_logprobs:
-            rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
+            rollout_logprobs = sum(
+                [[output.rollout_logprobs for output in step_output] for step_output in all_outputs], []
+            )
         else:
             rollout_logprobs = None
 
@@ -304,6 +317,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
         output_ids: List[int],
         new_obs: ConversationType,
         done: bool,
+        added_eos: bool,
     ):
         """
         Update the input ids given a new model response and observation.
@@ -333,12 +347,16 @@ class StepWiseGenerator(SkyRLGymGenerator):
             output: str
             new_obs: ConversationType
             done: bool
+            added_eos: bool
         Returns:
             input_ids: List[int]
             loss_mask: List[int]
         """
         input_ids += output_ids
-        loss_mask = [1] * len(output_ids)
+        # if `added_eos` is `True`, then  the EOS token was not generated and only added in the
+        # agent loop. For consistency with other entities like logprobs , we ignore it in the loss
+        # mask
+        loss_mask = [1] * len(output_ids) if not added_eos else [1] * (len(output_ids) - 1) + [0]
 
         # apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
@@ -348,6 +366,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 [*self.base_conversation, *new_obs],
                 add_generation_prompt=True,
                 tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)

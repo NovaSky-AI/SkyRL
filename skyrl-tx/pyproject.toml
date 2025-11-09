@@ -39,6 +39,8 @@ tinker = [
     "sqlmodel",
     "sqlalchemy[asyncio]",
     "aiosqlite",
+    "asyncpg",
+    "psycopg2-binary",
 ]
 
 aws = [
@@ -57,6 +59,7 @@ dev = [
     "mkdocs",
     "mkdocs-material",
     "pytest",
+    "pytest-forked",
     "torch",
     "ty",
     "cloudpathlib[s3]",

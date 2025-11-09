@@ -10,8 +10,8 @@ FILES = {
 }
 
 for name, filename in FILES.items():
-    in_path = DATA_DIR / filename
-    out_path = DATA_DIR / f"{name}-cleaned.parquet"
+    in_path = f"{DATA_DIR}/{filename}"
+    out_path = f"{DATA_DIR}/{name}-cleaned.parquet"
 
     # Read using pandas
     df = pd.read_parquet(in_path)

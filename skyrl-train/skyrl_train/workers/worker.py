@@ -36,7 +36,7 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -155,7 +155,13 @@ class DistributedTorchRayActor:
                 ("maskp", POINTER(c_ulong)),
             ]
 
-        LIBNUMA = CDLL(find_library("numa"))
+        try:
+            LIBNUMA = CDLL(find_library("numa"))
+        except Exception as e:
+            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
+            _SET_AFFINITY = True
+            return
+
         LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
@@ -260,12 +266,13 @@ class Worker(DistributedTorchRayActor):
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
 
-            num_inference_engines, tensor_parallel_size, data_parallel_size = (
+            num_inference_engines, tensor_parallel_size, pipeline_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
                 self.cfg.generator.inference_engine_tensor_parallel_size,
+                self.cfg.generator.inference_engine_pipeline_parallel_size,
                 self.cfg.generator.inference_engine_data_parallel_size,
             )
-            world_size = num_inference_engines * tensor_parallel_size * data_parallel_size + 1
+            world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
             backend = self.cfg.generator.weight_sync_backend
 
@@ -290,7 +297,7 @@ class Worker(DistributedTorchRayActor):
                 asyncio.to_thread(
                     init_custom_process_group,
                     backend=backend,
-                    init_method=f"tcp://{master_addr}:{master_port}",
+                    init_method=get_tcp_url(master_addr, master_port),
                     world_size=world_size,
                     rank=0,
                     group_name=group_name,

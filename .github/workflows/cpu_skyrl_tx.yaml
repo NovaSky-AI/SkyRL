@@ -47,7 +47,7 @@ jobs:
     #     uv run --extra tinker --extra dev ty check
     - name: Run pytest
       run: |
-        uv run --extra tinker --extra dev pytest -s tests
+        uv run --extra tinker --extra dev pytest --forked -s tests
     - name: Run a single training step
       run: |
         uv run tx train --model pcmoritz/qwen3-tiny-test --dataset mahiatlinux/TinyStories-GPT4-V2-50K-SUBSET --output-dir /tmp --batch-size 2 --max-steps 1 --optimizer-args '{"learning_rate": 0.002, "weight_decay": 0.1}'
