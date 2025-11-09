@@ -421,9 +421,10 @@ class TinkerEngine:
         if adapter_index >= self.config.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
 
-        # Extract LoRA rank and alpha from config
-        lora_rank = request_data.lora_config.rank
-        lora_alpha = request_data.lora_config.alpha
+        # Extract LoRA configuration
+        lora_config = request_data.lora_config
+        lora_rank = lora_config.rank
+        lora_alpha = lora_config.alpha
 
         # Validate rank doesn't exceed max
         if not (0 < lora_rank <= self.config.max_lora_rank):
@@ -431,7 +432,7 @@ class TinkerEngine:
 
         self.models[model_id] = types.ModelMetadata(
             adapter_index=adapter_index,
-            lora_config=request_data.lora_config,
+            lora_config=lora_config,
         )
         self.accumulated_grads[model_id] = AccumulatedGradients()
 
@@ -441,7 +442,15 @@ class TinkerEngine:
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Update the adapter's rank and scaling in all LoRA layers
-        update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
+        update_adapter_config(
+            self.model,
+            adapter_index,
+            lora_rank,
+            lora_alpha,
+            train_attn=lora_config.train_attn,
+            train_mlp=lora_config.train_mlp,
+            train_unembed=lora_config.train_unembed,
+        )
 
         logger.info(
             f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}"

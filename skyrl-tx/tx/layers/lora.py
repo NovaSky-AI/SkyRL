@@ -257,7 +257,15 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int, lora_alpha: float):
+def update_adapter_config(
+    model: nnx.Module,
+    adapter_index: int,
+    lora_rank: int,
+    lora_alpha: float,
+    train_attn: bool = True,
+    train_mlp: bool = True,
+    train_unembed: bool = False,
+):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
@@ -270,18 +278,44 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
         adapter_index: Index of the adapter to update
         lora_rank: Rank to set for this adapter
         lora_alpha: Alpha value to use for computing scaling (alpha / rank)
+        train_attn: Whether to train attention layers with LoRA (default: True)
+        train_mlp: Whether to train MLP layers with LoRA (default: True)
+        train_unembed: Whether to train unembedding/LM head layer with LoRA (default: False)
     """
     scaling = lora_alpha / lora_rank
     state = nnx.state(model)
 
+    def _is_attention_layer(path) -> bool:
+        """Check if path corresponds to attention layer."""
+        return any("self_attn" in str(key) for key in path)
+
+    def _is_mlp_layer(path) -> bool:
+        """Check if path corresponds to MLP layer (including MoE experts)."""
+        return any("mlp" in str(key) or "experts" in str(key) for key in path)
+
+    def _is_unembed_layer(path) -> bool:
+        """Check if path corresponds to unembedding/LM head layer."""
+        return any("lm_head" in str(key) for key in path)
+
     def update_lora_config(path, value):
+        # Determine if this layer should be trained based on layer type
+        effective_rank = lora_rank
+        if not train_attn and _is_attention_layer(path):
+            effective_rank = 0
+        elif not train_mlp and _is_mlp_layer(path):
+            effective_rank = 0
+        elif not train_unembed and _is_unembed_layer(path):
+            effective_rank = 0
+
         if path[-2].key == "lora_ranks":
-            return value.at[adapter_index].set(lora_rank)
+            return value.at[adapter_index].set(effective_rank)
         if path[-2].key == "lora_scaling":
-            return value.at[adapter_index].set(scaling)
+            # Set scaling to 0 if rank is 0 to avoid division by zero issues
+            effective_scaling = scaling if effective_rank > 0 else 0.0
+            return value.at[adapter_index].set(effective_scaling)
         if path[-2].key == "lora_A":
             # Zero out columns beyond the rank for this adapter; lora_B is already zero
-            return value.at[adapter_index, ..., lora_rank:].set(0.0)
+            return value.at[adapter_index, ..., effective_rank:].set(0.0)
         return value
 
     updated_state = jax.tree.map_with_path(update_lora_config, state)
