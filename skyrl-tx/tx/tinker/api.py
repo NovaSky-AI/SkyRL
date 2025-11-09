@@ -543,21 +543,22 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
+
 # Still have to figure out what checkpoint_path looks like
 async def forward_external_engine(request: SampleRequest, checkpoint_path: str, http_client: httpx.AsyncClient):
     """Forward to vLLM"""
 
     prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
-    
+
     payload = {
-          "model": checkpoint_path, 
-          "prompt_token_ids": prompt_tokens,
-          "max_tokens": request.sampling_params.max_tokens,
-          "temperature": request.sampling_params.temperature,
-          "logprobs": True,
-          "stream": False,
-          "return_token_ids": True,
-      }
+        "model": checkpoint_path,
+        "prompt_token_ids": prompt_tokens,
+        "max_tokens": request.sampling_params.max_tokens,
+        "temperature": request.sampling_params.temperature,
+        "logprobs": True,
+        "stream": False,
+        "return_token_ids": True,
+    }
 
     response = await http_client.post("/completions", json=payload)
     response.raise_for_status()
@@ -566,36 +567,40 @@ async def forward_external_engine(request: SampleRequest, checkpoint_path: str, 
     sequences = []
     for choice in result.choices:
         lp = choice.logprobs
-        sequences.append({
-            "tokens": lp.tokens,
-            "logprobs": lp.token_logprobs,
-            "stop_reason": choice.finish_reason,
-        })
+        sequences.append(
+            {
+                "tokens": lp.tokens,
+                "logprobs": lp.token_logprobs,
+                "stop_reason": choice.finish_reason,
+            }
+        )
 
     return {"sequences": sequences, "prompt_logprobs": []}
 
 
-async def call_external_engine_and_store_result(db_engine, http_client: httpx.AsyncClient, request_id: int, sample_req: SampleRequest, checkpoint_path: str):
-      """Background task to call external engine and store result in database."""
-      try:
-          result = await forward_external_engine(sample_req, checkpoint_path, http_client)
+async def call_external_engine_and_store_result(
+    db_engine, http_client: httpx.AsyncClient, request_id: int, sample_req: SampleRequest, checkpoint_path: str
+):
+    """Background task to call external engine and store result in database."""
+    try:
+        result = await forward_external_engine(sample_req, checkpoint_path, http_client)
 
-          async with AsyncSession(db_engine) as session:
-              future = await session.get(FutureDB, request_id)
-              if future:
-                  future.result_data = result
-                  future.status = RequestStatus.COMPLETED
-                  future.completed_at = datetime.now(timezone.utc)
-                  await session.commit()
-      except Exception as e:
-          logger.exception("External engine error")
-          async with AsyncSession(db_engine) as session:
-              future = await session.get(FutureDB, request_id)
-              if future:
-                  future.result_data = {"error": str(e), "status": "failed"}
-                  future.status = RequestStatus.FAILED
-                  future.completed_at = datetime.now(timezone.utc)
-                  await session.commit()
+        async with AsyncSession(db_engine) as session:
+            future = await session.get(FutureDB, request_id)
+            if future:
+                future.result_data = result
+                future.status = RequestStatus.COMPLETED
+                future.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+    except Exception as e:
+        logger.exception("External engine error")
+        async with AsyncSession(db_engine) as session:
+            future = await session.get(FutureDB, request_id)
+            if future:
+                future.result_data = {"error": str(e), "status": "failed"}
+                future.status = RequestStatus.FAILED
+                future.completed_at = datetime.now(timezone.utc)
+                await session.commit()
 
 
 @app.post("/api/v1/asample", response_model=FutureResponse)
@@ -615,15 +620,15 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     # Use external inference engine
     if req.app.state.engine_config.external_inference_url and req.app.state.http:
         request_id = await create_future(
-        session=session,
-        request_type=types.RequestType.SAMPLE,
-        model_id=model_id,
-        request_data=types.SampleInput(
-            base_model=request.base_model,
-            prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
-            num_samples=request.num_samples,
-            checkpoint_id=checkpoint_id,
+            session=session,
+            request_type=types.RequestType.SAMPLE,
+            model_id=model_id,
+            request_data=types.SampleInput(
+                base_model=request.base_model,
+                prompt=request.prompt.to_types(),
+                sampling_params=request.sampling_params.to_types(),
+                num_samples=request.num_samples,
+                checkpoint_id=checkpoint_id,
             ),
         )
         await session.commit()
@@ -635,7 +640,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             )
         )
         return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
-    
+
     # Use internal engine instead
     request_id = await create_future(
         session=session,
