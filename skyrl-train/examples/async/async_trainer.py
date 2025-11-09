@@ -26,7 +26,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         # Load checkpoint state if resumption is enabled
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.load_checkpoints()
+                self.global_step, _ = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
 
         # Initialize weight sync state
