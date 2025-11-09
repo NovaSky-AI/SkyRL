@@ -453,12 +453,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
             )
 
-        all_outputs = await tqdm.gather(
-            *tasks,
-            desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
-            mininterval=5,
-        )
+        # all_outputs = await tqdm.gather(
+        #     *tasks,
+        #     desc="Generating Trajectories",
+        #     miniters=max(1, len(tasks) // 10),
+        #     mininterval=5,
+        # )
+        all_outputs = await asyncio.gather(*tasks)
 
         responses = [output.response_ids for output in all_outputs]
         rewards = [output.reward for output in all_outputs]
