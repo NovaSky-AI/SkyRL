@@ -534,7 +534,6 @@ class TinkerEngine:
                 sampling_logprobs[mb_start:mb_end],
                 advantages[mb_start:mb_end],
             )
-            # Store full padded arrays - no slicing on device
             token_losses_device.append(per_token_losses)
             logprobs_device.append(target_logprobs)
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
