@@ -77,7 +77,7 @@ class _AsyncStalenessManager:
     can consume, such that we will never drop any generated trajectories for being too stale.
 
     Capacity formula:
-        consumer_capacity = (max_staleness + current_version) * mini_batch_size
+        consumer_capacity = (max_staleness_steps + current_version) * mini_batch_size
             How many trajectories the training worker can consume at most, including those already consumed.
             Note we do not need a +1 here unlike AReal because of our semantic of `self._current_version`
             is "the version being worked on".
@@ -96,10 +96,10 @@ class _AsyncStalenessManager:
     for a slot at the same time.
     """
 
-    def __init__(self, max_concurrent_rollouts: int, mini_batch_size: int, max_staleness: int):
+    def __init__(self, max_concurrent_rollouts: int, mini_batch_size: int, max_staleness_steps: int):
         self.max_concurrent_rollouts = max(1, int(max_concurrent_rollouts))
         self.mini_batch_size = max(1, int(mini_batch_size))
-        self.max_staleness = int(max_staleness)
+        self.max_staleness_steps = int(max_staleness_steps)
 
         self._stat = _RolloutStat()
         self._cond = asyncio.Condition()
@@ -128,7 +128,7 @@ class _AsyncStalenessManager:
             assert self._current_version == global_step, "Unexpected current version when resetting staleness manager"
 
     def _compute_capacity_unlocked(self) -> int:
-        consumer_capacity = (self.max_staleness + self._current_version) * self.mini_batch_size
+        consumer_capacity = (self.max_staleness_steps + self._current_version) * self.mini_batch_size
         producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
         producer_concurrency_capacity = self.max_concurrent_rollouts - self._stat.running
         return min(producer_concurrency_capacity, producer_staleness_capacity)
@@ -248,25 +248,26 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)
         assert cfg is not None, "cfg must be provided to FullyAsyncRayPPOTrainer"
 
-        # Initialize async-specific knobs -- TODO(Charlie): move these to the config.
-        # we generate self.num_parallel_generation_workers * n_samples_per_prompt individual rollouts in parallel
-        self.num_parallel_generation_workers = cfg.trainer.policy_mini_batch_size * 5  # TODO(Charlie): make this a config option.
-        
-        # we kick off training whenever we have self.mini_batch_size groups of rollouts are in the
-        # generation buffer. i.e. consumer batch size.
+        # Initialize async-specific knobs
+        # we generate num_parallel_generation_workers groups of rollouts in parallel
+        # we kick off training whenever we have self.mini_batch_size groups of rollouts are in the generation buffer. i.e. consumer batch size.
+        self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
+        self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
 
-        # If a group of trajectory is scheduled at step i, and it gets used at step j, we only use
-        # it if j - i <= self.max_steps_off_policy, otherwise we discard the generated group and re-schedule it.
-        # So if self.max_steps_off_policy = 0, it is equivalent to synchronous training; and 1 is one-step off-policy,
-        # except we will generate wasted rollouts.)
-        # TODO(Charlie): make this a config option.
-        self.max_steps_off_policy = 0
-
-        # TODO(Charlie): Check that say self.mini_batch_size * self.max_steps_off_policy is less than self.num_parallel_generation_workers.
-        # since otherwise that parallelism will never happen due to staleness control. (is it correct?)
-        # But it should not be too small either, otherwise the throughput is underutilized.
-        # So it should be: self.mini_batch_size <= self.num_parallel_generation_workers <= self.mini_batch_size * self.max_steps_off_policy.
+        assert (
+            (
+                self.mini_batch_size <= self.num_parallel_generation_workers and 
+                self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
+            ),
+            (
+                "Invalid num_parallel_generation_workers, the following must hold: "
+                "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1)."
+                f"Got: mini_batch_size = {self.mini_batch_size}, "
+                f"num_parallel_generation_workers = {self.num_parallel_generation_workers}, "
+                f"max_staleness_steps = {self.max_staleness_steps}"
+            )
+        )
 
         # Initialize base trainer (will call our overridden _build_train_dataloader..., which uses fields above)
         super().__init__(*args, **kwargs)
@@ -284,7 +285,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_rollouts=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
-            max_staleness=self.max_steps_off_policy,
+            max_staleness_steps=self.max_staleness_steps,
         )
 
 
@@ -339,9 +340,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Inside the loop, global_step's semantic is: the model has finished `global_step - 1`
             # steps of training, and we are working on the `global_step`-th step of training in the loop.
 
-            # Shared queue of completed rollout groups
-            # TODO(Charlie): do I need to set a max size here? Technically it is the capacity.
-            generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup]()
+            # Shared queue of completed rollout groups, size bounded by the maximum capacity controlled by the staleness manager.
+            # consumer_capacity - (accepted + running), where accepted depends on current_version, hence
+            # making it step-invariant.
+            generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](
+                maxsize=self.mini_batch_size * (self.max_staleness_steps + 1)
+            )
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers
             generator_tasks = [
@@ -517,11 +521,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
-                await generation_output_group_buffer.put(GeneratedOutputGroup(
-                    generator_output=cur_generator_output,
-                    uid=uids[0],
-                    global_step_when_scheduled=global_step_at_start,
-                ))
+                try:
+                    generation_output_group_buffer.put_nowait(GeneratedOutputGroup(
+                        generator_output=cur_generator_output,
+                        uid=uids[0],
+                        global_step_when_scheduled=global_step_at_start,
+                    ))
+                except asyncio.QueueFull:
+                    raise AssertionError("Generation buffer should never be full given staleness control.")
                 await self._staleness_manager.on_rollout_accepted()
         except asyncio.CancelledError:
             # If a slot was acquired but we exit early, release running count
@@ -557,7 +564,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
-            assert cur_staleness <= self.max_steps_off_policy, "Staleness control violated. This is not expected since we use AsyncStalenessManager."
+            assert cur_staleness <= self.max_staleness_steps, "Staleness control violated. This is not expected since we use AsyncStalenessManager."
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
 
