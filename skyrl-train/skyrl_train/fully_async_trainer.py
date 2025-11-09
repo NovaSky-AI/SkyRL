@@ -117,7 +117,7 @@ class _AsyncStalenessManager:
         self._current_version = global_step
         self._stat.accepted = (global_step - 1) * self.mini_batch_size  # trainer has already consumed this many trajectories.
 
-    async def validate_state_at_epoch_end(self, global_step: int) -> None:
+    async def validate_state_at_step_end(self, global_step: int, is_at_epoch_end: bool = False) -> None:
         """
         Check that the current version and accepted rollouts are consistent with the global step.
 
@@ -125,9 +125,10 @@ class _AsyncStalenessManager:
             global_step: The global step we are about to train on (after incrementing).
         """
         async with self._cond:
-            assert self._stat.running == 0 and self._stat.submitted == 0, "We expect no rollouts are running or submitted when validating state at epoch start"
-            assert self._stat.accepted == (global_step - 1) * self.mini_batch_size, "Unexpected accepted rollouts when resetting staleness manager"
-            assert self._current_version == global_step, "Unexpected current version when resetting staleness manager"
+            if is_at_epoch_end:
+                assert self._stat.running == 0 and self._stat.submitted == 0, "We expect no rollouts are running or submitted when validating state at epoch end."
+            assert self._stat.accepted == (global_step - 1) * self.mini_batch_size, "Unexpected number of accepted rollouts."
+            assert self._current_version == global_step, "Unexpected current version."
 
     def _compute_capacity_unlocked(self) -> int:
         consumer_capacity = (self.max_staleness_steps + self._current_version) * self.mini_batch_size
@@ -315,6 +316,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # Set async dataloader manager and staleness manager to the loaded state.
                 self.async_train_dataloader_manager.load_state_from_checkpoint(loaded_consumed_data_uids_set)
                 self._staleness_manager.load_state_from_checkpoint(self.global_step + 1)  # +1 due to we haven't incremented yet
+                assert len(loaded_consumed_data_uids_set) == self.mini_batch_size * self.global_step, "Unexpected number of consumed data UIDs."
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
@@ -415,15 +417,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self.all_metrics.update(eval_metrics)
                 if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                     with Timer("save_checkpoints", self.all_timings):
-                        self.save_checkpoints()
+                        await asyncio.to_thread(self.save_checkpoints)
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
                     with Timer("save_hf_model", self.all_timings):
-                        self.save_models()
+                        await asyncio.to_thread(self.save_models)
                 self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
                 self.all_timings = {}
                 self.global_step += 1
                 # Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
+                await self._staleness_manager.validate_state_at_step_end(self.global_step, is_at_epoch_end=False)
+                assert len(self.async_train_dataloader_manager.get_consumed_uids_list()) == self.mini_batch_size * (self.global_step - 1), "Unexpected number of consumed data UIDs."
 
             # 6. Per-epoch epilogue.
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
@@ -441,17 +445,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Per-epoch reset/validation for data loading and staleness management
             assert all(t.done() for t in generator_tasks), "Generator tasks must be done before resetting the dataloader manager"
             await self.async_train_dataloader_manager.reset_at_epoch_end()
-            await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
+            await self._staleness_manager.validate_state_at_step_end(self.global_step, is_at_epoch_end=True)
 
             # End of an epoch.
         pbar.close()
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
-                self.save_checkpoints()
+                await asyncio.to_thread(self.save_checkpoints)
                 logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
             with Timer("save_hf_model", self.all_timings):
-                self.save_models()
+                await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
         logger.info("Training done!")
 
