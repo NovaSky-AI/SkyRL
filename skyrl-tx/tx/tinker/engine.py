@@ -63,7 +63,9 @@ class AccumulatedGradients:
         if self.grad_sum is None:
             self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
         else:
-            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index)
+            # Update grad_sum in-place with the new accumulated values
+            updated = self._accumulate(self.grad_sum, lora_grads, adapter_index)
+            nnx.update(self.grad_sum, updated)
         self.denominator += count
 
     def get_mean(self) -> nnx.State:
