@@ -276,7 +276,8 @@ def update_adapter_config(
     Args:
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to update
-        lora_rank: Rank to set for this adapter
+        lora_rank: Rank to set for this adapter (note: MoE expert layers automatically
+            use rank/num_experts to normalize parameter count)
         lora_alpha: Alpha value to use for computing scaling (alpha / rank)
         train_attn: Whether to train attention layers with LoRA (default: True)
         train_mlp: Whether to train MLP layers with LoRA (default: True)
@@ -293,6 +294,10 @@ def update_adapter_config(
         """Check if path corresponds to MLP layer (including MoE experts)."""
         return any("mlp" in str(key) or "experts" in str(key) for key in path)
 
+    def _is_expert_layer(path) -> bool:
+        """Check if path corresponds to MoE expert layer."""
+        return any("experts" in str(key) for key in path)
+
     def _is_unembed_layer(path) -> bool:
         """Check if path corresponds to unembedding/LM head layer."""
         return any("lm_head" in str(key) for key in path)
@@ -300,6 +305,16 @@ def update_adapter_config(
     def update_lora_config(path, value):
         # Determine if this layer should be trained based on layer type
         effective_rank = lora_rank
+
+        # Apply rank normalization for MoE expert layers
+        # Following Thinking Machines' approach: divide rank by num_experts
+        # to keep total LoRA parameters similar to non-MoE models
+        if _is_expert_layer(path):
+            num_experts = getattr(model.config, "num_experts", None)
+            if num_experts and num_experts > 1:
+                effective_rank = max(1, lora_rank // num_experts)
+
+        # Apply layer-specific training flags
         if not train_attn and _is_attention_layer(path):
             effective_rank = 0
         elif not train_mlp and _is_mlp_layer(path):
