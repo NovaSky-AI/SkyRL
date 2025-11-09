@@ -116,8 +116,9 @@ class _AsyncStalenessManager:
         """
         self._current_version = global_step
         self._stat.accepted = (global_step - 1) * self.mini_batch_size  # trainer has already consumed this many trajectories.
+        self._stat.submitted = self._stat.accepted
 
-    async def validate_state_at_step_end(self, global_step: int, is_at_epoch_end: bool = False) -> None:
+    async def validate_state_at_epoch_end(self, global_step: int) -> None:
         """
         Check that the current version and accepted rollouts are consistent with the global step.
 
@@ -125,10 +126,18 @@ class _AsyncStalenessManager:
             global_step: The global step we are about to train on (after incrementing).
         """
         async with self._cond:
-            if is_at_epoch_end:
-                assert self._stat.running == 0 and self._stat.submitted == 0, "We expect no rollouts are running or submitted when validating state at epoch end."
-            assert self._stat.accepted == (global_step - 1) * self.mini_batch_size, "Unexpected number of accepted rollouts."
-            assert self._current_version == global_step, "Unexpected current version."
+            assert self._stat.running == 0, "We expect no rollouts are running at end of an epoch."
+            consumed = (global_step - 1) * self.mini_batch_size
+            assert self._stat.accepted == consumed, (
+                f"Unexpected number of accepted rollouts. Got {self._stat.accepted} != {consumed}."
+            )
+            assert self._current_version == global_step, (
+                f"Unexpected current version. Got {self._current_version} != {global_step}."
+            )
+            assert self._stat.submitted == self._stat.accepted, (
+                "We expect all submitted rollouts to be accepted at end of an epoch. "
+                f"Got {self._stat.submitted} != {self._stat.accepted}."
+            )
 
     def _compute_capacity_unlocked(self) -> int:
         consumer_capacity = (self.max_staleness_steps + self._current_version) * self.mini_batch_size
@@ -426,7 +435,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.global_step += 1
                 # Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
-                await self._staleness_manager.validate_state_at_step_end(self.global_step, is_at_epoch_end=False)
                 assert len(self.async_train_dataloader_manager.get_consumed_uids_list()) == self.mini_batch_size * (self.global_step - 1), "Unexpected number of consumed data UIDs."
 
             # 6. Per-epoch epilogue.
@@ -445,7 +453,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Per-epoch reset/validation for data loading and staleness management
             assert all(t.done() for t in generator_tasks), "Generator tasks must be done before resetting the dataloader manager"
             await self.async_train_dataloader_manager.reset_at_epoch_end()
-            await self._staleness_manager.validate_state_at_step_end(self.global_step, is_at_epoch_end=True)
+            await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
             # End of an epoch.
         pbar.close()
