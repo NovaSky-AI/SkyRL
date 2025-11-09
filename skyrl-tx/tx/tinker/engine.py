@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import functools
 import time
 from collections import Counter
 from contextlib import contextmanager
