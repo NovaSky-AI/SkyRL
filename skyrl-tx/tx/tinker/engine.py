@@ -58,15 +58,12 @@ class AccumulatedGradients:
         """Extracts gradients and adds them to the sum."""
         return jax.tree.map(lambda accum, g: accum.at[:].add(g[adapter_index]), grad_sum, lora_grads)
 
-    def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
+    def add(self, lora_grads: nnx.State, adapter_index: jax.Array, count: int) -> None:
         """Accumulate gradients and increment denominator."""
-        # Convert adapter_index to JAX array so indexing happens on device
-        adapter_index_array = jnp.array(adapter_index, dtype=jnp.int32)
-
         if self.grad_sum is None:
-            self.grad_sum = jax.tree.map(lambda g: g[adapter_index_array], lora_grads)
+            self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
         else:
-            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index_array)
+            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index)
         self.denominator += count
 
     def get_mean(self) -> nnx.State:
@@ -297,9 +294,8 @@ class TinkerEngine:
         Accumulate adapter-wise gradient sums and example counts.
         """
         for model_id, count in Counter(example_model_ids).items():
-            adapter_index = self.models[model_id].adapter_index
+            adapter_index = jnp.array(self.models[model_id].adapter_index, dtype=jnp.int32)
             accumulator = self.accumulated_grads[model_id]
-            # Extract and accumulate gradients for this adapter
             accumulator.add(lora_grads, adapter_index, count)
 
     def _filter_valid_requests(
