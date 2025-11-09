@@ -53,7 +53,7 @@ class AccumulatedGradients:
     denominator: int = 0
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("adapter_index",), donate_argnames=("lora_grads",))
+    @functools.partial(jax.jit, static_argnames=("adapter_index",))
     def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> nnx.State:
         """Extracts gradients and adds them to the sum in-place."""
         return jax.tree.map(lambda accum, g: accum.at[:].add(g[adapter_index]), grad_sum, lora_grads)
