@@ -184,6 +184,7 @@ class _AsyncDataloaderManager:
     """
     def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int):
         self._train_dataloader = train_dataloader
+        self._train_dataloader_initial_state = train_dataloader.state_dict()
         self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -196,9 +197,12 @@ class _AsyncDataloaderManager:
         """
         self._consumed_data_uids = consumed_data_uids_set
 
+        # Reset in case the dataloader loaded the state from the checkpoint, which we do not want.
+        self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)
+
     async def reset_at_epoch_end(self) -> None:
         async with self._lock:
-            # TODO(Charlie): do we need to reset train_dataloader since it is stateful?
+            self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
             self._iter = enumerate(self._train_dataloader)
             self._consumed_data_uids.clear()
             self._exhausted = False
@@ -598,7 +602,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         Returns the global step to resume from, the checkpoint path, and the consumed data UIDs.
         """
-        global_step, checkpoint_path = super().load_checkpoints(skip_loading_dataloader_state=True)
+        global_step, checkpoint_path = super().load_checkpoints()
         if global_step == 0:
             return 0, checkpoint_path, None
         fully_async_state_path = os.path.join(checkpoint_path, "fully_async_state.pt")
