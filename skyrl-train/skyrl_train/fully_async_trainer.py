@@ -17,6 +17,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Tuple, Iterable, Set
+import inspect
 
 @dataclass
 class GeneratedOutputGroup:
@@ -97,10 +98,11 @@ class _AsyncStalenessManager:
     """
 
     def __init__(self, max_concurrent_rollouts: int, mini_batch_size: int, max_staleness_steps: int):
-        self.max_concurrent_rollouts = max(1, int(max_concurrent_rollouts))
-        self.mini_batch_size = max(1, int(mini_batch_size))
-        self.max_staleness_steps = int(max_staleness_steps)
+        self.max_concurrent_rollouts = max_concurrent_rollouts
+        self.mini_batch_size = mini_batch_size
+        self.max_staleness_steps = max_staleness_steps
 
+        # Control logics.
         self._stat = _RolloutStat()
         self._cond = asyncio.Condition()
 
@@ -518,7 +520,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # 3. Generate one rollout group
                 global_step_at_start = self.global_step  # for staleness control
-                cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+
+                if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
+                    # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
+                    # blast the console with each worker's progress bar.
+                    cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input, disable_tqdm=True)
+                else:
+                    cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 try:
