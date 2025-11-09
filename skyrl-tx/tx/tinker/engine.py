@@ -540,8 +540,7 @@ class TinkerEngine:
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
 
         # Single batched device-to-host transfer for all arrays
-        token_losses_host = jax.device_get(token_losses_device)
-        logprobs_host = jax.device_get(logprobs_device)
+        token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
 
         # Flatten microbatches and slice to actual sequence lengths
         token_losses_out = []

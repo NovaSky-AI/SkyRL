@@ -239,10 +239,9 @@ class GeneratorMixin:
         )
 
         # Single device-to-host transfer for all data
-        generated_ids_host = jax.device_get(generated_ids[:, prompt_length:])
-        stop_pos_host = jax.device_get(stop_pos)
-        all_logprobs_host = jax.device_get(all_logprobs[:, prompt_length:])
-        end_positions_host = jax.device_get(end_positions - prompt_length)
+        generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host = jax.device_get(
+            (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length)
+        )
 
         return GenerateOutput(
             generated_ids=[generated_ids_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
