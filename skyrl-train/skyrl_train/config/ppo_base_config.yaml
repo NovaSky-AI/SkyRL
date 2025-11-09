@@ -135,7 +135,22 @@ trainer:
     cispo: 
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+  fully_async:
+    # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
+    # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
+    # So if max_staleness_steps = 0, it is equivalent to synchronous training; and 1 is one-step
+    # off-policy. For more on staleness control, see `fully_async_trainer.py::_AsyncStalenessManager`.
+    # The larger the max_staleness_steps, the more off-policy the training is, and the more throughput we get.
+    max_staleness_steps: 4
 
+    # The number of generation workers to spawn, where each worker works on a group of trajcetories,
+    # being the same prompt repeated `generator.n_samples_per_prompt` times. We would want:
+    # policy_mini_batch_size <= num_parallel_generation_workers <= policy_mini_batch_size * (max_staleness_steps + 1).
+    # If smaller than policy_mini_batch_size, we will waste throughput by not maximizing the concurrency.
+    # If larger than policy_mini_batch_size * (max_staleness_steps + 1), some workers will be idle due to staleness control.
+    # See `fully_async_trainer.py::_AsyncStalenessManager` for more details.
+    # Default value is policy_mini_batch_size * (max_staleness_steps + 1) -- 256 * (4 + 1) = 1280
+    num_parallel_generation_workers: 1280
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

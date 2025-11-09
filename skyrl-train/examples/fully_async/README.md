@@ -17,3 +17,7 @@ For more details, refer to the documentation. (TO BE ADDED)
 
 Currently, only support generators that use `/chat/completions`. Hence for demonstration we
 implement a `skyrl_gym_http_generator.py` (which normally uses a `.generate()`).
+
+Fully async specific configuration knobs are:
+- `trainer.full_async.max_staleness_steps`
+- `trainer.fully_async.num_parallel_generation_workers`
