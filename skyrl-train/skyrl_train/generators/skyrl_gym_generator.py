@@ -406,7 +406,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
+            "response_ids": truncated_responses,
             "rewards": rewards,
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
