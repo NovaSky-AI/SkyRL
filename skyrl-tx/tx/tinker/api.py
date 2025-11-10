@@ -577,6 +577,7 @@ async def call_external_engine_and_store_result(
         async with httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
+            timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
         ) as http_client:
             result = await forward_external_engine(sample_req, checkpoint_path, http_client)
 
