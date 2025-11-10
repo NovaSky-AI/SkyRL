@@ -407,6 +407,7 @@ class TinkerEngine:
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
+            .where(FutureDB.request_type != types.RequestType.EXTERNAL)
             .order_by(FutureDB.request_id)
         )
         other_futures = session.exec(statement).all()

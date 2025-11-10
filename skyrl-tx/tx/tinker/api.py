@@ -617,7 +617,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     if req.app.state.engine_config.external_inference_url:
         request_id = await create_future(
             session=session,
-            request_type=types.RequestType.SAMPLE,
+            request_type=types.RequestType.EXTERNAL,
             model_id=model_id,
             request_data=types.SampleInput(
                 base_model=request.base_model,
