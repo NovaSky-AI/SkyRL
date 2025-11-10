@@ -25,6 +25,7 @@ from tx.tinker.db_models import (
     CheckpointStatus,
     get_async_database_url,
 )
+from tx.tinker.extra import ExternalInferenceClient
 from tx.utils.storage import download_file
 from tx.utils.log import logger
 
@@ -43,10 +44,15 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    # Log if external inference is specified (client will be created per-request)
+    # Setup external inference client if configured
     if app.state.engine_config.external_inference_url:
+        app.state.external_inference_client = ExternalInferenceClient(
+            app.state.engine_config.external_inference_url,
+            app.state.engine_config.external_inference_api_key,
+        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     else:
+        app.state.external_inference_client = None
         logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters
@@ -540,65 +546,6 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-# Still have to figure out what checkpoint_path looks like
-async def forward_external_engine(request: SampleRequest, checkpoint_path: str, http_client: httpx.AsyncClient):
-    """Forward to vLLM"""
-
-    prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
-
-    payload = {
-        # "model": checkpoint_path,
-        "model": "Qwen/Qwen3-4B", # TODO: Currently this is hard coded
-        "prompt": prompt_tokens,
-        "max_tokens": request.sampling_params.max_tokens,
-        "temperature": request.sampling_params.temperature,
-        "logprobs": True,
-        "stream": False,
-        "return_token_ids": True,
-    }
-
-    response = await http_client.post("/completions", json=payload)
-    response.raise_for_status()
-    result = response.json()
-
-    sequences = []
-    for choice in result["choices"]:
-        lp = choice["logprobs"]
-        sequences.append(types.GeneratedSequence(tokens=choice["token_ids"], logprobs=lp["token_logprobs"], stop_reason=choice["finish_reason"]))
-
-    return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
-
-
-async def call_external_engine_and_store_result(
-    db_engine, base_url: str, api_key: str, request_id: int, sample_req: SampleRequest, checkpoint_path: str
-):
-    """Background task to call external engine and store result in database."""
-    try:
-        async with httpx.AsyncClient(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
-        ) as http_client:
-            result = await forward_external_engine(sample_req, checkpoint_path, http_client)
-
-        async with AsyncSession(db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future:
-                future.result_data = result.model_dump()
-                future.status = RequestStatus.COMPLETED
-                future.completed_at = datetime.now(timezone.utc)
-                await session.commit()
-    except Exception as e:
-        logger.exception("External engine error")
-        async with AsyncSession(db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future:
-                future.result_data = {"error": str(e), "status": "failed"}
-                future.status = RequestStatus.FAILED
-                future.completed_at = datetime.now(timezone.utc)
-                await session.commit()
-
-
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
@@ -613,40 +560,9 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
-    # Use external inference engine
-    if req.app.state.engine_config.external_inference_url:
-        request_id = await create_future(
-            session=session,
-            request_type=types.RequestType.EXTERNAL,
-            model_id=model_id,
-            request_data=types.SampleInput(
-                base_model=request.base_model,
-                prompt=request.prompt.to_types(),
-                sampling_params=request.sampling_params.to_types(),
-                num_samples=request.num_samples,
-                checkpoint_id=checkpoint_id,
-            ),
-        )
-        await session.commit()
-
-        checkpoint_path = req.app.state.engine_config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
-        base_url = f"{req.app.state.engine_config.external_inference_url}/v1"
-        asyncio.create_task(
-            call_external_engine_and_store_result(
-                req.app.state.db_engine,
-                base_url,
-                req.app.state.engine_config.external_inference_api_key,
-                request_id,
-                request,
-                str(checkpoint_path),
-            )
-        )
-        return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
-
-    # Use internal engine instead
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.SAMPLE,
+        request_type=types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE,
         model_id=model_id,
         request_data=types.SampleInput(
             base_model=request.base_model,
@@ -656,8 +572,18 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             checkpoint_id=checkpoint_id,
         ),
     )
-
     await session.commit()
+
+    if req.app.state.external_inference_client:
+        checkpoint_path = req.app.state.engine_config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        asyncio.create_task(
+            req.app.state.external_inference_client.call_and_store_result(
+                req.app.state.db_engine,
+                request_id,
+                request,
+                str(checkpoint_path),
+            )
+        )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
