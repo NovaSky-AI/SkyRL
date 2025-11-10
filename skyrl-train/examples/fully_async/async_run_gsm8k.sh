@@ -1,7 +1,7 @@
 set -x
 
 # Fully async GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
-# This bash script is opied from examples/async/async_run_gsm8k.sh, except for:
+# This bash script is copied from examples/async/async_run_gsm8k.sh, except for:
 # - running examples.fully_async.main_async
 # - setting the generator.batched=false.
 # - colocate_all=false

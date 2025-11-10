@@ -167,7 +167,7 @@ class _AsyncStalenessManager:
         """
         Called when a generation is not accepted, or generation worker runs into error while generating a trajectory.
 
-        Currenty we do not call this method but runs into error. We might need to use this when we want to
+        Currently, we do not call this method but instead raise errors. We might need to use this when we want to
         filter out trajectories.
         """
         async with self._cond:
@@ -183,7 +183,7 @@ class _AsyncStalenessManager:
 
 class _AsyncDataloader:
     """
-    A train dataloader wrapper that accomodates the need of fully async training, including:
+    A train dataloader wrapper that accommodates the need of fully async training, including:
     - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
     - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
     - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
@@ -614,7 +614,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("example: ", vis)
+        logger.info(f"Example generated: {vis}")
 
         return self.convert_to_training_input(generator_output, uids)
 

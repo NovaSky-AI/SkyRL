@@ -123,7 +123,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("example: ", vis)
+        logger.info(f"Example generated: {vis}")
 
         with Timer("convert_to_training_input", self.all_timings):
             training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
