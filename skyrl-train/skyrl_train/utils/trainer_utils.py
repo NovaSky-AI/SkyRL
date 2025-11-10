@@ -619,7 +619,9 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
 
-def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False) -> StatefulDataLoader:
+def build_dataloader(
+    cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+) -> StatefulDataLoader:
     """
     Build the dataloader for the training or evaluation dataset.
 
