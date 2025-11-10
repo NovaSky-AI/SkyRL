@@ -50,7 +50,7 @@ b. One-Step Off-Policy Async Training
 
 In AReal's figure 1 RHS, we have one-step off-policy pipelining, also supported by SkyRL and discussed in :doc:`one_step_off_async`.
 
-Here we split the GPUs into two groups, dedicated to training and generation respectively. We first geneate a batch of trajectories to start the pipeline, and the trainer always train on the one-step-stale batch of trajectories (hence one-step off).
+Here we split the GPUs into two groups, dedicated to training and generation respectively. We first generate a batch of trajectories to start the pipeline, and the trainer always trains on the one-step-stale batch of trajectories (hence one-step off).
 
 - Pro: still relatively easy to implement and setup.
 - Con: as shown in the figure, stragglers in a generation batch will stall both generation and training, decreasing throughput. This is especially an issue for long-horizon tasks.
@@ -101,12 +101,12 @@ Following `examples/fully_async/async_run_gsm8k.sh <https://github.com/NovaSky-A
 
 For fully async specifically, the following are the main knobs to tune:
 
-- ``trainer.policy_mini_batch_size``: The mini-batch size for policy training. The trainer triggers a traning step whenever the geneartion workers have generated this many groups of trajectories.
+- ``trainer.policy_mini_batch_size``: The mini-batch size for policy training. The trainer triggers a training step whenever the generation workers have generated this many groups of trajectories.
 - ``trainer.fully_async.max_staleness_steps``: The maximum off-policy steps allowed for each training batch, trading off between throughput and off-policy bias. See :ref:`async-staleness-manager` for more details.
 
   - ``max_staleness_steps = 0`` is equivalent to synchronous training (despite wasting throughput since we cannot overlap training and generation).
   - ``max_staleness_steps = 1`` is one-step off-policy training (except having potential in-flight weight updates).
-- ``trainer.fully_async.num_parallel_generation_workers``: The number of generation workers to spawn, where each worker works on a group of trajcetories. For maximum throughput, set to ``trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)``. Each is simply an ``asyncio.Task`` that runs ``generator.generate()``.
+- ``trainer.fully_async.num_parallel_generation_workers``: The number of generation workers to spawn, where each worker works on a group of trajectories. For maximum throughput, set to ``trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)``. Each is simply an ``asyncio.Task`` that runs ``generator.generate()``.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -157,7 +157,7 @@ Note that all the control logics pertain to a single epoch. We do not do any cro
 Besides, we define ``group`` as the smallest unit of data in the control logic. A group (in GRPO sense)
 is a set of ``generator.n_samples_per_prompt`` number of trajectories generated for the same prompt.
 
-1. N Generation Workers
+1. K Generation Workers
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Generation workers are virtual workers, each is simply an ``asyncio.Task`` that runs ``generator.generate()``
@@ -218,48 +218,63 @@ The ``AsyncDataloader`` is used in the following cases:
 5. Async Staleness Manager
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The async staleness manager is responsible for ensuring that the generation workers never generate
-data that will violate the staleness control specified by user's ``trainer.fully_async.max_staleness_steps``.
+The async staleness manager makes sure generation never outruns training beyond the user-specified
+bound ``trainer.fully_async.max_staleness_steps``. It enforces a simple, global capacity rule so
+that groups waiting in the buffer or currently being generated are never "too stale" relative to the
+latest trained model.
 
-This might be the most involved component in the fully async training. We first define the terms:
+Modeled after AReal's `StalenessManager <https://github.com/inclusionAI/AReaL/blob/b755c4447c2fff97889d8828293ee85f17a806f9/areal/core/staleness_manager.py>`_ (paper §5.1), our controller maintains a small set of global counters and enforces a simple capacity inequality.
 
-- We use the term "consumed by trainer" to refer to the generation outputs that have been used to train, since the trainer
-is a consumer of training data, and the generation workers are producers.
-- ``current_global_step`` denotes the current model version being worked on. That is, the model has performed ``current_global_step - 1`` number of updates.
-- "capacity" refers to the maximum number of generation outputs that the trainer can consume without violating the staleness control.
+Definitions
+^^^^^^^^^^^
 
-The implementation is modeled after AReal's `StalenessManager <https://github.com/inclusionAI/AReaL/blob/b755c4447c2fff97889d8828293ee85f17a806f9/areal/core/staleness_manager.py>`_ and the idea is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3.
+- **Consumed by trainer**: groups that have already been used for updating the model weights.
+- ``current_global_step``: the model version currently being worked on; the model has completed ``current_global_step - 1`` updates.
+- ``mini_batch_size = B``: number of groups consumed per training step.
+- ``max_staleness_steps = S``: the maximum allowed difference between when a group was scheduled to generate, and the step that trains on it.
+- ``accepted``: total number of groups that finished generation (either already consumed or waiting in the buffer). This includes all the generation outputs throughout the entire training process. Thus, this number is strictly increasing.
+- ``running``: number of groups currently being generated by workers.
+- ``submitted``: total number of groups submitted to workers (used for logging).
 
-We first keep track of the following key statistics in a class ``_RolloutStat``:
+Capacity control
+^^^^^^^^^^^^^^^^
 
-- ``accepted``: The number of generation outputs that have been generated (can be either already consumed by the trainer, or waiting in the buffer to be consumed). This includes all the generation outputs throughout the entire training process. Thus, this number is strictly increasing.
-- ``running``: The number of generation outputs that are currently being generated by the generation workers.
-- ``submitted``: The number of generation outputs that have been submitted to the generation workers. Only used for logging purposes.
+At ``current_global_step``, the maximum number of groups the system may have progressed
+since the very beginning of the training (counting both completed and in-flight generation) without violating the staleness bound is::
 
-Now with these metrics, we can deduce the following capacity formula.
+  capacity = (S + current_global_step) * B
 
-We can deduce the maximum number of groups (capacity) that the trainer can consume from the beginning of the training (including all previous epochs) until ``current_global_step`` as ``(max_staleness_steps + current_global_step) * mini_batch_size``. This capacity includes:
+To stay within the bound, the manager guarantees::
 
-- The groups already consumed by the trainer (i.e. already used to train), which is ``(current_global_step - 1) * mini_batch_size``
-- The groups that are already in the output buffer but not yet consumed by the trainer (i.e. ``accepted - consumed``)
-- The groups that are currently being generated by the generation workers (i.e. ``running``)
+  accepted + running <= capacity
 
-Therefore, at a given ``current_global_step``, we need to ensure ``accepted + running <= capacity`` to avoid violating the staleness control.
+Intuition:
 
-So, whenever the generation worker tries to start generating a new group of trajectories, it needs to check if there is capacity available by calling ``await AsyncStalenessManager.acquire_submission_slot()``.
+- Of the capacity, ``(current_global_step - 1) * B`` have already been consumed by training.
+- The remainder is the "headroom" the system can be ahead of training: items already in the buffer (``accepted - consumed``) plus items currently being generated (``running``).
+- Each time training finishes a step, ``current_global_step`` increases by 1, expanding capacity by ``B`` and unblocking generation.
 
-Upon finishing generating a group of trajectories, the generation worker needs to mark the generation as accepted to the ``AsyncStalenessManager`` by calling ``await AsyncStalenessManager.on_rollout_accepted()``.
+Operationally, a generation worker:
 
-Finally, when the trainer finishes a training step and increment the ``global_step``, it needs to update the capacity by calling ``await AsyncStalenessManager.notify_capacity_change(global_step)``, potentially unblocking generation workers stuck on step 1.
+1) Acquires capacity before starting a new group via ``await AsyncStalenessManager.acquire_submission_slot()``. This blocks until ``capacity - (accepted + running) > 0`` is satisfied.  
+2) When the group finishes generation and is enqueued, it calls ``await AsyncStalenessManager.on_rollout_accepted()`` to convert one running slot into an accepted unit.  
 
-Note that when loading from a checkpoint, we can do ``accepted := consumed`` since we only record the state that is trained, ignoring the running or about-to-be-consumed trajectories when saving the checkpoint.
+After each training step, the trainer increments the version and calls
+``await AsyncStalenessManager.notify_capacity_change(current_global_step)``, which increases capacity and wakes up blocked workers.
+
+Checkpointing semantics
+^^^^^^^^^^^^^^^^^^^^^^^
+
+When saving a checkpoint, only trainer-consumed state is recorded. On resume, we set ``accepted := consumed`` (and do not restore those that were running or about-to-be-consumed in the buffer), which preserves the capacity invariant without reintroducing stale or partially generated work.
 
 .. note::
 
-    Note that the ``AsyncStalenessManager`` is a design choice. We could also ignore the capacity control and
-    simply allow the generation workers to generate any number of groups, and only drop trajectories that are too stale when the trainer tries to train on them.
+    ``AsyncStalenessManager`` is a deliberate design choice. One could instead over-generate and drop groups that are too stale at training time. We prefer proactive admission control to avoid wasted compute and simplify buffer management. With very small ``S``, the system may stall more often; increasing ``S`` trades off stricter on-policy-ness for higher throughput.
 
-    Using the ``AsyncStalenessManager`` makes the implementation simpler (do not need to add data back to the buffer) and avoids wasted computation. However, it might be less effective in terms of dealing with stragglers, especially when the ``max_staleness_steps`` is too small.
+.. note::
+
+    Our capacity formula uses ``current_global_step`` directly (no ``+1``) because in SkyRL ``current_global_step`` denotes the version being worked on, whereas AReal's derivation counts completed versions. This matches the implementation in ``fully_async_trainer.py``.
+
 
 
 IV. More Implementation Details
@@ -270,7 +285,7 @@ IV. More Implementation Details
 
 The main reason why we can support fully async training for any generator (single-turn or multi-turn) is that, the in-flight weight update is implemented by the inference engines, not the generator / agent harness that the users use.
 
-To implement in-flight weight update, we need to change the semantic of ``/chat/completions`` (or ``.generate()``, ``/completions``) from "generate an output for a given input" to "generate an output for a given input, while possibly updating the model weights in the middle".
+To implement in-flight weight update, we need to change the semantics of ``/chat/completions`` (or ``.generate()``, ``/completions``) from "generate an output for a given input" to "generate an output for a given input, while possibly updating the model weights in the middle".
 
 That is, when the weight update is happening, the generator / agent harness has no clue that this is happening
 underlyingly as the ``/chat/completions`` endpoint is simply blocked and not returning.
@@ -278,7 +293,7 @@ underlyingly as the ``/chat/completions`` endpoint is simply blocked and not ret
 This design makes the implementation of fully async training agnostic to the generator / agent harness as
 the trajectory could be doing anything when weight update is happening -- in the middle of a output generation or in the middle of an interaction with the environment (where the next output generation will simply be blocked until the weight update is finished).
 
-We implement this semantic by implmementing SkyRL's ``InferenceEngineClient`` to keep calling the underlying
+We implement this semantics by implementing SkyRL's ``InferenceEngineClient`` to keep calling the underlying
 inference engine's ``/chat/completions`` endpoint in a while loop, until the finish reason is not an ``abort``.
 
 Upon ``InferenceEngineClient.pause_generation()``, we abort all the in-flight ``/chat/completions`` requests,
@@ -295,7 +310,7 @@ See the following two PRs for more details:
 The main challenge of performing checkpointing and resuming in fully async training is that, the 
 dataloader's state is not reliable (which is usually used to save checkpoint in sync training). While some data could be retrieved, upon checkpointing, we have no clue whether a data has already been trained or not.
 
-To address, our ``AsyncDataloader`` records the data UIDs that have been consumed by the trainer.
+To address this, our ``AsyncDataloader`` records the data UIDs that have been consumed by the trainer.
 
 Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained.
 
