@@ -1,7 +1,6 @@
 import aiohttp
 import copy
 from uuid import uuid4
-from loguru import logger
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, AgentLoopOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from omegaconf import DictConfig
@@ -119,9 +118,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
                     "session_id": session_id,
                     **(sampling_params or {}),
                 }
-                async with session.post(
-                    f"{self.base_url}/v1/chat/completions", json=payload, headers=headers
-                ) as resp:
+                async with session.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers) as resp:
                     output_json = await resp.json()
             # Parse responses
             output = output_json["choices"][0]["message"]["content"]
@@ -132,7 +129,9 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             done = env_step_output["done"]
-            assert env_step_output.get("postprocessed_action", None) is None, "postprocessed action is not supported for SkyRLGymHTTPGenerator"
+            assert (
+                env_step_output.get("postprocessed_action", None) is None
+            ), "postprocessed action is not supported for SkyRLGymHTTPGenerator"
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # We always re-tokenize the entire chat history every turn and at the end.

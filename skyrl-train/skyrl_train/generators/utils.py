@@ -47,18 +47,18 @@ CUSTOM_CHAT_TEMPLATES = {
     # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
     "qwen2_5_with_generation_tag_simplified": (
         "{% for message in messages %}"
-            "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
-                "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
-            "{% elif message.role == 'assistant' %}"
-                "{{ '<|im_start|>' + message.role + '\n'}}"
-                "{% generation %}"
-                "{{ message.content + '<|im_end|>'}}"
-                "{% endgeneration %}"
-                "{{ '\n' }}"
-            "{% endif %}"
+        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
+        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
+        "{% elif message.role == 'assistant' %}"
+        "{{ '<|im_start|>' + message.role + '\n'}}"
+        "{% generation %}"
+        "{{ message.content + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{ '\n' }}"
+        "{% endif %}"
         "{% endfor %}"
         "{% if add_generation_prompt %}"
-            "{{ '<|im_start|>assistant\n' }}"
+        "{{ '<|im_start|>assistant\n' }}"
         "{% endif %}"
     ),
 }
