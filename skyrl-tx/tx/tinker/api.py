@@ -547,8 +547,9 @@ async def forward_external_engine(request: SampleRequest, checkpoint_path: str, 
     prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
 
     payload = {
-        "model": checkpoint_path,
-        "prompt_token_ids": prompt_tokens,
+        # "model": checkpoint_path,
+        "model": "Qwen/Qwen3-4B", # TODO: Currently this is hard coded
+        "prompt": prompt_tokens,
         "max_tokens": request.sampling_params.max_tokens,
         "temperature": request.sampling_params.temperature,
         "logprobs": True,
@@ -561,17 +562,11 @@ async def forward_external_engine(request: SampleRequest, checkpoint_path: str, 
     result = response.json()
 
     sequences = []
-    for choice in result.choices:
-        lp = choice.logprobs
-        sequences.append(
-            {
-                "tokens": lp.tokens,
-                "logprobs": lp.token_logprobs,
-                "stop_reason": choice.finish_reason,
-            }
-        )
+    for choice in result["choices"]:
+        lp = choice["logprobs"]
+        sequences.append(types.GeneratedSequence(tokens=choice["token_ids"], logprobs=lp["token_logprobs"], stop_reason=choice["finish_reason"]))
 
-    return {"sequences": sequences, "prompt_logprobs": []}
+    return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
 
 
 async def call_external_engine_and_store_result(
@@ -588,7 +583,7 @@ async def call_external_engine_and_store_result(
         async with AsyncSession(db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future:
-                future.result_data = result
+                future.result_data = result.model_dump()
                 future.status = RequestStatus.COMPLETED
                 future.completed_at = datetime.now(timezone.utc)
                 await session.commit()
