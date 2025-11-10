@@ -171,9 +171,31 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
 
 def get_rank_path(path: tuple, lora_name: str) -> tuple:
     "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
-    path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-    model_idx = path.index("model")
+    # Convert DictKey objects to strings, or keep strings as-is
+    path = tuple(p.key if hasattr(p, "key") else (p.name if hasattr(p, "name") else p) for p in path)
     lora_idx = path.index(lora_name)
+
+    # Handle optimizer state paths: strip 'opt_state' prefix to get model path
+    # E.g., ('opt_state', 0, 'mu', 'lm_head', 'lora_A') -> ('lm_head', 'lora_ranks')
+    # E.g., ('opt_state', 0, 'mu', 'model', 'layers', 0, 'self_attn', 'q_proj', 'lora_A')
+    #    -> ('model', 'layers', 0, 'self_attn', 'q_proj', 'lora_ranks')
+    if 'opt_state' in path:
+        # Find where the model structure starts (after opt_state internals)
+        # Optimizer paths have structure: ('opt_state', <moment_idx>, <moment_name>, ...model_path...)
+        # So we skip the first 3 elements to get to the model path
+        opt_state_idx = path.index('opt_state')
+        model_path_start = opt_state_idx + 3  # Skip 'opt_state', moment index (0/1/...), moment name ('mu'/'nu'/etc)
+        path = path[model_path_start:]
+        lora_idx = path.index(lora_name)
+
+    # Handle model paths: ('model', 'embed_tokens', 'lora_A') -> ('model', 'embed_tokens', 'lora_ranks')
+    # Or lm_head paths: ('lm_head', 'lora_A') -> ('lm_head', 'lora_ranks')
+    try:
+        model_idx = path.index("model")
+    except ValueError:
+        # No "model" in path - this is lm_head or other root-level LoRA layer
+        model_idx = 0
+
     return (*path[model_idx:lora_idx], "lora_ranks")
 
 
