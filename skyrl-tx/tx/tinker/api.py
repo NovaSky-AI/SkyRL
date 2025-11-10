@@ -43,15 +43,11 @@ async def lifespan(app: FastAPI):
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
-    # Setups up client if external inference is specified
+    # Log if external inference is specified (client will be created per-request)
     if app.state.engine_config.external_inference_url:
-        app.state.http = httpx.AsyncClient(
-            base_url=f"{app.state.engine_config.external_inference_url}/v1",
-            headers={"Authorization": f"Bearer {app.state.engine_config.external_inference_api_key}"},
-        )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     else:
-        app.state.http = None
+        logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
@@ -579,11 +575,15 @@ async def forward_external_engine(request: SampleRequest, checkpoint_path: str, 
 
 
 async def call_external_engine_and_store_result(
-    db_engine, http_client: httpx.AsyncClient, request_id: int, sample_req: SampleRequest, checkpoint_path: str
+    db_engine, base_url: str, api_key: str, request_id: int, sample_req: SampleRequest, checkpoint_path: str
 ):
     """Background task to call external engine and store result in database."""
     try:
-        result = await forward_external_engine(sample_req, checkpoint_path, http_client)
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+        ) as http_client:
+            result = await forward_external_engine(sample_req, checkpoint_path, http_client)
 
         async with AsyncSession(db_engine) as session:
             future = await session.get(FutureDB, request_id)
@@ -618,7 +618,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     # Use external inference engine
-    if req.app.state.engine_config.external_inference_url and req.app.state.http:
+    if req.app.state.engine_config.external_inference_url:
         request_id = await create_future(
             session=session,
             request_type=types.RequestType.SAMPLE,
@@ -634,9 +634,15 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         await session.commit()
 
         checkpoint_path = req.app.state.engine_config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        base_url = f"{req.app.state.engine_config.external_inference_url}/v1"
         asyncio.create_task(
             call_external_engine_and_store_result(
-                req.app.state.db_engine, req.app.state.http, request_id, request, str(checkpoint_path)
+                req.app.state.db_engine,
+                base_url,
+                req.app.state.engine_config.external_inference_api_key,
+                request_id,
+                request,
+                str(checkpoint_path),
             )
         )
         return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
