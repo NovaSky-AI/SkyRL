@@ -233,8 +233,8 @@ class MegatronModelWrapper:
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-            action_logits = logits[:, -num_actions - 1 : -1, :]
             with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
+                action_logits = logits[:, -num_actions - 1 : -1, :]
                 entropy_BS = vocab_parallel_entropy(action_logits)
                 entropy_scalar = masked_mean(entropy_BS, loss_mask)
 
