@@ -296,6 +296,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
+        logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
+        logger.info(f"Total training steps: {self.total_training_steps}")
 
     async def train(self):
         """
@@ -312,7 +315,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # Set async dataloader manager and staleness manager to the loaded state.
                     self.async_train_dataloader.load_state_from_checkpoint(loaded_consumed_data_uids_set)
                     self._staleness_manager.load_state_from_checkpoint(self.global_step + 1)  # +1 due to we haven't incremented yet
-                    assert len(loaded_consumed_data_uids_set) == self.mini_batch_size * self.global_step, "Unexpected number of consumed data UIDs."
+                    expected_consumed_in_epoch = self.mini_batch_size * (self.global_step % self.num_steps_per_epoch)
+                    assert len(loaded_consumed_data_uids_set) == expected_consumed_in_epoch, (
+                        "Unexpected number of consumed data UIDs. Got: "
+                        f"{len(loaded_consumed_data_uids_set)} != {expected_consumed_in_epoch}"
+                    )
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
@@ -414,7 +421,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # 7. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
-                assert len(self.async_train_dataloader.get_consumed_uids_list()) == self.mini_batch_size * (self.global_step - 1), "Unexpected number of consumed data UIDs."
+                expected_consumed_in_epoch = self.mini_batch_size * ((self.global_step - 1) % self.num_steps_per_epoch)
+                actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
+                assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
+                    "Unexpected number of consumed data UIDs. Got: "
+                    f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
+                )
 
             # 8. Per-epoch epilogue.
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
