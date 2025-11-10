@@ -13,11 +13,7 @@ export WANDB_API_KEY=<your_key_here>
 bash examples/async/async_run_gsm8k.sh
 ```
 
-For more details, refer to the documentation. (TO BE ADDED)
+For more details, refer to the documentation: https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html
 
-Currently, only support generators that use `/chat/completions`. Hence for demonstration we
-implement a `skyrl_gym_http_generator.py` (which normally uses a `.generate()`).
+Especially, refer to the section on what knobs to tune: http://127.0.0.1:8010/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
 
-Fully async specific configuration knobs are:
-- `trainer.full_async.max_staleness_steps`
-- `trainer.fully_async.num_parallel_generation_workers`
