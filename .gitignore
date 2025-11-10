@@ -45,3 +45,8 @@ docs/_spelling/
 
 # uv lock files
 uv.lock
+
+# Hugo build output
+/website/public/
+/website/resources/
+/website/.hugo_build.lock
