@@ -44,6 +44,7 @@ class EngineConfig(BaseModel):
     external_inference_url: str | None = Field(
         default=None,
         description="URL of the external inference engine. If set, sample requests will be sent to the external engine instead (currently only VLLM is supported).",
+        json_schema_extra={"argparse_type": str},
     )
     external_inference_api_key: str = Field(
         default="EMPTY",
