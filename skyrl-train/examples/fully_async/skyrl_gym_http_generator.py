@@ -49,7 +49,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         Multi-turn generation loop that executes a single trajectory.
 
         This overrides the parent class's agent_loop to use the HTTP endpoint for generation,
-        without respecting token-in-token-out generation. We laregly follow the retokenize_chat_history
+        without respecting token-in-token-out generation. We largely follow the retokenize_chat_history
         codepath as a result.
 
         Args:

@@ -1,7 +1,7 @@
 (Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout
 =========================================================================================
 
-SkyRL supports fully async training for any generator that implements the ``GeneratorInterface`` interface, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
+SkyRL supports fully async training for any generator that implements the ``GeneratorInterface``, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
 
 We treat "fully async training" synonymous to the terms **"in-flight weight update"** and **"multi-turn partial rollout"**, as discussed in works like AReal, PipelineRL, ScaleRL, etc.
 
@@ -256,7 +256,7 @@ Intuition:
 
 Operationally, a generation worker:
 
-1) Acquires capacity before starting a new group via ``await AsyncStalenessManager.acquire_submission_slot()``. This blocks until ``capacity - (accepted + running) > 0`` is satisfied.  
+1) Acquires capacity before starting a new group via ``await AsyncStalenessManager.acquire_submission_slot()``. This blocks until ``capacity - (accepted + running) > 0`` is satisfied. 
 2) When the group finishes generation and is enqueued, it calls ``await AsyncStalenessManager.on_rollout_accepted()`` to convert one running slot into an accepted unit.  
 
 After each training step, the trainer increments the version and calls
