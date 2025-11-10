@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Any, AsyncGenerator, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
@@ -13,7 +13,6 @@ from sqlalchemy.exc import IntegrityError
 import asyncio
 import subprocess
 import random
-import httpx
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -562,7 +561,9 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
 
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE,
+        request_type=(
+            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
+        ),
         model_id=model_id,
         request_data=types.SampleInput(
             base_model=request.base_model,
