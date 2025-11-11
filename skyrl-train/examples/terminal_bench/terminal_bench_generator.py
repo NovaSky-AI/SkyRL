@@ -49,8 +49,32 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.agent_name = terminal_bench_cfg.agent_name
         self.max_episodes = terminal_bench_cfg.max_episodes
 
+        self.overlong_filtering_threshold = 800
+
         if self.generator_cfg.chat_template.name_or_path is not None:
             raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
+
+    def apply_overlong_filtering(
+        self,
+        loss_masks: List[List[int]],
+        response_ids: List[List[int]],
+        eos_token_id: int,
+    ) -> List[List[int]]:
+        """
+        Implements DAPO Overlong Filtering: zero-out every token's mask whenever
+        the response does not end with the eos token id (i.e. truncated).
+
+        Returns:
+            - The loss masks with tokens zeroed out for truncated responses
+        """
+        t = getattr(self, "overlong_filtering_threshold", None)
+        assert t is not None, "self.overlong_filtering_threshold must be set"
+        assert len(loss_masks) == len(response_ids), "loss_masks and response_ids must have the same length"
+
+        return [
+            mask[:t] + [0] * (len(mask) - t) if len(r) > t else mask
+            for mask, r in zip(loss_masks, response_ids)
+        ]
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         
@@ -68,19 +92,17 @@ class TerminalBenchGenerator(GeneratorInterface):
         rewards = [output.reward for output in all_outputs]
         rollout_metrics = get_rollout_metrics(responses, rewards)
 
+        loss_masks = [output.loss_mask for output in all_outputs]
+        if self.generator_cfg.apply_overlong_filtering:
+            loss_masks = self.apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
-        all_loss_masks = []
-        for output in all_outputs:
-            loss_masks = output.loss_mask
-            if self.generator_cfg.apply_overlong_filtering:
-                loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
             "response_ids": responses,
             "rewards": rewards,
-            "loss_masks": [output.loss_mask for output in all_outputs],
+            "loss_masks": loss_masks,
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
