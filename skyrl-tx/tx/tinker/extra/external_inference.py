@@ -58,6 +58,7 @@ class ExternalInferenceClient:
             "max_new_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
             "no_stop_trim": True,  # Prevent SGLang from trimming stop tokens from output
+            "ignore_eos": False,  # Allow EOS token to be generated and stop generation
         }
 
         if request.sampling_params.seed is not None:
