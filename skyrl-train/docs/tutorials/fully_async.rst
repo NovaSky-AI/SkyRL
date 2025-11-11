@@ -37,7 +37,7 @@ There are three types of RL training we are interested in here, well-depicted by
 
 
 a. Synchronous Training
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 In AReal's figure 1 LHS, we have the traditional synchronous training, colocating training and generation on the same set of GPUs.
 
@@ -105,8 +105,10 @@ For fully async specifically, the following are the main knobs to tune:
 - ``trainer.fully_async.max_staleness_steps``: The maximum off-policy steps allowed for each training batch, trading off between throughput and off-policy bias. See :ref:`async-staleness-manager` for more details.
 
   - ``max_staleness_steps = 0`` is equivalent to synchronous training (despite wasting throughput since we cannot overlap training and generation).
-  - ``max_staleness_steps = 1`` is one-step off-policy training (except having potential in-flight weight updates).
-- ``trainer.fully_async.num_parallel_generation_workers``: The number of generation workers to spawn, where each worker works on a group of trajectories. For maximum throughput, set to ``trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)``. Each is simply an ``asyncio.Task`` that runs ``generator.generate()``.
+- ``trainer.fully_async.num_parallel_generation_workers``: The number of generation workers to spawn, where
+  each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
+  and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
+  The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -129,7 +131,7 @@ Other restrictions (will be validated by the trainer):
 
 
 III. Design and Implementation of Fully Async Training in SkyRL
---------------------------------------------------------------
+----------------------------------------------------------------
 
 0. Overview
 ~~~~~~~~~~~
@@ -179,7 +181,7 @@ While we call it a "training worker", it is simply the single thread that runs t
 It follows the following steps in a for-loop over the number of steps per epoch:
 
 1. Get precisely ``trainer.policy_mini_batch_size`` groups from the ``GenerationOutputGroupBuffer``.
-   Due to staleness control, each group of output is guaranteed to be at most ``trainer.fully_async.max_staleness_steps`` steps stale.
+   The staleness controller enforces a global capacity bound that aims to keep batches within ``trainer.fully_async.max_staleness_steps`` steps stale. However, it does not strictly guarantee it. See :ref:`async-staleness-manager` for more details.
 2. Train on the generated groups.
 3. Mark the data that we used to train as "consumed" to the ``AsyncDataloader``, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
@@ -215,6 +217,7 @@ The ``AsyncDataloader`` is used in the following cases:
 - Reset to the initial state at the end of each epoch.
 
 .. _async-staleness-manager:
+
 5. Async Staleness Manager
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -262,6 +265,21 @@ Operationally, a generation worker:
 After each training step, the trainer increments the version and calls
 ``await AsyncStalenessManager.notify_capacity_change(current_global_step)``, which increases capacity and wakes up blocked workers.
 
+Per-sample staleness vs capacity bound
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The capacity inequality keeps generation from outpacing training by more than ``S`` steps in **aggregate**. It does **NOT** strictly guarantee that every trajectory group will be trained within ``S`` steps of when it was scheduled. In rare cases (e.g., very long rollouts), a trajectory group may complete after more than ``S`` steps have elapsed while the system as a whole still satisfies the capacity constraint. However, in **steady state**, staleness remains within the configured budget of ``max_staleness_steps``.
+
+Possible ways for handling such rare groups that violate the ``S`` bound:
+
+- **Current behavior**: Still accept the trajectory group for training, but log the staleness metrics with a warning.
+  
+  - Matches `PipelineRL's behavior <https://github.com/ServiceNow/PipelineRL/blob/67654d7905816f7526ab7ba6d064d996094879ce/pipelinerl/finetune_loop.py#L583-L588>`_ and `AReal's default behavior <https://github.com/inclusionAI/AReaL/blob/1e7cf19f6206acc65de83c96dac27666895e30e0/areal/core/workflow_executor.py#L569-L577>`_.
+- Drop the trajectory group using ``AsyncStalenessManager.on_rollout_rejected()`` **(not supported yet but should be hackable)**
+
+  - Matches AReal's behavior if the ``should_accept_fn`` is based on per-sample staleness.
+- Drop the trajectory group and resample. Would require logics to ``AsyncDataloader`` to requeue the data. **(not supported yet but should be hackable)**
+
 Checkpointing semantics
 ^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -278,10 +296,10 @@ When saving a checkpoint, only trainer-consumed state is recorded. On resume, we
 
 
 IV. More Implementation Details
-------------------------------
+--------------------------------
 
 1. How is in-flight weight update implemented by the inference engines?
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The main reason why we can support fully async training for any generator (single-turn or multi-turn) is that, the in-flight weight update is implemented by the inference engines, not the generator / agent harness that the users use.
 
@@ -310,11 +328,7 @@ See the following two PRs for more details:
 The main challenge of performing checkpointing and resuming in fully async training is that, the 
 dataloader's state is not reliable (which is usually used to save checkpoint in sync training). While some data could be retrieved, upon checkpointing, we have no clue whether a data has already been trained or not.
 
-To address this, our ``AsyncDataloader`` records the data UIDs that have been consumed by the trainer.
-
-Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained.
-
-Therefore, the state of the dataloader is not used at all.
+To address this, our ``AsyncDataloader`` records the data UIDs that have been consumed by the trainer. Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained. Therefore, the state of the dataloader is not used at all.
 
 V. Future Work
 ----------------
