@@ -92,8 +92,15 @@ class ExternalInferenceClient:
         if request.sampling_params.stop:
             logger.info(f"Stop token {request.sampling_params.stop[0]} in generated? {request.sampling_params.stop[0] in generated_tokens}")
 
-        # Extract logprobs - SGLang returns logprobs as a list of token logprobs
-        logprobs = result.get('meta_info', {}).get('output_token_logprobs', [])
+        # Extract logprobs - SGLang returns logprobs as a list of [logprob, token_id, ...] tuples
+        # We need to extract just the logprob values (first element of each tuple)
+        raw_logprobs = result.get('meta_info', {}).get('output_token_logprobs', [])
+        if raw_logprobs and isinstance(raw_logprobs[0], list):
+            # SGLang format: [[logprob, token_id, ...], ...]
+            logprobs = [lp[0] for lp in raw_logprobs]
+        else:
+            # Fallback to raw format if it's already a list of floats
+            logprobs = raw_logprobs
 
         sequences = [
             types.GeneratedSequence(
