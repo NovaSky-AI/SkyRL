@@ -78,12 +78,20 @@ class _RolloutStat:
 
 class _AsyncStalenessManager:
     """
-    A controller that manages the capacity of the generation workers.
+    A controller that manages the capacity of the generation workers based on staleness control.
 
     The goal is to never submit more trajectories to the generation workers than the training worker
-    can consume, such that we will never drop any generated trajectories for being too stale. The key
-    capacity formula is implemented in `_compute_capacity_unlocked`. For details, see
-    https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager
+    can consume, so that the trajectories are not too stale (relative to max_staleness_steps).
+    This is enforced via a capacity rule, not a hard **per-group** staleness guarantee: we bound
+    the **aggregate** number of groups that can be ahead of training so that, in **steady state**,
+    staleness remains within the configured budget of `max_staleness_steps`.
+
+    In pathological cases (e.g., very long-running trajectories), an individual group may take
+    more than `max_staleness_steps` of training steps of time to finish generation. For such rare
+    cases, we still accept the trajectory and log the staleness metrics with a warning.
+
+    The key capacity formula is implemented in `_compute_capacity_unlocked`. For details and caveats,
+    see https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager.
 
     Reference:
     - Modeled after AReal's StalenessManager: https://github.com/inclusionAI/AReaL/blob/b755c4447c2fff97889d8828293ee85f17a806f9/areal/core/staleness_manager.py
@@ -375,10 +383,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
                         # NOTE(Charlie): we currently trim the train_dataloader to make it perfectly divisible by
                         # self.mini_batch_size, and assume that all trajectories succeed (just like sync training),
-                        # so we always get a full mini-batch. Otherwise, we should handle the case where the
-                        # dataloader is exhausted and the buffer is empty or else this loop will never exit.
+                        # so we always get a full mini-batch. Otherwise (e.g. want to drop stale trajectories), we
+                        # should handle the case where the dataloader is exhausted and the buffer is empty, or
+                        # else this loop will never exit.
                         while len(cur_generation_group_mini_batch) < self.mini_batch_size:
-                            # We do FIFO here (i.e. prioritize the oldest group)
+                            # We do finish-time FIFO here (not schedule-time FIFO)
                             cur_generation_group_mini_batch.append(await generation_output_group_buffer.get())
                             buffer_pbar.update(1)
                             buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
@@ -585,15 +594,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         generator_outputs = []
         uids = []
         stalenesses = []
+        staleness_violation_count = 0
         group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
             stalenesses.append(cur_staleness)
-            assert (
-                cur_staleness <= self.max_staleness_steps
-            ), "Staleness control violated. This is not expected since we use AsyncStalenessManager."
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
+
+            # Check staleness violation.
+            if cur_staleness > self.max_staleness_steps:
+                # TODO(Charlie): should we drop, drop and resample, or just log?
+                logger.warning(
+                    "Staleness control violated despite using AsyncStalenessManager: "
+                    f"cur_staleness={cur_staleness}, max_staleness_steps={self.max_staleness_steps}.\n"
+                    "This can happen if a trajectory takes longer to generate than updating the model max_staleness_steps times."
+                    "If this happens too often, consider increasing max_staleness_steps or adjusting generation-training GPU allocation."
+                )
+                staleness_violation_count += 1
 
         generator_output = concatenate_generator_outputs(generator_outputs)
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
@@ -606,6 +624,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "async/staleness_max": max(stalenesses),
                 "async/staleness_min": min(stalenesses),
                 "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
+                "async/staleness_violation_count": staleness_violation_count,
             }
         )
 
