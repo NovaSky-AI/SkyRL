@@ -76,7 +76,9 @@ class ExternalInferenceClient:
 
         logger.info(f"=== EXTERNAL ENGINE REQUEST (request_id={request_id}) ===")
         logger.info(f"Prompt length: {len(prompt_tokens)}, Max tokens: {sampling_params['max_new_tokens']}, Temp: {sampling_params['temperature']}, Seed: {sampling_params.get('seed')}")
-        logger.info(f"Stop tokens: {request.sampling_params.stop}")
+        logger.info(f"Stop token IDs: {request.sampling_params.stop}")
+        logger.info(f"Last 10 prompt tokens: {prompt_tokens[-10:]}")
+        logger.info(f"Full sampling_params: {sampling_params}")
         logger.info(f"Full payload (excluding input_ids): {dict((k, v) for k, v in payload.items() if k != 'input_ids')}")
 
         response = await http_client.post("/generate", json=payload)
@@ -89,9 +91,12 @@ class ExternalInferenceClient:
 
         logger.info(f"=== EXTERNAL ENGINE RESPONSE (request_id={request_id}) ===")
         logger.info(f"Finish reason: {finish_reason}, Matched token: {finish_reason_data.get('matched') if isinstance(finish_reason_data, dict) else 'N/A'}")
-        logger.info(f"Generated {len(generated_tokens)} tokens: {generated_tokens[:20]}...")
+        logger.info(f"Generated {len(generated_tokens)} tokens")
+        logger.info(f"First 20 tokens: {generated_tokens[:20]}")
+        logger.info(f"Last 20 tokens: {generated_tokens[-20:]}")
         if request.sampling_params.stop:
-            logger.info(f"Stop token {request.sampling_params.stop[0]} in generated? {request.sampling_params.stop[0] in generated_tokens}")
+            for stop_token in request.sampling_params.stop:
+                logger.info(f"Stop token {stop_token} in generated? {stop_token in generated_tokens}")
 
         # Extract logprobs - SGLang returns logprobs as a list of [logprob, token_id, ...] tuples
         # We need to extract just the logprob values (first element of each tuple)
@@ -99,6 +104,10 @@ class ExternalInferenceClient:
         if raw_logprobs and isinstance(raw_logprobs[0], list):
             # SGLang format: [[logprob, token_id, ...], ...]
             logprobs = [lp[0] for lp in raw_logprobs]
+
+            # Log first few tokens with their logprobs for debugging
+            logger.info(f"First 10 generated (token, logprob): {[(generated_tokens[i], logprobs[i]) for i in range(min(10, len(generated_tokens)))]}")
+            logger.info(f"Last 10 generated (token, logprob): {[(generated_tokens[i], logprobs[i]) for i in range(max(0, len(generated_tokens)-10), len(generated_tokens))]}")
         else:
             # Fallback to raw format if it's already a list of floats
             logprobs = raw_logprobs
