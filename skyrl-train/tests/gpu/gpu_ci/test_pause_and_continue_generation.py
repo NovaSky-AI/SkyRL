@@ -106,11 +106,11 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
 
         # Pause then resume while requests are in-flight
         asyncio.run(client.pause_generation())
-        client.resume_generation()
+        asyncio.run(client.resume_generation())
         # Run for another two seconds, then pause and resume again
         asyncio.run(asyncio.sleep(2))
         asyncio.run(client.pause_generation())
-        client.resume_generation()
+        asyncio.run(client.resume_generation())
 
         # Wait for all requests to finish
         for t in threads:
@@ -258,4 +258,4 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
         ), f"Expected 2 requests with completion_tokens=0, got {num_completion_tokens_is_zero}."
 
         # Unpause for the next API run
-        client.resume_generation()
+        asyncio.run(client.resume_generation())
