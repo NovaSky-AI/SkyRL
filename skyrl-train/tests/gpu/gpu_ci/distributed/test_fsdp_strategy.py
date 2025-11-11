@@ -15,7 +15,7 @@ from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_th
 MODEL_NAME = "llamafactory/tiny-random-Llama-3"
 
 
-def test_fsdp_strategy():
+def test_fsdp1_wrap_policy():
     cfg = get_default_config()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.strategy = "fsdp"
@@ -63,7 +63,3 @@ def test_fsdp_strategy():
     assert num_wrapped_modules > 1
 
     dist.destroy_process_group()
-
-
-if __name__ == "__main__":
-    test_fsdp_strategy()
