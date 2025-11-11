@@ -77,6 +77,87 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg):
         ray.shutdown()
 
 
+import torch
+from skyrl_train.training_batch import TrainingInputBatch
+
+def make_dummy_batch(seq_lens, num_actions=4) -> TrainingInputBatch:
+    """Create a dummy TrainingInputBatch"""
+
+    batch_size = len(seq_lens)
+    max_seq_len = max(seq_lens)
+
+    sequences = torch.zeros((batch_size, max_seq_len), dtype=int, device="cpu")
+    attention_mask = torch.zeros((batch_size, max_seq_len), dtype=int, device="cpu")
+    for i, seq_len in enumerate(seq_lens):
+        sequences[i, :seq_len] = torch.randint(0, 100, (seq_len,), dtype=int, device="cpu")
+        attention_mask[i, :seq_len] = 1
+
+    print(sequences)
+    print(attention_mask)
+
+    # Add all the required fields for training
+    data = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_mask,
+            "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
+            "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
+            "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
+            "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
+            "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
+            "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+            "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+        }
+    )
+    data.metadata = {"response_length": num_actions}
+    return data
+
+
+
+def test_batch_balancing(ray_init_fixture, cfg):
+    try:
+        cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
+        cfg.trainer.max_tokens_per_microbatch = 15
+
+        # Hard-code to a single worker for simplicity
+        cfg.trainer.placement.policy_num_gpus_per_node = 1
+
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        train_data = make_dummy_batch([10, 10, 5, 5], num_actions=4)
+        train_data.metadata["global_step"] = 0
+
+        # Run ppo_train
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", train_data))
+        assert len(results) == cfg.trainer.placement.policy_num_gpus_per_node, "Should get result from each GPU"
+
+        result = results[0]  # Check first worker result
+        assert hasattr(result, "metadata"), "Result should have metadata attribute"
+        assert "train_status" in result.metadata, "Should have train_status in metadata"
+
+        train_status = result.metadata["train_status"]
+
+        # Validate expected training metrics are present
+        expected_metrics = ["policy_loss", "policy_update_steps", "policy_lr", "ppo_clip_ratio", "policy_entropy"]
+
+        for metric in expected_metrics:
+            assert metric in train_status, f"Should have {metric} in train_status"
+            assert isinstance(train_status[metric], (int, float)), f"{metric} should be numeric"
+
+        # Simple check for metric values
+        assert train_status["policy_update_steps"] > 0, "Should have completed at least one update step"
+        assert train_status["policy_lr"] > 0, "Should have positive learning rate"
+
+    finally:
+        ray.shutdown()
+
+
 def test_ppo_train_critic_worker(ray_init_fixture, cfg):
     """
     Test that ppo_train works for critic worker as well.

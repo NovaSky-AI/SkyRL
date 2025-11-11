@@ -650,15 +650,26 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
+        if self.cfg.trainer.max_tokens_per_microbatch is not None:
+            dataloader = BalancedBatchIterator(
+                train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
+            )
+
+            micro_batches_per_mini_batch = dataloader.num_microbatches
+            accumulation_steps = micro_batches_per_mini_batch
+
+            print(f"{micro_batches_per_mini_batch=}")
+        else:
+            dataloader = BatchIterator(
+                train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+            )
+
+            micro_batches_per_mini_batch = (
+                self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+            )
+            # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
+            accumulation_steps = micro_batches_per_mini_batch
 
         status_list = []
         all_metrics = defaultdict(list)
@@ -671,6 +682,7 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
+                print(f"{experience.sequences=}")
                 status = self.training_step(
                     experience,
                     global_step,
@@ -727,6 +739,7 @@ class PolicyWorkerBase(Worker):
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
+        # NOTE: No need to reorder anything here beacuse we average across the entire batch.
         output.metadata = {"train_status": status_mean}
         return output
 

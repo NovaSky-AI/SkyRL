@@ -144,6 +144,10 @@ class BalancedBatchIterator:
 
         self._num_padding_microbatches = max_num_microbatches - len(self._microbatches)
 
+    @property
+    def num_microbatches(self) -> int:
+        return len(self._microbatches) + self._num_padding_microbatches
+
     def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
         """Create a TrainingInputBatch from a list of sample indices."""
         # TODO: Support list indexing for TrainingInputBatch
@@ -186,6 +190,6 @@ class BalancedBatchIterator:
 
     def __iter__(self):
         for microbatch in self._microbatches:
-            yield self._create_microbatch_from_indices(microbatch)
+            yield BatchIterator.batch_to_experience(self._create_microbatch_from_indices(microbatch))
         for _ in range(self._num_padding_microbatches):
-            yield self._create_padding_microbatch()
+            yield BatchIterator.batch_to_experience(self._create_padding_microbatch())
