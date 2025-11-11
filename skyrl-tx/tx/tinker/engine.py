@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import functools
 import time
 from collections import Counter
 from contextlib import contextmanager
@@ -18,9 +17,10 @@ from flax.training import checkpoints
 
 
 import optax
-from transformers import AutoConfig
 from huggingface_hub import snapshot_download
+from transformers import PretrainedConfig
 
+from tx.models.configs import Qwen3Config
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
@@ -40,6 +40,11 @@ from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+def pad(xs, pad_to: int, *, fill):
+    """Pad a list to a specified length with a fill value."""
+    return xs + ([fill] * (pad_to - len(xs)))
+
+
 @dataclass
 class AccumulatedGradients:
     """Stores accumulated gradients for a LoRA adapter."""
@@ -48,12 +53,12 @@ class AccumulatedGradients:
     denominator: int = 0
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("adapter_index",))
-    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: int) -> nnx.State:
+    @jax.jit
+    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: jax.Array) -> nnx.State:
         """Extracts gradients and adds them to the sum."""
         return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
 
-    def add(self, lora_grads: nnx.State, adapter_index: int, count: int) -> None:
+    def add(self, lora_grads: nnx.State, adapter_index: jax.Array, count: int) -> None:
         """Accumulate gradients and increment denominator."""
         if self.grad_sum is None:
             self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
@@ -96,13 +101,14 @@ class TinkerEngine:
         # Metrics recorded in the engine
         self.metrics = types.EngineMetrics()
 
-        # Initialize the shared base model
-        self.model_config = AutoConfig.from_pretrained(self.config.base_model)
-
-        # Configure LoRA settings
-        self.model_config.max_lora_adapters = self.config.max_lora_adapters
-        self.model_config.max_lora_rank = self.config.max_lora_rank
-        self.model_config.shard_attention_heads = self.config.shard_attention_heads
+        # Initialize the shared base model with LoRA config
+        base_config = PretrainedConfig.from_pretrained(self.config.base_model)
+        self.model_config = Qwen3Config(
+            base_config,
+            max_lora_adapters=self.config.max_lora_adapters,
+            max_lora_rank=self.config.max_lora_rank,
+            shard_attention_heads=self.config.shard_attention_heads,
+        )
 
         model_class = get_model_class(self.model_config)
 
@@ -236,15 +242,21 @@ class TinkerEngine:
         return total if mb <= 0 else max(1, min(mb, total))
 
     @contextmanager
-    def _jit_timing_context(self, seq_len: int):
-        """Context manager to track JIT compilation times for different sequence lengths."""
-        if not self.config.enforce_eager and seq_len not in self.metrics.seq_len_jit_times:
-            logger.info(f"JIT compiling for seq_len={seq_len} in progress...")
+    def _jit_timing_context(self, seq_len: int, mode: str):
+        """Context manager to track JIT compilation times for different sequence lengths.
+
+        Args:
+            seq_len: The sequence length being compiled
+            mode: Either 'train' or 'sample' to track separately
+        """
+        jit_times = self.metrics.train_seq_len_jit_times if mode == "train" else self.metrics.sample_seq_len_jit_times
+        if not self.config.enforce_eager and seq_len not in jit_times:
+            logger.info(f"JIT compiling for {mode} seq_len={seq_len} in progress...")
             start_time = time.time()
             yield
             elapsed = time.time() - start_time
-            self.metrics.seq_len_jit_times[seq_len] = elapsed
-            logger.info(f"JIT compilation for seq_len={seq_len} took {elapsed:.2f}s")
+            jit_times[seq_len] = elapsed
+            logger.info(f"JIT compilation for {mode} seq_len={seq_len} took {elapsed:.2f}s")
         else:
             yield
 
@@ -261,7 +273,7 @@ class TinkerEngine:
     ) -> tuple[jax.Array, jax.Array, nnx.State]:
         """Run forward+backward on a batch of inputs."""
         seq_len = input_ids.shape[1]
-        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
                 self.lora_params,
                 self.non_lora_params,
@@ -283,9 +295,8 @@ class TinkerEngine:
         Accumulate adapter-wise gradient sums and example counts.
         """
         for model_id, count in Counter(example_model_ids).items():
-            adapter_index = self.models[model_id].adapter_index
+            adapter_index = jnp.array(self.models[model_id].adapter_index, dtype=jnp.int32)
             accumulator = self.accumulated_grads[model_id]
-            # Extract and accumulate gradients for this adapter
             accumulator.add(lora_grads, adapter_index, count)
 
     def _filter_valid_requests(
@@ -491,31 +502,27 @@ class TinkerEngine:
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
-        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
-        target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
+        input_ids = jnp.array([pad(seq, max_len, fill=0) for seq in all_input_ids], dtype=jnp.int32)
+        target_ids = jnp.array([pad(seq, max_len, fill=0) for seq in all_targets], dtype=jnp.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
         loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = jnp.array(
-            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32
-        )
+        attention_mask = jnp.array([pad([1] * len(seq), max_len, fill=0) for seq in all_input_ids], dtype=jnp.int32)
         loss_mask = jnp.array(
-            [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
+            [pad(all_token_weights[i], max_len, fill=0) for i in range(len(all_token_weights))],
             dtype=jnp.float32,
         )
-        sampling_logprobs = jnp.array(
-            [seq + [0.0] * (max_len - len(seq)) for seq in all_sampling_logprobs], dtype=jnp.float32
-        )
-        advantages = jnp.array([seq + [0.0] * (max_len - len(seq)) for seq in all_advantages], dtype=jnp.float32)
+        sampling_logprobs = jnp.array([pad(seq, max_len, fill=0.0) for seq in all_sampling_logprobs], dtype=jnp.float32)
+        advantages = jnp.array([pad(seq, max_len, fill=0.0) for seq in all_advantages], dtype=jnp.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
         seq_lens = [len(seq) for seq in all_input_ids]
 
-        # Used to collect per-example outputs (by global row index)
-        token_losses_out = [None] * total_bs
-        logprobs_out = [None] * total_bs
+        # Collect full padded arrays on device, slice after transfer
+        token_losses_device = []
+        logprobs_device = []
 
         for mb_start in range(0, total_bs, micro_bs):
             mb_end = min(mb_start + micro_bs, total_bs)
@@ -529,11 +536,22 @@ class TinkerEngine:
                 sampling_logprobs[mb_start:mb_end],
                 advantages[mb_start:mb_end],
             )
-            for i_local, i_global in enumerate(range(mb_start, mb_end)):
-                L = seq_lens[i_global]
-                token_losses_out[i_global] = per_token_losses[i_local, :L].astype(jnp.float32)
-                logprobs_out[i_global] = target_logprobs[i_local, :L].astype(jnp.float32)
+            token_losses_device.append(per_token_losses)
+            logprobs_device.append(target_logprobs)
             self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+
+        # Single batched device-to-host transfer for all arrays
+        token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
+
+        # Flatten microbatches and slice to actual sequence lengths
+        token_losses_out = []
+        logprobs_out = []
+        idx = 0
+        for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
+            for i in range(mb_losses.shape[0]):
+                token_losses_out.append(mb_losses[i, : seq_lens[idx]].astype(jnp.float32))
+                logprobs_out.append(mb_logprobs[i, : seq_lens[idx]].astype(jnp.float32))
+                idx += 1
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
@@ -614,30 +632,43 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_prompts = all_prompts[batch_start:batch_end]
+                batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
 
                 # Pad sequences to same length within the batch to minimize memory usage.
-                max_len = max(len(seq) for seq in batch_prompts) if batch_prompts else 0
+                # Also bin it so the JIT has to compile fewer kernels.
+                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = jnp.array(
-                    [seq + [0] * (max_len - len(seq)) for seq in batch_prompts],
+                    [pad(seq, max_len, fill=0) for seq in batch_prompts],
                     dtype=jnp.int32,
                 )
                 attention_mask = jnp.array(
-                    [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in batch_prompts],
+                    [pad([1] * len(seq), max_len, fill=0) for seq in batch_prompts],
                     dtype=jnp.int32,
                 )
-                adapter_indices = jnp.array(all_adapter_indices[batch_start:batch_end], dtype=jnp.int32)
-                sampling_params = all_sampling_params[batch_start:batch_end]
-
-                result = model.generate(
-                    input_ids,
-                    attention_mask,
-                    sampling_params=sampling_params,
-                    adapter_indices=adapter_indices,
+                adapter_indices = jnp.array(
+                    pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0),
+                    dtype=jnp.int32,
                 )
+                sampling_params = pad(
+                    all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
+                )
+
+                with self._jit_timing_context(max_len, mode="sample"):
+                    result = model.generate(
+                        input_ids,
+                        attention_mask,
+                        sampling_params=sampling_params,
+                        adapter_indices=adapter_indices,
+                    )
+                # Only take the actual results, not the padded ones
+                batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
-                    for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
+                    for stop_reason, tokens, logprobs in zip(
+                        result.stop_reasons[:batch_size],
+                        result.generated_ids[:batch_size],
+                        result.logprobs[:batch_size],
+                    )
                 )
 
         for request_id, _, start_idx, end_idx in request_batch_slices:

@@ -3,23 +3,26 @@ import jax
 import jax.numpy as jnp
 import optax
 from huggingface_hub import snapshot_download
-from transformers import PretrainedConfig
+from transformers import LlamaConfig
 
-from tx.models import Qwen3Config, Qwen3ForCausalLM
+from tx.models import Llama3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
 
 
 def test_lora_training():
-    base_model = "Qwen/Qwen3-0.6B"
-    base_config = PretrainedConfig.from_pretrained(base_model)
-    config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
+    base_model = "meta-llama/Llama-3.2-1B"
+    base_config = LlamaConfig.from_pretrained(base_model)
+    # Add LoRA config parameters
+    base_config.max_lora_adapters = 5
+    base_config.max_lora_rank = 32
+    base_config.shard_attention_heads = True
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
-        model = Qwen3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
-        load_safetensors(checkpoint_path, config, model)
+        model = Llama3ForCausalLM(base_config, dtype=get_dtype(base_config.torch_dtype), rngs=nnx.Rngs(0))
+        load_safetensors(checkpoint_path, base_config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
         update_adapter_config(model, adapter_index=0, lora_rank=16, lora_alpha=16)

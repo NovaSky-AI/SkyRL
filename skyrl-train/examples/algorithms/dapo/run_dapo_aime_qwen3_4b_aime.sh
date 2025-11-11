@@ -1,26 +1,22 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen2.5-1.5B-Instruct on DAPO training data and validate on AIME 2024.
+# Colocated DAPO training+generation for Qwen3-4B-Base on DAPO training data and validate on AIME 2024.
 # uv run examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_qwen2.5_math_7b_aime.sh
+# bash examples/algorithms/dapo/run_dapo_aime_qwen3_4b_aime.sh
 
-# download the model from huggingface and modify the max_position_embeddings in config.json to 32768
-# hf download Qwen/Qwen2.5-Math-7B --local-dir $HOME/qwen2.5-math
-MODEL_NAME="$HOME/qwen2.5-math"
+MODEL_NAME="Qwen/Qwen3-4B-Base"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
-NUM_GPUS=8
-NUM_INFERENCE_ENGINES=2
-INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=4
+NUM_NODES=2
+NUM_GPUS_PER_NODE=8
+NUM_INFERENCE_ENGINES=16
+INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
 LOGGER="wandb"  # change to "console" to print to stdout
 
-# main DAPO parameters
-EPS_CLIP_LOW=0.2
-EPS_CLIP_HIGH=0.28
-# dynamic sampling parameters - off by default, since this greatly slows down inference
-DYNAMIC_SAMPLING_TYPE=null
-DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES=30
+CLIP_RATIO_LOW=0.2
+CLIP_RATIO_HIGH=0.28
+# use dr. grpo loss reduction
 LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
@@ -43,6 +39,7 @@ MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
+LR=1e-6
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -51,10 +48,6 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.algorithm.policy_loss_type="dual_clip" \
   +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
   +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
-  trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
-  trainer.algorithm.eps_clip_high=$EPS_CLIP_HIGH \
-  trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
-  trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
   generator.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
@@ -67,22 +60,26 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.policy_num_nodes=$NUM_NODES \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
+  trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.epochs=20 \
+  trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
+  trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
-  trainer.eval_interval=10 \
+  trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=16 \
-  trainer.micro_train_batch_size_per_gpu=16 \
+  trainer.micro_forward_batch_size_per_gpu=8 \
+  trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
-  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.num_warmup_steps=160 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
@@ -97,8 +94,10 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen_2.5_math_7b" \
+  trainer.run_name="dapo_qwen3_4b_base" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_4b_base" \
+  trainer.hf_save_interval=10 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen_2.5_math_7b" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_4b_base" \
   $@

@@ -1,11 +1,11 @@
-from types import SimpleNamespace
-
+from flax import nnx
 import jax.numpy as jnp
+from tx.models.outputs import CausalLMOutput
 from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache
 
 
-class DummyModel(GeneratorMixin):
+class DummyModel(GeneratorMixin, nnx.Module):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
 
@@ -25,7 +25,7 @@ class DummyModel(GeneratorMixin):
             logits = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
             kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
-        return SimpleNamespace(logits=logits, kv_cache=kv_cache)
+        return CausalLMOutput(logits=logits, last_hidden_state=logits, kv_cache=kv_cache)
 
 
 def make_inputs(batch_size: int, prompt_length: int):
