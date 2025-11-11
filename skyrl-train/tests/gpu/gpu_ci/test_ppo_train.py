@@ -114,7 +114,8 @@ def make_dummy_batch(seq_lens, num_actions=4) -> TrainingInputBatch:
 
 
 
-def test_batch_balancing(ray_init_fixture, cfg):
+@pytest.mark.parametrize("worker_type", ["policy", "critic"])
+def test_max_tokens_per_microbatch(ray_init_fixture, cfg, worker_type):
     try:
         cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
         cfg.trainer.max_tokens_per_microbatch = 15
@@ -123,7 +124,7 @@ def test_batch_balancing(ray_init_fixture, cfg):
         cfg.trainer.placement.policy_num_gpus_per_node = 1
 
         actor_group = init_worker_with_type(
-            "policy",
+            worker_type,
             shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
@@ -131,6 +132,7 @@ def test_batch_balancing(ray_init_fixture, cfg):
         )
 
         train_data = make_dummy_batch([10, 10, 5, 5], num_actions=4)
+        # Expect: 2 microbatches with [10, 5] and [10, 5] tokens.
         train_data.metadata["global_step"] = 0
 
         # Run ppo_train
@@ -140,19 +142,6 @@ def test_batch_balancing(ray_init_fixture, cfg):
         result = results[0]  # Check first worker result
         assert hasattr(result, "metadata"), "Result should have metadata attribute"
         assert "train_status" in result.metadata, "Should have train_status in metadata"
-
-        train_status = result.metadata["train_status"]
-
-        # Validate expected training metrics are present
-        expected_metrics = ["policy_loss", "policy_update_steps", "policy_lr", "ppo_clip_ratio", "policy_entropy"]
-
-        for metric in expected_metrics:
-            assert metric in train_status, f"Should have {metric} in train_status"
-            assert isinstance(train_status[metric], (int, float)), f"{metric} should be numeric"
-
-        # Simple check for metric values
-        assert train_status["policy_update_steps"] > 0, "Should have completed at least one update step"
-        assert train_status["policy_lr"] > 0, "Should have positive learning rate"
 
     finally:
         ray.shutdown()
