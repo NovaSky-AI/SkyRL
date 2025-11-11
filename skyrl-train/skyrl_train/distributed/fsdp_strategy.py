@@ -208,7 +208,9 @@ class FSDPStrategy(DistributedStrategy):
     def _fsdp_init_model(self, model, is_train=True, is_wrapped=False):
         # Initialize FSDP wrapping policy
         wrap_policy = get_fsdp_wrap_policy(
-            module=model, config=self.fsdp_config.get("wrap_policy", None), is_lora=self.is_lora
+            module=model.model if is_wrapped else model,
+            config=self.fsdp_config.get("wrap_policy", None),
+            is_lora=self.is_lora,
         )
 
         # Setup mixed precision
