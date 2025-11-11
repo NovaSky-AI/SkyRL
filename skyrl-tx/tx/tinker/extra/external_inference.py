@@ -57,6 +57,7 @@ class ExternalInferenceClient:
         sampling_params = {
             "max_new_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
+            "no_stop_trim": True,  # Prevent SGLang from trimming stop tokens from output
         }
 
         if request.sampling_params.seed is not None:
