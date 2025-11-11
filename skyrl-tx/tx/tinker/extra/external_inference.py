@@ -71,6 +71,7 @@ class ExternalInferenceClient:
         logger.info(f"=== EXTERNAL ENGINE REQUEST (request_id={request_id}) ===")
         logger.info(f"Prompt length: {len(prompt_tokens)}, Max tokens: {payload['max_tokens']}, Temp: {payload['temperature']}, Seed: {payload['seed']}")
         logger.info(f"Stop tokens: {request.sampling_params.stop}")
+        logger.info(f"Full payload (excluding prompt tokens): {dict((k, v) for k, v in payload.items() if k != 'prompt')}")
 
         response = await http_client.post("/completions", json=payload)
         response.raise_for_status()
