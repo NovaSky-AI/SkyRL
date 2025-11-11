@@ -858,22 +858,22 @@ async def test_generate_retry_no_gen_finish():
             self.calls = []
             self.responses = [
                 # 1) abort with 0 tokens
-                {
-                    "responses": [""],
-                    "response_ids": [[]],
-                    "stop_reasons": ["abort"],
-                    "response_logprobs": [[]],
-                },
+                InferenceEngineOutput(
+                    responses=[""],
+                    response_ids=[[]],
+                    stop_reasons=["abort"],
+                    response_logprobs=[[]],
+                ),
                 # 2) finish directly
-                {
-                    "responses": ["something"],  # will be ignored since we decode the final output
-                    "response_ids": [final_response_ids],
-                    "stop_reasons": ["stop"],
-                    "response_logprobs": [[-0.1, -0.1, -0.1]],
-                },
+                InferenceEngineOutput(
+                    responses=["something"],  # will be ignored since we decode the final output
+                    response_ids=[final_response_ids],
+                    stop_reasons=["stop"],
+                    response_logprobs=[[-0.1, -0.1, -0.1]],
+                ),
             ]
 
-        async def generate(self, input_batch):
+        async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
             self.calls.append(deepcopy(input_batch))
             return deepcopy(self.responses[len(self.calls) - 1])
 
@@ -883,12 +883,10 @@ async def test_generate_retry_no_gen_finish():
     client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     original_prompt_ids = [7, 8, 9]
-    input_batch = {
-        "prompts": None,
-        "prompt_token_ids": [original_prompt_ids],
-        "sampling_params": {"max_tokens": 16},
-        "session_ids": None,
-    }
+    input_batch = InferenceEngineInput(
+        prompt_token_ids=[original_prompt_ids],
+        sampling_params={"max_tokens": 16},
+    )
 
     out = await client.generate(input_batch)
 
