@@ -28,7 +28,7 @@ class ExternalInferenceClient:
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
             ) as http_client:
-                result = await self._forward_to_engine(sample_req, checkpoint_path, http_client)
+                result = await self._forward_to_engine(sample_req, checkpoint_path, http_client, request_id)
 
             async with AsyncSession(db_engine) as session:
                 future = await session.get(FutureDB, request_id)
@@ -48,7 +48,7 @@ class ExternalInferenceClient:
                     await session.commit()
 
     async def _forward_to_engine(
-        self, request, checkpoint_path: str, http_client: httpx.AsyncClient
+        self, request, checkpoint_path: str, http_client: httpx.AsyncClient, request_id: int
     ) -> types.SampleOutput:
         """Forward request to vLLM."""
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
@@ -68,9 +68,20 @@ class ExternalInferenceClient:
         if request.sampling_params.stop is not None:
             payload["stop_token_ids"] = request.sampling_params.stop
 
+        logger.info(f"=== EXTERNAL ENGINE REQUEST (request_id={request_id}) ===")
+        logger.info(f"Prompt length: {len(prompt_tokens)}, Max tokens: {payload['max_tokens']}, Temp: {payload['temperature']}, Seed: {payload['seed']}")
+        logger.info(f"Stop tokens: {request.sampling_params.stop}")
+
         response = await http_client.post("/completions", json=payload)
         response.raise_for_status()
         result = response.json()
+
+        generated_tokens = result['choices'][0]['token_ids']
+        logger.info(f"=== EXTERNAL ENGINE RESPONSE (request_id={request_id}) ===")
+        logger.info(f"Finish reason: {result['choices'][0]['finish_reason']}, Stop reason: {result['choices'][0].get('stop_reason')}")
+        logger.info(f"Generated {len(generated_tokens)} tokens: {generated_tokens[:20]}...")
+        if request.sampling_params.stop:
+            logger.info(f"Stop token {request.sampling_params.stop[0]} in generated? {request.sampling_params.stop[0] in generated_tokens}")
 
         sequences = []
         for choice in result["choices"]:

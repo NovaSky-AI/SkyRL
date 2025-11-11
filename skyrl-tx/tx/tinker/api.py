@@ -618,6 +618,22 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
                 raise HTTPException(status_code=404, detail="Future not found")
 
             if future.status == RequestStatus.COMPLETED:
+                # Log sample results for comparison
+                if future.request_type in (types.RequestType.SAMPLE, types.RequestType.EXTERNAL):
+                    result_data = future.result_data
+                    if result_data and "sequences" in result_data and result_data["sequences"]:
+                        first_seq = result_data["sequences"][0]
+                        engine_type = "INTERNAL" if future.request_type == types.RequestType.SAMPLE else "EXTERNAL"
+                        logger.info(f"=== {engine_type} ENGINE RESULT (request_id={request.request_id}) ===")
+                        logger.info(f"Stop reason: {first_seq.get('stop_reason')}")
+                        logger.info(f"Generated {len(first_seq.get('tokens', []))} tokens: {first_seq.get('tokens', [])[:20]}...")
+                        # Get original request to check stop tokens
+                        original_request = future.request_data
+                        if original_request and "sampling_params" in original_request:
+                            stop_tokens = original_request["sampling_params"].get("stop")
+                            if stop_tokens:
+                                tokens = first_seq.get('tokens', [])
+                                logger.info(f"Stop token {stop_tokens[0]} in generated? {stop_tokens[0] in tokens}")
                 return future.result_data
 
             if future.status == RequestStatus.FAILED:
