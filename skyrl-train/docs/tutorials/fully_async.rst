@@ -131,7 +131,7 @@ Other restrictions (will be validated by the trainer):
 III. Design and Implementation of Fully Async Training in SkyRL
 --------------------------------------------------------------
 
-1. Overview
+0. Overview
 ~~~~~~~~~~~
 
 The high-level control logics of fully async training in SkyRL are shown in the figure below.
