@@ -63,19 +63,17 @@ class ExternalInferenceClient:
         if request.sampling_params.seed is not None:
             sampling_params["seed"] = request.sampling_params.seed
 
-        # DEBUG: Temporarily comment out stop_token_ids to test if it's suppressing generation
-        # if request.sampling_params.stop is not None:
-        #     sampling_params["stop_token_ids"] = request.sampling_params.stop
-
-        # Log what we're NOT sending for debugging
         if request.sampling_params.stop is not None:
-            logger.warning(f"DEBUG MODE: NOT sending stop_token_ids={request.sampling_params.stop} to test if it suppresses generation")
+            sampling_params["stop_token_ids"] = request.sampling_params.stop
+
+            # DEBUG: Check if stop token appears in the top logprobs to see if it's even being considered
+            logger.info(f"Stop tokens configured: {request.sampling_params.stop}")
 
         payload = {
             "input_ids": prompt_tokens,
             "sampling_params": sampling_params,
             "return_logprob": True,
-            "top_logprobs_num": 1,
+            "top_logprobs_num": 5,  # Get top 5 to see if stop token ever appears
             "logprob_start_len": 0,
         }
 
@@ -113,6 +111,22 @@ class ExternalInferenceClient:
             # Log first few tokens with their logprobs for debugging
             logger.info(f"First 10 generated (token, logprob): {[(generated_tokens[i], logprobs[i]) for i in range(min(10, len(generated_tokens)))]}")
             logger.info(f"Last 10 generated (token, logprob): {[(generated_tokens[i], logprobs[i]) for i in range(max(0, len(generated_tokens)-10), len(generated_tokens))]}")
+
+            # Check if stop token ever appeared in top 5 alternatives
+            if request.sampling_params.stop:
+                stop_token = request.sampling_params.stop[0]
+                top_logprobs_full = result.get('meta_info', {}).get('output_top_logprobs', [])
+                if top_logprobs_full:
+                    # Each entry is a list of [logprob, token_id] pairs for top tokens at that position
+                    positions_with_stop = []
+                    for i, top_tokens in enumerate(top_logprobs_full):
+                        if any(token_id == stop_token for _, token_id, *_ in top_tokens):
+                            positions_with_stop.append(i)
+
+                    if positions_with_stop:
+                        logger.info(f"Stop token {stop_token} appeared in top-5 at positions: {positions_with_stop[:10]}... (showing first 10)")
+                    else:
+                        logger.warning(f"Stop token {stop_token} NEVER appeared in top-5 alternatives across {len(top_logprobs_full)} positions")
         else:
             # Fallback to raw format if it's already a list of floats
             logprobs = raw_logprobs
