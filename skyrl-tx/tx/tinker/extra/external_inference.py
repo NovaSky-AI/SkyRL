@@ -63,8 +63,13 @@ class ExternalInferenceClient:
         if request.sampling_params.seed is not None:
             sampling_params["seed"] = request.sampling_params.seed
 
+        # DEBUG: Temporarily comment out stop_token_ids to test if it's suppressing generation
+        # if request.sampling_params.stop is not None:
+        #     sampling_params["stop_token_ids"] = request.sampling_params.stop
+
+        # Log what we're NOT sending for debugging
         if request.sampling_params.stop is not None:
-            sampling_params["stop_token_ids"] = request.sampling_params.stop
+            logger.warning(f"DEBUG MODE: NOT sending stop_token_ids={request.sampling_params.stop} to test if it suppresses generation")
 
         payload = {
             "input_ids": prompt_tokens,
