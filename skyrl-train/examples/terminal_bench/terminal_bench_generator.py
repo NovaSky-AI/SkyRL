@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
+from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset, apply_overlong_filtering
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -56,9 +56,6 @@ class TerminalBenchGenerator(GeneratorInterface):
         
         tasks = []
         for prompt in input_batch["prompts"]:
-            # task = asyncio.create_task(self.terminal_bench_agent_loop(prompt=prompt))
-            # tasks.append(task)
-            # await asyncio.sleep(1)
             tasks.append(
                 self.terminal_bench_agent_loop(
                     prompt=prompt,
@@ -66,12 +63,18 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
 
         all_outputs = await asyncio.gather(*tasks)
-        
-        all_outputs = [output for output in all_outputs if output is not None]
 
         responses = [output.response_ids for output in all_outputs]
         rewards = [output.reward for output in all_outputs]
         rollout_metrics = get_rollout_metrics(responses, rewards)
+
+
+        all_loss_masks = []
+        for output in all_outputs:
+            loss_masks = output.loss_mask
+            if self.generator_cfg.apply_overlong_filtering:
+                loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
+
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
