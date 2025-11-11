@@ -176,15 +176,15 @@ def get_rank_path(path: tuple, lora_name: str) -> tuple:
     lora_idx = path.index(lora_name)
 
     # Handle optimizer state paths: strip 'opt_state' prefix to get model path
-    # E.g., ('opt_state', 0, 'mu', 'lm_head', 'lora_A') -> ('lm_head', 'lora_ranks')
-    # E.g., ('opt_state', 0, 'mu', 'model', 'layers', 0, 'self_attn', 'q_proj', 'lora_A')
+    # E.g., ('opt_state', 'inner_state', 0, 'mu', 'lm_head', 'lora_A') -> ('lm_head', 'lora_ranks')
+    # E.g., ('opt_state', 'inner_state', 0, 'mu', 'model', 'layers', 0, 'self_attn', 'q_proj', 'lora_A')
     #    -> ('model', 'layers', 0, 'self_attn', 'q_proj', 'lora_ranks')
     if 'opt_state' in path:
         # Find where the model structure starts (after opt_state internals)
-        # Optimizer paths have structure: ('opt_state', <moment_idx>, <moment_name>, ...model_path...)
-        # So we skip the first 3 elements to get to the model path
+        # Optimizer paths have structure: ('opt_state', 'inner_state', <moment_idx>, <moment_name>, ...model_path...)
+        # So we skip the first 4 elements to get to the model path
         opt_state_idx = path.index('opt_state')
-        model_path_start = opt_state_idx + 3  # Skip 'opt_state', moment index (0/1/...), moment name ('mu'/'nu'/etc)
+        model_path_start = opt_state_idx + 4  # Skip 'opt_state', 'inner_state', moment index, moment name
         path = path[model_path_start:]
         lora_idx = path.index(lora_name)
 
