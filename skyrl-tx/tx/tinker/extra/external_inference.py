@@ -62,7 +62,11 @@ class ExternalInferenceClient:
             "logprobs": True,
             "stream": False,
             "return_token_ids": True,
+            "seed": request.sampling_params.seed,
         }
+
+        if request.sampling_params.stop is not None:
+            payload["stop_token_ids"] = request.sampling_params.stop
 
         response = await http_client.post("/completions", json=payload)
         response.raise_for_status()
