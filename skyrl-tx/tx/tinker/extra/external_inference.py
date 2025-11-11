@@ -8,10 +8,10 @@ from tx.utils.log import logger
 
 
 class ExternalInferenceClient:
-    """Client for calling external inference engines (e.g., vLLM)."""
+    """Client for calling external inference engines (e.g., SGLang)."""
 
     def __init__(self, base_url: str, api_key: str):
-        self.base_url = f"{base_url}/v1"
+        self.base_url = base_url
         self.api_key = api_key
 
     async def call_and_store_result(
@@ -50,49 +50,57 @@ class ExternalInferenceClient:
     async def _forward_to_engine(
         self, request, checkpoint_path: str, http_client: httpx.AsyncClient, request_id: int
     ) -> types.SampleOutput:
-        """Forward request to vLLM."""
+        """Forward request to SGLang."""
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
 
-        payload = {
-            # "model": checkpoint_path,
-            "model": "Qwen/Qwen3-4B",  # TODO: Currently this is hard coded
-            "prompt": prompt_tokens,
-            "max_tokens": request.sampling_params.max_tokens,
+        # Build sampling_params for SGLang
+        sampling_params = {
+            "max_new_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
-            "logprobs": True,
-            "stream": False,
-            "return_token_ids": True,
-            "seed": request.sampling_params.seed,
         }
 
+        if request.sampling_params.seed is not None:
+            sampling_params["seed"] = request.sampling_params.seed
+
         if request.sampling_params.stop is not None:
-            payload["stop_token_ids"] = request.sampling_params.stop
+            sampling_params["stop_token_ids"] = request.sampling_params.stop
+
+        payload = {
+            "input_ids": prompt_tokens,
+            "sampling_params": sampling_params,
+            "return_logprob": True,
+            "top_logprobs_num": 1,
+            "logprob_start_len": 0,
+        }
 
         logger.info(f"=== EXTERNAL ENGINE REQUEST (request_id={request_id}) ===")
-        logger.info(f"Prompt length: {len(prompt_tokens)}, Max tokens: {payload['max_tokens']}, Temp: {payload['temperature']}, Seed: {payload['seed']}")
+        logger.info(f"Prompt length: {len(prompt_tokens)}, Max tokens: {sampling_params['max_new_tokens']}, Temp: {sampling_params['temperature']}, Seed: {sampling_params.get('seed')}")
         logger.info(f"Stop tokens: {request.sampling_params.stop}")
-        logger.info(f"Full payload (excluding prompt tokens): {dict((k, v) for k, v in payload.items() if k != 'prompt')}")
+        logger.info(f"Full payload (excluding input_ids): {dict((k, v) for k, v in payload.items() if k != 'input_ids')}")
 
-        response = await http_client.post("/completions", json=payload)
+        response = await http_client.post("/generate", json=payload)
         response.raise_for_status()
         result = response.json()
 
-        generated_tokens = result['choices'][0]['token_ids']
+        generated_tokens = result['output_ids']
+        finish_reason_data = result['meta_info']['finish_reason']
+        finish_reason = finish_reason_data.get('type', 'unknown') if isinstance(finish_reason_data, dict) else str(finish_reason_data)
+
         logger.info(f"=== EXTERNAL ENGINE RESPONSE (request_id={request_id}) ===")
-        logger.info(f"Finish reason: {result['choices'][0]['finish_reason']}, Stop reason: {result['choices'][0].get('stop_reason')}")
+        logger.info(f"Finish reason: {finish_reason}, Matched token: {finish_reason_data.get('matched') if isinstance(finish_reason_data, dict) else 'N/A'}")
         logger.info(f"Generated {len(generated_tokens)} tokens: {generated_tokens[:20]}...")
         if request.sampling_params.stop:
             logger.info(f"Stop token {request.sampling_params.stop[0]} in generated? {request.sampling_params.stop[0] in generated_tokens}")
 
-        sequences = []
-        for choice in result["choices"]:
-            lp = choice["logprobs"]
-            sequences.append(
-                types.GeneratedSequence(
-                    tokens=choice["token_ids"],
-                    logprobs=lp["token_logprobs"],
-                    stop_reason=choice["finish_reason"],
-                )
+        # Extract logprobs - SGLang returns logprobs as a list of token logprobs
+        logprobs = result.get('meta_info', {}).get('output_token_logprobs', [])
+
+        sequences = [
+            types.GeneratedSequence(
+                tokens=generated_tokens,
+                logprobs=logprobs,
+                stop_reason=finish_reason,
             )
+        ]
 
         return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
