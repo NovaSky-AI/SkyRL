@@ -655,11 +655,7 @@ class PolicyWorkerBase(Worker):
             dataloader = BalancedBatchIterator(
                 train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
             )
-
-            micro_batches_per_mini_batch = dataloader.num_microbatches
-            accumulation_steps = micro_batches_per_mini_batch
-
-            print(f"{micro_batches_per_mini_batch=}")
+            accumulation_steps = dataloader.num_microbatches
         else:
             dataloader = BatchIterator(
                 train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
@@ -955,18 +951,28 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
+
+        # TODO: Move this to the base class since it's common to both policy and critic workers.
+        if self.cfg.trainer.max_tokens_per_microbatch is not None:
+            dataloader = BalancedBatchIterator(
+                train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
+            )
+            accumulation_steps = dataloader.num_microbatches
+        else:
+            dataloader = BatchIterator(
+                train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+            )
+
+            # TODO: Make `num_microbatches` a property of the dataloader instead of computing it here.
+            # Ex: see the BalancedBatchIterator class.
+            micro_batches_per_mini_batch = (
+                self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+            )
+            # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
+            accumulation_steps = micro_batches_per_mini_batch
 
         torch.cuda.empty_cache()
         self.model.train()
-
-        micro_batches_per_mini_batch = (
-            self.critic_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
 
         all_metrics = defaultdict(list)
         critic_update_steps = 0
