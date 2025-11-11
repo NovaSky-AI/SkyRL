@@ -333,15 +333,18 @@ class Worker(DistributedTorchRayActor):
                 data=data,
                 max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
             )
-            micro_batches = list(micro_batch_iterator)
         else:
-            # Fall back to sample-based chunking
-            micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+            micro_batch_iterator = BatchIterator(
+                data=data,
+                sample_batch_size=self.cfg.trainer.micro_forward_batch_size_per_gpu,
+                drop_last=False,
+            )
 
         outputs = []
-        for micro_batch in micro_batches:
+        for micro_batch in micro_batch_iterator:
             outputs.append(self._forward_micro_batch(micro_batch))
-        output = TrainingOutputBatch.cat(outputs)
+
+        output = micro_batch_iterator.reorder_microbatches(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
         return output
@@ -677,7 +680,8 @@ class PolicyWorkerBase(Worker):
                 desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
+            for local_step, batch in enumerate(pbar):
+                experience = BatchIterator.batch_to_experience(batch)
                 print(f"{experience.sequences=}")
                 status = self.training_step(
                     experience,
@@ -982,7 +986,8 @@ class CriticWorkerBase(Worker):
                 desc=f"Critic Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
+            for local_step, batch in enumerate(pbar):
+                experience = BatchIterator.batch_to_experience(batch)
                 status = self.training_step(experience, global_step, local_step, accumulation_steps)
                 critic_update_steps += 1
 

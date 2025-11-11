@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 from skyrl_train.dataset.replay_buffer import Experience
 from typing import List, Dict
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TensorBatch
 
 
 def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
@@ -40,14 +40,17 @@ class BatchIterator:
     def __iter__(self):
         return self
 
-    def __next__(self) -> Experience:
+    def __next__(self) -> TrainingInputBatch:
         try:
-            batch = next(self._iter)
-            exp = self.batch_to_experience(batch)
-            return exp
+            return next(self._iter)
         except StopIteration:
             self._iter = iter(self._chunks)
             raise StopIteration
+
+    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
+        """Reorder microbatches to match the order of the original data."""
+        # TODO: Define a common interface for batch iterators.
+        return TensorBatch.cat(microbatches)
 
     @staticmethod
     def batch_to_experience(batch: TrainingInputBatch):
@@ -212,6 +215,31 @@ class BalancedBatchIterator:
 
     def __iter__(self):
         for microbatch in self._microbatches:
-            yield BatchIterator.batch_to_experience(self._create_microbatch_from_indices(microbatch))
+            yield self._create_microbatch_from_indices(microbatch)
         for _ in range(self._num_padding_microbatches):
-            yield BatchIterator.batch_to_experience(self._create_padding_microbatch())
+            yield self._create_padding_microbatch()
+
+    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
+        """Reorder microbatch data into a single batch with the same order as the original data.
+
+        Args:
+            microbatches: List of microbatches to reorder.
+
+        Returns:
+            A single reordered batch.
+        """
+        non_padding_microbatches = microbatches[:len(microbatches)-self._num_padding_microbatches]
+
+        # Create a reverse mapping of original idx -> (microbatch idx, sample idx)
+        original_idx_to_microbatch_idx = {}
+
+        for microbatch_idx, original_indices in enumerate(self._microbatches):
+            for sample_idx, original_idx in enumerate(original_indices):
+                original_idx_to_microbatch_idx[original_idx] = (microbatch_idx, sample_idx)
+
+        # Reorder the microbatches to match the original data order
+        reordered_microbatches = []
+        for original_idx in range(len(self._token_counts)):
+            microbatch_idx, sample_idx = original_idx_to_microbatch_idx[original_idx]
+            reordered_microbatches.append(non_padding_microbatches[microbatch_idx][sample_idx])
+        return TensorBatch.cat(reordered_microbatches)
