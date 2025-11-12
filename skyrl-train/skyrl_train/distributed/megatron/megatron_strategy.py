@@ -140,6 +140,10 @@ class MegatronStrategy(DistributedStrategy):
         scheduler: Optional[OptimizerParamScheduler] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
+        self.print("Saving checkpoint function began: ")
+        # import pdb
+        # pdb.set_trace()
+
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
@@ -203,6 +207,10 @@ class MegatronStrategy(DistributedStrategy):
         load_optimizer_states: bool = True,
         load_lr_scheduler_states: bool = True,
     ):
+        self.print("Loading checkpoint function began: ")
+        # import pdb
+        # pdb.set_trace()
+
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
 
@@ -212,7 +220,7 @@ class MegatronStrategy(DistributedStrategy):
         unwrapped_model = model[0]
         if hasattr(unwrapped_model, "module"):
             unwrapped_model = unwrapped_model.module
-
+        
         # Extract sharded state dicts.
         sharded_state_dict = {}
         model_sharded_state_dict = unwrapped_model.sharded_state_dict()
