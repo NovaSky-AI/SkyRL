@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = ExternalInferenceClient(
             app.state.engine_config.external_inference_url,
             app.state.engine_config.external_inference_api_key,
+            app.state.engine_config.checkpoints_base,
         )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     else:
@@ -576,13 +577,13 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     await session.commit()
 
     if req.app.state.external_inference_client:
-        checkpoint_path = req.app.state.engine_config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
         asyncio.create_task(
             req.app.state.external_inference_client.call_and_store_result(
                 req.app.state.db_engine,
                 request_id,
                 request,
-                str(checkpoint_path),
+                model_id,
+                checkpoint_id,
             )
         )
 

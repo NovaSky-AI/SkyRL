@@ -13,25 +13,30 @@ from tx.utils.storage import download_and_unpack
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, checkpoints_base: AnyPath):
         self.base_url = f"{base_url}/v1"
         self.api_key = api_key
+        self.checkpoints_base = checkpoints_base
 
     async def call_and_store_result(
         self,
         db_engine,
         request_id: int,
         sample_req,
-        checkpoint_path: str,
+        model_id: str,
+        checkpoint_id: str,
     ):
         """Background task to call external engine and store result in database."""
         try:
+            # Form the checkpoint path
+            checkpoint_path = self.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
             ) as http_client:
-                result = await self._forward_to_engine(sample_req, checkpoint_path, http_client)
+                result = await self._forward_to_engine(sample_req, model_id, checkpoint_id, str(checkpoint_path), http_client)
 
             async with AsyncSession(db_engine) as session:
                 future = await session.get(FutureDB, request_id)
@@ -51,7 +56,7 @@ class ExternalInferenceClient:
                     await session.commit()
 
     async def _forward_to_engine(
-        self, request, checkpoint_path: str, http_client: httpx.AsyncClient
+        self, request, model_id: str, checkpoint_id: str, checkpoint_path: str, http_client: httpx.AsyncClient
     ) -> types.SampleOutput:
         """Forward request to vLLM with dynamic LoRA loading.
 
@@ -63,15 +68,9 @@ class ExternalInferenceClient:
         # Extract checkpoint to the LoRA models directory that vLLM monitors
         lora_models_dir = Path("/tmp/lora_models")
 
-        # Extract the model name from the checkpoint path (e.g., "model_id/checkpoint_id")
-        checkpoint_path_obj = Path(checkpoint_path)
-        model_name = checkpoint_path_obj.stem  # Remove .tar.gz extension
-        # Include parent directory (model_id) in the name to avoid collisions
-        if len(checkpoint_path_obj.parts) >= 2:
-            model_id = checkpoint_path_obj.parts[-2]
-            model_name = f"{model_id}/{model_name}"
-
-        target_dir = lora_models_dir / model_name
+        # Use model_id/checkpoint_id as the model name
+        model_name = f"{model_id}/{checkpoint_id}"
+        target_dir = lora_models_dir / model_id / checkpoint_id
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
         # Extract the checkpoint if it doesn't already exist
