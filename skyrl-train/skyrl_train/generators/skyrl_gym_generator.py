@@ -396,7 +396,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_token_ids = self.tokenizer.apply_chat_template(
             init_prompts,
             add_generation_prompt=True,
-            add_special_tokens=False,
             tokenize=True,
         )
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
