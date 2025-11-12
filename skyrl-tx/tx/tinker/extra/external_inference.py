@@ -1,10 +1,12 @@
 import httpx
 from datetime import datetime, timezone
 from sqlmodel.ext.asyncio.session import AsyncSession
+from cloudpathlib import AnyPath
 
 from tx.tinker import types
 from tx.tinker.db_models import FutureDB, RequestStatus
 from tx.utils.log import logger
+from tx.utils.storage import download_and_unpack
 
 
 class ExternalInferenceClient:
@@ -53,30 +55,34 @@ class ExternalInferenceClient:
         """Forward request to vLLM."""
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
 
-        payload = {
-            # "model": checkpoint_path,
-            "model": "Qwen/Qwen3-4B",  # TODO: Currently this is hard coded
-            "prompt": prompt_tokens,
-            "max_tokens": request.sampling_params.max_tokens,
-            "temperature": request.sampling_params.temperature,
-            "logprobs": True,
-            "stream": False,
-            "return_token_ids": True,
-        }
+        # Extract checkpoint from tar.gz archive
+        with download_and_unpack(AnyPath(checkpoint_path)) as extracted_path:
+            # Use the extracted checkpoint path for vLLM
+            model_path = str(extracted_path)
 
-        response = await http_client.post("/completions", json=payload)
-        response.raise_for_status()
-        result = response.json()
+            payload = {
+                "model": model_path,
+                "prompt": prompt_tokens,
+                "max_tokens": request.sampling_params.max_tokens,
+                "temperature": request.sampling_params.temperature,
+                "logprobs": True,
+                "stream": False,
+                "return_token_ids": True,
+            }
 
-        sequences = []
-        for choice in result["choices"]:
-            lp = choice["logprobs"]
-            sequences.append(
-                types.GeneratedSequence(
-                    tokens=choice["token_ids"],
-                    logprobs=lp["token_logprobs"],
-                    stop_reason=choice["finish_reason"],
+            response = await http_client.post("/completions", json=payload)
+            response.raise_for_status()
+            result = response.json()
+
+            sequences = []
+            for choice in result["choices"]:
+                lp = choice["logprobs"]
+                sequences.append(
+                    types.GeneratedSequence(
+                        tokens=choice["token_ids"],
+                        logprobs=lp["token_logprobs"],
+                        stop_reason=choice["finish_reason"],
+                    )
                 )
-            )
 
-        return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+            return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
