@@ -50,7 +50,7 @@ from skyrl_train.utils.trainer_utils import (
 )
 
 
-def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
+def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput):
     """
     Validate the generator output.
 
@@ -60,11 +60,9 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
 
-    # check that input prompts, response ids, and prompt token ids are all the same length
-    # num_prompts = len(input_batch["prompts"])
+    # check that response ids and prompt token ids are all the same length
     num_responses = len(generator_output["response_ids"])
     num_prompt_tokens = len(generator_output["prompt_token_ids"])
-    # assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
     assert (
         num_responses == num_prompt_tokens
     ), f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
@@ -224,7 +222,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(generator_output["response_ids"]), generator_output)
 
         return generator_output
 
@@ -456,7 +454,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                 global_step,
             )
             generator_output: GeneratorOutput = await generator.generate(generator_input)
-            validate_generator_output(generator_input, generator_output)
+            validate_generator_output(len(generator_output["response_ids"]), generator_output)
             generator_outputs.append(generator_output)
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])
