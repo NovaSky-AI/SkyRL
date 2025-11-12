@@ -39,6 +39,8 @@ Inference engines share GPUs with training models:
 - Engines will ``sleep()`` after generation to free GPU memory
 - Engines will ``wake_up()`` before the next generation round
 
+NOTE: As of now, colocated engines are only supported with ``generator.run_engines_locally=true``.
+
 **Disaggregated Engines (colocate_all = false)**
 
 Inference engines run on dedicated GPUs:
