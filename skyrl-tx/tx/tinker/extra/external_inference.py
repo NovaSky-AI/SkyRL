@@ -1,5 +1,6 @@
 import httpx
 from datetime import datetime, timezone
+from pathlib import Path
 from sqlmodel.ext.asyncio.session import AsyncSession
 from cloudpathlib import AnyPath
 
@@ -52,37 +53,57 @@ class ExternalInferenceClient:
     async def _forward_to_engine(
         self, request, checkpoint_path: str, http_client: httpx.AsyncClient
     ) -> types.SampleOutput:
-        """Forward request to vLLM."""
+        """Forward request to vLLM with dynamic LoRA loading.
+
+        Extracts the checkpoint to /tmp/lora_models and references it by a model name
+        that vLLM can dynamically load via the lora_filesystem_resolver plugin.
+        """
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
 
-        # Extract checkpoint from tar.gz archive
-        with download_and_unpack(AnyPath(checkpoint_path)) as extracted_path:
-            # Use the extracted checkpoint path for vLLM
-            model_path = str(extracted_path)
+        # Extract checkpoint to the LoRA models directory that vLLM monitors
+        lora_models_dir = Path("/tmp/lora_models")
 
-            payload = {
-                "model": model_path,
-                "prompt": prompt_tokens,
-                "max_tokens": request.sampling_params.max_tokens,
-                "temperature": request.sampling_params.temperature,
-                "logprobs": True,
-                "stream": False,
-                "return_token_ids": True,
-            }
+        # Extract the model name from the checkpoint path (e.g., "model_id/checkpoint_id")
+        checkpoint_path_obj = Path(checkpoint_path)
+        model_name = checkpoint_path_obj.stem  # Remove .tar.gz extension
+        # Include parent directory (model_id) in the name to avoid collisions
+        if len(checkpoint_path_obj.parts) >= 2:
+            model_id = checkpoint_path_obj.parts[-2]
+            model_name = f"{model_id}/{model_name}"
 
-            response = await http_client.post("/completions", json=payload)
-            response.raise_for_status()
-            result = response.json()
+        target_dir = lora_models_dir / model_name
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-            sequences = []
-            for choice in result["choices"]:
-                lp = choice["logprobs"]
-                sequences.append(
-                    types.GeneratedSequence(
-                        tokens=choice["token_ids"],
-                        logprobs=lp["token_logprobs"],
-                        stop_reason=choice["finish_reason"],
-                    )
+        # Extract the checkpoint if it doesn't already exist
+        if not target_dir.exists():
+            with download_and_unpack(AnyPath(checkpoint_path)) as extracted_path:
+                # Move/copy the extracted content to the target directory
+                import shutil
+                shutil.copytree(extracted_path, target_dir)
+
+        payload = {
+            "model": model_name,  # vLLM will dynamically load this LoRA from /tmp/lora_models
+            "prompt": prompt_tokens,
+            "max_tokens": request.sampling_params.max_tokens,
+            "temperature": request.sampling_params.temperature,
+            "logprobs": True,
+            "stream": False,
+            "return_token_ids": True,
+        }
+
+        response = await http_client.post("/completions", json=payload)
+        response.raise_for_status()
+        result = response.json()
+
+        sequences = []
+        for choice in result["choices"]:
+            lp = choice["logprobs"]
+            sequences.append(
+                types.GeneratedSequence(
+                    tokens=choice["token_ids"],
+                    logprobs=lp["token_logprobs"],
+                    stop_reason=choice["finish_reason"],
                 )
+            )
 
-            return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+        return types.SampleOutput(sequences=sequences, prompt_logprobs=[])
