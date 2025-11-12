@@ -11,12 +11,6 @@ from skyrl_train.utils.utils import initialize_ray
 from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
 
-import logging
-
-logging.getLogger("LiteLLM").setLevel(logging.ERROR)
-import litellm
-litellm._logging._disable_debugging()
-
 
 class TerminalBenchExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):

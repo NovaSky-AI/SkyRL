@@ -2,4 +2,4 @@
 
 trials_dir: "~/trials"
 agent_name: "terminus"
-max_episodes: 16 
+max_episodes: 16

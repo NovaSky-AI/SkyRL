@@ -26,7 +26,7 @@ NUM_NODES=2
 NUM_GPUS=8
 LOGGER="wandb"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
-SANDBOXES_DIR="$HOME/SkyRL/skyrl-train/sandboxes"
+SANDBOXES_DIR="$HOME/SkyRL/skyrl-train/harbor"
 MODEL_NAME="Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
 # Inference backend (for rollout generation)
@@ -82,7 +82,7 @@ export GLOO_SOCKET_IFNAME=enp210s0f0np0
 # export HYDRA_FULL_ERROR=1
 
 # data.train_data="['$DATA_DIR/train.parquet']" \
-uv run --isolated --extra mcore --with "sandboxes@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra mcore --with "sandboxes@./harbor" -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \

@@ -12,7 +12,7 @@ from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from tx.layers.lora import update_adapter_config
-from tx.models import Qwen3ForCausalLM
+from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils import models
 from tx.utils.storage import download_and_unpack
@@ -20,22 +20,22 @@ from tx.utils.storage import download_and_unpack
 
 def create_test_model(rank: int, alpha: int, adapter_index: int):
     """Create a small Qwen3 model for testing with LoRA enabled."""
-    config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    base_config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
     # Make it smaller for testing
-    config.num_hidden_layers = 1
-    config.hidden_size = 64
-    config.intermediate_size = 128
-    config.num_attention_heads = 2
-    config.num_key_value_heads = 2
-    config.max_lora_adapters = 5
-    config.max_lora_rank = 32
+    base_config.num_hidden_layers = 1
+    base_config.hidden_size = 64
+    base_config.intermediate_size = 128
+    base_config.num_attention_heads = 2
+    base_config.num_key_value_heads = 2
+
+    config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         update_adapter_config(model, adapter_index=adapter_index, lora_rank=rank, lora_alpha=alpha)
 
-    return config, model
+    return config, base_config, model
 
 
 @pytest.mark.parametrize("storage_type", ["local", "cloud"])
@@ -49,7 +49,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
         output_path = tmp_path / "checkpoint.tar.gz"
 
     rank, alpha, adapter_index = 8, 16, 2
-    config, model = create_test_model(rank, alpha, adapter_index)
+    config, base_config, model = create_test_model(rank, alpha, adapter_index)
     adapter_config = LoraConfig(rank=rank, alpha=alpha)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
@@ -68,7 +68,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 
     # Load with peft and verify
     with download_and_unpack(output_path) as extracted_dir:
-        base_model = AutoModelForCausalLM.from_config(config)
+        base_model = AutoModelForCausalLM.from_config(base_config)
         peft_model = PeftModel.from_pretrained(base_model, extracted_dir)
 
         assert peft_model.peft_config["default"].r == rank

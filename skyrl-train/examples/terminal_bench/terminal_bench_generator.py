@@ -8,10 +8,10 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
-from sandboxes.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
-from sandboxes.models.environment_type import EnvironmentType
-from sandboxes.models.agent.name import AgentName
-from sandboxes.trial.trial import Trial
+from harbor.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
+from harbor.models.environment_type import EnvironmentType
+from harbor.models.agent.name import AgentName
+from harbor.trial.trial import Trial
 
 
 @dataclass
@@ -53,12 +53,9 @@ class TerminalBenchGenerator(GeneratorInterface):
             raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        
+        prompts = input_batch["prompts"]
         tasks = []
-        for prompt in input_batch["prompts"]:
-            # task = asyncio.create_task(self.terminal_bench_agent_loop(prompt=prompt))
-            # tasks.append(task)
-            # await asyncio.sleep(1)
+        for prompt in prompts:
             tasks.append(
                 self.terminal_bench_agent_loop(
                     prompt=prompt,
@@ -131,8 +128,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         trial = Trial(trial_config)
         # Run the trial
-        # for retry in range(3):
-        while True: 
+        while True:
             try:
                 results = await trial.run()
                 print(f"Results: {results}")
@@ -140,26 +136,14 @@ class TerminalBenchGenerator(GeneratorInterface):
                     print(f"[WARNING] Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
-                agent_result = getattr(results, "agent_result", None)
-                metadata = getattr(agent_result, "metadata", None)
-                if agent_result and "all_messages" not in results.agent_result.metadata:
-                    print(f"[WARNING] No 'all_messages' in agent_result.metadata for agent. Exception info: {results.agent_result}")
-                    continue
-
-                # chat_history = results.agent_result.metadata["all_messages"]
-                chat_history = metadata.get("all_messages") or []
-                if agent_result and len(chat_history) > 0:
+                chat_history = results.agent_result.all_messages
+                if len(chat_history) > 0:
                     break
                 else:
                     print(f"[WARNING] Agent {self.agent_name} did not return a response")
             except Exception as e:
                 print(f"Error running trial: {e}")
-                
                 continue
-
-
-        # if retry == 2:
-        #     return None
 
         # Use the first message as the prompt
         prompt = [chat_history[0]]
@@ -184,6 +168,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         for message in response_messages:
             # Apply chat template and tokenize each message
+            # NOTE(Charlie): for Qwen3, this preserves all the thinking tokens.
             msg_encoding = encode_messages_subset([message], self.tokenizer)
 
             # Extend response_ids with the tokens
@@ -203,6 +188,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         )
                     msg_logprobs = assistant_logprobs[assistant_msg_idx]
                     if len(msg_logprobs) != len(msg_encoding):
+                        # TODO(Charlie): We should get the raw tokens from the agent, or not use logprobs at all.
                         raise ValueError(
                             f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(msg_encoding)}) "
                             f"for assistant message #{assistant_msg_idx + 1}."
@@ -220,6 +206,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
+        # TODO(Charlie): should we do rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)?
 
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
@@ -232,7 +219,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
-            # in case sandboxes doesn't return logprobs, use None
+            # in case harbor doesn't return logprobs, use None
             rollout_logprobs=rollout_logprobs if assistant_logprobs is not None else None,
         )
 

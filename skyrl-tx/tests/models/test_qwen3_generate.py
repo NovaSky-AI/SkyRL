@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 
@@ -5,10 +6,11 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
-from tx.models import Qwen3ForCausalLM
+from tx.models import Qwen3Config, Qwen3ForCausalLM
 from tx.tinker import types
 from tx.utils.models import load_safetensors
 
@@ -36,7 +38,8 @@ def test_qwen3_generate():
     # Generate with our implementation
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        config = AutoConfig.from_pretrained(model_name)
+        base_config = PretrainedConfig.from_pretrained(model_name)
+        config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
         with jax.set_mesh(mesh):
@@ -87,12 +90,14 @@ def test_qwen3_generate():
                 )
 
 
+@pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
 def test_qwen3_generate_speed():
     """Profile batched text generation with KV caching."""
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-    config = AutoConfig.from_pretrained(model_name)
+    base_config = PretrainedConfig.from_pretrained(model_name)
+    config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
     inputs = [
         "Why do humans need sleep and what happens when we dream",

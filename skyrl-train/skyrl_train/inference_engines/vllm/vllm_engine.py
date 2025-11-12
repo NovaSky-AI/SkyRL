@@ -33,7 +33,7 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype
+from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
 
 
@@ -102,7 +102,7 @@ class WorkerWrap:
 
         self._model_update_group = init_custom_process_group(
             backend=backend,
-            init_method=f"tcp://{master_address}:{master_port}",
+            init_method=get_tcp_url(master_address, master_port),
             world_size=world_size,
             rank=rank,
             group_name=group_name,

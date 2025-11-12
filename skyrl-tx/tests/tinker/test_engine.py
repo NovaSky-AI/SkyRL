@@ -14,13 +14,6 @@ from tx.tinker import types
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
-class FutureStub:
-    """Minimal stub with request_id (engine only reads this attribute)."""
-
-    def __init__(self, request_id: int):
-        self.request_id = request_id
-
-
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
     samples = []
     for tokens in token_lists:
@@ -94,10 +87,10 @@ def test_adapter_gradient_calculation():
             [13, 14, 15, 16],
         ]
     )
-    reqs_round1 = [
-        (FutureStub(101), adapter1_id, a1_input),
-        (FutureStub(102), adapter2_id, a2_input1),
-    ]
+    reqs_round1 = {
+        "101": (adapter1_id, a1_input),
+        "102": (adapter2_id, a2_input1),
+    }
 
     # Process round 1 batch
     engine.process_forward_backward_batch(reqs_round1)
@@ -110,10 +103,10 @@ def test_adapter_gradient_calculation():
 
     a1_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8]])
     a2_input2 = make_fwd_bwd_input([[9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20], [21, 22, 23, 24]])
-    reqs_round2 = [
-        (FutureStub(201), adapter1_id, a1_input),
-        (FutureStub(202), adapter2_id, a2_input2),
-    ]
+    reqs_round2 = {
+        "201": (adapter1_id, a1_input),
+        "202": (adapter2_id, a2_input2),
+    }
 
     # Process round 2 batch
     engine.process_forward_backward_batch(reqs_round2)
@@ -135,7 +128,7 @@ def test_micro_batch_grad_accumulation():
         checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
-        micro_batch_size=4,
+        train_micro_batch_size=4,
     )
     engine = TinkerEngine(config)
 
@@ -160,10 +153,10 @@ def test_micro_batch_grad_accumulation():
         ]
     )
 
-    reqs = [
-        (FutureStub(1001), adapter1_id, a1_input),
-        (FutureStub(1002), adapter2_id, a2_input),
-    ]
+    reqs = {
+        "1001": (adapter1_id, a1_input),
+        "1002": (adapter2_id, a2_input),
+    }
 
     # Run 1: micro-batching enabled
     engine.process_forward_backward_batch(reqs)
@@ -182,7 +175,7 @@ def test_micro_batch_grad_accumulation():
         checkpoints_base=AnyPath(""),
         max_lora_adapters=8,
         max_lora_rank=32,
-        micro_batch_size=0,
+        train_micro_batch_size=0,
     )
     engine = TinkerEngine(config)
 
@@ -233,7 +226,7 @@ def test_process_optim_step_hyperparams_behavior():
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
 
     def apply_step(request_id: int, model_id: str, request: types.OptimStepInput) -> float:
-        engine.process_forward_backward_batch([(FutureStub(request_id), model_id, make_fwd_bwd_input(tokens))])
+        engine.process_forward_backward_batch({str(request_id): (model_id, make_fwd_bwd_input(tokens))})
         params_before = jax.tree.map(jnp.copy, engine.lora_params)
         engine.process_optim_step(model_id, request)
         delta = jax.tree.map(lambda old, new: (new - old).astype(jnp.float32), params_before, engine.lora_params)
@@ -262,10 +255,10 @@ def test_gradient_checkpointing():
     losses = []
     for use_gradient_checkpointing in (False, True):
         cfg = EngineConfig(
-            base_model="Qwen/Qwen3-0.6B",
+            base_model=BASE_MODEL,
             enforce_eager=False,
             train_batch_size=2,
-            micro_batch_size=1,
+            train_micro_batch_size=1,
             max_lora_adapters=1,
             max_lora_rank=4,
             gradient_checkpointing=use_gradient_checkpointing,
@@ -301,3 +294,65 @@ def test_gradient_checkpointing():
 
     # Check relative difference between losses is small
     assert abs(losses[0] - losses[1]) / abs(losses[0]) < 5e-3
+
+
+def test_sample_max_num_sequences():
+    """
+    Verify sampling with sample_max_num_sequences constraint.
+    """
+    cfg = EngineConfig(
+        base_model=BASE_MODEL,
+        checkpoints_base=AnyPath(""),
+        max_lora_adapters=2,
+        max_lora_rank=32,
+        sample_max_num_sequences=2,  # Set max sample batch size to 2
+    )
+    engine = TinkerEngine(cfg)
+
+    # Five prompts, resulting in 3 batches (2 of size 2, 1 of size 1)
+    prompts = [
+        [1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9],
+        [10, 11, 12, 13, 14],
+        [15, 16, 17],
+    ]
+
+    sampling_params = api.SamplingParams(temperature=0.0, max_tokens=16, seed=42).to_types()
+
+    def make_sample_input(tokens: list[int]) -> types.SampleInput:
+        return types.SampleInput(
+            base_model=BASE_MODEL,  # Sample from base model (no LoRA)
+            prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+            sampling_params=sampling_params,
+            num_samples=1,
+            checkpoint_id="",  # Empty for base model sampling
+        )
+
+    # Build a batch of 5 sample requests
+    reqs = {str(request_id): ("", make_sample_input(tokens)) for request_id, tokens in enumerate(prompts)}
+
+    # Process sample requests.
+    results = engine.process_sample_batch(reqs)
+
+    # Verify results
+    assert len(results) == len(prompts), f"Expected {len(prompts)} results, got {len(results)}"
+    for request_id in reqs:
+        result = results[request_id]
+
+        assert len(result.sequences) == 1, f"Request {request_id}: expected 1 sequence, got {len(result.sequences)}"
+        seq = result.sequences[0]
+        tokens = seq.tokens
+
+        # Should have generated some tokens (max_tokens=16)
+        assert len(tokens) > 0, f"Request {request_id}: no tokens generated"
+        assert len(tokens) <= 16, f"Request {request_id}: generated {len(tokens)} tokens, max was 16"
+
+        # Stop reason should be valid
+        assert seq.stop_reason in ["length", "stop"], f"Request {request_id}: invalid stop_reason '{seq.stop_reason}'"
+
+        # If we have logprobs, they should match the number of tokens
+        if seq.logprobs:
+            assert len(seq.logprobs) == len(
+                tokens
+            ), f"Request {request_id}: {len(tokens)} tokens but {len(seq.logprobs)} logprobs"
