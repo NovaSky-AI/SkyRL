@@ -780,7 +780,7 @@ class TinkerEngine:
                 """Recursively remove zero-sized arrays from nested dicts."""
                 if not isinstance(d, dict):
                     # Check if this is a zero-sized array
-                    if hasattr(d, 'size') and d.size == 0:
+                    if hasattr(d, "size") and d.size == 0:
                         return None
                     return d
                 filtered = {}
