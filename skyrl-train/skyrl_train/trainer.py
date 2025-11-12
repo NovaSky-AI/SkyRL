@@ -140,7 +140,7 @@ class RayPPOTrainer:
         if model is None:
             logger.warning(f"Skipping HF export for {model_name or 'unknown model'} (model is None).")
             return
-        
+
         # Infer the model name if it is not provided
         if model_name is None:
             if model is self.policy_model:
@@ -151,17 +151,16 @@ class RayPPOTrainer:
                 model_name = "ref"
             else:
                 model_name = "unknown"
-        
+
         export_root = getattr(self.cfg.trainer, "export_path", None)
         if not export_root:
             import datetime
+
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             home_dir = os.path.expanduser("~")
             export_root = os.path.join(home_dir, "exports", timestamp)
             io.makedirs(export_root, exist_ok=True)
-            logger.warning(
-                f"cfg.trainer.export_path not defined — using default export path: {export_root}"
-            )
+            logger.warning(f"cfg.trainer.export_path not defined — using default export path: {export_root}")
         export_dir = os.path.join(export_root, f"global_step_{self.global_step}", model_name)
         io.makedirs(export_dir, exist_ok=True)
 
@@ -196,9 +195,6 @@ class RayPPOTrainer:
         self.save_to_hf(self.policy_model)
         self.save_to_hf(self.critic_model)
         self.save_to_hf(self.ref_model)
-
-    
-        
 
     def train(self):
         """
