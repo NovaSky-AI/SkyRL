@@ -68,9 +68,9 @@ class ExternalInferenceClient:
         # Extract checkpoint to the LoRA models directory that vLLM monitors
         lora_models_dir = Path("/tmp/lora_models")
 
-        # Use model_id/checkpoint_id as the model name
-        model_name = f"{model_id}/{checkpoint_id}"
-        target_dir = lora_models_dir / model_id / checkpoint_id
+        # Use model_id_checkpoint_id as the model name
+        model_name = f"{model_id}_{checkpoint_id}"
+        target_dir = lora_models_dir / model_name
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
         # Extract the checkpoint if it doesn't already exist
