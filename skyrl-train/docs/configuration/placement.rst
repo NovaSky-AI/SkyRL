@@ -23,7 +23,7 @@ The ``generator.run_engines_locally`` argument controls inference engine managem
 
 If ``run_engines_locally=true``, then the inference engines are launched during the training run and managed by SkyRL.
 
-If ``run_engines_locally=false``, then the user can specify inference engine URLs managed externally (with the ``generator.remote_inference_engine_urls`` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines `here <https://github.com/NovaSky-AI/SkyRL/tree/c47faab761e7c78e34479e4a82bf340c5ae7506e/skyrl-train/examples/remote_inference_engine>`_ for convenience.
+If ``run_engines_locally=false``, then the user can specify inference engine URLs managed externally (with the ``generator.remote_inference_engine_urls`` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines `here <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/remote_inference_engine>`_ for convenience.
 
 
 Inference Engine Placement
