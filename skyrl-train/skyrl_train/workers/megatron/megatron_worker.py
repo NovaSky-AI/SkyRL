@@ -4,6 +4,8 @@ import torch.distributed
 import ray
 from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
+
+import asyncio
 import os
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
@@ -269,6 +271,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             policy_loss_fn=self.policy_loss_fn,
         )
 
+        self.use_cuda_ipc = False
+        if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
+            self.use_cuda_ipc = True
+
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
@@ -404,49 +410,89 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.cuda.empty_cache()
         per_tensor_param = self.bridge.export_weights(self.actor_module)
-        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-        current_size = 0
 
-        for name, param in per_tensor_param:
-            # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
-            # in the future we should improve this to use bucketed weight updates and support FlashRL + megatron for large models
-            from torch.multiprocessing.reductions import reduce_tensor
+        # Non CUDA IPC wt sync
+        if not self.use_cuda_ipc:
+            for name, param in per_tensor_param:
+                if torch.distributed.get_rank() == 0:
+                    update_weight_task = asyncio.create_task(
+                        inference_engine_client.update_named_weights(
+                            {
+                                "names": [name],
+                                "dtypes": [self.cfg.generator.model_dtype],
+                                "shapes": [param.shape],
+                            }
+                        )
+                    )
 
-            device = torch.cuda.current_device()
-            param = param.to(device, non_blocking=True)
-            param = param.to(generator_dtype)
-            weight = param.data.clone()
-            ipc_handle = reduce_tensor(weight)
+                def broadcast_param(param):
+                    device = torch.cuda.current_device()
+                    param = param.to(device, non_blocking=True)
+                    param = param.to(generator_dtype)
 
-            ipc_handle = {get_physical_gpu_id(): ipc_handle}
-            ipc_handle_list = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+                    # Broadcast weights from training rank 0 to inference engine ranks via the update group
+                    if torch.distributed.get_rank() == 0:
+                        torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
 
-            if torch.distributed.get_rank() == 0:
-                ipc_handles = {}
-                for d in ipc_handle_list:
-                    ipc_handles.update(d)
+                await asyncio.to_thread(broadcast_param, param)
+                if torch.distributed.get_rank() == 0:
+                    await update_weight_task
+                torch.distributed.barrier()
+        # CUDA IPC wt sync
+        else:
+            weights_update_request = {
+                "names": [],
+                "dtypes": [],
+                "shapes": [],
+                "extras": [],
+            }
+            current_size = 0
 
-                current_size += weight.nbytes
-                weights_update_request["names"].append(name)
-                weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                weights_update_request["shapes"].append(param.shape)
-                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
-                    await inference_engine_client.update_named_weights(weights_update_request)
-                    current_size = 0
-                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-                    # force collect any sent tensors if possible to be memory efficient
-                    torch.cuda.ipc_collect()
+            for name, param in per_tensor_param:
+                # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
+                # in the future we should improve this to use bucketed weight updates and support FlashRL + megatron for large models
+                from torch.multiprocessing.reductions import reduce_tensor
 
+                device = torch.cuda.current_device()
+                param = param.to(device, non_blocking=True)
+                param = param.to(generator_dtype)
+                weight = param.data.clone()
+                ipc_handle = reduce_tensor(weight)
+
+                ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                ipc_handle_list = [None] * torch.distributed.get_world_size()
+                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+
+                if torch.distributed.get_rank() == 0:
+                    ipc_handles = {}
+                    for d in ipc_handle_list:
+                        ipc_handles.update(d)
+
+                    current_size += weight.nbytes
+                    weights_update_request["names"].append(name)
+                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                    weights_update_request["shapes"].append(param.shape)
+                    weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+                    if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                        await inference_engine_client.update_named_weights(weights_update_request)
+                        current_size = 0
+                        weights_update_request = {
+                            "names": [],
+                            "dtypes": [],
+                            "shapes": [],
+                            "extras": [],
+                        }
+                        # force collect any sent tensors if possible to be memory efficient
+                        torch.cuda.ipc_collect()
+
+                torch.distributed.barrier()
+                torch.cuda.synchronize()
+
+            if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
+                await inference_engine_client.update_named_weights(weights_update_request)
+                torch.cuda.ipc_collect()
             torch.distributed.barrier()
             torch.cuda.synchronize()
-
-        if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
-            await inference_engine_client.update_named_weights(weights_update_request)
-            torch.cuda.ipc_collect()
-        torch.distributed.barrier()
-        torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -515,6 +561,13 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         self.actor_module = self.make_megatron_module(
             self.cfg.trainer.ref.megatron_config.model_config_kwargs, wrap_with_ddp=False, ddp_config=None
         )
+
+        # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
+        if self._local_rank == 0 and not os.path.exists(
+            model_path
+        ):  # if not local path, try downloading model weights from huggingface
+            snapshot_download(model_path)  # will be no-op if already downloaded
+        torch.distributed.barrier()
 
         # load weights
         self.bridge.load_weights(self.actor_module, model_path)

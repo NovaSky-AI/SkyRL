@@ -67,7 +67,7 @@ async def evaluate(
             global_step,
         )
         generator_output: GeneratorOutput = await generator.generate(generator_input)
-        validate_generator_output(generator_input, generator_output)
+        validate_generator_output(len(generator_input["prompts"]), generator_output)
         generator_outputs.append(generator_output)
         concat_all_envs.extend(generator_input["env_classes"])
         concat_env_extras.extend(generator_input["env_extras"])
