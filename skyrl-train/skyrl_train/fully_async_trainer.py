@@ -608,8 +608,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 logger.warning(
                     "Staleness control violated despite using AsyncStalenessManager: "
                     f"cur_staleness={cur_staleness}, max_staleness_steps={self.max_staleness_steps}.\n"
-                    "This can happen if a trajectory takes longer to generate than updating the model max_staleness_steps times."
-                    "If this happens too often, consider increasing max_staleness_steps or adjusting generation-training GPU allocation."
+                    "If this happens too often, consider increasing max_staleness_steps, adjusting "
+                    "trainer.fully_async.num_parallel_generation_workers, or adjusting generation-training GPU allocation.\n"
+                    "See https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#async-staleness-manager for more details."
                 )
                 staleness_violation_count += 1
 
