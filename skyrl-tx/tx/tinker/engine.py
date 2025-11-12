@@ -775,11 +775,26 @@ class TinkerEngine:
                 adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
             )
 
+            # Filter out zero-sized arrays (disabled LoRA layers with rank=0)
+            def filter_empty_arrays(d):
+                """Recursively remove zero-sized arrays from nested dicts."""
+                if not isinstance(d, dict):
+                    # Check if this is a zero-sized array
+                    if hasattr(d, 'size') and d.size == 0:
+                        return None
+                    return d
+                filtered = {}
+                for k, v in d.items():
+                    filtered_v = filter_empty_arrays(v)
+                    if filtered_v is not None:
+                        filtered[k] = filtered_v
+                return filtered  # Always return the dict, even if empty
+
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
                     target={
-                        "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                        "optimizer_state": nnx.to_pure_dict(optimizer_params),
+                        "lora_weights": filter_empty_arrays(nnx.to_pure_dict(adapter_lora_params)),
+                        "optimizer_state": filter_empty_arrays(nnx.to_pure_dict(optimizer_params)),
                         "lora_config": self.models[model_id].lora_config.model_dump(),
                     },
                     ckpt_dir=temp_dir,
