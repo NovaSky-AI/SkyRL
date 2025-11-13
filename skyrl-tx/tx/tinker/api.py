@@ -840,6 +840,15 @@ async def list_checkpoints(
     return ListCheckpointsResponse(checkpoints=checkpoints)
 
 
+@app.get("/api/v1/models/{unique_id}/checkpoints")
+async def list_checkpoints_models(
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    session: AsyncSession = Depends(get_session),
+):
+    """Just to be compatible with tinker SDK"""
+    return await list_checkpoints(unique_id=unique_id, session=session)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
