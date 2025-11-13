@@ -645,30 +645,31 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-@app.post("/api/v1/asample", response_model=FutureResponse)
-async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
-    """Generates samples from the model (async version)."""
-    base_model = request.base_model
-    model_path = request.model_path
-
+async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+    """Return (base_model, model_path) for a sampling request."""
     # Resolve model/base from sampling_session_id if provided
     if request.sampling_session_id is not None:
         sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
         if sampling_session is None:
             raise HTTPException(status_code=404, detail="Sampling session not found")
-        base_model = sampling_session.base_model
-        model_path = sampling_session.model_path
+        return (sampling_session.base_model, sampling_session.model_path)
+    return (request.base_model, request.model_path)
+
+
+@app.post("/api/v1/asample", response_model=FutureResponse)
+async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
+    """Generates samples from the model (async version)."""
+    base_model, model_path = await get_sampling_model(request, session)
 
     if base_model:
         model_id = checkpoint_id = ""
     else:
         assert model_path is not None
         path = types.TinkerPath.parse(model_path)
-        # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
-        valid_kinds = ("", "sampler_weights")
         if (
             not path
-            or path.kind not in valid_kinds
+            # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
+            or path.kind not in ("", "sampler_weights")
             or not (model_id := path.primary_id)
             or not (checkpoint_id := path.secondary_id)
         ):
