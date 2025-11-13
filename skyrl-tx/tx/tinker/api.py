@@ -287,18 +287,31 @@ class SamplingParams(BaseModel):
 
 
 class SampleRequest(BaseModel):
-    base_model: str | None = None
-    model_path: str | None = None
+    num_samples: int = 1
     prompt: ModelInput
     sampling_params: SamplingParams
-    num_samples: int
-    prompt_logprobs: bool = False
+    base_model: Optional[str] = None
+    model_path: Optional[str] = None
+    sampling_session_id: Optional[str] = None
+    seq_id: Optional[int] = None
+    prompt_logprobs: Optional[bool] = None
+    topk_prompt_logprobs: int = 0
+    type: Literal["sample"] = "sample"
 
     @model_validator(mode="after")
     def validate_model_source(self):
-        """Ensure exactly one of base_model or model_path is set."""
+        """Validate model source per SDK contract.
+
+        Valid if:
+        - sampling_session_id is provided AND seq_id is provided
+        - OR exactly one of base_model or model_path is provided
+        """
+        if self.sampling_session_id is not None:
+            if self.seq_id is None:
+                raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
+            return self
         if (self.base_model is None) == (self.model_path is None):
-            raise ValueError("Exactly one of 'base_model' or 'model_path' must be provided")
+            raise ValueError("When 'sampling_session_id' is not provided, exactly one of 'base_model' or 'model_path' must be provided")
         return self
 
 
@@ -636,13 +649,34 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    if request.base_model:
+    base_model = request.base_model
+    model_path = request.model_path
+
+    # Resolve model/base from sampling_session_id if provided
+    if request.sampling_session_id is not None:
+        sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
+        if sampling_session is None:
+            raise HTTPException(status_code=404, detail="Sampling session not found")
+        base_model = sampling_session.base_model
+        model_path = sampling_session.model_path
+
+    if base_model:
         model_id = checkpoint_id = ""
     else:
-        assert request.model_path is not None
-        path = types.TinkerPath.parse(request.model_path)
-        if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
-            raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
+        assert model_path is not None
+        path = types.TinkerPath.parse(model_path)
+        # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
+        valid_kinds = ("", "sampler_weights")
+        if (
+            not path
+            or path.kind not in valid_kinds
+            or not (model_id := path.primary_id)
+            or not (checkpoint_id := path.secondary_id)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
+            )
         await get_model(session, model_id)
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
@@ -652,7 +686,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         request_type=types.RequestType.SAMPLE,
         model_id=model_id,
         request_data=types.SampleInput(
-            base_model=request.base_model,
+            base_model=base_model,
             prompt=request.prompt.to_types(),
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
