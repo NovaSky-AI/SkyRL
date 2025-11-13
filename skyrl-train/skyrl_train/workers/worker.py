@@ -32,7 +32,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, BalancedBatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, TokenBasedBatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -329,7 +329,7 @@ class Worker(DistributedTorchRayActor):
         # Check if token-based chunking is enabled
         if self.cfg.trainer.max_tokens_per_microbatch > 0:
             # Use token-based chunking
-            micro_batch_iterator = BalancedBatchIterator(
+            micro_batch_iterator = TokenBasedBatchIterator(
                 data=data,
                 max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
             )
@@ -655,7 +655,7 @@ class PolicyWorkerBase(Worker):
         global_step = train_data.metadata["global_step"]
 
         if self.cfg.trainer.max_tokens_per_microbatch is not None:
-            dataloader = BalancedBatchIterator(
+            dataloader = TokenBasedBatchIterator(
                 train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
             )
             accumulation_steps = dataloader.num_microbatches
@@ -958,7 +958,7 @@ class CriticWorkerBase(Worker):
 
         # TODO: Move this to the base class since it's common to both policy and critic workers.
         if self.cfg.trainer.max_tokens_per_microbatch is not None:
-            dataloader = BalancedBatchIterator(
+            dataloader = TokenBasedBatchIterator(
                 train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
             )
             accumulation_steps = dataloader.num_microbatches
@@ -968,7 +968,7 @@ class CriticWorkerBase(Worker):
             )
 
             # TODO: Make `num_microbatches` a property of the dataloader instead of computing it here.
-            # Ex: see the BalancedBatchIterator class.
+            # Ex: see the TokenBasedBatchIterator class.
             micro_batches_per_mini_batch = (
                 self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
             )

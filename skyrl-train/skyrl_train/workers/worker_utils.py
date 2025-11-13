@@ -146,7 +146,7 @@ def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int)
     return microbatch_indices
 
 
-class BalancedBatchIterator(BaseBatchIterator):
+class TokenBasedBatchIterator(BaseBatchIterator):
     """An iterator that chunks microbatches based on real token count.
 
     Packs samples into microbatches, ensuring each microbatch doesn't exceed
