@@ -5,6 +5,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from cloudpathlib import AnyPath
 
 from tx.tinker import types
+from tx.tinker.config import EngineConfig
 from tx.tinker.db_models import FutureDB, RequestStatus
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack
@@ -13,10 +14,10 @@ from tx.utils.storage import download_and_unpack
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
-    def __init__(self, base_url: str, api_key: str, checkpoints_base: AnyPath):
-        self.base_url = f"{base_url}/v1"
-        self.api_key = api_key
-        self.checkpoints_base = checkpoints_base
+    def __init__(self, engine_config: EngineConfig):
+        self.base_url = f"{engine_config.external_inference_url}/v1"
+        self.api_key = engine_config.external_inference_api_key
+        self.checkpoints_base = engine_config.checkpoints_base
 
     async def call_and_store_result(
         self,

@@ -45,11 +45,7 @@ async def lifespan(app: FastAPI):
 
     # Setup external inference client if configured
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(
-            app.state.engine_config.external_inference_url,
-            app.state.engine_config.external_inference_api_key,
-            app.state.engine_config.checkpoints_base,
-        )
+        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     else:
         app.state.external_inference_client = None
