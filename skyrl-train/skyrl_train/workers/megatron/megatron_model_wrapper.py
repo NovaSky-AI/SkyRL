@@ -233,15 +233,10 @@ class MegatronModelWrapper:
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-            with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
-                action_logits = logits[:, -num_actions - 1 : -1, :]
-                entropy_BS = vocab_parallel_entropy(action_logits)
-                entropy_scalar = masked_mean(entropy_BS, loss_mask)
-
-            if self.cfg.trainer.algorithm.use_entropy_loss:
-                policy_loss = policy_loss - self.cfg.trainer.algorithm.entropy_loss_coef * entropy_scalar
-
-            entropy = entropy_scalar.detach().cpu().item()
+            action_logits = logits[:, -num_actions - 1 : -1, :]
+            entropy_BS = vocab_parallel_entropy(action_logits)
+            entropy = masked_mean(entropy_BS, loss_mask)
+            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
 
             if self.cfg.trainer.algorithm.use_kl_loss:
                 kl_loss = compute_approx_kl(
@@ -253,12 +248,13 @@ class MegatronModelWrapper:
                 kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
             else:
                 kl_loss = torch.tensor(0.0)
+            kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-            loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+            loss = policy_loss + kl_loss_term - entropy_loss_term
 
             metrics = {
                 "policy_loss": policy_loss.detach().item(),
-                "policy_entropy": entropy,
+                "policy_entropy": entropy.detach().item(),
                 "ppo_clip_ratio": clip_ratio,
                 "policy_kl": kl_loss.detach().item(),
             }
