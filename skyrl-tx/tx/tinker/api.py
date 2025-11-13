@@ -415,7 +415,7 @@ async def healthz():
 @app.post("/api/v1/create_session", response_model=CreateSessionResponse)
 async def create_session(request: CreateSessionRequest, session: AsyncSession = Depends(get_session)):
     """Create a new session + persist in DB"""
-    session_id = f"session_{uuid4().hex}"
+    session_id = f"session_{uuid4().hex[:8]}"
     session_db = SessionDB(
         session_id=session_id,
         tags=request.tags,
@@ -443,13 +443,13 @@ async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSess
 @app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
 async def create_sampling_session(request: CreateSamplingSessionRequest, session: AsyncSession = Depends(get_session)):
     """Create a new sampling session within an existing session."""
-    session_row = await session.get(SessionDB, request.session_id)
-    if session_row is None:
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
         raise HTTPException(status_code=404, detail="Session not found")
     # Exactly one of base_model or model_path must be provided
     if (request.base_model is None) == (request.model_path is None):
         raise HTTPException(status_code=400, detail="Exactly one of base_model or model_path must be provided")
-    sampling_session_id = f"sampling_{uuid4().hex[:12]}"
+    sampling_session_id = f"sampling_{uuid4().hex[:8]}"
     sampling_db = SamplingSessionDB(
         sampling_session_id=sampling_session_id,
         session_id=request.session_id,
