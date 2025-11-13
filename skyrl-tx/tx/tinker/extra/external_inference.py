@@ -14,14 +14,14 @@ from tx.utils.storage import download_and_unpack
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
-    def __init__(self, engine_config: EngineConfig):
+    def __init__(self, engine_config: EngineConfig, db_engine):
         self.base_url = f"{engine_config.external_inference_url}/v1"
         self.api_key = engine_config.external_inference_api_key
         self.checkpoints_base = engine_config.checkpoints_base
+        self.db_engine = db_engine
 
     async def call_and_store_result(
         self,
-        db_engine,
         request_id: int,
         sample_req,
         model_id: str,
@@ -41,7 +41,7 @@ class ExternalInferenceClient:
                     sample_req, model_id, checkpoint_id, str(checkpoint_path), http_client
                 )
 
-            async with AsyncSession(db_engine) as session:
+            async with AsyncSession(self.db_engine) as session:
                 future = await session.get(FutureDB, request_id)
                 if future:
                     future.result_data = result.model_dump()
@@ -50,7 +50,7 @@ class ExternalInferenceClient:
                     await session.commit()
         except Exception as e:
             logger.exception("External engine error")
-            async with AsyncSession(db_engine) as session:
+            async with AsyncSession(self.db_engine) as session:
                 future = await session.get(FutureDB, request_id)
                 if future:
                     future.result_data = {"error": str(e), "status": "failed"}

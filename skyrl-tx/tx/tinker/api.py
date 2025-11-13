@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
 
     # Setup external inference client if configured
     if app.state.engine_config.external_inference_url:
-        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config)
+        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     else:
         app.state.external_inference_client = None
@@ -574,13 +574,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
 
     if req.app.state.external_inference_client:
         asyncio.create_task(
-            req.app.state.external_inference_client.call_and_store_result(
-                req.app.state.db_engine,
-                request_id,
-                request,
-                model_id,
-                checkpoint_id,
-            )
+            req.app.state.external_inference_client.call_and_store_result(request_id, request, model_id, checkpoint_id)
         )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
