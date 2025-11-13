@@ -3,9 +3,11 @@
 import os
 import subprocess
 import tempfile
+import time
 import urllib.request
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 import tinker
 from tinker import types
@@ -39,6 +41,28 @@ def api_server():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+    # Wait for server to be ready (max 30 seconds)
+    server_url = "http://0.0.0.0:8000/"
+    max_wait = 30
+    start_time = time.time()
+    server_ready = False
+
+    while time.time() - start_time < max_wait:
+        try:
+            response = httpx.get(server_url, timeout=1.0)
+            if response.status_code == 200:
+                server_ready = True
+                break
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout):
+            time.sleep(0.5)
+
+    if not server_ready:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=5)
+        raise RuntimeError(
+            f"Server failed to start within {max_wait}s\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}"
+        )
 
     yield process
 
