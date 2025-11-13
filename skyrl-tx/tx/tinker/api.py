@@ -300,9 +300,7 @@ class SampleRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_model_source(self):
-        """Validate model source per SDK contract.
-
-        Valid if:
+        """Valid if:
         - sampling_session_id is provided AND seq_id is provided
         - OR exactly one of base_model or model_path is provided
         """
@@ -355,7 +353,6 @@ class TelemetryResponse(BaseModel):
     status: Literal["accepted"] = "accepted"
 
 
-# ---- Session and service models (mirror SDK types) ----
 class HealthResponse(BaseModel):
     status: Literal["ok"]
 
@@ -417,7 +414,7 @@ async def healthz():
 
 @app.post("/api/v1/create_session", response_model=CreateSessionResponse)
 async def create_session(request: CreateSessionRequest, session: AsyncSession = Depends(get_session)):
-    """Create a new SDK session."""
+    """Create a new session + persist in DB"""
     session_id = f"session_{uuid4().hex}"
     session_db = SessionDB(
         session_id=session_id,

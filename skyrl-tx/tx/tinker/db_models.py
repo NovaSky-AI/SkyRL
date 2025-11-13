@@ -90,7 +90,6 @@ class CheckpointDB(SQLModel, table=True):
     error_message: str | None = None
 
 
-# --- Session tables ---
 class SessionDB(SQLModel, table=True):
     __tablename__ = "sessions"
 
