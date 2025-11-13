@@ -311,7 +311,9 @@ class SampleRequest(BaseModel):
                 raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
             return self
         if (self.base_model is None) == (self.model_path is None):
-            raise ValueError("When 'sampling_session_id' is not provided, exactly one of 'base_model' or 'model_path' must be provided")
+            raise ValueError(
+                "When 'sampling_session_id' is not provided, exactly one of 'base_model' or 'model_path' must be provided"
+            )
         return self
 
 
