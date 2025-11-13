@@ -19,11 +19,26 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     return reduced_metrics
 
 
-class BatchIterator:
-    """A simple iterator to yield micro batches of data from the training batch."""
+class BaseBatchIterator:
+    def __init__(self, data: TrainingInputBatch):
+        self.data = data
+
+    def __len__(self):
+        raise NotImplementedError
+
+    def __iter__(self):
+        raise NotImplementedError
+
+    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
+        """Reorder microbatches to match the order of the original data."""
+        raise NotImplementedError
+
+
+class SampleBasedBatchIterator(BaseBatchIterator):
+    """A simple iterator to yield micro batches of the same number of samples from the training batch."""
 
     def __init__(self, data: TrainingInputBatch, sample_batch_size: int, drop_last: bool = False):
-        self.data = data
+        super().__init__(data)
         self.sample_batch_size = sample_batch_size
         self.total_batch_size = data.batch_size
         self.drop_last = drop_last
@@ -131,13 +146,12 @@ def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int)
     return microbatch_indices
 
 
-class BalancedBatchIterator:
-    """
-    An iterator that chunks batches based on token count rather than sample count.
+class BalancedBatchIterator(BaseBatchIterator):
+    """An iterator that chunks microbatches based on real token count.
 
-    Packs samples into micro batches efficiently, ensuring each microbatch doesn't exceed
+    Packs samples into microbatches, ensuring each microbatch doesn't exceed
     max_tokens_per_microbatch. All data parallel workers will have the same number of
-    micro batches (padding batches are added if needed).
+    microbatches (where padding microbatches are added if needed).
     """
 
     def __init__(
@@ -159,6 +173,7 @@ class BalancedBatchIterator:
         self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
 
         # Create microbatches based on token count
+        # TODO: Allow for different chunking strategies.
         self._microbatches = balanced_binpacking(self._token_counts, self._max_tokens_per_microbatch)
 
         # Synchronize the number of microbatches across all DP workers
@@ -226,6 +241,8 @@ class BalancedBatchIterator:
 
     def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
         """Reorder microbatch data into a single batch with the same order as the original data.
+
+        Example: [[0, 2], [1, 3]] -> [0, 1, 2, 3]
 
         Args:
             microbatches: List of microbatches to reorder.
