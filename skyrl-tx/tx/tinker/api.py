@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence, Optional
+from typing import Literal, Any, AsyncGenerator, Sequence
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
@@ -290,11 +290,11 @@ class SampleRequest(BaseModel):
     num_samples: int = 1
     prompt: ModelInput
     sampling_params: SamplingParams
-    base_model: Optional[str] = None
-    model_path: Optional[str] = None
-    sampling_session_id: Optional[str] = None
-    seq_id: Optional[int] = None
-    prompt_logprobs: Optional[bool] = None
+    base_model: str | None = None
+    model_path: str | None = None
+    sampling_session_id: str | None = None
+    seq_id: int | None = None
+    prompt_logprobs: bool | None = None
     topk_prompt_logprobs: int = 0
     type: Literal["sample"] = "sample"
 
@@ -384,8 +384,8 @@ class SessionHeartbeatResponse(BaseModel):
 class CreateSamplingSessionRequest(BaseModel):
     session_id: str
     sampling_session_seq_id: int
-    base_model: Optional[str] = None
-    model_path: Optional[str] = None
+    base_model: str | None = None
+    model_path: str | None = None
     type: Literal["create_sampling_session"] = "create_sampling_session"
 
 
