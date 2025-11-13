@@ -233,7 +233,12 @@ class BalancedBatchIterator:
         Returns:
             A single reordered batch.
         """
+        # TODO: Move this stuff to utility functions.
         non_padding_microbatches = microbatches[: len(microbatches) - self._num_padding_microbatches]
+
+        if not non_padding_microbatches:
+            # TODO: Can this happen?
+            raise ValueError("Cannot reorder an empty list of microbatches.")
 
         # Create a reverse mapping of original idx -> (microbatch idx, sample idx)
         original_idx_to_microbatch_idx = {}
@@ -242,9 +247,29 @@ class BalancedBatchIterator:
             for sample_idx, original_idx in enumerate(original_indices):
                 original_idx_to_microbatch_idx[original_idx] = (microbatch_idx, sample_idx)
 
-        # Reorder the microbatches to match the original data order
-        reordered_microbatches = []
-        for original_idx in range(len(self._token_counts)):
-            microbatch_idx, sample_idx = original_idx_to_microbatch_idx[original_idx]
-            reordered_microbatches.append(non_padding_microbatches[microbatch_idx][sample_idx])
-        return TensorBatch.cat(reordered_microbatches)
+        # Get reference microbatch to know keys and tensor shapes
+        ref_microbatch = non_padding_microbatches[0]
+        reordered_data = {}
+
+        for key, ref_value in ref_microbatch.items():
+            # Get shape of a single sample (remove batch dimension)
+            sample_shape = ref_value.shape[1:]
+            device = ref_value.device
+            dtype = ref_value.dtype
+
+            # Pre-allocate output tensor: [batch_size, *sample_shape]
+            batch_size = len(self._token_counts)
+            output_tensor = torch.zeros((batch_size, *sample_shape), dtype=dtype, device=device)
+
+            # Copy each sample directly into the correct position
+            for original_idx in range(batch_size):
+                microbatch_idx, sample_idx = original_idx_to_microbatch_idx[original_idx]
+                source_tensor = non_padding_microbatches[microbatch_idx][key]
+                output_tensor[original_idx] = source_tensor[sample_idx]
+
+            reordered_data[key] = output_tensor
+
+        # Create single TensorBatch with reordered data
+        reordered_batch = type(ref_microbatch)(reordered_data)
+        reordered_batch.metadata = ref_microbatch.metadata
+        return reordered_batch
