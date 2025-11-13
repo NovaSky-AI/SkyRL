@@ -766,8 +766,12 @@ class PolicyWorkerBase(Worker):
             # batch_size, seqlen
             entropy_BS = output["entropy"]
             entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-
             entropy = masked_mean(entropy_BS, loss_mask)
+
+        if self.cfg.trainer.algorithm.use_entropy_loss:
+            entropy_loss_term = entropy * self.cfg.trainer.algorithm.use_entropy_loss
+        else:
+            entropy_loss_term = torch.tensor(0.0)
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
@@ -780,12 +784,9 @@ class PolicyWorkerBase(Worker):
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
             kl_loss = torch.tensor(0.0)
+        kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-        loss = (
-            policy_loss
-            + (kl_loss * self.cfg.trainer.algorithm.kl_loss_coef)
-            + (-self.cfg.trainer.algorithm.entropy_loss_coef * entropy)
-        )
+        loss = policy_loss + kl_loss_term - entropy_loss_term
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
