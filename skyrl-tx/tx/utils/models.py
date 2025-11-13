@@ -130,7 +130,11 @@ def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path:
 
 
 def save_lora_checkpoint(
-    model: nnx.Module, base_model_name: str, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
+    model: nnx.Module,
+    base_model_name: str,
+    adapter_config: LoraConfig,
+    adapter_index: int,
+    output_path: Path | CloudPath,
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
@@ -144,7 +148,9 @@ def save_lora_checkpoint(
 
     adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
 
-    peft_config = peft.LoraConfig(base_model_name_or_path=base_model_name,r=adapter_config.rank, lora_alpha=adapter_config.alpha)
+    peft_config = peft.LoraConfig(
+        base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
+    )
     with pack_and_upload(output_path) as temp_dir:
         save_safetensors(
             model.config,

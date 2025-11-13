@@ -36,7 +36,9 @@ class ExternalInferenceClient:
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
             ) as http_client:
-                result = await self._forward_to_engine(sample_req, model_id, checkpoint_id, str(checkpoint_path), http_client)
+                result = await self._forward_to_engine(
+                    sample_req, model_id, checkpoint_id, str(checkpoint_path), http_client
+                )
 
             async with AsyncSession(db_engine) as session:
                 future = await session.get(FutureDB, request_id)
@@ -78,6 +80,7 @@ class ExternalInferenceClient:
             with download_and_unpack(AnyPath(checkpoint_path)) as extracted_path:
                 # Move/copy the extracted content to the target directory
                 import shutil
+
                 shutil.copytree(extracted_path, target_dir)
 
         payload = {
