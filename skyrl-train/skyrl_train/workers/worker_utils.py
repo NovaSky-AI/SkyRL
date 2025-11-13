@@ -99,17 +99,17 @@ def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int)
     [[0, 4], [5, 1], [3, 2]]
     """
     # TODO: Handle max(token_counts) > max_tokens_per_microbatch
-    
+
     # Create list of (index, token_count) pairs and sort by token count descending
     seq_lens = [(i, seq_len) for i, seq_len in enumerate(token_counts)]
     seq_lens.sort(key=lambda x: x[1], reverse=True)
-    
+
     # Track microbatch indices and their current token counts
     microbatch_indices: List[List[int]] = []
 
     # Heap to track the total number of tokens in each microbatch
     microbatch_tokens_heap = []  # (current_total, bin_idx)
-    
+
     for idx, seq_len in seq_lens:
         placed = False
 
@@ -162,10 +162,7 @@ class BalancedBatchIterator:
         self._microbatches = balanced_binpacking(self._token_counts, self._max_tokens_per_microbatch)
 
         # Synchronize the number of microbatches across all DP workers
-        if dist.is_initialized():
-            max_num_microbatches = self._sync_num_microbatches()
-        else:
-            max_num_microbatches = len(self._microbatches)
+        max_num_microbatches = self._sync_num_microbatches()
 
         self._num_padding_microbatches = max_num_microbatches - len(self._microbatches)
 
@@ -175,8 +172,13 @@ class BalancedBatchIterator:
 
     def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
         """Create a TrainingInputBatch from a list of sample indices."""
-        # TODO: Support list indexing for TrainingInputBatch
-        return TrainingInputBatch.cat([self._data[i] for i in indices])
+        indices_tensor = torch.tensor(indices, dtype=torch.long, device="cpu")
+        selected_data = {}
+        for key, value in self._data.items():
+            selected_data[key] = value[indices_tensor]
+        microbatch = TrainingInputBatch(selected_data)
+        microbatch.metadata = self._data.metadata
+        return microbatch
 
     def _create_padding_microbatch(self) -> TrainingInputBatch:
         """Create a padding microbatch."""
@@ -199,6 +201,9 @@ class BalancedBatchIterator:
     def _sync_num_microbatches(self) -> int:
         """Ensure all DP workers have the same number of micro batches."""
         local_num_microbatches = len(self._microbatches)
+
+        if not dist.is_initialized():
+            return local_num_microbatches
 
         # Get the maximum number of batches across all DP workers
         # Handle case where CUDA might not be available
@@ -228,7 +233,7 @@ class BalancedBatchIterator:
         Returns:
             A single reordered batch.
         """
-        non_padding_microbatches = microbatches[:len(microbatches)-self._num_padding_microbatches]
+        non_padding_microbatches = microbatches[: len(microbatches) - self._num_padding_microbatches]
 
         # Create a reverse mapping of original idx -> (microbatch idx, sample idx)
         original_idx_to_microbatch_idx = {}
