@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Any, AsyncGenerator, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
@@ -22,6 +22,8 @@ from tx.tinker.db_models import (
     FutureDB,
     RequestStatus,
     CheckpointStatus,
+    SessionDB,
+    SamplingSessionDB,
     get_async_database_url,
 )
 from tx.utils.storage import download_file
@@ -285,18 +287,31 @@ class SamplingParams(BaseModel):
 
 
 class SampleRequest(BaseModel):
-    base_model: str | None = None
-    model_path: str | None = None
+    num_samples: int = 1
     prompt: ModelInput
     sampling_params: SamplingParams
-    num_samples: int
-    prompt_logprobs: bool = False
+    base_model: str | None = None
+    model_path: str | None = None
+    sampling_session_id: str | None = None
+    seq_id: int | None = None
+    prompt_logprobs: bool | None = None
+    topk_prompt_logprobs: int = 0
+    type: Literal["sample"] = "sample"
 
     @model_validator(mode="after")
     def validate_model_source(self):
-        """Ensure exactly one of base_model or model_path is set."""
+        """Valid if:
+        - sampling_session_id is provided AND seq_id is provided
+        - OR exactly one of base_model or model_path is provided
+        """
+        if self.sampling_session_id is not None:
+            if self.seq_id is None:
+                raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
+            return self
         if (self.base_model is None) == (self.model_path is None):
-            raise ValueError("Exactly one of 'base_model' or 'model_path' must be provided")
+            raise ValueError(
+                "When 'sampling_session_id' is not provided, exactly one of 'base_model' or 'model_path' must be provided"
+            )
         return self
 
 
@@ -338,6 +353,47 @@ class TelemetryResponse(BaseModel):
     status: Literal["accepted"] = "accepted"
 
 
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class CreateSessionRequest(BaseModel):
+    tags: list[str]
+    user_metadata: dict[str, Any] | None = None
+    sdk_version: str
+    type: Literal["create_session"] = "create_session"
+
+
+class CreateSessionResponse(BaseModel):
+    type: Literal["create_session"] = "create_session"
+    info_message: str | None = None
+    warning_message: str | None = None
+    error_message: str | None = None
+    session_id: str
+
+
+class SessionHeartbeatRequest(BaseModel):
+    session_id: str
+    type: Literal["session_heartbeat"] = "session_heartbeat"
+
+
+class SessionHeartbeatResponse(BaseModel):
+    type: Literal["session_heartbeat"] = "session_heartbeat"
+
+
+class CreateSamplingSessionRequest(BaseModel):
+    session_id: str
+    sampling_session_seq_id: int
+    base_model: str | None = None
+    model_path: str | None = None
+    type: Literal["create_sampling_session"] = "create_sampling_session"
+
+
+class CreateSamplingSessionResponse(BaseModel):
+    type: Literal["create_sampling_session"] = "create_sampling_session"
+    sampling_session_id: str
+
+
 class SupportedModel(BaseModel):
     model_name: str
 
@@ -348,6 +404,62 @@ class GetServerCapabilitiesResponse(BaseModel):
 
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
+
+
+@app.get("/api/v1/healthz", response_model=HealthResponse)
+async def healthz():
+    """Checks if the API server is ready."""
+    return HealthResponse(status="ok")
+
+
+@app.post("/api/v1/create_session", response_model=CreateSessionResponse)
+async def create_session(request: CreateSessionRequest, session: AsyncSession = Depends(get_session)):
+    """Create a new session + persist in DB"""
+    session_id = f"session_{uuid4().hex[:8]}"
+    session_db = SessionDB(
+        session_id=session_id,
+        tags=request.tags,
+        user_metadata=request.user_metadata or {},
+        sdk_version=request.sdk_version,
+        status="active",
+    )
+    session.add(session_db)
+    await session.commit()
+    return CreateSessionResponse(session_id=session_id)
+
+
+@app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
+async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSession = Depends(get_session)):
+    """Heartbeat for an active session to keep it alive."""
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session_db.last_heartbeat_at = datetime.now(timezone.utc)
+    session_db.heartbeat_count += 1
+    await session.commit()
+    return SessionHeartbeatResponse()
+
+
+@app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
+async def create_sampling_session(request: CreateSamplingSessionRequest, session: AsyncSession = Depends(get_session)):
+    """Create a new sampling session within an existing session."""
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Exactly one of base_model or model_path must be provided
+    if (request.base_model is None) == (request.model_path is None):
+        raise HTTPException(status_code=400, detail="Exactly one of base_model or model_path must be provided")
+    sampling_session_id = f"sampling_{uuid4().hex[:8]}"
+    sampling_db = SamplingSessionDB(
+        sampling_session_id=sampling_session_id,
+        session_id=request.session_id,
+        sampling_session_seq_id=request.sampling_session_seq_id,
+        base_model=request.base_model,
+        model_path=request.model_path,
+    )
+    session.add(sampling_db)
+    await session.commit()
+    return CreateSamplingSessionResponse(sampling_session_id=sampling_session_id)
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
@@ -533,16 +645,38 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
+async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+    """Return (base_model, model_path) for a sampling request."""
+    # Resolve model/base from sampling_session_id if provided
+    if request.sampling_session_id is not None:
+        sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
+        if sampling_session is None:
+            raise HTTPException(status_code=404, detail="Sampling session not found")
+        return (sampling_session.base_model, sampling_session.model_path)
+    return (request.base_model, request.model_path)
+
+
 @app.post("/api/v1/asample", response_model=FutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
-    if request.base_model:
+    base_model, model_path = await get_sampling_model(request, session)
+
+    if base_model:
         model_id = checkpoint_id = ""
     else:
-        assert request.model_path is not None
-        path = types.TinkerPath.parse(request.model_path)
-        if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
-            raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
+        assert model_path is not None
+        path = types.TinkerPath.parse(model_path)
+        if (
+            not path
+            # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
+            or path.kind not in ("", "sampler_weights")
+            or not (model_id := path.primary_id)
+            or not (checkpoint_id := path.secondary_id)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
+            )
         await get_model(session, model_id)
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
@@ -552,7 +686,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         request_type=types.RequestType.SAMPLE,
         model_id=model_id,
         request_data=types.SampleInput(
-            base_model=request.base_model,
+            base_model=base_model,
             prompt=request.prompt.to_types(),
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
@@ -705,6 +839,15 @@ async def list_checkpoints(
         )
 
     return ListCheckpointsResponse(checkpoints=checkpoints)
+
+
+@app.get("/api/v1/models/{unique_id}/checkpoints")
+async def list_checkpoints_models(
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    session: AsyncSession = Depends(get_session),
+):
+    """Just to be compatible with tinker SDK"""
+    return await list_checkpoints(unique_id=unique_id, session=session)
 
 
 @app.get("/")
