@@ -570,6 +570,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             checkpoint_id=checkpoint_id,
         ),
     )
+
     await session.commit()
 
     if req.app.state.external_inference_client:
