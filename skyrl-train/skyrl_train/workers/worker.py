@@ -769,7 +769,7 @@ class PolicyWorkerBase(Worker):
             entropy = masked_mean(entropy_BS, loss_mask)
 
         if self.cfg.trainer.algorithm.use_entropy_loss:
-            entropy_loss_term = entropy * self.cfg.trainer.algorithm.use_entropy_loss
+            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
         else:
             entropy_loss_term = torch.tensor(0.0)
 
