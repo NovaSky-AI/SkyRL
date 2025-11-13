@@ -2,8 +2,8 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence
-from datetime import datetime, timedelta
+from typing import Literal, Any, AsyncGenerator, Sequence, Optional
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
@@ -22,6 +22,8 @@ from tx.tinker.db_models import (
     FutureDB,
     RequestStatus,
     CheckpointStatus,
+    SessionDB,
+    SamplingSessionDB,
     get_async_database_url,
 )
 from tx.utils.storage import download_file
@@ -338,6 +340,48 @@ class TelemetryResponse(BaseModel):
     status: Literal["accepted"] = "accepted"
 
 
+# ---- Session and service models (mirror SDK types) ----
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class CreateSessionRequest(BaseModel):
+    tags: list[str]
+    user_metadata: dict[str, Any] | None = None
+    sdk_version: str
+    type: Literal["create_session"] = "create_session"
+
+
+class CreateSessionResponse(BaseModel):
+    type: Literal["create_session"] = "create_session"
+    info_message: str | None = None
+    warning_message: str | None = None
+    error_message: str | None = None
+    session_id: str
+
+
+class SessionHeartbeatRequest(BaseModel):
+    session_id: str
+    type: Literal["session_heartbeat"] = "session_heartbeat"
+
+
+class SessionHeartbeatResponse(BaseModel):
+    type: Literal["session_heartbeat"] = "session_heartbeat"
+
+
+class CreateSamplingSessionRequest(BaseModel):
+    session_id: str
+    sampling_session_seq_id: int
+    base_model: Optional[str] = None
+    model_path: Optional[str] = None
+    type: Literal["create_sampling_session"] = "create_sampling_session"
+
+
+class CreateSamplingSessionResponse(BaseModel):
+    type: Literal["create_sampling_session"] = "create_sampling_session"
+    sampling_session_id: str
+
+
 class SupportedModel(BaseModel):
     model_name: str
 
@@ -348,6 +392,62 @@ class GetServerCapabilitiesResponse(BaseModel):
 
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
+
+
+@app.get("/api/v1/healthz", response_model=HealthResponse)
+async def healthz():
+    """Checks if the API server is ready."""
+    return HealthResponse(status="ok")
+
+
+@app.post("/api/v1/create_session", response_model=CreateSessionResponse)
+async def create_session(request: CreateSessionRequest, session: AsyncSession = Depends(get_session)):
+    """Create a new SDK session."""
+    session_id = f"session_{uuid4().hex}"
+    session_db = SessionDB(
+        session_id=session_id,
+        tags=request.tags,
+        user_metadata=request.user_metadata or {},
+        sdk_version=request.sdk_version,
+        status="active",
+    )
+    session.add(session_db)
+    await session.commit()
+    return CreateSessionResponse(session_id=session_id)
+
+
+@app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
+async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSession = Depends(get_session)):
+    """Heartbeat for an active session to keep it alive."""
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session_db.last_heartbeat_at = datetime.now(timezone.utc)
+    session_db.heartbeat_count += 1
+    await session.commit()
+    return SessionHeartbeatResponse()
+
+
+@app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
+async def create_sampling_session(request: CreateSamplingSessionRequest, session: AsyncSession = Depends(get_session)):
+    """Create a new sampling session within an existing session."""
+    session_row = await session.get(SessionDB, request.session_id)
+    if session_row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Exactly one of base_model or model_path must be provided
+    if (request.base_model is None) == (request.model_path is None):
+        raise HTTPException(status_code=400, detail="Exactly one of base_model or model_path must be provided")
+    sampling_session_id = f"sampling_{uuid4().hex[:12]}"
+    sampling_db = SamplingSessionDB(
+        sampling_session_id=sampling_session_id,
+        session_id=request.session_id,
+        sampling_session_seq_id=request.sampling_session_seq_id,
+        base_model=request.base_model,
+        model_path=request.model_path,
+    )
+    session.add(sampling_db)
+    await session.commit()
+    return CreateSamplingSessionResponse(sampling_session_id=sampling_session_id)
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
