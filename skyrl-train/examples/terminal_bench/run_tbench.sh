@@ -33,7 +33,7 @@ uv run --isolated --extra vllm --extra sandboxes --with "harbor@./harbor" -m exa
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=8 \
-  trainer.policy_mini_batch_size=2 \
+  trainer.policy_mini_batch_size=8 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=-1 \

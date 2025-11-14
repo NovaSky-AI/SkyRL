@@ -63,6 +63,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
 
         all_outputs = await asyncio.gather(*tasks)
+        
+        all_outputs = [output for output in all_outputs if output is not None]
 
         responses = [output.response_ids for output in all_outputs]
         rewards = [output.reward for output in all_outputs]
@@ -75,7 +77,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": [output.rollout_logprobs for output in all_outputs],
+            "rollout_logprobs": None,
         }
 
         return generator_output
@@ -87,6 +89,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
+        # Sleeping to create an overlap between task execution and inferencing
+        import random
+        await asyncio.sleep(random.uniform(1, 60))
+
         # Generate session_id for sticky routing to inference engines
         # All LLM requests in this trial will share the same session_id
         session_id = uuid4().hex
@@ -196,6 +202,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
+
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
@@ -215,3 +222,61 @@ class TerminalBenchGenerator(GeneratorInterface):
             # in case harbor doesn't return logprobs, use None
             rollout_logprobs=rollout_logprobs if assistant_logprobs is not None else None,
         )
+
+    
+
+    # async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    #     # For testing, skip the actual async agent loop
+    #     max_response_tokens = (
+    #         self.generator_cfg.sampling_params.max_generate_length
+    #         + self.generator_cfg.max_input_length
+    #     )
+
+    #     fake_output = self.fake_generator_output(
+    #         tokenizer=self.tokenizer,
+    #         input_batch=input_batch,
+    #         max_response_tokens=max_response_tokens,
+    #     )
+
+    #     return fake_output
+    
+
+    # def fake_generator_output(self, tokenizer, input_batch, max_response_tokens: int, batch_size: int = None):
+    #     """
+    #     Create a fake generator_output dict that mimics the structure of a real one.
+
+    #     Args:
+    #         tokenizer: your tokenizer (used to get vocab size)
+    #         input_batch: the same input_batch used in generate()
+    #         max_response_tokens: maximum length of fake responses
+    #         batch_size: optional override for batch size
+    #     """
+    #     import random
+    #     vocab_size = len(tokenizer)
+    #     prompts = input_batch["prompts"]
+    #     batch_size = batch_size or len(prompts)
+
+    #     def random_tokens(length):
+    #         return [random.randint(0, vocab_size - 1) for _ in range(length)]
+
+    #     fake_outputs = []
+    #     for _ in range(batch_size):
+    #         fake_outputs.append({
+    #             "prompt_ids": random_tokens(32),  # arbitrary prompt length
+    #             "response_ids": random_tokens(max_response_tokens),
+    #             "reward": random.uniform(0, 1),
+    #             "loss_mask": [1] * max_response_tokens,
+    #             "stop_reason": "length",
+    #         })
+
+    #     generator_output = {
+    #         "prompt_token_ids": [o["prompt_ids"] for o in fake_outputs],
+    #         "response_ids": [o["response_ids"] for o in fake_outputs],
+    #         "rewards": [o["reward"] for o in fake_outputs],
+    #         "loss_masks": [o["loss_mask"] for o in fake_outputs],
+    #         "stop_reasons": [o["stop_reason"] for o in fake_outputs],
+    #         "rollout_metrics": {"avg_reward": sum(o["reward"] for o in fake_outputs) / batch_size},
+    #         "rollout_logprobs": None,
+    #     }
+
+    #     return generator_output

@@ -48,30 +48,48 @@ class DistributedTorchRayActor:
     def __init__(
         self, world_size, rank, local_rank, master_addr, master_port, sequence_parallel_size, record_memory=False
     ):
+        print("DISTRIBUTED RAY ACTOR INIT: Entering __init__")
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
             level=logging.INFO,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
+        print("DISTRIBUTED RAY ACTOR INIT: logging.basicConfig completed")
         self._world_size = world_size
+        print(f"DISTRIBUTED RAY ACTOR INIT: self._world_size = {world_size}")
         self._rank = rank
+        print(f"DISTRIBUTED RAY ACTOR INIT: self._rank = {rank}")
         self._local_rank = local_rank
+        print(f"DISTRIBUTED RAY ACTOR INIT: self._local_rank = {local_rank}")
         self._master_addr = master_addr if master_addr else self._get_current_node_ip()
+        print(f"DISTRIBUTED RAY ACTOR INIT: self._master_addr = {self._master_addr}")
         self._master_port = master_port if master_port else self._get_free_port()
+        print(f"DISTRIBUTED RAY ACTOR INIT: self._master_port = {self._master_port}")
         os.environ["MASTER_ADDR"] = self._master_addr
+        print(f"DISTRIBUTED RAY ACTOR INIT: os.environ['MASTER_ADDR'] = {self._master_addr}")
         os.environ["MASTER_PORT"] = str(self._master_port)
+        print(f"DISTRIBUTED RAY ACTOR INIT: os.environ['MASTER_PORT'] = {self._master_port}")
         os.environ["WORLD_SIZE"] = str(self._world_size)
+        print(f"DISTRIBUTED RAY ACTOR INIT: os.environ['WORLD_SIZE'] = {self._world_size}")
         os.environ["RANK"] = str(self._rank)
+        print(f"DISTRIBUTED RAY ACTOR INIT: os.environ['RANK'] = {self._rank}")
         # NOTE: Ray will automatically set the CUDA_VISIBLE_DEVICES
         # environment variable for each actor, so always set device to 0
         # os.environ["LOCAL_RANK"] = str(self._local_rank)
         os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
+        print(f"DISTRIBUTED RAY ACTOR INIT: os.environ['LOCAL_RANK'] = {os.environ['LOCAL_RANK']}")
         self.sequence_parallel_size: int = sequence_parallel_size
+        print(f"DISTRIBUTED RAY ACTOR INIT: self.sequence_parallel_size = {sequence_parallel_size}")
 
         self.record_memory = record_memory
+        print(f"DISTRIBUTED RAY ACTOR INIT: self.record_memory = {record_memory}")
         if record_memory:
+            print("DISTRIBUTED RAY ACTOR INIT: record_memory is True, calling torch.cuda.memory._record_memory_history()")
             torch.cuda.memory._record_memory_history()
+            print("DISTRIBUTED RAY ACTOR INIT: torch.cuda.memory._record_memory_history() completed")
         configure_ray_worker_logging()
+        print("DISTRIBUTED RAY ACTOR INIT: configure_ray_worker_logging() completed")
+        print("DISTRIBUTED RAY ACTOR INIT: Exiting __init__")
 
     def get_node_local_rank(self):
         return self._local_rank
@@ -418,14 +436,22 @@ class PPORayActorGroup:
 
             pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        logger.info(f"[Line 432] Checking if pg exists: pg={pg}, bool(pg)={bool(pg)}")
         if pg:
+            logger.info(f"[Line 433] Creating master_actor with placement group")
+            logger.info(f"[Line 433-436] Options: num_cpus={num_gpus_per_actor}, num_gpus={num_gpus_per_actor}, resources={self._resources}")
+            logger.info(f"[Line 437] PlacementGroupSchedulingStrategy: placement_group={pg}")
+            logger.info(f"[Line 439] Computing master placement_group_bundle_index: reordered_bundle_indices={reordered_bundle_indices}")
+            master_bundle_index = reordered_bundle_indices[0] if reordered_bundle_indices else 0
+            logger.info(f"[Line 439] Computed master placement_group_bundle_index={master_bundle_index}")
+            logger.info(f"[Line 441-450] remote() params for master: cfg={self.cfg}, world_size={world_size}, rank=0, local_rank=0, master_addr=None, master_port=None, sequence_parallel_size={self.sequence_parallel_size}, record_memory={self.record_memory}")
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
-                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
+                    placement_group_bundle_index=master_bundle_index,
                 ),
             ).remote(
                 cfg=self.cfg,
@@ -437,7 +463,11 @@ class PPORayActorGroup:
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
             )
+            logger.info(f"[Line 441-450] Created master_actor={master_actor}")
         else:
+            logger.info(f"[Line 452] Creating master_actor without placement group")
+            logger.info(f"[Line 452-455] Options: num_cpus={num_gpus_per_actor}, num_gpus={num_gpus_per_actor}, resources={self._resources}")
+            logger.info(f"[Line 456-465] remote() params for master: cfg={self.cfg}, world_size={world_size}, rank=0, local_rank=0, master_addr=None, master_port=None, sequence_parallel_size={self.sequence_parallel_size}, record_memory={self.record_memory}")
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
@@ -452,25 +482,42 @@ class PPORayActorGroup:
                 sequence_parallel_size=self.sequence_parallel_size,
                 record_memory=self.record_memory,
             )
+            logger.info(f"[Line 456-465] Created master_actor={master_actor}")
+        logger.info(f"[Line 466] Setting self._actor_handlers = [master_actor], master_actor={master_actor}")
         self._actor_handlers = [master_actor]
         # Create worker actors
+        logger.info(f"[Line 468] Checking if world_size > 1: world_size={world_size}, condition={world_size > 1}")
         if world_size > 1:
+            logger.info(f"[Line 469] Calling ray.get(master_actor.get_master_addr_port.remote()), master_actor={master_actor}")
             master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
+            logger.info(f"[Line 469] Retrieved master_addr={master_addr}, master_port={master_port}")
+            logger.info(f"[Line 470] Starting loop: range(1, world_size) = range(1, {world_size})")
             for rank in range(1, world_size):
+                logger.info(f"[Line 470] Loop iteration: rank={rank}")
+                logger.info(f"[Line 471] Computing local_rank: rank % self._num_gpus_per_node = {rank} % {self._num_gpus_per_node}")
                 local_rank = rank % self._num_gpus_per_node
+                logger.info(f"[Line 471] Computed local_rank={local_rank}")
 
+                logger.info(f"[Line 473] Checking if pg exists: pg={pg}, bool(pg)={bool(pg)}")
                 if pg:
+                    logger.info(f"[Line 474] Creating worker_actor with placement group")
+                    logger.info(f"[Line 474-486] Options: num_cpus={num_gpus_per_actor}, num_gpus={num_gpus_per_actor}, resources={self._resources}")
+                    logger.info(f"[Line 478] PlacementGroupSchedulingStrategy: placement_group={pg}")
+                    logger.info(f"[Line 481-483] Computing bundle_index: reordered_bundle_indices={reordered_bundle_indices}")
+                    bundle_index = (
+                        reordered_bundle_indices[rank]
+                        if reordered_bundle_indices
+                        else rank // self._num_gpus_per_node
+                    )
+                    logger.info(f"[Line 481-483] Computed placement_group_bundle_index={bundle_index}")
+                    logger.info(f"[Line 486-495] remote() params: cfg={self.cfg}, world_size={world_size}, rank={rank}, local_rank={local_rank}, master_addr={master_addr}, master_port={master_port}, sequence_parallel_size={self.sequence_parallel_size}, record_memory={self.record_memory}")
                     worker_actor = self.ray_actor_type.options(
                         num_cpus=num_gpus_per_actor,
                         num_gpus=num_gpus_per_actor,
                         resources=self._resources,
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
-                            placement_group_bundle_index=(
-                                reordered_bundle_indices[rank]
-                                if reordered_bundle_indices
-                                else rank // self._num_gpus_per_node
-                            ),
+                            placement_group_bundle_index=bundle_index,
                         ),
                     ).remote(
                         cfg=self.cfg,
@@ -482,7 +529,11 @@ class PPORayActorGroup:
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
                     )
+                    logger.info(f"[Line 486-495] Created worker_actor={worker_actor}")
                 else:
+                    logger.info(f"[Line 497] Creating worker_actor without placement group")
+                    logger.info(f"[Line 497-500] Options: num_cpus={num_gpus_per_actor}, num_gpus={num_gpus_per_actor}, resources={self._resources}")
+                    logger.info(f"[Line 501-510] remote() params: cfg={self.cfg}, world_size={world_size}, rank={rank}, local_rank={local_rank}, master_addr={master_addr}, master_port={master_port}, sequence_parallel_size={self.sequence_parallel_size}, record_memory={self.record_memory}")
                     worker_actor = self.ray_actor_type.options(
                         num_cpus=num_gpus_per_actor,
                         num_gpus=num_gpus_per_actor,
@@ -497,10 +548,14 @@ class PPORayActorGroup:
                         sequence_parallel_size=self.sequence_parallel_size,
                         record_memory=self.record_memory,
                     )
+                    logger.info(f"[Line 501-510] Created worker_actor={worker_actor}")
+                logger.info(f"[Line 511] Appending worker_actor to self._actor_handlers. Current length before append: {len(self._actor_handlers)}")
                 self._actor_handlers.append(worker_actor)
+                logger.info(f"[Line 511] Appended worker_actor. Current length after append: {len(self._actor_handlers)}")
 
         # Initialize process group
         logger.info("Initializing process group for RayActorGroup")
+        print(">> ACTOR HANDLERS len: ", len(self._actor_handlers))
         ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
         logger.info("Initialized process group for RayActorGroup")
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
