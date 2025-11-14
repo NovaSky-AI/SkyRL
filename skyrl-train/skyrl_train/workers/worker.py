@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import socket
+from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
@@ -78,7 +79,9 @@ class DistributedTorchRayActor:
 
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes
+            timeout_min = int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT", "10"))
+            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_min))
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed

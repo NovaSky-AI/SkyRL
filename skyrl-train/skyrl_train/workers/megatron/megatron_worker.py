@@ -7,6 +7,7 @@ from huggingface_hub import snapshot_download
 
 import asyncio
 import os
+from datetime import timedelta
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
@@ -175,7 +176,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes
+            timeout_min = int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT", "10"))
+            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_min))
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
         # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
@@ -527,7 +530,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes
+            timeout_min = int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT", "10"))
+            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_min))
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.ref.megatron_config,
