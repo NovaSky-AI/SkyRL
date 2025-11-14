@@ -809,7 +809,7 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             # Save the LoRA adapter weights and LoRA config as tar.gz
@@ -837,32 +837,36 @@ class TinkerEngine:
         adapter_indices_list = []
 
         for _, (model_id, request_data) in requests.items():
-            if request_data.base_model is None:
+            base_model = request_data.base_model
+            checkpoint_id = request_data.checkpoint_id
+            if base_model is None:
                 # This code path is for sampling from a LoRA adapter
-                assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
+                assert checkpoint_id != "", "checkpoint_id must be not empty"
 
                 adapter_index = self.models[model_id].adapter_index
-                if self.models[model_id].loaded_checkpoint_id == request_data.checkpoint_id:
+                if self.models[model_id].loaded_checkpoint_id == checkpoint_id:
                     # Load model from RAM
                     adapter_indices_list.append(adapter_index)
                 else:
                     # Load model from disk
                     assert adapter_index not in adapter_indices_list, "Cannot override already used adapter"
 
-                    checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+                    checkpoint_path = (
+                        self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+                    )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
                     load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
 
-                    self.models[model_id].loaded_checkpoint_id = request_data.checkpoint_id
+                    self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
                     adapter_indices_list.append(adapter_index)
             else:
                 # This code path is for sampling from the base model
-                if request_data.base_model != self.config.base_model:
+                if base_model != self.config.base_model:
                     raise ValueError(
-                        f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                        f"Requested base_model '{base_model}' does not match engine's base_model '{self.config.base_model}'"
                     )
-                assert model_id == "" and request_data.checkpoint_id == ""
+                assert model_id == "" and checkpoint_id == ""
                 adapter_indices_list.append(0)
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)

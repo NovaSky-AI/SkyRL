@@ -118,6 +118,8 @@ def test_training_workflow(service_client):
 
     # Save the optimizer state
     resume_path = training_client.save_state(name="0000").result().path
+    # Make sure if we save the sampler weights it will not override training weights
+    training_client.save_weights_for_sampler(name="0000").result()
     # Get the training run ID from the first save
     parsed_resume = urlparse(resume_path)
     original_training_run_id = parsed_resume.netloc
