@@ -4,6 +4,7 @@ import os
 import shutil
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
+import datetime
 from pathlib import Path
 import ray
 from ray import ObjectRef
@@ -122,6 +123,77 @@ class RayPPOTrainer:
             tokenizer=self.tokenizer,
         )
         return eval_metrics
+
+    def save_to_hf(self, model: PPORayActorGroup, model_name: Optional[str] = None):
+        """
+        Save a single model (policy, critic, or ref) in Hugging Face format.
+
+        Args:
+            model (Optional[PPORayActorGroup]): The Ray actor group representing the model.
+            model_name (Optional[str]): Optional subdirectory name (e.g. "policy", "critic", "ref").
+                If None, the name is inferred automatically.
+
+        Notes:
+            - The export directory is created under cfg.trainer.export_path/global_step_{self.global_step}/{model_name}.
+            - Does nothing if model is None.
+            - This should be called *after* model checkpoint loading or at evaluation export time.
+        """
+        if model is None:
+            logger.warning(f"Skipping HF export for {model_name or 'unknown model'} (model is None).")
+            return
+
+        # Infer the model name if it is not provided
+        if model_name is None:
+            if model is self.policy_model:
+                model_name = "policy"
+            elif model is self.critic_model:
+                model_name = "critic"
+            elif model is self.ref_model:
+                model_name = "ref"
+            else:
+                model_name = "unknown"
+
+        export_root = getattr(self.cfg.trainer, "export_path", None)
+        if not export_root:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            home_dir = Path.home()
+            export_root = home_dir / "exports" / timestamp
+            io.makedirs(export_root, exist_ok=True)
+            logger.warning(f"cfg.trainer.export_path not defined — using default export path: {export_root}")
+        export_dir = os.path.join(export_root, f"global_step_{self.global_step}", model_name)
+        io.makedirs(export_dir, exist_ok=True)
+
+        try:
+            model.backload_to_gpu()
+            ray.get(
+                model.async_run_ray_method(
+                    "pass_through",
+                    "save_hf_model",
+                    export_dir,
+                    self.tokenizer,
+                )
+            )
+            logger.info(f"Saved {model_name} model in Hugging Face format to: {export_dir}")
+        except Exception as e:
+            logger.error(f"Failed to save {model_name} model to HF format: {e}")
+        finally:
+            model.offload_to_cpu()
+
+    def load_checkpoint_and_save_to_hf(self):
+        # Initialize weight sync state between policy model and inference engines.
+        with Timer("init_weight_sync_state"):
+            self.init_weight_sync_state()
+
+        # Load policy model to GPU before loading checkpoint.
+        if self.colocate_all:
+            self.policy_model.backload_to_gpu()
+
+        # Load checkpoint state if resumption is enabled.
+        with Timer("load_checkpoints"):
+            self.global_step = self.load_checkpoints()
+        self.save_to_hf(self.policy_model)
+        self.save_to_hf(self.critic_model)
+        self.save_to_hf(self.ref_model)
 
     def train(self):
         """
