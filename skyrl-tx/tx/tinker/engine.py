@@ -123,7 +123,7 @@ class TinkerEngine:
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
-            update_adapter_config(self.model, adapter_index=0, lora_rank=1, lora_alpha=1.0)
+            update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -445,11 +445,7 @@ class TinkerEngine:
         update_adapter_config(
             self.model,
             adapter_index,
-            lora_rank,
-            lora_alpha,
-            train_attn=lora_config.train_attn,
-            train_mlp=lora_config.train_mlp,
-            train_unembed=lora_config.train_unembed,
+            lora_config,
         )
 
         logger.info(

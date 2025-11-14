@@ -3,6 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.layers.util import Param, prepare_routing
+from tx.tinker.types import LoraConfig
 
 
 class LoRAMixin:
@@ -260,11 +261,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 def update_adapter_config(
     model: nnx.Module,
     adapter_index: int,
-    lora_rank: int,
-    lora_alpha: float,
-    train_attn: bool = True,
-    train_mlp: bool = True,
-    train_unembed: bool = False,
+    lora_config: LoraConfig,
 ):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
@@ -276,14 +273,9 @@ def update_adapter_config(
     Args:
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to update
-        lora_rank: Rank to set for this adapter (note: MoE expert layers automatically
-            use rank/num_experts to normalize parameter count)
-        lora_alpha: Alpha value to use for computing scaling (alpha / rank)
-        train_attn: Whether to train attention layers with LoRA (default: True)
-        train_mlp: Whether to train MLP layers with LoRA (default: True)
-        train_unembed: Whether to train unembedding/LM head layer with LoRA (default: False)
+        lora_config: LoraConfig object containing rank, alpha, and training flags
     """
-    scaling = lora_alpha / lora_rank
+    scaling = lora_config.alpha / lora_config.rank
     state = nnx.state(model)
 
     def _is_attention_layer(path) -> bool:
@@ -304,7 +296,7 @@ def update_adapter_config(
 
     def update_lora_config(path, value):
         # Determine if this layer should be trained based on layer type
-        effective_rank = lora_rank
+        effective_rank = lora_config.rank
 
         # Apply rank normalization for MoE expert layers
         # Following Thinking Machines' approach: divide rank by num_experts
@@ -312,14 +304,14 @@ def update_adapter_config(
         if _is_expert_layer(path):
             num_experts = getattr(model.config, "num_experts", None)
             if num_experts and num_experts > 1:
-                effective_rank = max(1, lora_rank // num_experts)
+                effective_rank = max(1, lora_config.rank // num_experts)
 
         # Apply layer-specific training flags
-        if not train_attn and _is_attention_layer(path):
+        if not lora_config.train_attn and _is_attention_layer(path):
             effective_rank = 0
-        elif not train_mlp and _is_mlp_layer(path):
+        elif not lora_config.train_mlp and _is_mlp_layer(path):
             effective_rank = 0
-        elif not train_unembed and _is_unembed_layer(path):
+        elif not lora_config.train_unembed and _is_unembed_layer(path):
             effective_rank = 0
 
         if path[-2].key == "lora_ranks":
