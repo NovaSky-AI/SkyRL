@@ -61,7 +61,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in self.engines]
         return await asyncio.gather(*awaitables)
 
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+    async def generate(
+        self, input_batch: InferenceEngineInput, tool_specs: Optional[List[List[Dict[str, Any]]]] = None
+    ) -> InferenceEngineOutput:
         if self.generation_paused_event.is_set():
             raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
@@ -78,6 +80,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 add_generation_prompt=True,
                 add_special_tokens=False,
                 return_dict=True,
+                tools=tool_specs,
                 tokenize=True,
             )["input_ids"]
 
