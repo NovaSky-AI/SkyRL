@@ -101,7 +101,7 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
             continue
         key = get_param_key(path, prefix=prefix)
         # Skip saving LoRA parameters for rank 0 adapters
-        if "lora_A" in path or "lora_B" in path and param.size() == 0:
+        if "lora_A" in path or "lora_B" in path and param.size == 0:
             continue
         if "experts" in path:
             for i in range(config.num_experts):
