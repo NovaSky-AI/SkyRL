@@ -764,8 +764,8 @@ async def validate_checkpoint(
     if checkpoint_db.status == CheckpointStatus.FAILED:
         raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
-    checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
-    return checkpoint_path
+    subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
+    return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
 
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
