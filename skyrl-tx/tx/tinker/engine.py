@@ -442,11 +442,7 @@ class TinkerEngine:
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Update the adapter's rank and scaling in all LoRA layers
-        update_adapter_config(
-            self.model,
-            adapter_index,
-            lora_config,
-        )
+        update_adapter_config(self.model, adapter_index, lora_config)
 
         logger.info(
             f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}"

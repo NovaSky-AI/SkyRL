@@ -258,11 +258,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(
-    model: nnx.Module,
-    adapter_index: int,
-    lora_config: LoraConfig,
-):
+def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
