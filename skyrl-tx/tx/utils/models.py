@@ -81,6 +81,9 @@ def load_safetensors(
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
+        # Skip loading LoRA parameters for rank 0 adapters
+        if "lora_A" in path or "lora_B" in path and param.size == 0:
+            continue
         if "experts" in path:
             tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
         else:
