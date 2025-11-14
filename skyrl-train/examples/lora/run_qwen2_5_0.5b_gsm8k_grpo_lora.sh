@@ -41,7 +41,7 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   trainer.micro_train_batch_size_per_gpu=64 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
-  generator.sampling_params.max_generate_length=16384 \
+  generator.sampling_params.max_generate_length=256 \
   trainer.policy.optimizer_config.lr=3.0e-5 \
   trainer.algorithm.use_kl_loss=true \
   generator.backend=$INFERENCE_BACKEND \

@@ -73,14 +73,14 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
             if lora_rank >= 64 or tp_size >= 4:
                 engine_kwargs["fully_sharded_loras"] = True
         
-        #TODO(devpatel): Remove this once we have a better solution for LoRA performance degradation
-        # if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
-        #     logger.warning(
-        #         "LoRA is enabled but generator.enforce_eager=true. "
-        #         "This combination causes significant performance degradation (2-3x slower generation). "
-        #         "Automatically setting enforce_eager=false for better performance. "
-        #     )
-        #     engine_kwargs["enforce_eager"] = False
+        #TODO(devpatel): Bandaid solution, replace this once we have a better solution for LoRA performance degradation on the vLLM side
+        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
+            logger.warning(
+                "LoRA is enabled but generator.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            engine_kwargs["enforce_eager"] = False
 
     if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
         engine_kwargs["rope_scaling"] = rope_scaling
