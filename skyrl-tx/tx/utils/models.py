@@ -171,31 +171,9 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
 
 def get_rank_path(path: tuple, lora_name: str) -> tuple:
     "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
-    # Convert DictKey objects to strings, or keep strings as-is
-    path = tuple(p.key if hasattr(p, "key") else (p.name if hasattr(p, "name") else p) for p in path)
+    path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+    model_idx = path.index("model")
     lora_idx = path.index(lora_name)
-
-    # Handle optimizer state paths: strip 'opt_state' prefix to get model path
-    # E.g., ('opt_state', 'inner_state', 0, 'mu', 'lm_head', 'lora_A') -> ('lm_head', 'lora_ranks')
-    # E.g., ('opt_state', 'inner_state', 0, 'mu', 'model', 'layers', 0, 'self_attn', 'q_proj', 'lora_A')
-    #    -> ('model', 'layers', 0, 'self_attn', 'q_proj', 'lora_ranks')
-    if "opt_state" in path:
-        # Find where the model structure starts (after opt_state internals)
-        # Optimizer paths have structure: ('opt_state', 'inner_state', <moment_idx>, <moment_name>, ...model_path...)
-        # So we skip the first 4 elements to get to the model path
-        opt_state_idx = path.index("opt_state")
-        model_path_start = opt_state_idx + 4  # Skip 'opt_state', 'inner_state', moment index, moment name
-        path = path[model_path_start:]
-        lora_idx = path.index(lora_name)
-
-    # Handle model paths: ('model', 'embed_tokens', 'lora_A') -> ('model', 'embed_tokens', 'lora_ranks')
-    # Or lm_head paths: ('lm_head', 'lora_A') -> ('lm_head', 'lora_ranks')
-    try:
-        model_idx = path.index("model")
-    except ValueError:
-        # No "model" in path - this is lm_head or other root-level LoRA layer
-        model_idx = 0
-
     return (*path[model_idx:lora_idx], "lora_ranks")
 
 
@@ -226,26 +204,7 @@ def insert_adapter_state(
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    def get_value_at_path(d: dict, path: tuple):
-        """Navigate through nested dict using path keys. Returns None if path doesn't exist."""
-        current = d
-        for key in path:
-            key_str = key.key if hasattr(key, "key") else (key.name if hasattr(key, "name") else key)
-            if isinstance(current, dict) and key_str in current:
-                current = current[key_str]
-            else:
-                return None
-        return current
-
-    def insert_state(path: tuple, p: jax.Array):
-        # Try to get the new value from the restored dict
-        new = get_value_at_path(new_params, path)
-
-        # If the key doesn't exist in new_params (e.g., filtered out zero-sized arrays),
-        # keep the original value
-        if new is None:
-            return p
-
+    def insert_state(path: tuple, p: jax.Array, new: jax.Array):
         if path[-1].key not in {"lora_A", "lora_B"}:
             return new
         rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
@@ -255,7 +214,7 @@ def insert_adapter_state(
         elif path[-1].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params))
+    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
     nnx.update(lora_params, updated)
 
 
