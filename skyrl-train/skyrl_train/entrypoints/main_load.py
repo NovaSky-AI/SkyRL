@@ -291,7 +291,7 @@ class BasePPOExp:
     def run(self):
         trainer = self._setup_trainer()
         # Start the training loop
-        trainer.get_model()
+        trainer.load_checkpoint_and_save_to_hf()
 
 
 @ray.remote(num_cpus=1)

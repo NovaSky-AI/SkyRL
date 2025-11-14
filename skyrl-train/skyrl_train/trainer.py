@@ -4,6 +4,7 @@ import os
 import shutil
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
+import datetime
 from pathlib import Path
 import ray
 from ray import ObjectRef
@@ -154,11 +155,9 @@ class RayPPOTrainer:
 
         export_root = getattr(self.cfg.trainer, "export_path", None)
         if not export_root:
-            import datetime
-
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            home_dir = os.path.expanduser("~")
-            export_root = os.path.join(home_dir, "exports", timestamp)
+            home_dir = Path.home()
+            export_root = home_dir / "exports" / timestamp
             io.makedirs(export_root, exist_ok=True)
             logger.warning(f"cfg.trainer.export_path not defined — using default export path: {export_root}")
         export_dir = os.path.join(export_root, f"global_step_{self.global_step}", model_name)
@@ -180,7 +179,7 @@ class RayPPOTrainer:
         finally:
             model.offload_to_cpu()
 
-    def get_model(self):
+    def load_checkpoint_and_save_to_hf(self):
         # Initialize weight sync state between policy model and inference engines.
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
