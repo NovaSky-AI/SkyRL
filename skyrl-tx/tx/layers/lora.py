@@ -3,6 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.layers.util import Param, prepare_routing
+from tx.tinker.types import LoraConfig
 
 
 class LoRAMixin:
@@ -257,7 +258,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int, lora_alpha: float):
+def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
@@ -268,20 +269,36 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
     Args:
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to update
-        lora_rank: Rank to set for this adapter
-        lora_alpha: Alpha value to use for computing scaling (alpha / rank)
+        lora_config: LoraConfig object containing rank, alpha, and training flags
     """
-    scaling = lora_alpha / lora_rank
     state = nnx.state(model)
 
     def update_lora_config(path, value):
+        effective_rank = lora_config.rank
+        path_str = "/".join(str(k) for k in path)
+
+        # Apply rank normalization for MoE expert layers
+        # Following Thinking Machines' approach: divide rank by num_experts
+        # to keep total LoRA parameters similar to non-MoE models
+        if "experts" in path_str:
+            effective_rank = max(1, lora_config.rank // model.config.num_experts)
+
+        # Determine if this layer should be trained based on layer type
+        if not lora_config.train_attn and "self_attn" in path_str:
+            effective_rank = 0
+        if not lora_config.train_mlp and ("mlp" in path_str or "experts" in path_str):
+            effective_rank = 0
+        if not lora_config.train_unembed and ("embed_tokens" in path_str or "lm_head" in path_str):
+            effective_rank = 0
+
         if path[-2].key == "lora_ranks":
-            return value.at[adapter_index].set(lora_rank)
+            return value.at[adapter_index].set(effective_rank)
         if path[-2].key == "lora_scaling":
-            return value.at[adapter_index].set(scaling)
+            # Set scaling to 0.0 if rank is 0
+            return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
         if path[-2].key == "lora_A":
             # Zero out columns beyond the rank for this adapter; lora_B is already zero
-            return value.at[adapter_index, ..., lora_rank:].set(0.0)
+            return value.at[adapter_index, ..., effective_rank:].set(0.0)
         return value
 
     updated_state = jax.tree.map_with_path(update_lora_config, state)
