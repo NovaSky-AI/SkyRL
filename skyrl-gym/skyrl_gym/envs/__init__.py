@@ -28,6 +28,11 @@ register(
 )
 
 register(
+    id="browse",
+    entry_point="skyrl_gym.envs.browse.env:BrowseEnv",
+)
+
+register(
     id="lcb",
     entry_point="skyrl_gym.envs.lcb.env:LCBEnv",
 )
