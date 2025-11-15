@@ -282,9 +282,7 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
         if "experts" in path_str:
-            num_experts = getattr(model.config, "num_experts", None)
-            if num_experts and num_experts > 1:
-                effective_rank = max(1, lora_config.rank // num_experts)
+            effective_rank = max(1, lora_config.rank // model.config.num_experts)
 
         # Apply layer-specific training flags
         if not lora_config.train_attn and "self_attn" in path_str:
