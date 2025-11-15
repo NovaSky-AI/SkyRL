@@ -178,9 +178,12 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
 def get_rank_path(path: tuple, lora_name: str) -> tuple:
     "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
     path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-    model_idx = path.index("model")
+    # The path could be from a parameter in the optimizer, if that's the case
+    # find the associated parameter in the model. We do this by getting the index
+    # of the root module (which is either "model" or "lm_head").
+    start_idx = path.index("model") if "model" in path else path.index("lm_head")
     lora_idx = path.index(lora_name)
-    return (*path[model_idx:lora_idx], "lora_ranks")
+    return (*path[start_idx:lora_idx], "lora_ranks")
 
 
 def extract_adapter_state(
