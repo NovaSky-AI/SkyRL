@@ -727,7 +727,15 @@ class TinkerEngine:
         )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
-            restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
+            restored_data = checkpoints.restore_checkpoint(
+                ckpt_dir=temp_dir,
+                target={
+                    "lora_weights": nnx.to_pure_dict(extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)),
+                    "optimizer_state": nnx.to_pure_dict(extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params)),
+                    "lora_config": self.models[model_id].lora_config.model_dump(),
+                },
+                prefix="checkpoint_"
+            )
 
         if restored_data is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
