@@ -23,6 +23,9 @@ class RequestType(str, Enum):
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
 
+    # External request that should not be processed by the engine
+    EXTERNAL = "external"
+
 
 class CheckpointType(str, Enum):
     """Type of checkpoint."""

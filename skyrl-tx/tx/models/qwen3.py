@@ -327,12 +327,13 @@ class Qwen3Model(nnx.Module):
         max_lora_adapters = getattr(config, "max_lora_adapters", 0)
         max_lora_rank = getattr(config, "max_lora_rank", 8)
 
-        self.embed_tokens = LoRAEmbed(
+        # self.embed_tokens = LoRAEmbed(
+        self.embed_tokens = nnx.Embed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
             dtype=dtype,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            # max_lora_adapters=max_lora_adapters,
+            # max_lora_rank=max_lora_rank,
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
             rngs=rngs,
@@ -356,7 +357,8 @@ class Qwen3Model(nnx.Module):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
+        # hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
+        hidden_states = self.embed_tokens(input_ids)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
