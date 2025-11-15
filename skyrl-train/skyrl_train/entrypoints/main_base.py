@@ -66,12 +66,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
-
-        tp_size = cfg.generator.inference_engine_tensor_parallel_size
-        if cfg.generator.backend == "vllm" and tp_size > 1:
-            # try fully-sharded-loras (adjust heuristics)
-            if cfg.trainer.policy.model.lora.rank >= 64 or tp_size >= 4:
-                engine_kwargs["fully_sharded_loras"] = True
+        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better solution for LoRA performance degradation on the vLLM side
         if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
