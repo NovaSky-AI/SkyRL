@@ -178,7 +178,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S))
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
         # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
@@ -531,7 +533,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S))
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.ref.megatron_config,

@@ -80,7 +80,9 @@ class DistributedTorchRayActor:
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            torch.distributed.init_process_group(backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S))
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed
