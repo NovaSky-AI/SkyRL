@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorResponse,
-    ErrorInfo,
     CompletionRequest,
     CompletionResponse,
 )
@@ -587,6 +586,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
@@ -616,6 +617,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
