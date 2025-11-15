@@ -40,7 +40,7 @@ def create_modal_image() -> modal.Image:
     }
 
     return (
-        modal.Image.from_registry("novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8")
+        modal.Image.from_registry("novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8")
         .env(envs)
         .add_local_dir(
             local_path=str(local_repo_path),
