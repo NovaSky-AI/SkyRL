@@ -274,9 +274,8 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
     state = nnx.state(model)
 
     def update_lora_config(path, value):
-        # Determine if this layer should be trained based on layer type
         effective_rank = lora_config.rank
-        path_str = '/'.join(str(k) for k in path)
+        path_str = "/".join(str(k) for k in path)
 
         # Apply rank normalization for MoE expert layers
         # Following Thinking Machines' approach: divide rank by num_experts
@@ -284,7 +283,7 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         if "experts" in path_str:
             effective_rank = max(1, lora_config.rank // model.config.num_experts)
 
-        # Apply layer-specific training flags
+        # Determine if this layer should be trained based on layer type
         if not lora_config.train_attn and "self_attn" in path_str:
             effective_rank = 0
         elif not lora_config.train_mlp and ("mlp" in path_str or "experts" in path_str):
