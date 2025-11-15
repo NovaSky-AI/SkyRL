@@ -21,3 +21,12 @@ fi
 
 # Run all SGLang tests
 uv run --directory . --isolated --extra dev --extra sglang --extra deepspeed pytest -s tests/gpu/gpu_ci -m "sglang"
+
+# Run tests for vllm 0.9.2 
+# TODO (sumanthrh): We should have a better way to override without pinning a flash-attn wheel
+uv run --isolated --extra vllm --extra dev \
+    --with vllm==0.9.2 \
+    --with transformers==4.53.0 \
+    --with torch==2.7.0 \
+    --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
+    -- pytest -s -vvv tests/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation -m "vllm"

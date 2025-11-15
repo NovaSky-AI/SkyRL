@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorResponse,
-    ErrorInfo,
     CompletionRequest,
     CompletionResponse,
 )
@@ -35,6 +34,7 @@ from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
+from packaging import version
 
 
 @dataclass
@@ -399,7 +399,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        else:
+            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
@@ -486,6 +489,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def sleep(self, *args: Any, **kwargs: Any):
         engine = self._get_engine()
         output_processor = engine.output_processor
+        # make sure that the engine is alive
+        engine.engine_core.ensure_alive()
         if output_processor.has_unfinished_requests():
             logger.warning(
                 "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
@@ -580,13 +585,22 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.BAD_REQUEST.phrase,
+                        code=HTTPStatus.BAD_REQUEST.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
         # 2. Call vllm engine
         try:
@@ -602,13 +616,22 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                     code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.
