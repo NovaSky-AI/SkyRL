@@ -288,7 +288,7 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
             effective_rank = 0
         elif not lora_config.train_mlp and ("mlp" in path_str or "experts" in path_str):
             effective_rank = 0
-        elif not lora_config.train_unembed and "lm_head" in path_str:
+        elif not lora_config.train_unembed and ("embed_tokens" in path_str or "lm_head" in path_str):
             effective_rank = 0
 
         if path[-2].key == "lora_ranks":
