@@ -169,9 +169,14 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
+def get_normalized_path(path: tuple) -> tuple:
+    """Convert path of flax.typing.PathParts to path of str."""
+    return tuple(p.key if hasattr(p, "key") else p.name for p in path)
+
+
 def get_rank_path(path: tuple, lora_name: str) -> tuple:
     "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
-    path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+    path = get_normalized_path(path)
     # The path could be from a parameter in the optimizer. In that case we find the
     # associated parameter in the model to get the rank. We do this by getting the index
     # of the root module (which is either "model" or "lm_head") and indexing path with it.
@@ -197,7 +202,7 @@ def extract_adapter_state(
             return p[adapter_index, ..., :rank, :]
 
     adapter_state = jax.tree.map_with_path(extract_state, lora_params)
-    # Filter out rank 0 adapters
+    # Filter out rank 0 adapters, since we do not want to save or load them
     return nnx.filter_state(adapter_state, lambda path, value: value.size != 0)
 
 
@@ -206,17 +211,12 @@ def insert_adapter_state(
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
     flat_params = dict(nnx.to_flat_state(non_lora_params))
+    flat_lora_params = dict(nnx.to_flat_state(lora_params))
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    lora_params_dict = nnx.to_pure_dict(lora_params)
-
     def insert_state(path: tuple, new: jax.Array):
-        # Navigate to the corresponding parameter in lora_params_dict
-        p = lora_params_dict
-        for key in path:
-            p = p[key.key if hasattr(key, 'key') else key]
-
+        p = flat_lora_params[get_normalized_path(path)]
         if path[-1].key not in {"lora_A", "lora_B"}:
             return new
         rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
