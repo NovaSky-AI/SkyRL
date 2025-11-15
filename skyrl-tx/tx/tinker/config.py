@@ -50,6 +50,10 @@ class EngineConfig(BaseModel):
         default="EMPTY",
         description="API key for an external inference engine. If not provided will use vLLM 'EMPTY' key convention",
     )
+    external_inference_lora_base: Path = Field(
+        default=Path("/tmp/lora_models"),
+        description="Directory where LoRA models will be extracted for external inference engines",
+    )
 
 
 def convert_env_var(env_name: str, env_value: str, expected_type: type):

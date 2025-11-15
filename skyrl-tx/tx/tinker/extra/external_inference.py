@@ -1,6 +1,7 @@
 import httpx
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from sqlmodel.ext.asyncio.session import AsyncSession
 from cloudpathlib import AnyPath
 
@@ -18,6 +19,7 @@ class ExternalInferenceClient:
         self.base_url = f"{engine_config.external_inference_url}/v1"
         self.api_key = engine_config.external_inference_api_key
         self.checkpoints_base = engine_config.checkpoints_base
+        self.lora_base_dir = engine_config.external_inference_lora_base
         self.db_engine = db_engine
 
     async def call_and_store_result(
@@ -61,29 +63,23 @@ class ExternalInferenceClient:
     ) -> types.SampleOutput:
         """Forward request to vLLM with dynamic LoRA loading.
 
-        Extracts the checkpoint to /tmp/lora_models and references it by a model name
+        Extracts the checkpoint to the configured external_inference_lora_base and references it by a model name
         that vLLM can dynamically load via the lora_filesystem_resolver plugin.
         """
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
 
-        # Extract checkpoint to the LoRA models directory that vLLM monitors
-        lora_models_dir = Path("/tmp/lora_models")
-
         # Use model_id_checkpoint_id as the model name
         model_name = f"{model_id}_{checkpoint_id}"
-        target_dir = lora_models_dir / model_name
+        target_dir = self.lora_base_dir / model_name
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
         # Extract the checkpoint if it doesn't already exist
         if not target_dir.exists():
             with download_and_unpack(AnyPath(checkpoint_path)) as extracted_path:
-                # Move/copy the extracted content to the target directory
-                import shutil
-
                 shutil.copytree(extracted_path, target_dir)
 
         payload = {
-            "model": model_name,  # vLLM will dynamically load this LoRA from /tmp/lora_models
+            "model": model_name,
             "prompt": prompt_tokens,
             "max_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
