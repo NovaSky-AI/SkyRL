@@ -81,9 +81,6 @@ def load_safetensors(
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
-        # Skip loading LoRA parameters for rank 0 adapters
-        if "lora_A" in path or "lora_B" in path and param.size == 0:
-            continue
         if "experts" in path:
             tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
         else:
@@ -103,9 +100,6 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
         if "rngs" in path:
             continue
         key = get_param_key(path, prefix=prefix)
-        # Skip saving LoRA parameters for rank 0 adapters
-        if "lora_A" in path or "lora_B" in path and param.size == 0:
-            continue
         if "experts" in path:
             for i in range(config.num_experts):
                 tensors[get_expert_key(path, i)] = param[i, :, :].T
@@ -202,7 +196,9 @@ def extract_adapter_state(
         if path[-2].key == "lora_B":
             return p[adapter_index, ..., :rank, :]
 
-    return jax.tree.map_with_path(extract_state, lora_params)
+    adapter_state = jax.tree.map_with_path(extract_state, lora_params)
+    # Filter out rank 0 adapters
+    return nnx.filter_state(adapter_state, lambda path, value: value.size != 0)
 
 
 def insert_adapter_state(
@@ -213,7 +209,14 @@ def insert_adapter_state(
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    def insert_state(path: tuple, p: jax.Array, new: jax.Array):
+    lora_params_dict = nnx.to_pure_dict(lora_params)
+
+    def insert_state(path: tuple, new: jax.Array):
+        # Navigate to the corresponding parameter in lora_params_dict
+        p = lora_params_dict
+        for key in path:
+            p = p[key.key if hasattr(key, 'key') else key]
+
         if path[-1].key not in {"lora_A", "lora_B"}:
             return new
         rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
@@ -223,7 +226,7 @@ def insert_adapter_state(
         elif path[-1].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
+    updated = jax.tree.map_with_path(insert_state, new_params)
     nnx.update(lora_params, updated)
 
 
