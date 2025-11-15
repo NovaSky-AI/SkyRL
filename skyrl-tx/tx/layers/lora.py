@@ -271,51 +271,34 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         adapter_index: Index of the adapter to update
         lora_config: LoraConfig object containing rank, alpha, and training flags
     """
-    scaling = lora_config.alpha / lora_config.rank
     state = nnx.state(model)
-
-    def _is_attention_layer(path) -> bool:
-        """Check if path corresponds to attention layer."""
-        return any("self_attn" in str(key) for key in path)
-
-    def _is_mlp_layer(path) -> bool:
-        """Check if path corresponds to MLP layer (including MoE experts)."""
-        return any("mlp" in str(key) or "experts" in str(key) for key in path)
-
-    def _is_expert_layer(path) -> bool:
-        """Check if path corresponds to MoE expert layer."""
-        return any("experts" in str(key) for key in path)
-
-    def _is_unembed_layer(path) -> bool:
-        """Check if path corresponds to unembedding/LM head layer."""
-        return any("lm_head" in str(key) for key in path)
 
     def update_lora_config(path, value):
         # Determine if this layer should be trained based on layer type
         effective_rank = lora_config.rank
+        path_str = '/'.join(str(k) for k in path)
 
         # Apply rank normalization for MoE expert layers
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
-        if _is_expert_layer(path):
+        if "experts" in path_str:
             num_experts = getattr(model.config, "num_experts", None)
             if num_experts and num_experts > 1:
                 effective_rank = max(1, lora_config.rank // num_experts)
 
         # Apply layer-specific training flags
-        if not lora_config.train_attn and _is_attention_layer(path):
+        if not lora_config.train_attn and "self_attn" in path_str:
             effective_rank = 0
-        elif not lora_config.train_mlp and _is_mlp_layer(path):
+        elif not lora_config.train_mlp and ("mlp" in path_str or "experts" in path_str):
             effective_rank = 0
-        elif not lora_config.train_unembed and _is_unembed_layer(path):
+        elif not lora_config.train_unembed and "lm_head" in path_str:
             effective_rank = 0
 
         if path[-2].key == "lora_ranks":
             return value.at[adapter_index].set(effective_rank)
         if path[-2].key == "lora_scaling":
-            # Set scaling to 0 if rank is 0 to avoid division by zero issues
-            effective_scaling = scaling if effective_rank > 0 else 0.0
-            return value.at[adapter_index].set(effective_scaling)
+            # Set scaling to 0.0 if rank is 0
+            return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
         if path[-2].key == "lora_A":
             # Zero out columns beyond the rank for this adapter; lora_B is already zero
             return value.at[adapter_index, ..., effective_rank:].set(0.0)
