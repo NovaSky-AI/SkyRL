@@ -866,21 +866,18 @@ class TinkerEngine:
             results: Dict mapping request_id to result (Pydantic BaseModel)
         """
         completed_at = datetime.now(timezone.utc)
+        params = [
+            {
+                "request_id": int(request_id),
+                "result_data": result.model_dump(),
+                "status": RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED,
+                "completed_at": completed_at,
+            }
+            for request_id, result in results.items()
+        ]
+
         with Session(self.db_engine) as session:
-            session.execute(
-                update(FutureDB),
-                [
-                    {
-                        "request_id": int(request_id),
-                        "result_data": result.model_dump(),
-                        "status": (
-                            RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
-                        ),
-                        "completed_at": completed_at,
-                    }
-                    for request_id, result in results.items()
-                ],
-            )
+            session.execute(update(FutureDB), params)
             session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
