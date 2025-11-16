@@ -42,20 +42,19 @@ class ExternalInferenceClient:
                     sample_req, model_id, checkpoint_id, str(checkpoint_path), http_client
                 )
 
-            async with AsyncSession(self.db_engine) as session:
-                future = await session.get(FutureDB, request_id)
-                future.result_data = result.model_dump()
-                future.status = RequestStatus.COMPLETED
-                future.completed_at = datetime.now(timezone.utc)
-                await session.commit()
+            result_data = result.model_dump()
+            status = RequestStatus.COMPLETED
         except Exception as e:
             logger.exception("External engine error")
-            async with AsyncSession(self.db_engine) as session:
-                future = await session.get(FutureDB, request_id)
-                future.result_data = {"error": str(e), "status": "failed"}
-                future.status = RequestStatus.FAILED
-                future.completed_at = datetime.now(timezone.utc)
-                await session.commit()
+            result_data = {"error": str(e), "status": "failed"}
+            status = RequestStatus.FAILED
+
+        async with AsyncSession(self.db_engine) as session:
+            future = await session.get(FutureDB, request_id)
+            future.result_data = result_data
+            future.status = status
+            future.completed_at = datetime.now(timezone.utc)
+            await session.commit()
 
     async def _forward_to_engine(
         self, request, model_id: str, checkpoint_id: str, checkpoint_path: str, http_client: httpx.AsyncClient
