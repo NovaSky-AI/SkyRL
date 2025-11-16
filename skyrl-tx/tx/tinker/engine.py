@@ -867,10 +867,9 @@ class TinkerEngine:
             results: Dict mapping request_id to result (Pydantic BaseModel)
         """
         with Session(self.db_engine) as session:
-            statement = (
+            futures = session.exec(
                 select(FutureDB).where(FutureDB.request_id.in_(results.keys())).options(load_only(FutureDB.request_id))
-            )
-            futures = session.exec(statement).all()
+            ).all()
             assert len(futures) == len(results), "Some request_ids not found in database"
 
             completed_at = datetime.now(timezone.utc)
