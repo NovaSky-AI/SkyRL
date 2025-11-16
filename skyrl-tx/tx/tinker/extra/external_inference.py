@@ -1,6 +1,5 @@
 import httpx
 from datetime import datetime, timezone
-import shutil
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from tx.tinker import types
