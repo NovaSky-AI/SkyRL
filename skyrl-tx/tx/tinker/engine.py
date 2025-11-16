@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from pydantic import BaseModel
-from sqlmodel import create_engine, Session, select, func
+from sqlmodel import create_engine, Session, select, update, func
 
 import jax
 import jax.numpy as jnp
@@ -865,20 +865,22 @@ class TinkerEngine:
         Args:
             results: Dict mapping request_id to result (Pydantic BaseModel)
         """
+        completed_at = datetime.now(timezone.utc)
         with Session(self.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id.in_(results.keys()))
-            futures = session.exec(statement).all()
-            assert len(futures) == len(results), "Some request_ids not found in database"
-
-            completed_at = datetime.now(timezone.utc)
-            for future in futures:
-                result = results[future.request_id]
-                future.result_data = result.model_dump()
-                future.status = (
-                    RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
-                )
-                future.completed_at = completed_at
-
+            session.execute(
+                update(FutureDB),
+                [
+                    {
+                        "request_id": int(request_id),
+                        "result_data": result.model_dump(),
+                        "status": (
+                            RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
+                        ),
+                        "completed_at": completed_at,
+                    }
+                    for request_id, result in results.items()
+                ],
+            )
             session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
