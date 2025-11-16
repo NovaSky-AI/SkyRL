@@ -623,6 +623,9 @@ class TinkerEngine:
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
 
+        # Convert adapter indices to JAX array once for efficient slicing
+        all_adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
+
         # Collect generated sequences across batches
         all_sequences: list[types.GeneratedSequence] = []
 
@@ -643,9 +646,10 @@ class TinkerEngine:
                     [pad([1] * len(seq), max_len, fill=0) for seq in batch_prompts],
                     dtype=jnp.int32,
                 )
-                adapter_indices = jnp.array(
-                    pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0),
-                    dtype=jnp.int32,
+                batch_size = batch_end - batch_start
+                adapter_indices = jnp.pad(
+                    all_adapter_indices[batch_start:batch_end],
+                    (0, max_batch_size - batch_size)
                 )
                 sampling_params = pad(
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
