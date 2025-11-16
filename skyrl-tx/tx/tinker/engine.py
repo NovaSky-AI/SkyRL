@@ -878,8 +878,6 @@ class TinkerEngine:
                     RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
                 )
                 future.completed_at = completed_at
-                if future.status == RequestStatus.COMPLETED:
-                    logger.info(f"Completed {future.request_type} request {future.request_id}")
 
             session.commit()
 
