@@ -354,8 +354,7 @@ class Qwen3Model(nnx.Module):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        # hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
