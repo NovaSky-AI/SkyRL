@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from pydantic import BaseModel
-from sqlalchemy.orm import load_only
 from sqlmodel import create_engine, Session, select, func
 
 import jax
@@ -867,9 +866,8 @@ class TinkerEngine:
             results: Dict mapping request_id to result (Pydantic BaseModel)
         """
         with Session(self.db_engine) as session:
-            futures = session.exec(
-                select(FutureDB).where(FutureDB.request_id.in_(results.keys())).options(load_only(FutureDB.request_id))
-            ).all()
+            statement = select(FutureDB).where(FutureDB.request_id.in_(results.keys()))
+            futures = session.exec(statement).all()
             assert len(futures) == len(results), "Some request_ids not found in database"
 
             completed_at = datetime.now(timezone.utc)
