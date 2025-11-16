@@ -65,8 +65,13 @@ class ExternalInferenceClient:
 
         # Extract the checkpoint if it doesn't already exist
         if not target_dir.exists():
-            with download_and_unpack(checkpoint_path) as extracted_path:
-                shutil.copytree(extracted_path, target_dir)
+            try:
+                with download_and_unpack(checkpoint_path) as extracted_path:
+                    extracted_path.rename(target_dir)
+            except FileExistsError:
+                # This could happen if two processes try to download the file.
+                # In that case the other process won the race and created target_dir.
+                pass
 
         payload = {
             "model": model_name,
