@@ -58,7 +58,8 @@ async def lifespan(app: FastAPI):
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
-    logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
+    logger.info(
+        f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
 
     yield
 
@@ -67,7 +68,8 @@ async def lifespan(app: FastAPI):
     try:
         background_engine.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+        logger.warning(
+            f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
         background_engine.kill()
         background_engine.wait()
     logger.info("Background engine stopped")
@@ -134,7 +136,8 @@ async def create_checkpoint(
         result = await session.exec(statement)
 
         if not result.first():
-            raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not found")
         else:
             raise HTTPException(
                 status_code=409, detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
@@ -219,7 +222,8 @@ class Datum(BaseModel):
         inp = self.loss_fn_inputs
 
         if "weights" not in inp:
-            weights = types.TensorData(data=[1.0] * len(inp["target_tokens"].data))
+            weights = types.TensorData(
+                data=[1.0] * len(inp["target_tokens"].data))
         else:
             weights = inp["weights"].to_types()
 
@@ -227,8 +231,10 @@ class Datum(BaseModel):
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
                 weights=weights,
-                advantages=inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[]),
-                logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
+                advantages=inp["advantages"].to_types(
+                ) if "advantages" in inp else types.TensorData(data=[]),
+                logprobs=inp["logprobs"].to_types(
+                ) if "logprobs" in inp else types.TensorData(data=[]),
             ),
             model_input=self.model_input.to_types(),
         )
@@ -277,21 +283,23 @@ class SamplingParams(BaseModel):
 
     def to_types(self) -> types.SamplingParams:
         if self.max_tokens is None:
-            raise HTTPException(status_code=400, detail="max_tokens is currently required")
+            raise HTTPException(
+                status_code=400, detail="max_tokens is currently required")
 
-        if self.top_k != -1:
-            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
         if self.top_p != 1.0:
-            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
+            raise HTTPException(
+                status_code=501, detail="'top_p' parameter is not yet implemented")
 
         # Generate a random seed if not provided
-        seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
+        seed = self.seed if self.seed is not None else random.randint(
+            0, 2**31 - 1)
 
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
             stop=self.stop,
+            top_k=self.top_k,
         )
 
 
@@ -315,7 +323,8 @@ class SampleRequest(BaseModel):
         """
         if self.sampling_session_id is not None:
             if self.seq_id is None:
-                raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
+                raise ValueError(
+                    "'seq_id' must be provided when 'sampling_session_id' is used")
             return self
         if (self.base_model is None) == (self.model_path is None):
             raise ValueError(
@@ -457,7 +466,8 @@ async def create_sampling_session(request: CreateSamplingSessionRequest, session
         raise HTTPException(status_code=404, detail="Session not found")
     # Exactly one of base_model or model_path must be provided
     if (request.base_model is None) == (request.model_path is None):
-        raise HTTPException(status_code=400, detail="Exactly one of base_model or model_path must be provided")
+        raise HTTPException(
+            status_code=400, detail="Exactly one of base_model or model_path must be provided")
     sampling_session_id = f"sampling_{uuid4().hex[:8]}"
     sampling_db = SamplingSessionDB(
         sampling_session_id=sampling_session_id,
@@ -537,7 +547,8 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
         is_lora=True,
         corrupted=False,
         lora_rank=lora_config.rank,
-        last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+        # TODO: Once we track modified_at timestamps, update this
+        last_request_time=model.created_at,
         last_checkpoint=None,
         last_sampler_checkpoint=None,
         user_metadata=None,
@@ -570,7 +581,8 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         session=session,
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
+        request_data=types.OptimStepInput(
+            adam_params=request.adam_params.to_types()),
     )
 
     await session.commit()
@@ -600,7 +612,8 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
         session=session,
         request_type=types.RequestType.LOAD_WEIGHTS,
         model_id=request.model_id,
-        request_data=types.LoadWeightsInput(source_model_id=source_model_id, checkpoint_id=checkpoint_id),
+        request_data=types.LoadWeightsInput(
+            source_model_id=source_model_id, checkpoint_id=checkpoint_id),
     )
 
     await session.commit()
@@ -660,7 +673,8 @@ async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (
     if request.sampling_session_id is not None:
         sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
         if sampling_session is None:
-            raise HTTPException(status_code=404, detail="Sampling session not found")
+            raise HTTPException(
+                status_code=404, detail="Sampling session not found")
         return (sampling_session.base_model, sampling_session.model_path)
     return (request.base_model, request.model_path)
 
@@ -737,7 +751,8 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
 
     for _ in range(int(timeout / poll_interval)):
         async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+            statement = select(FutureDB).where(
+                FutureDB.request_id == int(request.request_id))
             result = await session.exec(statement)
             future = result.first()
 
@@ -750,9 +765,11 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             if future.status == RequestStatus.FAILED:
                 # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
                 if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
+                    raise HTTPException(
+                        status_code=400, detail=future.result_data["error"])
                 else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
+                    raise HTTPException(
+                        status_code=500, detail="Unknown error")
 
         await asyncio.sleep(poll_interval)
 
@@ -773,13 +790,16 @@ async def validate_checkpoint(
     checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, checkpoint_type))
 
     if not checkpoint_db:
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
+        raise HTTPException(
+            status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
 
     if checkpoint_db.status == CheckpointStatus.PENDING:
-        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
+        raise HTTPException(
+            status_code=425, detail="Checkpoint is still being created")
 
     if checkpoint_db.status == CheckpointStatus.FAILED:
-        raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
+        raise HTTPException(
+            status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
     subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
     return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
@@ -788,15 +808,18 @@ async def validate_checkpoint(
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
 async def get_checkpoint_archive_url(
     request: Request,
-    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
-    checkpoint_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN,
+                                  max_length=ID_MAX_LENGTH),
+    checkpoint_id: str = fastapi.Path(...,
+                                      pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """Return a 302 redirect to the download URL (SDK expects this pattern)"""
     await validate_checkpoint(request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     # Generate URL to the download endpoint and return 302 redirect
-    download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
+    download_url = str(request.url_for(
+        "download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
     expires = datetime.utcnow() + timedelta(minutes=120)
 
     response = RedirectResponse(url=download_url, status_code=302)
@@ -807,8 +830,10 @@ async def get_checkpoint_archive_url(
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/download")
 async def download_checkpoint_archive(
     request: Request,
-    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
-    checkpoint_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN,
+                                  max_length=ID_MAX_LENGTH),
+    checkpoint_id: str = fastapi.Path(...,
+                                      pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """Actually download the checkpoint archive bytes"""
@@ -829,7 +854,8 @@ async def download_checkpoint_archive(
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints")
 async def list_checkpoints(
-    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN,
+                                  max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """List checkpoints for a model."""
@@ -860,7 +886,8 @@ async def list_checkpoints(
 
 @app.get("/api/v1/models/{unique_id}/checkpoints")
 async def list_checkpoints_models(
-    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN,
+                                  max_length=ID_MAX_LENGTH),
     session: AsyncSession = Depends(get_session),
 ):
     """Just to be compatible with tinker SDK"""
@@ -895,12 +922,15 @@ if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")
     add_model(parser, EngineConfig)
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--host", type=str,
+                        default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port to bind to")
     args = parser.parse_args()
 
     # Create EngineConfig from parsed arguments (only EngineConfig fields)
-    engine_config = EngineConfig.model_validate({k: v for k, v in vars(args).items() if k in EngineConfig.model_fields})
+    engine_config = EngineConfig.model_validate(
+        {k: v for k, v in vars(args).items() if k in EngineConfig.model_fields})
 
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config

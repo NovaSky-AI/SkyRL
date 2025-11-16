@@ -50,6 +50,7 @@ class DecodeState:
     temperatures: jax.Array
     stop_tokens: jax.Array
     adapter_indices: jax.Array
+    top_k: jax.Array
 
     # Updated each iteration:
     kv_cache: KVCache
@@ -78,13 +79,16 @@ class GenerateOutput:
     prompt_logprobs: list[list[float]] | None = None
 
 
-def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
+def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, top_k_values: jax.Array, sample_keys: jax.Array) -> jax.Array:
     """Sample next token per-example using a per-example PRNGKey."""
     temperatures = temperatures[:, None]
     zero_temp_mask = temperatures == 0.0
     scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
+    filtered_logits = jax.vmap(apply_top_k)(scaled_logits, top_k_values)
+
     # Draw one sample per example
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(
+        key, logit, axis=-1))(sample_keys, filtered_logits)
     greedy = jnp.argmax(logits, axis=-1)
     next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
     return next_token
@@ -104,16 +108,20 @@ def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.A
     """Sample next token and compute logprobs, updating the logprobs array."""
     split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(s.logits, temperatures=s.temperatures, sample_keys=sample_keys)
+    next_token = batched_sample_token(
+        s.logits, temperatures=s.temperatures, top_k_values=s.top_k_values, sample_keys=sample_keys)
 
     logprobs = jax.nn.log_softmax(s.logits, axis=-1)
-    sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
-    all_logprobs = lax.dynamic_update_slice(s.all_logprobs, sampled_logprobs, (0, s.kv_cache.cache_position))
+    sampled_logprobs = jnp.take_along_axis(
+        logprobs, next_token, axis=-1)  # [batch_size, 1]
+    all_logprobs = lax.dynamic_update_slice(
+        s.all_logprobs, sampled_logprobs, (0, s.kv_cache.cache_position))
 
     # Check if sampled token is in stop tokens and update stop position
     is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
     # Only update stop_pos if not already stopped (stop_pos == -1)
-    stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
+    stop_pos = jnp.where((s.stop_pos == -1) & is_stop,
+                         s.kv_cache.cache_position, s.stop_pos)
 
     return next_rngs, next_token, all_logprobs, stop_pos
 
@@ -132,7 +140,8 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     """Decode one token step for use with jax.lax.scan."""
     rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(s)
 
-    generated_ids = lax.dynamic_update_slice(s.generated_ids, next_token, (0, s.kv_cache.cache_position))
+    generated_ids = lax.dynamic_update_slice(
+        s.generated_ids, next_token, (0, s.kv_cache.cache_position))
     attention_mask = lax.dynamic_update_slice(
         s.attention_mask,
         jnp.ones((s.generated_ids.shape[0], 1), dtype=s.attention_mask.dtype),
@@ -149,6 +158,7 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     next_state = DecodeState(
         model=s.model,
         temperatures=s.temperatures,
+        top_k_values=s.top_k_values,
         stop_tokens=s.stop_tokens,
         adapter_indices=s.adapter_indices,
         kv_cache=outputs.kv_cache,
@@ -192,9 +202,14 @@ class GeneratorMixin:
         """
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
-        max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
-        max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
-        temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+        max_new_tokens = max(
+            sampling_param.max_tokens for sampling_param in sampling_params)
+        max_length = tx.utils.models.round_up_seq_len(
+            prompt_length + max_new_tokens)
+        temperatures = jnp.array(
+            [sampling_param.temperature for sampling_param in sampling_params])
+        top_k_values = jnp.array(
+            [sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
 
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
         # per-request streams will be identical.
@@ -202,7 +217,8 @@ class GeneratorMixin:
         rngs = jax.vmap(jax.random.PRNGKey)(jnp.array(seeds))
 
         # Extract stop tokens and pad to same length
-        max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
+        max_stop_tokens = max(
+            len(sp.stop) if sp.stop else 0 for sp in sampling_params)
         stop_tokens = []
         for sp in sampling_params:
             stop = sp.stop or []
@@ -211,7 +227,8 @@ class GeneratorMixin:
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
-        outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
+        outputs = self._prefill_fn(
+            self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         # Capture prompt lengths and compute prompt logprobs if requested
@@ -222,12 +239,14 @@ class GeneratorMixin:
         pad_length = max_length - prompt_length
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
-        all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
+        all_logprobs = jnp.zeros(
+            (batch_size, max_length), dtype=outputs.logits.dtype)
         stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
 
         initial_state = DecodeState(
             model=self,
             temperatures=temperatures,
+            top_k_values=top_k_values,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
@@ -239,19 +258,23 @@ class GeneratorMixin:
             all_logprobs=all_logprobs,
             stop_pos=stop_pos,
         )
-        final_state, _ = jax.lax.scan(decode_fn, initial_state, xs=None, length=max_new_tokens - 1)
+        final_state, _ = jax.lax.scan(
+            decode_fn, initial_state, xs=None, length=max_new_tokens - 1)
 
         # Sample final token
-        rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(final_state)
+        rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
+            final_state)
         generated_ids = lax.dynamic_update_slice(
-            final_state.generated_ids, next_token, (0, final_state.kv_cache.cache_position)
+            final_state.generated_ids, next_token, (
+                0, final_state.kv_cache.cache_position)
         )
 
         # Compute end position for each sequence: stop_pos + 1 if stopped, else prompt_length + max_tokens
         end_positions = jnp.where(
             stop_pos[:, 0] >= 0,
             stop_pos[:, 0] + 1,
-            prompt_length + jnp.array([sp.max_tokens for sp in sampling_params]),
+            prompt_length +
+            jnp.array([sp.max_tokens for sp in sampling_params]),
         )
 
         # Single device-to-host transfer for all data
@@ -283,3 +306,24 @@ class GeneratorMixin:
                 else None
             ),
         )
+
+
+def apply_top_k(logits: jax.Array, k: int) -> jax.Array:
+    """Keep only top-k logits, set rest to -inf.
+
+    Args:
+        logits: Logits tensor of shape [vocab_size]
+        k: Number of top logits to keep. If k <= 0, no filtering is applied.
+
+    Returns:
+        Filtered logits with the same shape.
+    """
+    if k <= 0:
+        return logits
+
+    # Get the k-th largest value as threshold
+    top_k_logits, _ = lax.top_k(logits, k)
+    threshold = top_k_logits[-1]  # The smallest value in top-k
+
+    # Mask out everything below threshold
+    return jnp.where(logits < threshold, -jnp.inf, logits)
