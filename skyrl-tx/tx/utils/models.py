@@ -169,12 +169,20 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
+def get_normalized_path(path: tuple) -> tuple:
+    """Convert path of flax.typing.PathParts to path of str."""
+    return tuple(p.key if hasattr(p, "key") else p.name for p in path)
+
+
 def get_rank_path(path: tuple, lora_name: str) -> tuple:
     "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
-    path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-    model_idx = path.index("model")
+    path = get_normalized_path(path)
+    # The path could be from a parameter in the optimizer. In that case we find the
+    # associated parameter in the model to get the rank. We do this by getting the index
+    # of the root module (which is either "model" or "lm_head") and indexing path with it.
+    start_idx = path.index("model") if "model" in path else path.index("lm_head")
     lora_idx = path.index(lora_name)
-    return (*path[model_idx:lora_idx], "lora_ranks")
+    return (*path[start_idx:lora_idx], "lora_ranks")
 
 
 def extract_adapter_state(
@@ -193,7 +201,9 @@ def extract_adapter_state(
         if path[-2].key == "lora_B":
             return p[adapter_index, ..., :rank, :]
 
-    return jax.tree.map_with_path(extract_state, lora_params)
+    adapter_state = jax.tree.map_with_path(extract_state, lora_params)
+    # Filter out rank 0 adapters, since we do not want to save or load them
+    return nnx.filter_state(adapter_state, lambda path, value: value.size != 0)
 
 
 def insert_adapter_state(
@@ -201,10 +211,12 @@ def insert_adapter_state(
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
     flat_params = dict(nnx.to_flat_state(non_lora_params))
+    flat_lora_params = dict(nnx.to_flat_state(lora_params))
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    def insert_state(path: tuple, p: jax.Array, new: jax.Array):
+    def insert_state(path: tuple, new: jax.Array):
+        p = flat_lora_params[get_normalized_path(path)]
         if path[-1].key not in {"lora_A", "lora_B"}:
             return new
         rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
@@ -214,7 +226,7 @@ def insert_adapter_state(
         elif path[-1].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
+    updated = jax.tree.map_with_path(insert_state, new_params)
     nnx.update(lora_params, updated)
 
 
