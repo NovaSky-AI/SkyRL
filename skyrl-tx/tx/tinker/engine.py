@@ -856,29 +856,29 @@ class TinkerEngine:
 
         return jnp.array(adapter_indices_list, dtype=jnp.int32)
 
-  def _complete_futures(self, results: dict[str, BaseModel]):
-      """Helper method to complete multiple futures in the database.
+    def _complete_futures(self, results: dict[str, BaseModel]):
+        """Helper method to complete multiple futures in the database.
 
-      Args:
-          results: Dict mapping request_id to result (Pydantic BaseModel)
-      """
-      with Session(self.db_engine) as session:
-          # Batch fetch all futures in a single query
-          statement = select(FutureDB).where(FutureDB.request_id.in_(results.keys()))
-          futures = session.exec(statement).all()
+        Args:
+            results: Dict mapping request_id to result (Pydantic BaseModel)
+        """
+        with Session(self.db_engine) as session:
+            # Batch fetch all futures in a single query
+            statement = select(FutureDB).where(FutureDB.request_id.in_(results.keys()))
+            futures = session.exec(statement).all()
 
-          completed_at = datetime.now(timezone.utc)
-          for future in futures:
-              result = results[future.request_id]
-              future.result_data = result.model_dump()
-              future.status = (
-                  RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
-              )
-              future.completed_at = completed_at
-              if future.status == RequestStatus.COMPLETED:
-                  logger.info(f"Completed {future.request_type} request {future.request_id}")
+            completed_at = datetime.now(timezone.utc)
+            for future in futures:
+                result = results[future.request_id]
+                future.result_data = result.model_dump()
+                future.status = (
+                    RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
+                )
+                future.completed_at = completed_at
+                if future.status == RequestStatus.COMPLETED:
+                    logger.info(f"Completed {future.request_type} request {future.request_id}")
 
-          session.commit()
+            session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
         match request_type:
