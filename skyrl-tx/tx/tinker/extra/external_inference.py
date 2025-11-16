@@ -30,18 +30,12 @@ class ExternalInferenceClient:
     ):
         """Background task to call external engine and store result in database."""
         try:
-            # Form the checkpoint path
-            checkpoint_path = self.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
-
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
             ) as http_client:
-                result = await self._forward_to_engine(
-                    sample_req, model_id, checkpoint_id, str(checkpoint_path), http_client
-                )
-
+                result = await self._forward_to_engine(sample_req, model_id, checkpoint_id, http_client)
             result_data = result.model_dump()
             status = RequestStatus.COMPLETED
         except Exception as e:
@@ -57,7 +51,7 @@ class ExternalInferenceClient:
             await session.commit()
 
     async def _forward_to_engine(
-        self, request, model_id: str, checkpoint_id: str, checkpoint_path: str, http_client: httpx.AsyncClient
+        self, request, model_id: str, checkpoint_id: str, http_client: httpx.AsyncClient
     ) -> types.SampleOutput:
         """Forward request to vLLM with dynamic LoRA loading.
 
@@ -65,15 +59,14 @@ class ExternalInferenceClient:
         that vLLM can dynamically load via the lora_filesystem_resolver plugin.
         """
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
-
-        # Use model_id_checkpoint_id as the model name
+        checkpoint_path = self.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
         model_name = f"{model_id}_{checkpoint_id}"
         target_dir = self.lora_base_dir / model_name
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
         # Extract the checkpoint if it doesn't already exist
         if not target_dir.exists():
-            with download_and_unpack(AnyPath(checkpoint_path)) as extracted_path:
+            with download_and_unpack(checkpoint_path) as extracted_path:
                 shutil.copytree(extracted_path, target_dir)
 
         payload = {
