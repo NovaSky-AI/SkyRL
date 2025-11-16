@@ -187,6 +187,7 @@ class Qwen3Experts(nnx.Module):
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         fsdp_shard = "dp" if config.fsdp else None
+        column_parallel_shard = tuple(s for s in [fsdp_shard, "tp"] if s is not None) or None
 
         self.gate_proj = LoRAExpert(
             config.num_experts,
@@ -195,7 +196,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(fsdp_shard, None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, fsdp_shard, "tp")),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
@@ -205,7 +206,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(fsdp_shard, None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, fsdp_shard, "tp")),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
@@ -215,7 +216,9 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(fsdp_shard, "tp", None)),
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(), jax.P(None, column_parallel_shard, None)
+            ),
             rngs=rngs,
         )
 
