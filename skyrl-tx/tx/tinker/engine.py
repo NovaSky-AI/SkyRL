@@ -816,7 +816,7 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> jax.Array:
+    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> list[int]:
         """Load sampler weights for all requests and return full adapter indices array.
 
         Args:
@@ -826,7 +826,7 @@ class TinkerEngine:
             The adapter_indices array for LoRA sampling [batch_size]
             Uses adapter index 0 for base model sampling (no LoRA)
         """
-        adapter_indices_list = []
+        adapter_indices = []
 
         for _, (model_id, request_data) in requests.items():
             base_model = request_data.base_model
@@ -838,10 +838,10 @@ class TinkerEngine:
                 adapter_index = self.models[model_id].adapter_index
                 if self.models[model_id].loaded_checkpoint_id == checkpoint_id:
                     # Load model from RAM
-                    adapter_indices_list.append(adapter_index)
+                    adapter_indices.append(adapter_index)
                 else:
                     # Load model from disk
-                    assert adapter_index not in adapter_indices_list, "Cannot override already used adapter"
+                    assert adapter_index not in adapter_indices, "Cannot override already used adapter"
 
                     checkpoint_path = (
                         self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
@@ -851,7 +851,7 @@ class TinkerEngine:
 
                     self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
-                    adapter_indices_list.append(adapter_index)
+                    adapter_indices.append(adapter_index)
             else:
                 # This code path is for sampling from the base model
                 if base_model != self.config.base_model:
@@ -859,9 +859,9 @@ class TinkerEngine:
                         f"Requested base_model '{base_model}' does not match engine's base_model '{self.config.base_model}'"
                     )
                 assert model_id == "" and checkpoint_id == ""
-                adapter_indices_list.append(0)
+                adapter_indices.append(0)
 
-        return jnp.array(adapter_indices_list, dtype=jnp.int32)
+        return adapter_indices
 
     def _complete_futures(self, results: dict[str, BaseModel]):
         """Helper method to complete multiple futures in the database.
