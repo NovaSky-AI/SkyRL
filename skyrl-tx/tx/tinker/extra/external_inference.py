@@ -2,7 +2,6 @@ import httpx
 from datetime import datetime, timezone
 import shutil
 from sqlmodel.ext.asyncio.session import AsyncSession
-from cloudpathlib import AnyPath
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig
