@@ -324,15 +324,13 @@ class Qwen3Model(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
             dtype=dtype,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
             rngs=rngs,

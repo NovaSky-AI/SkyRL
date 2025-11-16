@@ -26,6 +26,7 @@ from tx.tinker.db_models import (
     SamplingSessionDB,
     get_async_database_url,
 )
+from tx.tinker.extra import ExternalInferenceClient
 from tx.utils.storage import download_file
 from tx.utils.log import logger
 
@@ -43,6 +44,14 @@ async def lifespan(app: FastAPI):
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+
+    # Setup external inference client if configured
+    if app.state.engine_config.external_inference_url:
+        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
+    else:
+        app.state.external_inference_client = None
+        logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
@@ -683,7 +692,9 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
 
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.SAMPLE,
+        request_type=(
+            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
+        ),
         model_id=model_id,
         request_data=types.SampleInput(
             base_model=base_model,
@@ -695,6 +706,11 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     )
 
     await session.commit()
+
+    if req.app.state.external_inference_client:
+        asyncio.create_task(
+            req.app.state.external_inference_client.call_and_store_result(request_id, request, model_id, checkpoint_id)
+        )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
