@@ -57,7 +57,7 @@ class ExternalInferenceClient:
         that vLLM can dynamically load via the lora_filesystem_resolver plugin.
         """
         prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
-        checkpoint_path = self.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        checkpoint_path = self.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
         model_name = f"{model_id}_{checkpoint_id}"
         target_dir = self.lora_base_dir / model_name
         target_dir.parent.mkdir(parents=True, exist_ok=True)
