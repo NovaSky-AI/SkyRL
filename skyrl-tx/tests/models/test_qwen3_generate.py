@@ -15,8 +15,25 @@ from tx.tinker import types
 from tx.utils.models import load_safetensors
 
 
-def test_qwen3_generate():
+@pytest.fixture
+def mesh_configs():
+    """Generate mesh configurations to test."""
+    configs = [
+        {"name": "no_fsdp", "dp": 1, "tp": 1, "fsdp": False},
+        {"name": "fsdp", "dp": len(jax.devices()), "tp": 1, "fsdp": True},
+    ]
+
+    return configs
+
+
+@pytest.mark.parametrize("mesh_config_idx", [0, 1])
+def test_qwen3_generate(mesh_config_idx, mesh_configs):
     """Test batched text generation with KV caching matches HuggingFace."""
+    mesh_config = mesh_configs[mesh_config_idx]
+    print(
+        f"\nTesting with mesh configuration: {mesh_config['name']} (dp={mesh_config['dp']}, tp={mesh_config['tp']}, fsdp={mesh_config['fsdp']})"
+    )
+
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
@@ -39,9 +56,11 @@ def test_qwen3_generate():
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
         base_config = PretrainedConfig.from_pretrained(model_name)
-        config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
+        config = Qwen3Config(
+            base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True, fsdp=mesh_config["fsdp"]
+        )
 
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((mesh_config["dp"], mesh_config["tp"]), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)

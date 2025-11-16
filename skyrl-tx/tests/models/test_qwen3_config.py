@@ -19,6 +19,9 @@ def test_config_wraps_pretrained_config():
     assert config.hidden_size > 0
     assert config.num_hidden_layers > 0
 
+    # Check FSDP param
+    assert config.fsdp is False
+
 
 def test_config_preserves_moe_config():
     """Test that MoE-specific configs are preserved."""
@@ -27,3 +30,12 @@ def test_config_preserves_moe_config():
 
     # Check that MoE-specific attributes are preserved
     assert config.num_experts > 0
+
+
+def test_config_fsdp():
+    """Test that FSDP config is preserved."""
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config(hf_config, max_lora_adapters=8, max_lora_rank=16, shard_attention_heads=False, fsdp=True)
+
+    # Check FSDP param
+    assert config.fsdp is True
