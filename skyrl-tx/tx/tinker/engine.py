@@ -638,19 +638,14 @@ class TinkerEngine:
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = jnp.array(
-                    [pad(seq, max_len, fill=0) for seq in batch_prompts],
-                    dtype=jnp.int32,
+                input_ids = jnp.stack(
+                    [jnp.pad(jnp.array(seq, dtype=jnp.int32), (0, max_len - len(seq))) for seq in batch_prompts]
                 )
-                attention_mask = jnp.array(
-                    [pad([1] * len(seq), max_len, fill=0) for seq in batch_prompts],
-                    dtype=jnp.int32,
+                attention_mask = jnp.stack(
+                    [jnp.pad(jnp.ones(len(seq), dtype=jnp.int32), (0, max_len - len(seq))) for seq in batch_prompts]
                 )
                 batch_size = batch_end - batch_start
-                adapter_indices = jnp.pad(
-                    all_adapter_indices[batch_start:batch_end],
-                    (0, max_batch_size - batch_size)
-                )
+                adapter_indices = jnp.pad(all_adapter_indices[batch_start:batch_end], (0, max_batch_size - batch_size))
                 sampling_params = pad(
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
                 )
