@@ -407,6 +407,7 @@ class TinkerEngine:
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
+            .where(FutureDB.request_type != types.RequestType.EXTERNAL)
             .order_by(FutureDB.request_id)
         )
         other_futures = session.exec(statement).all()
@@ -798,7 +799,9 @@ class TinkerEngine:
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             # Save the LoRA adapter weights and LoRA config as tar.gz
-            save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
+            save_lora_checkpoint(
+                self.model, self.config.base_model, lora_model.lora_config, lora_model.adapter_index, output_path
+            )
 
             logger.info(
                 f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}"
