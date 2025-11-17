@@ -627,7 +627,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
-                add_generation_prompt=True,
+                add_generation_prompt=not done,
                 tokenize=True,
                 **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]
