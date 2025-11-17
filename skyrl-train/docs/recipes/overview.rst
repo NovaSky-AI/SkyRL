@@ -14,7 +14,8 @@ DAPO Recipes
 ~~~~~~~~~~~~
 
 The code for the DAPO recipe is available at :code_link:`examples/algorithms/dapo/`.
-s
+
+
 .. raw:: html
 
    <style>
