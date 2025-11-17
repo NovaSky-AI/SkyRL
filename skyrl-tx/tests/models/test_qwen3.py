@@ -275,4 +275,13 @@ def test_qwen3_lora():
 
         # Compare outputs with corresponding adapters
         for idx in range(len(lora_adapters)):
-            assert np.allclose(hf_outputs_list[idx].logits[0], outputs.logits[idx], rtol=1e-2, atol=1e-2)
+            if not np.allclose(hf_outputs_list[idx].logits[0], outputs.logits[idx], rtol=1e-2, atol=1e-2):
+                diff = np.abs(hf_outputs_list[idx].logits[0] - outputs.logits[idx])
+                max_diff = np.max(diff)
+                mean_diff = np.mean(diff)
+                raise AssertionError(
+                    f"Adapter {idx}: Logits mismatch.\n"
+                    f"Max diff: {max_diff}, Mean diff: {mean_diff}\n"
+                    f"HF logits: {hf_outputs_list[idx].logits[0]}\n"
+                    f"Ours logits: {outputs.logits[idx]}"
+                )
