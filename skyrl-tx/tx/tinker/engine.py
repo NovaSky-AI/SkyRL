@@ -41,6 +41,11 @@ from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+def pad(xs, pad_to: int, *, fill):
+    """Pad a list to a specified length with a fill value."""
+    return xs + ([fill] * (pad_to - len(xs)))
+
+
 def pad_batch(sequences: list[list[int]], max_length: int, dtype) -> jax.Array:
     """Pad a batch of sequences to max_length."""
     batch_size = len(sequences)
@@ -624,7 +629,6 @@ class TinkerEngine:
         max_batch_size = (
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
-        all_adapter_indices = np.array(all_adapter_indices, dtype=np.int32)
         # Collect generated sequences across batches
         all_sequences: list[types.GeneratedSequence] = []
 
@@ -632,28 +636,25 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_size = batch_end - batch_start
-                pad_size = max_batch_size - batch_size
-                batch_prompts = all_prompts[batch_start:batch_end] + [[]] * pad_size
+                batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
+                adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
+                sampling_params = pad(all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start])
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = pad_batch(batch_prompts, max_len, np.int32)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
-                adapter_indices = jnp.asarray(np.pad(all_adapter_indices[batch_start:batch_end], (0, pad_size)))
-                sampling_params = (
-                    all_sampling_params[batch_start:batch_end] + [all_sampling_params[batch_start]] * pad_size
-                )
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
                         input_ids,
                         attention_mask,
                         sampling_params=sampling_params,
-                        adapter_indices=adapter_indices,
+                        adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
                     )
                 # Only take the actual results, not the padded ones
+                batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
                     for stop_reason, tokens, logprobs in zip(
