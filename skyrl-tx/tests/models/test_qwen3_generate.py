@@ -20,10 +20,12 @@ def mesh_configs():
     """Generate mesh configurations to test."""
     num_devices = len(jax.devices())
     configs = [
-        {"name": "basic", "dp": 1, "tp": 1, "fsdp": False},
-        {"name": "tp", "dp": 1, "tp": num_devices, "fsdp": False},
-        {"name": "fsdp", "dp": num_devices, "tp": 1, "fsdp": True},
+        {"name": "basic", "fsdp": 1, "tp": 1},
     ]
+
+    if num_devices > 1:
+        configs.append({"name": "tp", "fsdp": 1, "tp": num_devices})
+        configs.append({"name": "fsdp", "fsdp": num_devices, "tp": 1}) 
 
     return configs
 
@@ -33,7 +35,7 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
     """Test batched text generation with KV caching matches HuggingFace."""
     mesh_config = mesh_configs[mesh_config_idx]
     print(
-        f"\nTesting with mesh configuration: {mesh_config['name']} (dp={mesh_config['dp']}, tp={mesh_config['tp']}, fsdp={mesh_config['fsdp']})"
+        f"\nTesting with mesh configuration: {mesh_config['name']} (fsdp={mesh_config['fsdp']}, tp={mesh_config['tp']})"
     )
 
     model_name = "Qwen/Qwen3-0.6B"
@@ -59,10 +61,10 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
         hf_model.save_pretrained(tmp, safe_serialization=True)
         base_config = PretrainedConfig.from_pretrained(model_name)
         config = Qwen3Config(
-            base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True, fsdp=mesh_config["fsdp"]
+            base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True
         )
 
-        mesh = jax.make_mesh((mesh_config["dp"], mesh_config["tp"]), ("dp", "tp"))
+        mesh = jax.make_mesh((mesh_config["fsdp"], mesh_config["tp"]), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
@@ -125,7 +127,7 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
 
     mesh_config = mesh_configs[mesh_config_idx]
     print(
-        f"\nTesting with mesh configuration: {mesh_config['name']} (dp={mesh_config['dp']}, tp={mesh_config['tp']}, fsdp={mesh_config['fsdp']}, batch size={batch_size}, runs={runs})"
+        f"\nTesting with mesh configuration: {mesh_config['name']} (fsdp={mesh_config['fsdp']}, tp={mesh_config['tp']}, batch size={batch_size}, runs={runs})"
     )
 
     model_name = "Qwen/Qwen3-0.6B"
@@ -133,7 +135,7 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = Qwen3Config(
-        base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True, fsdp=mesh_config["fsdp"]
+        base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True
     )
 
     inputs = [
@@ -154,7 +156,7 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
 
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        mesh = jax.make_mesh((mesh_config["dp"], mesh_config["tp"]), ("dp", "tp"))
+        mesh = jax.make_mesh((mesh_config["fsdp"], mesh_config["tp"]), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)

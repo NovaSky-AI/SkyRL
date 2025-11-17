@@ -21,8 +21,6 @@ class Qwen3Config(PretrainedConfig):
     max_lora_rank: int
     shard_attention_heads: bool
 
-    # Mesh parameters
-    fsdp: bool
 
     def __init__(
         self,
@@ -31,7 +29,6 @@ class Qwen3Config(PretrainedConfig):
         max_lora_adapters: int,
         max_lora_rank: int,
         shard_attention_heads: bool,
-        fsdp: bool = False,
     ):
         # Copy all attributes from the base config
         super().__init__(**config.to_dict())
@@ -41,5 +38,3 @@ class Qwen3Config(PretrainedConfig):
         self.max_lora_rank = max_lora_rank
         self.shard_attention_heads = shard_attention_heads
 
-        # Add mesh parameters
-        self.fsdp = fsdp
