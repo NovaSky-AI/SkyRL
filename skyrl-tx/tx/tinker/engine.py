@@ -10,6 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -638,12 +639,18 @@ class TinkerEngine:
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = jnp.stack(
-                    [jnp.pad(jnp.array(seq, dtype=jnp.int32), (0, max_len - len(seq))) for seq in batch_prompts]
-                )
-                attention_mask = jnp.stack(
-                    [jnp.pad(jnp.ones(len(seq), dtype=jnp.int32), (0, max_len - len(seq))) for seq in batch_prompts]
-                )
+
+                input_ids = np.zeros((max_batch_size, max_len), dtype=np.int32)
+                attention_mask = np.zeros((max_batch_size, max_len), dtype=np.int32)
+
+                for i, seq in enumerate(batch_prompts):
+                    seq_len = len(seq)
+                    if seq_len > 0:
+                        input_ids[i, :seq_len] = seq
+                        attention_mask[i, :seq_len] = 1
+
+                input_ids = jnp.asarray(input_ids)
+                attention_mask = jnp.asarray(attention_mask)
                 batch_size = batch_end - batch_start
                 adapter_indices = jnp.pad(all_adapter_indices[batch_start:batch_end], (0, max_batch_size - batch_size))
                 sampling_params = pad(
