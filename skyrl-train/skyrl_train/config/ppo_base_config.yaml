@@ -92,6 +92,9 @@ trainer:
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
     kl_loss_coef: 0.001
+    # entropy loss
+    use_entropy_loss: false
+    entropy_loss_coef: 0.01
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
