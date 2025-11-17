@@ -21,7 +21,7 @@ class Qwen3Config(PretrainedConfig):
     max_lora_rank: int
     shard_attention_heads: bool
 
-    # Training mesh parameters
+    # Mesh parameters
     fsdp: bool
 
     def __init__(
