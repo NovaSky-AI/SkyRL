@@ -86,7 +86,7 @@ For more details, please refer to :doc:`../recipes/skyrl-sql`.
 
 We provide two reference runs: single-turn and multi-training for `Qwen/Qwen2.5-Coder-7B-Instruct <https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct>`_ (run on 1 8xH100 node upto convergence), with the WandB report `here <https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw?accessToken=vrqncoa32qcobvvpuo672yji4gweguk6tjxvaflk1zh73fn70j6l5rj8j619uvry>`_.
 
-The evaluation results are shown below:
+The evaluation results are shown below (using the evaluation code `here <https://github.com/lynnliu030/OmniSQL/tree/main/evaluate_skysql>`_):
 
 .. raw:: html
 
