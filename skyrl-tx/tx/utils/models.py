@@ -198,7 +198,6 @@ def extract_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, rank: int
 ) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
@@ -216,7 +215,6 @@ def insert_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict, rank: int
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
     flat_lora_params = dict(nnx.to_flat_state(lora_params))
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
