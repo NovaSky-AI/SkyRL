@@ -110,13 +110,21 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
 
 
 @pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
-def test_qwen3_generate_speed():
+@pytest.mark.parametrize("mesh_config_idx", [0, 1])
+def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
     """Profile batched text generation with KV caching."""
+    mesh_config = mesh_configs[mesh_config_idx]
+    print(
+        f"\nTesting with mesh configuration: {mesh_config['name']} (dp={mesh_config['dp']}, tp={mesh_config['tp']}, fsdp={mesh_config['fsdp']})"
+    )
+
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     base_config = PretrainedConfig.from_pretrained(model_name)
-    config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
+    config = Qwen3Config(
+        base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True, fsdp=mesh_config["fsdp"]
+    )
 
     inputs = [
         "Why do humans need sleep and what happens when we dream",
@@ -134,7 +142,7 @@ def test_qwen3_generate_speed():
 
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((mesh_config["dp"], mesh_config["tp"]), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
