@@ -735,9 +735,9 @@ class TinkerEngine:
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
+        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"], rank)
         insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"]
+            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"], rank
         )
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
@@ -756,9 +756,10 @@ class TinkerEngine:
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+            rank = self.models[model_id].lora_config.rank
+            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params, rank)
             optimizer_params = extract_adapter_state(
-                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
+                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank
             )
 
             with pack_and_upload(output_path) as temp_dir:
@@ -840,7 +841,8 @@ class TinkerEngine:
                         self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
                     )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+                    rank = self.models[model_id].lora_config.rank
+                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path, rank)
 
                     self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")

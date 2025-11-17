@@ -113,21 +113,22 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath):
+def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath, rank: int):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
         model: The Qwen3ForCausalLM model to load the adapter into
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
+        rank: LoRA rank to extract
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, rank)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params))
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params), rank)
 
 
 def save_lora_checkpoint(
@@ -147,7 +148,7 @@ def save_lora_checkpoint(
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, adapter_config.rank)
 
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
@@ -192,9 +193,9 @@ def get_rank_path(path: tuple, lora_name: str) -> tuple:
     return (*path[start_idx:lora_idx], "lora_ranks")
 
 
-@functools.partial(jax.jit, static_argnames=("adapter_index",))
+@functools.partial(jax.jit, static_argnames=("adapter_index", "rank"))
 def extract_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, rank: int
 ) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
     flat_params = dict(nnx.to_flat_state(non_lora_params))
@@ -202,19 +203,17 @@ def extract_adapter_state(
     def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return p
-        # rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
         if path[-2].key == "lora_A":
-            return p[adapter_index, ..., :, :1]
+            return p[adapter_index, ..., :, :rank]
         if path[-2].key == "lora_B":
-            return p[adapter_index, ..., :1, :]
+            return p[adapter_index, ..., :rank, :]
 
     return jax.tree.map_with_path(extract_state, lora_params)
 
 
-@functools.partial(jax.jit, static_argnames=("adapter_index",))
 def insert_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict, rank: int
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
     flat_params = dict(nnx.to_flat_state(non_lora_params))
@@ -222,18 +221,21 @@ def insert_adapter_state(
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    def insert_state(path: tuple, new: jax.Array):
-        p = flat_lora_params[get_normalized_path(path)]
-        if path[-1].key not in {"lora_A", "lora_B"}:
-            return new
-        # rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
-        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        if path[-1].key == "lora_A":
-            return p.at[adapter_index, ..., :, :1].set(new)
-        elif path[-1].key == "lora_B":
-            return p.at[adapter_index, ..., :1, :].set(new)
+    @functools.partial(jax.jit, static_argnames=("adapter_index", "rank"))
+    def _insert_state_jitted(flat_lora_params_dict, new_params_dict, adapter_index, rank):
+        def insert_state(path: tuple, new: jax.Array):
+            p = flat_lora_params_dict[get_normalized_path(path)]
+            if path[-1].key not in {"lora_A", "lora_B"}:
+                return new
+            assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
+            if path[-1].key == "lora_A":
+                return p.at[adapter_index, ..., :, :rank].set(new)
+            elif path[-1].key == "lora_B":
+                return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_state, new_params)
+        return jax.tree.map_with_path(insert_state, new_params_dict)
+
+    updated = _insert_state_jitted(flat_lora_params, new_params, adapter_index, rank)
     nnx.update(lora_params, updated)
 
 
