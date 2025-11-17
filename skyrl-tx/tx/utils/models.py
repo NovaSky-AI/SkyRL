@@ -191,6 +191,7 @@ def get_rank_path(path: tuple, lora_name: str) -> tuple:
     return (*path[start_idx:lora_idx], "lora_ranks")
 
 
+@jax.jit
 def extract_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
 ) -> nnx.GraphState:
