@@ -18,9 +18,11 @@ from tx.utils.models import load_safetensors
 @pytest.fixture
 def mesh_configs():
     """Generate mesh configurations to test."""
+    num_devices = len(jax.devices())
     configs = [
-        {"name": "no_fsdp", "dp": 1, "tp": 1, "fsdp": False},
-        {"name": "fsdp", "dp": len(jax.devices()), "tp": 1, "fsdp": True},
+        {"name": "basic", "dp": 1, "tp": 1, "fsdp": False},
+        {"name": "tp", "dp": 1, "tp": num_devices, "fsdp": False},
+        {"name": "fsdp", "dp": num_devices, "tp": 1, "fsdp": True},
     ]
 
     return configs
