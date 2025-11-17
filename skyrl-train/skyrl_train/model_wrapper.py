@@ -186,9 +186,10 @@ class HFModelWrapper(nn.Module):
         )
 
     @torch.no_grad()
-    def generate(
-        self, input_ids: torch.Tensor, **kwargs
-    ) -> Union[Tuple[torch.LongTensor, torch.LongTensor], Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],]:
+    def generate(self, input_ids: torch.Tensor, **kwargs) -> Union[
+        Tuple[torch.LongTensor, torch.LongTensor],
+        Tuple[torch.LongTensor, torch.LongTensor, torch.BoolTensor],
+    ]:
         generate_args = {
             "input_ids": input_ids,
             "top_k": kwargs.get("top_k", None),
