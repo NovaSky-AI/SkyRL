@@ -4,9 +4,10 @@ E2E Recipes with SkyRL
 We provide a collection of end-to-end recipes for single and multi-turn RL training with SkyRL.
 
 We provide reproduction runs for the following recipes:
-1. `Decoupled Clip and Dynamic Sampling Policy Optimization (DAPO) <https://dapo-sia.github.io/>`_
-2. `SkyRL-SQL <https://novasky-ai.notion.site/skyrl-sql>`_
-3. `SearchR1 <https://arxiv.org/abs/2503.09516>`_
+
+1. `Decoupled Clip and Dynamic Sampling Policy Optimization (DAPO) <https://dapo-sia.github.io/>`_ 
+2. `SkyRL-SQL <https://novasky-ai.notion.site/skyrl-sql>`_ 
+3. `SearchR1 <https://arxiv.org/abs/2503.09516>`_ 
 
 
 DAPO Recipes
@@ -80,7 +81,7 @@ SkyRL-SQL Recipes
 
 For more details, please refer to :doc:`../recipes/skyrl-sql`.
 
-We provide two reference runs: single-turn and multi-training (run on 1 8xH100 node for 150 training steps), with the WandB report `here <https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw?accessToken=vrqncoa32qcobvvpuo672yji4gweguk6tjxvaflk1zh73fn70j6l5rj8j619uvry>`_.
+We provide two reference runs: single-turn and multi-training (run on 1 8xH100 node upto convergence), with the WandB report `here <https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw?accessToken=vrqncoa32qcobvvpuo672yji4gweguk6tjxvaflk1zh73fn70j6l5rj8j619uvry>`_.
 
 The evaluation results are shown below:
 
@@ -178,7 +179,7 @@ SearchR1 Recipes
 For more details, please refer to :doc:`../recipes/searchr1`.
 
 
-The WandB report is available `here <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr>`_. The evaluation results are shown below for `Qwen/Qwen2.5-3B-Instruct <https://huggingface.co/Qwen/Qwen2.5-3B-Instruct>`_, with all experiments run on 1 8xH100 node for 330 training steps.
+The WandB report is available `here <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr>`_. The evaluation results are shown below for `Qwen/Qwen2.5-3B-Instruct <https://huggingface.co/Qwen/Qwen2.5-3B-Instruct>`_, with all experiments run on 1 8xH100 node upto convergence (330 training steps).
 
 .. raw:: html
 
