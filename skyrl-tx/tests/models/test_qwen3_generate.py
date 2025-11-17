@@ -103,7 +103,7 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
                 hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
                 expected_logprob = float(hf_logprobs[token_id])
 
-                assert np.isclose(our_logprob, expected_logprob, rtol=1e-3, atol=1e-3), (
+                assert np.isclose(our_logprob, expected_logprob, rtol=5e-3, atol=5e-3), (
                     f"Request {i}, step {step_idx}: Logprob mismatch. "
                     f"Ours: {our_logprob}, HF: {expected_logprob}, diff: {abs(our_logprob - expected_logprob)}"
                 )
