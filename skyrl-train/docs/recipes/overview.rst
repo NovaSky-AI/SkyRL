@@ -83,7 +83,7 @@ For more details, please refer to :doc:`../recipes/skyrl-sql`.
 
 We provide two reference runs: single-turn and multi-training (run on 1 8xH100 node upto convergence), with the WandB report `here <https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw?accessToken=vrqncoa32qcobvvpuo672yji4gweguk6tjxvaflk1zh73fn70j6l5rj8j619uvry>`_.
 
-The evaluation results are shown below:
+The evaluation results are shown below for `Qwen/Qwen2.5-Coder-7B-Instruct <https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct>`_:
 
 .. raw:: html
 
@@ -107,7 +107,6 @@ The evaluation results are shown below:
    <table class="skytable2">
      <thead>
        <tr>
-         <th>Model</th>
          <th>Eval Turns (Train)</th>
          <th>Training Method</th>
          <th>Spider-Dev</th>
@@ -121,7 +120,6 @@ The evaluation results are shown below:
      </thead>
      <tbody>
        <tr>
-         <td>Qwen/Qwen2.5-Coder-7B-Instruct</td>
          <td>1</td>
          <td>Single-Turn</td>
          <td>81.2</td>
@@ -133,7 +131,6 @@ The evaluation results are shown below:
          <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw">Link</a></td>
        </tr>
        <tr>
-         <td>Qwen/Qwen2.5-Coder-7B-Instruct</td>
          <td>1</td>
          <td>Multi-Turn</td>
          <td>82.4 (+1.2%)</td>
@@ -145,7 +142,6 @@ The evaluation results are shown below:
          <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw">Link</a></td>
        </tr>
        <tr>
-         <td>Qwen/Qwen2.5-Coder-7B-Instruct</td>
          <td>5</td>
          <td>Single-Turn</td>
          <td>79.5</td>
@@ -157,7 +153,6 @@ The evaluation results are shown below:
          <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw">Link</a></td>
        </tr>
        <tr>
-         <td>Qwen/Qwen2.5-Coder-7B-Instruct</td>
          <td>5</td>
          <td>Multi-Turn</td>
          <td>83.9 (+4.4%)</td>
