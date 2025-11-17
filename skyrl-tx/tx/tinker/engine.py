@@ -638,7 +638,9 @@ class TinkerEngine:
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
                 adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
-                sampling_params = pad(all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start])
+                sampling_params = pad(
+                    all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
+                )
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
