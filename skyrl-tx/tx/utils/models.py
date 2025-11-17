@@ -128,7 +128,7 @@ def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path:
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params), rank)
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, adapter_lora_params, rank)
 
 
 def save_lora_checkpoint(
@@ -212,30 +212,37 @@ def extract_adapter_state(
 
 
 def insert_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict, rank: int
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
     flat_lora_params = dict(nnx.to_flat_state(lora_params))
-    # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
-    new_params = nnx.statelib.restore_int_paths(new_params)
 
-    @functools.partial(jax.jit, static_argnames=("adapter_index", "rank", "is_lora_a"))
-    def _insert_lora_slice(old_array, new_array, adapter_index, rank, is_lora_a):
-        """JIT-compiled function to insert a slice into a LoRA parameter array."""
-        if is_lora_a:
-            return old_array.at[adapter_index, ..., :, :rank].set(new_array)
-        else:
-            return old_array.at[adapter_index, ..., :rank, :].set(new_array)
+    @functools.partial(jax.jit, static_argnames=("adapter_index", "rank"))
+    def _insert_jitted(lora_params_tree, new_params_tree, adapter_index, rank):
+        def insert_state(path: tuple, new: jax.Array):
+            # Normalize the path - GraphState paths may include 'value' at the end
+            norm_path = get_normalized_path(path)
+            # Remove 'value' suffix if present (happens with GraphState)
+            if norm_path and norm_path[-1] == 'value':
+                norm_path = norm_path[:-1]
 
-    def insert_state(path: tuple, new: jax.Array):
-        p = flat_lora_params[get_normalized_path(path)]
-        if path[-1].key not in {"lora_A", "lora_B"}:
-            return new
-        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        is_lora_a = path[-1].key == "lora_A"
-        return _insert_lora_slice(p, new, adapter_index, rank, is_lora_a)
+            # Check if this path exists in lora_params
+            if norm_path not in lora_params_tree:
+                return new
 
-    updated = jax.tree.map_with_path(insert_state, new_params)
+            p = lora_params_tree[norm_path]
+            # Check if this is a LoRA parameter by looking at the last element
+            if len(norm_path) < 2 or norm_path[-1] not in {"lora_A", "lora_B"}:
+                return p  # Return original value for non-LoRA params
+            assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
+            if norm_path[-1] == "lora_A":
+                return p.at[adapter_index, ..., :, :rank].set(new)
+            elif norm_path[-1] == "lora_B":
+                return p.at[adapter_index, ..., :rank, :].set(new)
+
+        return jax.tree.map_with_path(insert_state, new_params_tree)
+
+    updated = _insert_jitted(flat_lora_params, new_params, adapter_index, rank)
     nnx.update(lora_params, updated)
 
 

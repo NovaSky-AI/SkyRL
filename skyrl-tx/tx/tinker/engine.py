@@ -735,9 +735,18 @@ class TinkerEngine:
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"], rank)
+        # Restore int paths in checkpoint data to ensure keys are properly typed
+        lora_weights_dict = nnx.statelib.restore_int_paths(restored_data["lora_weights"])
+        optimizer_state_dict = nnx.statelib.restore_int_paths(restored_data["optimizer_state"])
+
+        # Convert to GraphState
+        adapter_lora_params = nnx.state(lora_weights_dict)
+        adapter_optimizer_params = nnx.state(optimizer_state_dict)
+
+        # Insert the adapter states
+        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, adapter_lora_params, rank)
         insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"], rank
+            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, adapter_optimizer_params, rank
         )
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
