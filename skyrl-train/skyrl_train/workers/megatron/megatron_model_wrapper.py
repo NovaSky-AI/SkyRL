@@ -258,7 +258,7 @@ class MegatronModelWrapper:
             loss = policy_loss + kl_loss_term - entropy_loss_term
 
             metrics = {
-                "total_loss": loss.detach().item(),
+                "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "ppo_clip_ratio": clip_ratio,
