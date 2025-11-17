@@ -114,10 +114,18 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
 @pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
 @pytest.mark.parametrize("mesh_config_idx", [0, 1, 2])
 def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
-    """Profile batched text generation with KV caching."""
+    """Profile batched text generation with KV caching.
+
+    Environment variables:
+        BATCH_SIZE: Number of inputs to generate in a single pass (default: 8)
+        RUNS: Number of benchmark runs (default: 10)
+    """
+    batch_size = int(os.environ.get("BATCH_SIZE", "8"))
+    runs = int(os.environ.get("RUNS", "1"))
+
     mesh_config = mesh_configs[mesh_config_idx]
     print(
-        f"\nTesting with mesh configuration: {mesh_config['name']} (dp={mesh_config['dp']}, tp={mesh_config['tp']}, fsdp={mesh_config['fsdp']})"
+        f"\nTesting with mesh configuration: {mesh_config['name']} (dp={mesh_config['dp']}, tp={mesh_config['tp']}, fsdp={mesh_config['fsdp']}, batch size={batch_size}, runs={runs})"
     )
 
     model_name = "Qwen/Qwen3-0.6B"
@@ -137,8 +145,10 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
         "Tell me about the solar system and its planets",
         "Explain the difference between AI and machine learning",
         "How does the human brain process language",
-        "What is quantum computing and how does it work",
     ]
+    assert batch_size % len(inputs) == 0, "Batch size must be divisible by the number of inputs"
+    multiplier = batch_size // len(inputs)
+    inputs = inputs * multiplier
 
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
@@ -157,7 +167,6 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
             sampling_params=sampling_params,
         )
 
-        runs = 1
         times = []
 
         for i in range(runs):
