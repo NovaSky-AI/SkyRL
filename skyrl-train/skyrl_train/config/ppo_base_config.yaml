@@ -92,7 +92,7 @@ trainer:
     kl_loss_coef: 0.001
     # entropy loss
     use_entropy_loss: false
-    entropy_loss_coef: 0.0
+    entropy_loss_coef: 0.01
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
