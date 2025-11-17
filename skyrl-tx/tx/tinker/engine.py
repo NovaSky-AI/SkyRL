@@ -45,10 +45,8 @@ def pad_batch(sequences: list[list[int]], max_length: int, dtype) -> jax.Array:
     """Pad a batch of sequences to max_length."""
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
-
     for i, seq in enumerate(sequences):
         padded[i, : len(seq)] = seq
-
     return jnp.asarray(padded)
 
 
