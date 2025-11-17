@@ -46,7 +46,7 @@ def pad(xs, pad_to: int, *, fill):
     return xs + ([fill] * (pad_to - len(xs)))
 
 
-def pad_batch(sequences: list[list[int]], max_length: int, dtype) -> jax.Array:
+def pad_batch(sequences: list[list], max_length: int, dtype) -> jax.Array:
     """Pad a batch of sequences to max_length."""
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
