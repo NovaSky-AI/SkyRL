@@ -41,5 +41,5 @@ class Qwen3Config(PretrainedConfig):
         self.max_lora_rank = max_lora_rank
         self.shard_attention_heads = shard_attention_heads
 
-        # Add training-specific parameters
+        # Add mesh parameters
         self.fsdp = fsdp
