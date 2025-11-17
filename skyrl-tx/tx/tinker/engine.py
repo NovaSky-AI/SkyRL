@@ -639,15 +639,14 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
+                batch_size = batch_end - batch_start
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-
                 input_ids = pad_batch(batch_prompts, max_len, np.int32)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
-                batch_size = batch_end - batch_start
                 adapter_indices = jnp.asarray(np.pad(all_adapter_indices[batch_start:batch_end], (0, max_batch_size - batch_size)))
                 sampling_params = pad(
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
@@ -661,7 +660,6 @@ class TinkerEngine:
                         adapter_indices=adapter_indices,
                     )
                 # Only take the actual results, not the padded ones
-                batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
                     for stop_reason, tokens, logprobs in zip(
