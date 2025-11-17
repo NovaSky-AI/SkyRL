@@ -27,4 +27,14 @@ Note on ``LD_LIBRARY_PATH``
 If you are using RDMA, you may need to customize the ``LD_LIBRARY_PATH`` to include the RDMA libraries (Ex: EFA on AWS). We've seen issues with `uv` where the ``LD_LIBRARY_PATH`` is not exported even if it is set in the ``.env`` file. It is recommended to set the ``SKYRL_LD_LIBRARY_PATH_EXPORT=1`` in the ``.env`` file and set ``LD_LIBRARY_PATH`` directly in the current shell.
 
 
+Illegal Memory Access with vLLM
+---------------------------------
 
+In some cases, you may encounter "illegal memory access" errors with vLLM >= 0.10.0: https://github.com/vllm-project/vllm/issues/23814. Currently, we recommend a workaround by downgrading to vLLM 0.9.2.
+
+With SkyRL, this can be done with the following overrides:
+
+
+.. code-block:: bash
+
+   uv run --isolated --extra vllm --with vllm==0.9.2 --with transformers==4.53.0 --with torch==2.7.0 --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" -- ...
