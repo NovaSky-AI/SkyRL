@@ -28,7 +28,7 @@ def mesh_configs():
     return configs
 
 
-@pytest.mark.parametrize("mesh_config_idx", [0, 1])
+@pytest.mark.parametrize("mesh_config_idx", [0, 1, 2])
 def test_qwen3_generate(mesh_config_idx, mesh_configs):
     """Test batched text generation with KV caching matches HuggingFace."""
     mesh_config = mesh_configs[mesh_config_idx]
@@ -112,7 +112,7 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
 
 
 @pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
-@pytest.mark.parametrize("mesh_config_idx", [0, 1])
+@pytest.mark.parametrize("mesh_config_idx", [0, 1, 2])
 def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
     """Profile batched text generation with KV caching."""
     mesh_config = mesh_configs[mesh_config_idx]
