@@ -219,21 +219,23 @@ def insert_adapter_state(
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
     new_params = nnx.statelib.restore_int_paths(new_params)
 
-    @functools.partial(jax.jit, static_argnames=("adapter_index", "rank"))
-    def _insert_state_jitted(flat_lora_params_dict, new_params_dict, adapter_index, rank):
-        def insert_state(path: tuple, new: jax.Array):
-            p = flat_lora_params_dict[get_normalized_path(path)]
-            if path[-1].key not in {"lora_A", "lora_B"}:
-                return new
-            assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-            if path[-1].key == "lora_A":
-                return p.at[adapter_index, ..., :, :rank].set(new)
-            elif path[-1].key == "lora_B":
-                return p.at[adapter_index, ..., :rank, :].set(new)
+    @functools.partial(jax.jit, static_argnames=("adapter_index", "rank", "is_lora_a"))
+    def _insert_lora_slice(old_array, new_array, adapter_index, rank, is_lora_a):
+        """JIT-compiled function to insert a slice into a LoRA parameter array."""
+        if is_lora_a:
+            return old_array.at[adapter_index, ..., :, :rank].set(new_array)
+        else:
+            return old_array.at[adapter_index, ..., :rank, :].set(new_array)
 
-        return jax.tree.map_with_path(insert_state, new_params_dict)
+    def insert_state(path: tuple, new: jax.Array):
+        p = flat_lora_params[get_normalized_path(path)]
+        if path[-1].key not in {"lora_A", "lora_B"}:
+            return new
+        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
+        is_lora_a = path[-1].key == "lora_A"
+        return _insert_lora_slice(p, new, adapter_index, rank, is_lora_a)
 
-    updated = _insert_state_jitted(flat_lora_params, new_params, adapter_index, rank)
+    updated = jax.tree.map_with_path(insert_state, new_params)
     nnx.update(lora_params, updated)
 
 
