@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import functools
 import os
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
@@ -191,7 +192,7 @@ def get_rank_path(path: tuple, lora_name: str) -> tuple:
     return (*path[start_idx:lora_idx], "lora_ranks")
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("adapter_index",))
 def extract_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
 ) -> nnx.GraphState:
@@ -201,18 +202,17 @@ def extract_adapter_state(
     def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return p
-        rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
+        # rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
         if path[-2].key == "lora_A":
-            return p[adapter_index, ..., :, :rank]
+            return p[adapter_index, ..., :, :1]
         if path[-2].key == "lora_B":
-            return p[adapter_index, ..., :rank, :]
+            return p[adapter_index, ..., :1, :]
 
-    adapter_state = jax.tree.map_with_path(extract_state, lora_params)
-    # Filter out rank 0 adapters, since we do not want to save or load them
-    return nnx.filter_state(adapter_state, lambda path, value: value.size != 0)
+    return jax.tree.map_with_path(extract_state, lora_params)
 
 
+@functools.partial(jax.jit, static_argnames=("adapter_index",))
 def insert_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict
 ):
@@ -226,12 +226,12 @@ def insert_adapter_state(
         p = flat_lora_params[get_normalized_path(path)]
         if path[-1].key not in {"lora_A", "lora_B"}:
             return new
-        rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
+        # rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
         if path[-1].key == "lora_A":
-            return p.at[adapter_index, ..., :, :rank].set(new)
+            return p.at[adapter_index, ..., :, :1].set(new)
         elif path[-1].key == "lora_B":
-            return p.at[adapter_index, ..., :rank, :].set(new)
+            return p.at[adapter_index, ..., :1, :].set(new)
 
     updated = jax.tree.map_with_path(insert_state, new_params)
     nnx.update(lora_params, updated)
