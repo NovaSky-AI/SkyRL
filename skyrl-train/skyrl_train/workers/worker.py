@@ -801,6 +801,7 @@ class PolicyWorkerBase(Worker):
 
         # status
         status = {
+            "total_loss": loss.item(),
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "ppo_clip_ratio": clip_ratio,

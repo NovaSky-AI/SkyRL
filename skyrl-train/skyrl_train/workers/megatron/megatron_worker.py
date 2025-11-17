@@ -343,6 +343,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
                         status = {
+                            "total_loss": metrics["total_loss"],
                             "policy_loss": metrics["policy_loss"],
                             "policy_lr": self.optimizer.param_groups[0]["lr"],
                             "ppo_clip_ratio": metrics["ppo_clip_ratio"],
