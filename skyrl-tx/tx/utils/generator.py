@@ -50,7 +50,7 @@ class DecodeState:
     temperatures: jax.Array
     stop_tokens: jax.Array
     adapter_indices: jax.Array
-    top_k: jax.Array
+    top_k_values: jax.Array
 
     # Updated each iteration:
     kv_cache: KVCache
