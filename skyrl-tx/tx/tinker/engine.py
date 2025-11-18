@@ -749,13 +749,9 @@ class TinkerEngine:
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"], rank)
+        insert_adapter_state(adapter_index, self.lora_params, restored_data["lora_weights"], rank)
         insert_adapter_state(
-            adapter_index,
-            nnx.state(self.optimizers[model_id]),
-            self.non_lora_params,
-            restored_data["optimizer_state"],
-            rank,
+            adapter_index, nnx.state(self.optimizers[model_id]), restored_data["optimizer_state"], rank
         )
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")

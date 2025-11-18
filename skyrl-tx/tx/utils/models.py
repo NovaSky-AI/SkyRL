@@ -127,7 +127,7 @@ def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path:
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, adapter_lora_params, rank)
+    insert_adapter_state(adapter_index, lora_params, adapter_lora_params, rank)
 
 
 def save_lora_checkpoint(
@@ -193,13 +193,7 @@ def extract_adapter_state(
     return jax.tree.map_with_path(extract_state, lora_params)
 
 
-def insert_adapter_state(
-    adapter_index: int,
-    lora_params: nnx.GraphState,
-    non_lora_params: nnx.GraphState,
-    new_params: nnx.GraphState,
-    rank: int,
-):
+def insert_adapter_state(adapter_index: int, lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
