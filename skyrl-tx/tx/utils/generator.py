@@ -213,41 +213,6 @@ class GeneratorMixin:
         outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
-        def scan_fn(carry, _):
-            kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
-            rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-                logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
-            )
-
-            # Update generated_ids and attention mask
-            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
-            attention_mask = lax.dynamic_update_slice(
-                attention_mask, jnp.ones((batch_size, 1), dtype=attention_mask.dtype), (0, kv_cache.cache_position)
-            )
-            last_positions = last_positions + 1
-
-            # Run decoder step
-            outputs = self(
-                next_token,
-                attention_mask=attention_mask,
-                positions=last_positions,
-                kv_cache=kv_cache,
-                adapter_indices=adapter_indices,
-            )
-
-            new_logits = outputs.logits[:, -1, :]
-            new_carry = (
-                outputs.kv_cache,
-                rngs,
-                generated_ids,
-                attention_mask,
-                last_positions,
-                new_logits,
-                all_logprobs,
-                stop_pos,
-            )
-            return new_carry, None
-
         # Pad inputs to max_length
         pad_length = max_length - prompt_length
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
