@@ -176,22 +176,6 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
-def get_normalized_path(path: tuple) -> tuple:
-    """Convert path of flax.typing.PathParts to path of str."""
-    return tuple(p.key if hasattr(p, "key") else p.name for p in path)
-
-
-def get_rank_path(path: tuple, lora_name: str) -> tuple:
-    "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
-    path = get_normalized_path(path)
-    # The path could be from a parameter in the optimizer. In that case we find the
-    # associated parameter in the model to get the rank. We do this by getting the index
-    # of the root module (which is either "model" or "lm_head") and indexing path with it.
-    start_idx = path.index("model") if "model" in path else path.index("lm_head")
-    lora_idx = path.index(lora_name)
-    return (*path[start_idx:lora_idx], "lora_ranks")
-
-
 def extract_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, rank: int
 ) -> nnx.GraphState:
