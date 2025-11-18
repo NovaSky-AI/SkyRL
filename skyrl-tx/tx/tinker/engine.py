@@ -2,7 +2,6 @@
 
 import argparse
 import time
-from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,40 +54,59 @@ def pad_batch(sequences: list[list], max_length: int, dtype) -> jax.Array:
     return jnp.asarray(padded)
 
 
+@jax.tree_util.register_dataclass
 @dataclass
 class AccumulatedGradients:
-    """Stores accumulated gradients for a LoRA adapter."""
+    """Stores accumulated gradients for all LoRA adapters."""
 
-    grad_sum: nnx.State | None = None
-    denominator: int = 0
+    grad_sum: nnx.State
+    counts: jax.Array
 
-    @staticmethod
+    @classmethod
+    def create(cls, lora_params: nnx.State, max_adapters: int) -> "AccumulatedGradients":
+        """Initialize with zeros."""
+        # Create zeros with same structure as lora_params
+        grad_sum = jax.tree.map(lambda x: jnp.zeros_like(x), lora_params)
+        counts = jnp.zeros((max_adapters,), dtype=jnp.int32)
+        return cls(grad_sum=grad_sum, counts=counts)
+
     @jax.jit
-    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: jax.Array) -> nnx.State:
-        """Extracts gradients and adds them to the sum."""
-        return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
+    def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
+        """Accumulate gradients and increment counts."""
+        # Update counts
+        # adapter_indices has shape [batch_size]
+        # We want to count occurrences of each adapter index
+        # bincount works for 1D integer arrays
+        batch_counts = jnp.bincount(adapter_indices, length=self.counts.shape[0])
+        new_counts = self.counts + batch_counts
 
-    def add(self, lora_grads: nnx.State, adapter_index: jax.Array, count: int) -> None:
-        """Accumulate gradients and increment denominator."""
-        if self.grad_sum is None:
-            self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
-        else:
-            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index)
-        self.denominator += count
+        # Update grad_sum
+        # lora_grads has shape [max_adapters, ...] and contains the sum of gradients for the batch.
+        # We just need to add it to our accumulator.
+        def sum_grads_by_adapter(current_sum, batch_grads):
+            return current_sum + batch_grads
 
-    def get_mean(self) -> nnx.State:
-        """Compute mean gradients."""
-        if self.grad_sum is None or self.denominator == 0:
-            raise ValueError("Cannot compute mean: no gradients accumulated")
-        return jax.tree.map(
-            lambda g: g / jnp.asarray(self.denominator, dtype=g.dtype),
-            self.grad_sum,
-        )
+        new_grad_sum = jax.tree.map(sum_grads_by_adapter, self.grad_sum, lora_grads)
+        return AccumulatedGradients(grad_sum=new_grad_sum, counts=new_counts)
 
-    def reset(self) -> None:
-        """Clear accumulated gradients."""
-        self.grad_sum = None
-        self.denominator = 0
+    def get_mean(self, adapter_index: int) -> nnx.State:
+        """Compute mean gradients for a specific adapter."""
+        count = self.counts[adapter_index]
+
+        def get_adapter_grad(g):
+            return g[adapter_index] / jnp.maximum(1.0, count.astype(g.dtype))
+
+        return jax.tree.map(get_adapter_grad, self.grad_sum)
+
+    def reset_adapter(self, adapter_index: int) -> "AccumulatedGradients":
+        """Reset gradients and count for a specific adapter."""
+        new_counts = self.counts.at[adapter_index].set(0)
+
+        def reset_grad(g):
+            return g.at[adapter_index].set(0.0)
+
+        new_grad_sum = jax.tree.map(reset_grad, self.grad_sum)
+        return AccumulatedGradients(grad_sum=new_grad_sum, counts=new_counts)
 
 
 class TinkerEngine:
@@ -104,8 +122,6 @@ class TinkerEngine:
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
-        # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
-        self.accumulated_grads: dict[str, AccumulatedGradients] = {}
         # Store optimizer instances per LoRA adapter (model_id -> optimizer)
         self.optimizers: dict[str, nnx.Optimizer] = {}
         # Metrics recorded in the engine
@@ -134,6 +150,9 @@ class TinkerEngine:
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
             update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
+
+            # Initialize global accumulated gradients
+            self.accumulated_grads = AccumulatedGradients.create(self.lora_params, self.config.max_lora_adapters)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
@@ -300,14 +319,11 @@ class TinkerEngine:
         target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
         return per_token_losses, target_logprobs, lora_grads
 
-    def _accumulate_grads(self, lora_grads: nnx.State, example_model_ids: list[str]) -> None:
+    def _accumulate_grads(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> None:
         """
         Accumulate adapter-wise gradient sums and example counts.
         """
-        for model_id, count in Counter(example_model_ids).items():
-            adapter_index = jnp.array(self.models[model_id].adapter_index, dtype=jnp.int32)
-            accumulator = self.accumulated_grads[model_id]
-            accumulator.add(lora_grads, adapter_index, count)
+        self.accumulated_grads = self.accumulated_grads.add(lora_grads, adapter_indices)
 
     def _filter_valid_requests(
         self,
@@ -443,7 +459,6 @@ class TinkerEngine:
             adapter_index=adapter_index,
             lora_config=lora_config,
         )
-        self.accumulated_grads[model_id] = AccumulatedGradients()
 
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
@@ -543,7 +558,7 @@ class TinkerEngine:
             )
             token_losses_device.append(per_token_losses)
             logprobs_device.append(target_logprobs)
-            self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+            self._accumulate_grads(lora_grads_mb, adapter_indices[mb_start:mb_end])
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
@@ -680,13 +695,14 @@ class TinkerEngine:
         adapter_index = self.models[model_id].adapter_index
 
         # Get accumulated gradients for this adapter
-        accumulator = self.accumulated_grads[model_id]
-        if accumulator.grad_sum is None or accumulator.denominator == 0:
+        # Check if we have any gradients accumulated (count > 0)
+        count = self.accumulated_grads.counts[adapter_index]
+        if count == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
         # Average over all examples for this adapter
-        adapter_grads = accumulator.get_mean()
+        adapter_grads = self.accumulated_grads.get_mean(adapter_index)
 
         # Create full gradient structure with zeros for all adapters except this one
         def expand_adapter_grads(lora_param, adapter_grad):
@@ -705,8 +721,8 @@ class TinkerEngine:
         hp["eps"][...] = request_data.adam_params.eps
         self.optimizers[model_id].update(self.lora_params, full_lora_grads)
 
-        # Clear accumulated gradients
-        self.accumulated_grads[model_id].reset()
+        # Clear accumulated gradients for this adapter
+        self.accumulated_grads = self.accumulated_grads.reset_adapter(adapter_index)
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
