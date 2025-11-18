@@ -141,6 +141,18 @@ class TinkerEngine:
 
         self._create_loss_and_grad_fn()
 
+    def _extract_checkpoint_data(self, model_id: str) -> dict:
+        """Extract adapter state and optimizer state for checkpointing."""
+        index = self.models[model_id].adapter_index
+        rank = self.models[model_id].lora_config.rank
+        lora_weights = extract_adapter_state(index, self.lora_params, self.non_lora_params, rank)
+        optimizer_state = extract_adapter_state(index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank)
+        return {
+            "lora_weights": lora_weights,
+            "optimizer_state": optimizer_state,
+            "lora_config": self.models[model_id].lora_config.model_dump(),
+        }
+
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
         """Context manager to handle checkpoint DB status updates.
@@ -721,20 +733,10 @@ class TinkerEngine:
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        rank = self.models[model_id].lora_config.rank
-        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params, rank)
-        optimizer_params = extract_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank
-        )
-
         with download_and_unpack(checkpoint_dir) as temp_dir:
             restored_data = checkpoints.restore_checkpoint(
                 ckpt_dir=temp_dir,
-                target={
-                    "lora_weights": adapter_lora_params,
-                    "optimizer_state": optimizer_params,
-                    "lora_config": self.models[model_id].lora_config.model_dump(),
-                },
+                target=self._extract_checkpoint_data(model_id),
                 prefix="checkpoint_",
             )
 
@@ -773,20 +775,10 @@ class TinkerEngine:
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        rank = self.models[model_id].lora_config.rank
-        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params, rank)
-        optimizer_params = extract_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank
-        )
-
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
-                    target={
-                        "lora_weights": adapter_lora_params,
-                        "optimizer_state": optimizer_params,
-                        "lora_config": self.models[model_id].lora_config.model_dump(),
-                    },
+                    target=self._extract_checkpoint_data(model_id),
                     ckpt_dir=temp_dir,
                     step=0,
                     prefix="checkpoint_",
