@@ -7,6 +7,7 @@ from huggingface_hub import snapshot_download
 
 import asyncio
 import os
+from datetime import timedelta
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
@@ -26,6 +27,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import freeze_moe_router, print_model_size
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
+from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
@@ -175,7 +177,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
         # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
@@ -349,6 +354,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
                         status = {
+                            "final_loss": metrics["final_loss"],
                             "policy_loss": metrics["policy_loss"],
                             "policy_lr": self.optimizer.param_groups[0]["lr"],
                             "ppo_clip_ratio": metrics["ppo_clip_ratio"],
@@ -527,7 +533,10 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.ref.megatron_config,

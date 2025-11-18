@@ -92,6 +92,9 @@ trainer:
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
     kl_loss_coef: 0.001
+    # entropy loss
+    use_entropy_loss: false
+    entropy_loss_coef: 0.01
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
@@ -202,6 +205,7 @@ generator:
   max_num_batched_tokens: 8192
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
+  fully_sharded_loras: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
@@ -221,7 +225,7 @@ generator:
   # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}
-
+  
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:

@@ -324,15 +324,13 @@ class Qwen3Model(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
             dtype=dtype,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
             rngs=rngs,
@@ -394,13 +392,15 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
         if not self.config.tie_word_embeddings:
-            self.lm_head = nnx.Linear(
+            self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
                 kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+                max_lora_adapters=config.max_lora_adapters,
+                max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
 
@@ -434,7 +434,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         if self.config.tie_word_embeddings:
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(
             logits=logits,
