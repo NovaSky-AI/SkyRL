@@ -64,7 +64,6 @@ class FSDPStrategy(DistributedStrategy):
         fsdp_strategy: str = "fsdp",
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
-        train_batch_size=1,
         num_training_steps: Optional[int] = None,
     ) -> None:
         super().__init__()
@@ -74,7 +73,6 @@ class FSDPStrategy(DistributedStrategy):
         self.model_config = model_config
         self.fsdp_strategy = fsdp_strategy
         self.max_norm = optimizer_config.max_grad_norm if optimizer_config is not None else 1.0
-        self.train_batch_size = train_batch_size
         self.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         self.seed = seed
         self.device_mesh = None
@@ -109,7 +107,6 @@ class FSDPStrategy(DistributedStrategy):
 
         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
         self.world_size = dist.get_world_size()
-        self.accumulated_gradient = self.train_batch_size // self.micro_train_batch_size_per_gpu // self.world_size
 
         self.device_mesh = create_device_mesh(world_size=self.world_size, fsdp_size=self.fsdp_config.fsdp_size)
 
@@ -211,7 +208,9 @@ class FSDPStrategy(DistributedStrategy):
     def _fsdp_init_model(self, model, is_train=True, is_wrapped=False):
         # Initialize FSDP wrapping policy
         wrap_policy = get_fsdp_wrap_policy(
-            module=model, config=self.fsdp_config.get("wrap_policy", None), is_lora=self.is_lora
+            module=model.model if is_wrapped else model,
+            config=self.fsdp_config.get("wrap_policy", None),
+            is_lora=self.is_lora,
         )
 
         # Setup mixed precision

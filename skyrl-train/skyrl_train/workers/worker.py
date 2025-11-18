@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import socket
+from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
@@ -22,7 +23,7 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
@@ -36,7 +37,7 @@ from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -78,7 +79,10 @@ class DistributedTorchRayActor:
 
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed
@@ -155,7 +159,13 @@ class DistributedTorchRayActor:
                 ("maskp", POINTER(c_ulong)),
             ]
 
-        LIBNUMA = CDLL(find_library("numa"))
+        try:
+            LIBNUMA = CDLL(find_library("numa"))
+        except Exception as e:
+            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
+            _SET_AFFINITY = True
+            return
+
         LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
@@ -291,7 +301,7 @@ class Worker(DistributedTorchRayActor):
                 asyncio.to_thread(
                     init_custom_process_group,
                     backend=backend,
-                    init_method=f"tcp://{master_addr}:{master_port}",
+                    init_method=get_tcp_url(master_addr, master_port),
                     world_size=world_size,
                     rank=0,
                     group_name=group_name,
@@ -742,6 +752,7 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.generator.sampling_params.temperature,
                 return_output=True,
                 compute_entropy=True,
+                entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
             )
             # loss function
             # TODO: recompute advantages
@@ -753,13 +764,18 @@ class PolicyWorkerBase(Worker):
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
-        # entropy
-        with torch.no_grad():
+
+        # entropy loss
+        with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
             # batch_size, seqlen
             entropy_BS = output["entropy"]
             entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-
             entropy = masked_mean(entropy_BS, loss_mask)
+
+        if self.cfg.trainer.algorithm.use_entropy_loss:
+            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
+        else:
+            entropy_loss_term = torch.tensor(0.0)
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
@@ -772,8 +788,9 @@ class PolicyWorkerBase(Worker):
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
             kl_loss = torch.tensor(0.0)
+        kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-        loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+        loss = policy_loss + kl_loss_term - entropy_loss_term
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
@@ -788,6 +805,7 @@ class PolicyWorkerBase(Worker):
 
         # status
         status = {
+            "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "ppo_clip_ratio": clip_ratio,
@@ -868,7 +886,6 @@ class PolicyWorkerBase(Worker):
 
 
 class CriticWorkerBase(Worker):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None

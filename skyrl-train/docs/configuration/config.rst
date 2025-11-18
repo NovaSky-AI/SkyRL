@@ -241,7 +241,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.weight_decay``: L2 regularization strength for AdamW.
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
-- ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
+- ``optimizer_config.num_warmup_steps``: Number of mini-batch steps to warmup the optimizer for.
 - ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from `Huggingface <https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType>`_.
 
 Policy Configuration
@@ -331,6 +331,8 @@ Reference Model Configuration
 .. code-block:: yaml
 
     ref:
+      model:
+        path: ${trainer.policy.model.path}
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
         cpu_offload: false
@@ -338,6 +340,7 @@ Reference Model Configuration
         fsdp_size: -1
       sequence_parallel_size: 1
 
+- ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_

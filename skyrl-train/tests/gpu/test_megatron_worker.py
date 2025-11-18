@@ -288,21 +288,25 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "use_entropy_loss"),
     [
-        ("policy", 2, 2, 1, 1, 1, 4, True),
-        ("policy", 2, 2, 1, 1, 1, 4, False),
-        ("policy", 2, 2, 2, 1, 1, 8, True),
-        ("policy", 2, 1, 1, 8, 1, 8, True),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False),
+        ("policy", 2, 2, 1, 1, 1, 4, True, True),
+        ("policy", 2, 2, 1, 1, 1, 4, False, False),
+        ("policy", 2, 2, 2, 1, 1, 8, True, False),
+        ("policy", 2, 1, 1, 8, 1, 8, True, False),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
+        "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_unpacked",
         "tp2_pp2_cp2_policy_seq_packing",
         "tp4_pp2_cp1_ep8_etp1_policy_seq_packing",
     ],
 )
-async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing):
+async def test_megatron_train(
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, use_entropy_loss
+):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
@@ -317,6 +321,9 @@ async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
+    if use_entropy_loss:
+        cfg.trainer.algorithm.use_entropy_loss = True
+        cfg.trainer.algorithm.entropy_loss_coef = 0.01
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -379,7 +386,7 @@ async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp
     print("\n\n")
     print("fsdp results: ", results_fsdp[0])
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl"]
+    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "final_loss"]
     for i, result in enumerate(results_fsdp):
         for k in keys_to_compare:
             if k == "policy_entropy":

@@ -6,22 +6,23 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/terminal_bench/run_tbench.sh
 
+DATA_DIR="$(pwd)/harbor/examples/tasks"
 NUM_GPUS=1
 LOGGER="console"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
 SANDBOXES_DIR="sandboxes" # TODO: For now, `sandboxes` is cloned into SkyRL/skyrl-train.
 
-uv run --isolated --extra vllm --extra sandboxes --with "sandbox@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench_generate \
+uv run --isolated --extra vllm --extra sandboxes --with "harbor@./harbor" -m examples.terminal_bench.entrypoints.main_tbench_generate \
+  data.train_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
   terminal_bench_config.max_episodes=16 \
-  terminal_bench_config.sandboxes_dir=$SANDBOXES_DIR \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host="127.0.0.1" \
-  generator.http_endpoint_port=8000 \
+  generator.http_endpoint_port=8010 \
   generator.sampling_params.max_generate_length=4096 \
   generator.backend=vllm \
   generator.run_engines_locally=true \
@@ -32,5 +33,7 @@ uv run --isolated --extra vllm --extra sandboxes --with "sandbox@./sandboxes" -m
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  trainer.train_batch_size=1 \
+  trainer.policy_mini_batch_size=1 \
   trainer.logger="$LOGGER" \
   $@

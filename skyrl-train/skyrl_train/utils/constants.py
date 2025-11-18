@@ -6,6 +6,11 @@ SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180)
 Timeout for allocating the placement group for different actors in SkyRL
 """
 
+SKYRL_WORKER_NCCL_TIMEOUT_IN_S = int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S", 600))
+"""
+Timeout for initializing the NCCL process group for the worker, defaults to 10 minutes.
+"""
+
 # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
 SKYRL_LD_LIBRARY_PATH_EXPORT = str(os.environ.get("SKYRL_LD_LIBRARY_PATH_EXPORT", "False")).lower() in (
     "true",

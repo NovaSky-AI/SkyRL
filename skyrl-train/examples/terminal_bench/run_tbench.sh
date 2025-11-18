@@ -3,19 +3,18 @@ set -x
 # WORK IN PROGRESS
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on TerminalBench tasks.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/terminal_bench/run_tbench.sh
 
-DATA_DIR="$HOME/data/gsm8k"
+DATA_DIR="$(pwd)/harbor/examples/tasks"
 NUM_GPUS=1
 LOGGER="console"  # change to "console" to print to stdout
 TBENCH_CONFIG_DIR="examples/terminal_bench"
 SANDBOXES_DIR="sandboxes" # TODO: For now, `sandboxes` is cloned into SkyRL/skyrl-train.
 
-uv run --isolated --extra vllm --extra sandboxes --with "sandbox@./sandboxes" -m examples.terminal_bench.entrypoints.main_tbench \
-  data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/validation.parquet']" \
+uv run --isolated --extra vllm --extra sandboxes --with "harbor@./harbor" -m examples.terminal_bench.entrypoints.main_tbench \
+  data.train_data="['$DATA_DIR']" \
+  data.val_data="['$DATA_DIR']" \
   hydra.searchpath=[file://$TBENCH_CONFIG_DIR] \
   +terminal_bench_config=terminal_bench \
   terminal_bench_config.max_episodes=16 \
