@@ -246,10 +246,10 @@ def test_sample_top_k(service_client):
         result = sampling_client.sample(
             prompt=prompt,
             sampling_params=types.SamplingParams(
-                temperature=1.0,  # High temp to make randomness visible
+                temperature=1.0,  
                 max_tokens=5,
-                seed=42 + i,  # Different seeds
-                top_k=1,  # ← Only pick from top 1 token
+                seed=42 + i, 
+                top_k=1, 
             ),
             num_samples=1,
         ).result()
@@ -267,8 +267,8 @@ def test_sample_top_k(service_client):
             sampling_params=types.SamplingParams(
                 temperature=1.0,
                 max_tokens=5,
-                seed=42 + i,  # Different seeds
-                top_k=-1,  # ← Disabled
+                seed=42 + i,
+                top_k=-1,
             ),
             num_samples=1,
         ).result()

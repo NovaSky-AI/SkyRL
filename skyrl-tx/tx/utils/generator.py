@@ -290,10 +290,6 @@ def apply_top_k(logits: jax.Array, k: int) -> jax.Array:
 
     vocab_size = logits.shape[0]
     
-    # Always get top-1 to determine threshold, but we'll use k to decide masking
-    # We need to handle k being a traced value, so we can't use it in lax.top_k directly
-    # Instead, we'll compute the k-th largest value using sorting
-    
     # Sort logits in descending order
     sorted_logits = jnp.sort(logits)[::-1]
     
