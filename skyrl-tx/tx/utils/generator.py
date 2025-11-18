@@ -321,14 +321,20 @@ def apply_top_k(logits: jax.Array, k: int) -> jax.Array:
 
     vocab_size = logits.shape[0]
     
-    # Clamp k to be between 1 and vocab_size
-    # If k <= 0, we clamp to vocab_size (no filtering)
-    # If k > vocab_size, we clamp to vocab_size
-    k_safe = jnp.where(k <= 0, vocab_size, jnp.minimum(k, vocab_size))
+    # Always get top-1 to determine threshold, but we'll use k to decide masking
+    # We need to handle k being a traced value, so we can't use it in lax.top_k directly
+    # Instead, we'll compute the k-th largest value using sorting
     
-    # Get the k-th largest value as threshold
-    top_k_logits, _ = lax.top_k(logits, k_safe)
-    threshold = top_k_logits[-1]  # The smallest value in top-k
+    # Sort logits in descending order
+    sorted_logits = jnp.sort(logits)[::-1]
+    
+    # Get the k-th largest value (or smallest if k > vocab_size)
+    # Use maximum(k-1, 0) to handle k=0 case, and minimum to handle k > vocab_size
+    k_index = jnp.clip(k - 1, 0, vocab_size - 1)
+    threshold = sorted_logits[k_index]
+    
+    # When k <= 0, we want to keep everything, so set threshold to -inf
+    threshold = jnp.where(k <= 0, -jnp.inf, threshold)
     
     # Mask out everything below threshold
     return jnp.where(logits < threshold, -jnp.inf, logits)
