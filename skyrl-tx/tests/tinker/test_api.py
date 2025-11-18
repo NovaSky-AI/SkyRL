@@ -56,16 +56,14 @@ def service_client(api_server):
 def make_datum(tokenizer, prompt: str, completion: str, weight: tuple[float, float] | None = (0.0, 1.0)):
     """Helper to create a Datum from prompt and completion with configurable weights."""
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
-    completion_tokens = tokenizer.encode(
-        f"{completion}\n\n", add_special_tokens=False)
+    completion_tokens = tokenizer.encode(f"{completion}\n\n", add_special_tokens=False)
     all_tokens = prompt_tokens + completion_tokens
     target_tokens = all_tokens[1:] + [tokenizer.eos_token_id]
 
     loss_fn_inputs = {"target_tokens": target_tokens}
     if weight is not None:
         prompt_weight, completion_weight = weight
-        all_weights = [prompt_weight] * \
-            len(prompt_tokens) + [completion_weight] * len(completion_tokens)
+        all_weights = [prompt_weight] * len(prompt_tokens) + [completion_weight] * len(completion_tokens)
         loss_fn_inputs["weights"] = all_weights[1:] + [completion_weight]
 
     return types.Datum(
@@ -83,19 +81,15 @@ def test_capabilities(service_client):
 
 def test_training_workflow(service_client):
     """Test a complete training workflow."""
-    training_client = service_client.create_lora_training_client(
-        base_model=BASE_MODEL)
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
 
     tokenizer = training_client.get_tokenizer()
 
     # Create training examples
     processed_examples = [
-        make_datum(tokenizer, "Question: What is 2+2?\nAnswer:",
-                   " 4", weight=(0.0, 0.0)),
-        make_datum(
-            tokenizer, "Question: What color is the sky?\nAnswer:", " Blue"),
-        make_datum(tokenizer, "Question: What is 3+3?\nAnswer:",
-                   " 6", weight=None),
+        make_datum(tokenizer, "Question: What is 2+2?\nAnswer:", " 4", weight=(0.0, 0.0)),
+        make_datum(tokenizer, "Question: What color is the sky?\nAnswer:", " Blue"),
+        make_datum(tokenizer, "Question: What is 3+3?\nAnswer:", " 6", weight=None),
     ]
 
     # Save the optimizer state
@@ -107,10 +101,8 @@ def test_training_workflow(service_client):
     original_training_run_id = parsed_resume.netloc
 
     # Run training step
-    fwdbwd_future = training_client.forward_backward(
-        processed_examples, "cross_entropy")
-    optim_future = training_client.optim_step(
-        types.AdamParams(learning_rate=1e-4))
+    fwdbwd_future = training_client.forward_backward(processed_examples, "cross_entropy")
+    optim_future = training_client.optim_step(types.AdamParams(learning_rate=1e-4))
 
     # Get results
     fwdbwd_result = fwdbwd_future.result()
@@ -122,52 +114,42 @@ def test_training_workflow(service_client):
     assert len(fwdbwd_result.loss_fn_outputs) == 3
 
     # The first example has all 0 weights, so all losses should be 0
-    assert all(
-        v == 0.0 for v in fwdbwd_result.loss_fn_outputs[0]["elementwise_loss"].data)
+    assert all(v == 0.0 for v in fwdbwd_result.loss_fn_outputs[0]["elementwise_loss"].data)
 
     # The second example has default weights (0 for prompt, 1 for completion), so should have non-zero losses
-    assert any(
-        v != 0.0 for v in fwdbwd_result.loss_fn_outputs[1]["elementwise_loss"].data)
+    assert any(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[1]["elementwise_loss"].data)
 
     # The third example omits weights (auto-filled with 1s), so all losses should be non-zero
-    assert all(
-        v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
+    assert all(v != 0.0 for v in fwdbwd_result.loss_fn_outputs[2]["elementwise_loss"].data)
 
     # Load the optimizer state and verify another forward_backward pass has the same loss
     training_client.load_state(resume_path)
-    fwdbwd_result2 = training_client.forward_backward(
-        processed_examples, "cross_entropy").result()
+    fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
     # Test that we can restore the training run
-    training_client = service_client.create_training_client_from_state(
-        resume_path)
+    training_client = service_client.create_training_client_from_state(resume_path)
     # Verify the restored client has the same state by running forward_backward again
-    fwdbwd_result3 = training_client.forward_backward(
-        processed_examples, "cross_entropy").result()
+    fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result3.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
-    sampling_path = training_client.save_weights_for_sampler(
-        name="final").result().path
+    sampling_path = training_client.save_weights_for_sampler(name="final").result().path
     parsed = urlparse(sampling_path)
     training_run_id = parsed.netloc
     checkpoint_id = parsed.path.lstrip("/")
     rest_client = service_client.create_rest_client()
     # Download the checkpoint
-    checkpoint_response = rest_client.get_checkpoint_archive_url(
-        training_run_id, checkpoint_id).result()
+    checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
     with tempfile.NamedTemporaryFile() as tmp_archive:
         urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
         assert os.path.getsize(tmp_archive.name) > 0
 
     # List all checkpoints for the original training run
-    checkpoints_response = rest_client.list_checkpoints(
-        original_training_run_id).result()
+    checkpoints_response = rest_client.list_checkpoints(original_training_run_id).result()
     assert checkpoints_response is not None
     assert len(checkpoints_response.checkpoints) > 0
     # Verify that the checkpoint we created is in the list
-    checkpoint_ids = [
-        ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
+    checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
     assert "0000" in checkpoint_ids
 
 
@@ -177,26 +159,21 @@ def test_sample(service_client, use_lora):
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
     if use_lora:
-        training_client = service_client.create_lora_training_client(
-            base_model=BASE_MODEL)
-        sampling_path = training_client.save_weights_for_sampler(
-            name="test_sample").result().path
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        sampling_path = training_client.save_weights_for_sampler(name="test_sample").result().path
         sampling_client = service_client.create_sampling_client(sampling_path)
     else:
-        sampling_client = service_client.create_sampling_client(
-            base_model=BASE_MODEL)
+        sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
 
     # Sample from the model (base or LoRA)
-    prompt = types.ModelInput.from_ints(tokenizer.encode(
-        "Hello, how are you doing today? ", add_special_tokens=True))
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
     num_samples_per_request = [1, 2]
     max_tokens_per_request = [20, 10]
     requests = []
     for num_samples, max_tokens in zip(num_samples_per_request, max_tokens_per_request):
         request = sampling_client.sample(
             prompt=prompt,
-            sampling_params=types.SamplingParams(
-                temperature=0.0, max_tokens=max_tokens, seed=42),
+            sampling_params=types.SamplingParams(temperature=0.0, max_tokens=max_tokens, seed=42),
             num_samples=num_samples,
         )
         requests.append(request)
@@ -211,16 +188,14 @@ def test_sample(service_client, use_lora):
     # Test stop tokens: generate once, then use the 5th token as a stop token
     initial_result = sampling_client.sample(
         prompt=prompt,
-        sampling_params=types.SamplingParams(
-            temperature=0.0, max_tokens=10, seed=42),
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=10, seed=42),
         num_samples=1,
     ).result()
 
     stop_token = initial_result.sequences[0].tokens[4]
     stopped_result = sampling_client.sample(
         prompt=prompt,
-        sampling_params=types.SamplingParams(
-            temperature=0.0, max_tokens=50, seed=42, stop=[stop_token]),
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=50, seed=42, stop=[stop_token]),
         num_samples=1,
     ).result()
 
@@ -232,13 +207,9 @@ def test_sample(service_client, use_lora):
 def test_sample_top_k(service_client):
     """Test that top_k sampling restricts token selection."""
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-    sampling_client = service_client.create_sampling_client(
-        base_model=BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
 
-    prompt = types.ModelInput.from_ints(
-        tokenizer.encode("Hello, how are you doing today? ",
-                         add_special_tokens=True)
-    )
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
 
     # Sample with top_k=1 (greedy-like) - should always pick the same token
     results_top_1 = []
@@ -246,18 +217,19 @@ def test_sample_top_k(service_client):
         result = sampling_client.sample(
             prompt=prompt,
             sampling_params=types.SamplingParams(
-                temperature=1.0,  # High temp to make randomness visible
+                temperature=1.0,
                 max_tokens=5,
-                seed=42 + i,  # Different seeds
-                top_k=1,  # ← Only pick from top 1 token
+                seed=42 + i,
+                top_k=1,
             ),
             num_samples=1,
         ).result()
         results_top_1.append(result.sequences[0].tokens)
 
     # All sequences should be identical (top_k=1 ignores the seed)
-    assert results_top_1[0] == results_top_1[1] == results_top_1[2], \
-        "top_k=1 should produce identical outputs regardless of seed"
+    assert (
+        results_top_1[0] == results_top_1[1] == results_top_1[2]
+    ), "top_k=1 should produce identical outputs regardless of seed"
 
     # Sample with top_k=-1 (disabled) - should vary with different seeds
     results_no_top_k = []
@@ -267,13 +239,14 @@ def test_sample_top_k(service_client):
             sampling_params=types.SamplingParams(
                 temperature=1.0,
                 max_tokens=5,
-                seed=42 + i,  # Different seeds
-                top_k=-1,  # ← Disabled
+                seed=42 + i,
+                top_k=-1,
             ),
             num_samples=1,
         ).result()
         results_no_top_k.append(result.sequences[0].tokens)
 
     # At least some should be different (probabilistic, but very likely)
-    assert not all(seq == results_no_top_k[0] for seq in results_no_top_k), \
-        "Without top_k, different seeds should produce different outputs"
+    assert not all(
+        seq == results_no_top_k[0] for seq in results_no_top_k
+    ), "Without top_k, different seeds should produce different outputs"
