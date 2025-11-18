@@ -215,7 +215,6 @@ def insert_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict, rank: int
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
     flat_lora_params = dict(nnx.to_flat_state(lora_params))
 
     # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
@@ -223,13 +222,12 @@ def insert_adapter_state(
 
     def insert_state(path: tuple, new: jax.Array):
         p = flat_lora_params[get_normalized_path(path)]
-        if path[-1].key not in {"lora_A", "lora_B"}:
+        if len(path) < 2 or path[-2].key not in {"lora_A", "lora_B"}:
             return new
-        rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        if path[-1].key == "lora_A":
+        if path[-2].key == "lora_A":
             return p.at[adapter_index, ..., :, :rank].set(new)
-        elif path[-1].key == "lora_B":
+        elif path[-2].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
     updated = jax.tree.map_with_path(insert_state, new_params)
