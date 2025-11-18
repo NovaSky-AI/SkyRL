@@ -43,6 +43,7 @@ class Qwen3Attention(nnx.Module):
             assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         tp_shard = "tp" if shard_attention_heads else None
+        column_parallel_shard = tuple(s for s in ["fsdp", tp_shard] if s is not None) or None
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
 
         self.q_proj = LoRALinear(
@@ -53,7 +54,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("fsdp", tp_shard)),
             rngs=rngs,
         )
         self.k_proj = LoRALinear(
@@ -64,7 +65,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("fsdp", tp_shard)),
             rngs=rngs,
         )
         self.v_proj = LoRALinear(
@@ -75,7 +76,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("fsdp", tp_shard)),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -86,7 +87,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(tp_shard, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(column_parallel_shard, None)),
             rngs=rngs,
         )
 
@@ -138,13 +139,14 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        column_parallel_shard = tuple(s for s in ["fsdp", "tp"] if s is not None) or None
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("fsdp", "tp")),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -155,7 +157,7 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("fsdp", "tp")),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -166,7 +168,7 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(column_parallel_shard, None)),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -182,6 +184,8 @@ class Qwen3Experts(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
+        column_parallel_shard = tuple(s for s in ["fsdp", "tp"] if s is not None) or None
+
         self.gate_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
@@ -189,7 +193,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "fsdp", "tp")),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
@@ -199,7 +203,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "fsdp", "tp")),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
@@ -209,7 +213,9 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp", None)),
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(), jax.P(None, column_parallel_shard, None)
+            ),
             rngs=rngs,
         )
 

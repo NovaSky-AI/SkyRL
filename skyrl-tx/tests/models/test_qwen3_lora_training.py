@@ -17,7 +17,7 @@ def test_lora_training():
     config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)

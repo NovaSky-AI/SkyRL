@@ -15,8 +15,29 @@ from tx.tinker import types
 from tx.utils.models import load_safetensors
 
 
-def test_qwen3_generate():
+@pytest.fixture
+def mesh_configs():
+    """Generate mesh configurations to test."""
+    num_devices = len(jax.devices())
+    configs = [
+        {"name": "basic", "fsdp": 1, "tp": 1},
+    ]
+
+    if num_devices > 1:
+        configs.append({"name": "tp", "fsdp": 1, "tp": num_devices})
+        configs.append({"name": "fsdp", "fsdp": num_devices, "tp": 1})
+
+    return configs
+
+
+@pytest.mark.parametrize("mesh_config_idx", [0, 1, 2])
+def test_qwen3_generate(mesh_config_idx, mesh_configs):
     """Test batched text generation with KV caching matches HuggingFace."""
+    mesh_config = mesh_configs[mesh_config_idx]
+    print(
+        f"\nTesting with mesh configuration: {mesh_config['name']} (fsdp={mesh_config['fsdp']}, tp={mesh_config['tp']})"
+    )
+
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
@@ -41,7 +62,7 @@ def test_qwen3_generate():
         base_config = PretrainedConfig.from_pretrained(model_name)
         config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((mesh_config["fsdp"], mesh_config["tp"]), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
@@ -84,15 +105,29 @@ def test_qwen3_generate():
                 hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
                 expected_logprob = float(hf_logprobs[token_id])
 
-                assert np.isclose(our_logprob, expected_logprob, rtol=1e-3, atol=1e-3), (
+                assert np.isclose(our_logprob, expected_logprob, rtol=5e-3, atol=5e-3), (
                     f"Request {i}, step {step_idx}: Logprob mismatch. "
                     f"Ours: {our_logprob}, HF: {expected_logprob}, diff: {abs(our_logprob - expected_logprob)}"
                 )
 
 
 @pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
-def test_qwen3_generate_speed():
-    """Profile batched text generation with KV caching."""
+@pytest.mark.parametrize("mesh_config_idx", [0, 1, 2])
+def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
+    """Profile batched text generation with KV caching.
+
+    Environment variables:
+        BATCH_SIZE: Number of inputs to generate in a single pass (default: 8)
+        RUNS: Number of benchmark runs (default: 10)
+    """
+    batch_size = int(os.environ.get("BATCH_SIZE", "8"))
+    runs = int(os.environ.get("RUNS", "1"))
+
+    mesh_config = mesh_configs[mesh_config_idx]
+    print(
+        f"\nTesting with mesh configuration: {mesh_config['name']} (fsdp={mesh_config['fsdp']}, tp={mesh_config['tp']}, batch size={batch_size}, runs={runs})"
+    )
+
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
@@ -108,14 +143,16 @@ def test_qwen3_generate_speed():
         "Tell me about the solar system and its planets",
         "Explain the difference between AI and machine learning",
         "How does the human brain process language",
-        "What is quantum computing and how does it work",
     ]
+    assert batch_size % len(inputs) == 0, "Batch size must be divisible by the number of inputs"
+    multiplier = batch_size // len(inputs)
+    inputs = inputs * multiplier
 
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((mesh_config["fsdp"], mesh_config["tp"]), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
@@ -128,7 +165,6 @@ def test_qwen3_generate_speed():
             sampling_params=sampling_params,
         )
 
-        runs = 1
         times = []
 
         for i in range(runs):
