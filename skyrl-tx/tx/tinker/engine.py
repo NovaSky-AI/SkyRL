@@ -734,25 +734,23 @@ class TinkerEngine:
         )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
-            restored_data = checkpoints.restore_checkpoint(
+            checkpoint = checkpoints.restore_checkpoint(
                 ckpt_dir=temp_dir, target=self._extract_checkpoint_data(model_id), prefix="checkpoint_"
             )
 
-        if restored_data is None:
+        if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
         # Validate rank
-        rank = restored_data["lora_config"]["rank"]
+        rank = checkpoint["lora_config"]["rank"]
         if self.models[model_id].lora_config.rank != rank:
             raise ValueError(
                 f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, restored_data["lora_weights"], rank)
-        insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), restored_data["optimizer_state"], rank
-        )
+        insert_adapter_state(adapter_index, self.lora_params, checkpoint["lora_weights"], rank)
+        insert_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), checkpoint["optimizer_state"], rank)
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
