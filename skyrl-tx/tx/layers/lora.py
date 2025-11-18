@@ -1,6 +1,10 @@
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from typing import Protocol
+from typing import runtime_checkable
+from dataclasses import dataclass
+
 
 from tx.layers.util import Param, prepare_routing
 from tx.tinker.types import LoraConfig
@@ -44,13 +48,13 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), tuple(sharding_A)),
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), tuple(sharding_B)),
                 rngs=rngs,
             )
 
@@ -62,6 +66,11 @@ class LoRAMixin:
     ) -> jax.Array:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
+
+        # Assert that the LoRA parameters are initialized
+        assert self.lora_A is not None
+        assert self.lora_B is not None
+        assert self.lora_scaling is not None
 
         (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
@@ -233,6 +242,11 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
 
+        # Assert that the LoRA parameters are initialized
+        assert self.lora_A is not None
+        assert self.lora_B is not None
+        assert self.lora_scaling is not None
+
         # Reconstruct expert indices from group_sizes
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
 
@@ -258,6 +272,12 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
+@runtime_checkable
+@dataclass(frozen=True)
+class HasNumExperts(Protocol):
+    num_experts: int
+
+
 def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
@@ -271,6 +291,10 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         adapter_index: Index of the adapter to update
         lora_config: LoraConfig object containing rank, alpha, and training flags
     """
+    model_config = getattr(model, "config", None)
+    if not isinstance(model_config, HasNumExperts):
+        raise ValueError("Model config does not have num_experts")
+
     state = nnx.state(model)
 
     def update_lora_config(path, value):
@@ -281,7 +305,7 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
         if "experts" in path_str:
-            effective_rank = max(1, lora_config.rank // model.config.num_experts)
+            effective_rank = max(1, lora_config.rank // model_config.num_experts)
 
         # Determine if this layer should be trained based on layer type
         if not lora_config.train_attn and "self_attn" in path_str:
