@@ -1,8 +1,7 @@
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from typing import Protocol
-from typing import runtime_checkable
+from typing import Protocol, runtime_checkable
 from dataclasses import dataclass
 
 
