@@ -212,37 +212,27 @@ def extract_adapter_state(
 
 
 def insert_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict, rank: int
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
+    flat_params = dict(nnx.to_flat_state(non_lora_params))
     flat_lora_params = dict(nnx.to_flat_state(lora_params))
 
-    @functools.partial(jax.jit, static_argnames=("adapter_index", "rank"))
-    def _insert_jitted(lora_params_tree, new_params_tree, adapter_index, rank):
-        def insert_state(path: tuple, new: jax.Array):
-            # Normalize the path - GraphState paths may include 'value' at the end
-            norm_path = get_normalized_path(path)
-            # Remove 'value' suffix if present (happens with GraphState)
-            if norm_path and norm_path[-1] == 'value':
-                norm_path = norm_path[:-1]
+    # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
+    new_params = nnx.statelib.restore_int_paths(new_params)
 
-            # Check if this path exists in lora_params
-            if norm_path not in lora_params_tree:
-                return new
+    def insert_state(path: tuple, new: jax.Array):
+        p = flat_lora_params[get_normalized_path(path)]
+        if path[-1].key not in {"lora_A", "lora_B"}:
+            return new
+        rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
+        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
+        if path[-1].key == "lora_A":
+            return p.at[adapter_index, ..., :, :rank].set(new)
+        elif path[-1].key == "lora_B":
+            return p.at[adapter_index, ..., :rank, :].set(new)
 
-            p = lora_params_tree[norm_path]
-            # Check if this is a LoRA parameter by looking at the last element
-            if len(norm_path) < 2 or norm_path[-1] not in {"lora_A", "lora_B"}:
-                return p  # Return original value for non-LoRA params
-            assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-            if norm_path[-1] == "lora_A":
-                return p.at[adapter_index, ..., :, :rank].set(new)
-            elif norm_path[-1] == "lora_B":
-                return p.at[adapter_index, ..., :rank, :].set(new)
-
-        return jax.tree.map_with_path(insert_state, new_params_tree)
-
-    updated = _insert_jitted(flat_lora_params, new_params, adapter_index, rank)
+    updated = jax.tree.map_with_path(insert_state, new_params)
     nnx.update(lora_params, updated)
 
 
