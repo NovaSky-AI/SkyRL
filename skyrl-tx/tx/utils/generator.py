@@ -318,8 +318,6 @@ def apply_top_k(logits: jax.Array, k: int) -> jax.Array:
     Returns:
         Filtered logits with the same shape.
     """
-    if k <= 0:
-        return logits
 
     # Get the k-th largest value as threshold (using max(k, 1) to avoid errors)
     k_safe = jnp.maximum(k, 1)
