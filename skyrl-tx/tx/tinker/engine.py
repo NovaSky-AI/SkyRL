@@ -735,9 +735,7 @@ class TinkerEngine:
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
             restored_data = checkpoints.restore_checkpoint(
-                ckpt_dir=temp_dir,
-                target=self._extract_checkpoint_data(model_id),
-                prefix="checkpoint_",
+                ckpt_dir=temp_dir, target=self._extract_checkpoint_data(model_id), prefix="checkpoint_"
             )
 
         if restored_data is None:
