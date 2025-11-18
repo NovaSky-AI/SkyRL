@@ -25,7 +25,7 @@ def mesh_configs():
 
     if num_devices > 1:
         configs.append({"name": "tp", "fsdp": 1, "tp": num_devices})
-        configs.append({"name": "fsdp", "fsdp": num_devices, "tp": 1}) 
+        configs.append({"name": "fsdp", "fsdp": num_devices, "tp": 1})
 
     return configs
 
@@ -60,9 +60,7 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
         base_config = PretrainedConfig.from_pretrained(model_name)
-        config = Qwen3Config(
-            base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True
-        )
+        config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
         mesh = jax.make_mesh((mesh_config["fsdp"], mesh_config["tp"]), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
@@ -134,9 +132,7 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     base_config = PretrainedConfig.from_pretrained(model_name)
-    config = Qwen3Config(
-        base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True
-    )
+    config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
     inputs = [
         "Why do humans need sleep and what happens when we dream",

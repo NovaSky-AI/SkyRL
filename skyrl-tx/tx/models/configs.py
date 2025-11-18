@@ -21,7 +21,6 @@ class Qwen3Config(PretrainedConfig):
     max_lora_rank: int
     shard_attention_heads: bool
 
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -37,4 +36,3 @@ class Qwen3Config(PretrainedConfig):
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
         self.shard_attention_heads = shard_attention_heads
-
