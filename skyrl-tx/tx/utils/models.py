@@ -126,7 +126,7 @@ def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path:
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params))
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, adapter_lora_params)
 
 
 def save_lora_checkpoint(
@@ -203,16 +203,16 @@ def insert_adapter_state(
     flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
-        if path[-1].key not in {"lora_A", "lora_B"}:
+        if path[-2].key not in {"lora_A", "lora_B"}:
             return new
-        rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
+        rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        if path[-1].key == "lora_A":
+        if path[-2].key == "lora_A":
             return p.at[adapter_index, ..., :, :rank].set(new)
-        elif path[-1].key == "lora_B":
+        elif path[-2].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
+    updated = jax.tree.map_with_path(insert_state, lora_params, new_params)
     nnx.update(lora_params, updated)
 
 

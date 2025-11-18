@@ -726,12 +726,15 @@ class TinkerEngine:
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
+        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params)
+
         with download_and_unpack(checkpoint_dir) as temp_dir:
             restored_data = checkpoints.restore_checkpoint(
                 ckpt_dir=temp_dir,
                 target={
-                    "lora_weights": nnx.to_pure_dict(extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)),
-                    "optimizer_state": nnx.to_pure_dict(extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params)),
+                    "lora_weights": adapter_lora_params,
+                    "optimizer_state": optimizer_params,
                     "lora_config": self.models[model_id].lora_config.model_dump(),
                 },
                 prefix="checkpoint_"
@@ -768,17 +771,15 @@ class TinkerEngine:
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
-        with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
-            optimizer_params = extract_adapter_state(
-                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
-            )
+        adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
+        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params)
 
+        with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
                     target={
-                        "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                        "optimizer_state": nnx.to_pure_dict(optimizer_params),
+                        "lora_weights": adapter_lora_params,
+                        "optimizer_state": optimizer_params,
                         "lora_config": self.models[model_id].lora_config.model_dump(),
                     },
                     ckpt_dir=temp_dir,
