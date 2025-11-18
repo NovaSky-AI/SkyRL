@@ -281,7 +281,9 @@ class BasePPOExp:
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
+        print('self.cfg.environment.env_class',self.cfg.environment.env_class)
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        print('GOT TO GENERATOR')
 
         trainer = self.get_trainer(
             cfg=self.cfg,
