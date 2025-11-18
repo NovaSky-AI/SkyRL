@@ -769,7 +769,6 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
