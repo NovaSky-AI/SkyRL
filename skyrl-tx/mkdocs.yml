@@ -9,7 +9,7 @@ repo_url: https://github.com/tx-project/tx
 nav:
   - "Overview": index.md
   - "Running":
-    - running/gpus.md
-    - running/tpus.md
+      - running/gpus.md
+      - running/tpus.md
   - "CLI Reference": reference.md
   - "Contributing": contributing.md

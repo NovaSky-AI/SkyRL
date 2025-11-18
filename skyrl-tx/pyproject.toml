@@ -63,6 +63,7 @@ dev = [
     "torch",
     "ty",
     "cloudpathlib[s3]",
+    "alembic",
 ]
 
 [tool.setuptools]
