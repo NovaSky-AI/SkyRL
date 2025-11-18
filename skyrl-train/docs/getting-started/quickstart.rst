@@ -97,5 +97,5 @@ Now that you've got the basics down, you might want to explore:
 
 - :doc:`../tutorials/new_env`: Creating a new environment without touching the training loop
 - :doc:`../tutorials/async`: Asynchronous off-by-one training in < 100 lines of code!
-
+- :doc:`../recipes/overview`: A collection of end-to-end recipes with SkyRL.
 
