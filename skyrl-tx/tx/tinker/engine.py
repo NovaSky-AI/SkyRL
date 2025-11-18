@@ -559,7 +559,7 @@ class TinkerEngine:
         if not valid_requests:
             return results
 
-        # Computes prompt_logprobs for all requests even if only one has prompt_logprobs true
+        # Computes prompt_logprobs for the whole batch if any request asked for them
         needs_prompt_logprobs = any(request_data.prompt_logprobs for _, _, request_data in valid_requests)
 
         all_prompts = []
@@ -608,8 +608,9 @@ class TinkerEngine:
 
         for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
+            # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (
-                result.prompt_logprobs[start_idx] if result.prompt_logprobs and request_data.prompt_logprobs else []
+                result.prompt_logprobs[start_idx] if request_data.prompt_logprobs and result.prompt_logprobs else None
             )
             results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
