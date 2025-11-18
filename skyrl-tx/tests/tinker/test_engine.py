@@ -361,10 +361,10 @@ def test_sample_max_num_sequences():
 def test_top_k_filtering():
     """Test apply_top_k function directly."""
     from tx.utils.generator import apply_top_k
-    
+
     # Create test logits
     logits = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    
+
     # Test k=2: should keep only top 2 values (4.0 and 5.0)
     filtered = apply_top_k(logits, k=2)
     # Values below threshold should be -inf
@@ -374,11 +374,11 @@ def test_top_k_filtering():
     # Top 2 values should be unchanged
     assert filtered[3] == 4.0
     assert filtered[4] == 5.0
-    
+
     # Test k=-1: should not filter anything
     filtered = apply_top_k(logits, k=-1)
     assert jnp.array_equal(filtered, logits)
-    
+
     # Test k=0: should not filter anything
     filtered = apply_top_k(logits, k=0)
     assert jnp.array_equal(filtered, logits)
