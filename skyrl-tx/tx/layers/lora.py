@@ -67,9 +67,8 @@ class LoRAMixin:
             return base_output
 
         # Assert that the LoRA parameters are initialized
-        assert self.lora_A is not None
-        assert self.lora_B is not None
-        assert self.lora_scaling is not None
+        if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+            raise ValueError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
