@@ -241,9 +241,8 @@ class LoRAExpert(LoRAMixin, nnx.Module):
             return base_out
 
         # Assert that the LoRA parameters are initialized
-        assert self.lora_A is not None
-        assert self.lora_B is not None
-        assert self.lora_scaling is not None
+        if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+            raise ValueError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         # Reconstruct expert indices from group_sizes
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
