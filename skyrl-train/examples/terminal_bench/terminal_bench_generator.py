@@ -110,12 +110,12 @@ class TerminalBenchGenerator(GeneratorInterface):
         while True:
             try:
                 results = await trial.run()
-                print(f"Results: {results}")
                 if not results.verifier_result:
                     print(f"[WARNING] Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
-                chat_history = results.agent_result.all_messages
+                print(f"Results: {results.agent_result.metadata}")
+                chat_history = results.agent_result.metadata['all_messages']
                 if len(chat_history) > 0:
                     break
                 else:
