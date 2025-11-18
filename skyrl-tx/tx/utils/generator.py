@@ -321,9 +321,13 @@ def apply_top_k(logits: jax.Array, k: int) -> jax.Array:
     if k <= 0:
         return logits
 
-    # Get the k-th largest value as threshold
-    top_k_logits, _ = lax.top_k(logits, k)
+    # Get the k-th largest value as threshold (using max(k, 1) to avoid errors)
+    k_safe = jnp.maximum(k, 1)
+    top_k_logits, _ = lax.top_k(logits, k_safe)
     threshold = top_k_logits[-1]  # The smallest value in top-k
-
+    
     # Mask out everything below threshold
-    return jnp.where(logits < threshold, -jnp.inf, logits)
+    filtered_logits = jnp.where(logits < threshold, -jnp.inf, logits)
+    
+    # If k <= 0, return original; otherwise return filtered
+    return jnp.where(k <= 0, logits, filtered_logits)
