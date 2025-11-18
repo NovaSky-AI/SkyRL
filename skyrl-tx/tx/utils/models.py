@@ -112,21 +112,22 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath):
+def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath, rank: int):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
         model: The Qwen3ForCausalLM model to load the adapter into
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
+        rank: LoRA rank to extract
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, rank)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, adapter_lora_params)
+    insert_adapter_state(adapter_index, lora_params, non_lora_params, adapter_lora_params, rank)
 
 
 def save_lora_checkpoint(
@@ -146,7 +147,7 @@ def save_lora_checkpoint(
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, adapter_config.rank)
 
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
@@ -192,15 +193,13 @@ def get_rank_path(path: tuple, lora_name: str) -> tuple:
 
 
 def extract_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, rank: int
 ) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return p
-        rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
         if path[-2].key == "lora_A":
             return p[adapter_index, ..., :, :rank]
@@ -211,15 +210,13 @@ def extract_adapter_state(
 
 
 def insert_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: nnx.GraphState
+    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return new
-        rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
         if path[-2].key == "lora_A":
             return p.at[adapter_index, ..., :, :rank].set(new)
