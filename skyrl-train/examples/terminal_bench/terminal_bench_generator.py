@@ -1,7 +1,8 @@
 import asyncio
 from dataclasses import dataclass
 from typing import List
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from loguru import logger
+from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import get_rollout_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
@@ -12,6 +13,9 @@ from sandboxes.models.environment_type import EnvironmentType
 from sandboxes.models.agent.name import AgentName
 from sandboxes.trial.trial import Trial
 
+# We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
+# after N attemptes, we skip this prompt altogether.
+MAX_NUM_RETRIES_PER_TRIAL = 2
 
 @dataclass
 class TerminalBenchAgentOutput:
@@ -20,6 +24,7 @@ class TerminalBenchAgentOutput:
     stop_reason: str
     loss_mask: List[int]
     prompt_ids: List[int]
+    trajectory_id: TrajectoryID
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -49,23 +54,48 @@ class TerminalBenchGenerator(GeneratorInterface):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
-        for prompt in input_batch["prompts"]:
+        for i in range(len(input_batch["prompts"])):
             tasks.append(
                 self.terminal_bench_agent_loop(
-                    prompt=prompt,
+                    prompt=input_batch["prompts"][i],
+                    trajectory_id=input_batch["trajectory_ids"][i],
                 )
             )
 
-        all_outputs = await asyncio.gather(*tasks)
+        all_outputs: List[TerminalBenchAgentOutput] = await asyncio.gather(*tasks)
 
-        responses = [output.response_ids for output in all_outputs]
-        rewards = [output.reward for output in all_outputs]
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+        # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt), if one
+        # of the trajectories fails, we skip the entire group. We also skip the group for rollout metric aggregation
+        failed_instance_ids = set()
+        num_failed_trajectories = 0  # per-trajectory, rather than per-instance
+        successful_outputs: List[TerminalBenchAgentOutput] = []  # only for metrics purpose
+        for output in all_outputs:
+            if output.stop_reason == "error":
+                failed_instance_ids.add(output.trajectory_id.instance_id)
+                num_failed_trajectories += 1
+
+        for output in all_outputs:
+            if output.trajectory_id.instance_id in failed_instance_ids:
+                output.response_ids = [0]
+                output.stop_reason = "error"
+                output.loss_mask = [0]
+                output.prompt_ids = [0]
+                output.reward = 0
+            else:
+                successful_outputs.append(output)
+
+        # Calculate rollout metrics for successful outputs
+        rollout_metrics = get_rollout_metrics(
+            [output.response_ids for output in successful_outputs], 
+            [output.reward for output in successful_outputs],
+        )
+        rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
+        rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": responses,
-            "rewards": rewards,
+            "response_ids": [output.response_ids for output in all_outputs],
+            "rewards": [output.reward for output in all_outputs],
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
@@ -77,6 +107,7 @@ class TerminalBenchGenerator(GeneratorInterface):
     async def terminal_bench_agent_loop(
         self,
         prompt: ConversationType,
+        trajectory_id: TrajectoryID,
     ) -> TerminalBenchAgentOutput:
         """
         Run a single terminal_bench agent.
@@ -107,22 +138,36 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         trial = Trial(trial_config)
         # Run the trial
-        while True:
+        successful = False
+        for i in range(MAX_NUM_RETRIES_PER_TRIAL):
+            prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             try:
                 results = await trial.run()
                 if not results.verifier_result:
-                    print(f"[WARNING] Exception info: {results.exception_info}")
+                    logger.warning(f"{prefix} failed: Exception info: {results.exception_info}")
                     continue
                 reward = results.verifier_result.reward
-                print(f"Results: {results.agent_result.metadata}")
+                logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
                 chat_history = results.agent_result.metadata['all_messages']
                 if len(chat_history) > 0:
+                    successful = True
                     break
                 else:
-                    print(f"[WARNING] Agent {self.agent_name} did not return a response")
+                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a response")
             except Exception as e:
-                print(f"Error running trial: {e}")
+                logger.warning(f"{prefix} failed: Error running trial: {e}")
                 continue
+
+        if not successful:
+            # We make loss mask 0 so it does not contribute to model updates
+            return TerminalBenchAgentOutput(
+                response_ids=[0],
+                reward=0,
+                stop_reason="error",
+                loss_mask=[0],
+                prompt_ids=[0],
+                trajectory_id=trajectory_id,
+            )
 
         # Use the first message as the prompt
         prompt = [chat_history[0]]
@@ -171,4 +216,5 @@ class TerminalBenchGenerator(GeneratorInterface):
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
+            trajectory_id=trajectory_id,
         )
