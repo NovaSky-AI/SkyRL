@@ -723,7 +723,9 @@ class TinkerEngine:
 
         rank = self.models[model_id].lora_config.rank
         adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params, rank)
-        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank)
+        optimizer_params = extract_adapter_state(
+            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank
+        )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
             restored_data = checkpoints.restore_checkpoint(
@@ -733,7 +735,7 @@ class TinkerEngine:
                     "optimizer_state": optimizer_params,
                     "lora_config": self.models[model_id].lora_config.model_dump(),
                 },
-                prefix="checkpoint_"
+                prefix="checkpoint_",
             )
 
         if restored_data is None:
@@ -749,7 +751,11 @@ class TinkerEngine:
         # Update both LoRA weights and optimizer state
         insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"], rank)
         insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"], rank
+            adapter_index,
+            nnx.state(self.optimizers[model_id]),
+            self.non_lora_params,
+            restored_data["optimizer_state"],
+            rank,
         )
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
@@ -769,7 +775,9 @@ class TinkerEngine:
 
         rank = self.models[model_id].lora_config.rank
         adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params, rank)
-        optimizer_params = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank)
+        optimizer_params = extract_adapter_state(
+            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank
+        )
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
             with pack_and_upload(output_path) as temp_dir:

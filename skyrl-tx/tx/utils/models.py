@@ -210,7 +210,11 @@ def extract_adapter_state(
 
 
 def insert_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int
+    adapter_index: int,
+    lora_params: nnx.GraphState,
+    non_lora_params: nnx.GraphState,
+    new_params: nnx.GraphState,
+    rank: int,
 ):
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
 
