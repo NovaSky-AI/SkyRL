@@ -134,8 +134,8 @@ def filter_lora(adapter_config: LoraConfig, path: tuple) -> bool:
 
 
 def load_lora_checkpoint(
-    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, checkpoint_path: Path | CloudPath, rank: int
-):
+    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, checkpoint_path: Path | CloudPath
+) -> None:
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
@@ -143,11 +143,10 @@ def load_lora_checkpoint(
         adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
-        rank: LoRA rank to extract
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, rank)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, adapter_config.rank)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(
@@ -158,7 +157,7 @@ def load_lora_checkpoint(
             prefix="base_model.model.",
             filter_fn=lambda path: filter_lora(adapter_config, path),
         )
-    insert_adapter_state(adapter_index, lora_params, adapter_lora_params, rank)
+    insert_adapter_state(adapter_index, lora_params, adapter_lora_params, adapter_config.rank)
 
 
 def save_lora_checkpoint(
