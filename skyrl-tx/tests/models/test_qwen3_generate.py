@@ -10,7 +10,7 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
-from tx.models import Qwen3Config, Qwen3ForCausalLM
+from tx.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from tx.tinker import types
 from tx.utils.models import load_safetensors
 

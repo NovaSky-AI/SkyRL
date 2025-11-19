@@ -5,7 +5,7 @@ import optax
 from huggingface_hub import snapshot_download
 from transformers import PretrainedConfig
 
-from tx.models import Qwen3Config, Qwen3ForCausalLM
+from tx.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
 from tx.tinker.types import LoraConfig

@@ -38,10 +38,10 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
-    import tx.models
+    import tx.models.qwen3
 
     for architecture in config.architectures or []:
-        if hasattr(tx.models, architecture):
+        if hasattr(tx.models.qwen3, architecture):
             return getattr(tx.models, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")

@@ -7,8 +7,7 @@ from typing import Protocol, TYPE_CHECKING
 import jax
 from transformers import PretrainedConfig
 
-if TYPE_CHECKING:
-    from tx.utils.generator import KVCache
+from tx.utils.generator import KVCache
 
 
 class ModelForCausalLM(Protocol):
