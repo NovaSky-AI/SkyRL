@@ -42,7 +42,7 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
 
     for architecture in config.architectures or []:
         if hasattr(tx.models.qwen3, architecture):
-            return getattr(tx.models, architecture)
+            return getattr(tx.models.qwen3, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
