@@ -12,7 +12,8 @@ from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from tx.layers.lora import update_adapter_config
-from tx.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
+from tx.models.configs import Qwen3Config
+from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils import models
 from tx.utils.storage import download_and_unpack

@@ -10,7 +10,7 @@ from transformers import AutoConfig, AutoTokenizer
 import typer
 
 from tx.loaders import get_loader
-from tx.models import Qwen3Config
+from tx.models.configs import Qwen3Config
 from tx.utils.models import OptimizerName, get_dtype, get_model_class, get_optimizer, load_safetensors, save_safetensors
 from tx.utils.log import ExperimentTracker, add_file_handler, get_tracker, logger
 
