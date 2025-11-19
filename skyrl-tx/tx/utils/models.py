@@ -124,7 +124,7 @@ def save_safetensors(
 
 
 def make_filter_fn(adapter_config: LoraConfig):
-    def filter_f(path: tuple) -> bool:
+    def filter_fn(path: tuple) -> bool:
         if not adapter_config.train_unembed and "embed_tokens" in path:
             return False
         return True
