@@ -26,8 +26,8 @@ class LoRAMixin:
         max_lora_rank: int,
         shape_A: tuple[int, ...],
         shape_B: tuple[int, ...],
-        sharding_A: jax.sharding.PartitionSpec,
-        sharding_B: jax.sharding.PartitionSpec,
+        sharding_A: tuple[str | None, ...],
+        sharding_B: tuple[str | None, ...],
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
@@ -45,13 +45,13 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), tuple(sharding_A)),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), tuple(sharding_B)),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
                 rngs=rngs,
             )
 
@@ -107,7 +107,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
-        embedding_init: nnx.Initializer | None = None,
+        embedding_init: nnx.Initializer,
         rngs: nnx.Rngs,
     ) -> None:
         param_dtype = param_dtype or dtype
@@ -130,8 +130,8 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, num_embeddings, max_lora_rank),
             shape_B=(max_lora_adapters, max_lora_rank, features),
-            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], None),
-            sharding_B=jax.sharding.PartitionSpec(None, None, sharding[1]),
+            sharding_A=(None, sharding[0], None),
+            sharding_B=(None, None, sharding[1]),
             dtype=param_dtype,
             rngs=rngs,
         )
@@ -153,13 +153,13 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
-        use_bias: bool = True,
-        kernel_init: nnx.Initializer | None = None,
+        use_bias: bool,
+        kernel_init: nnx.Initializer,
         bias_init: nnx.Initializer | None = None,
         rngs: nnx.Rngs,
     ) -> None:
         param_dtype = param_dtype or dtype
-        if use_bias and bias_init is None:
+        if bias_init is None:
             bias_init = nnx.initializers.zeros_init()
 
         super().__init__(
@@ -181,8 +181,8 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, in_features, max_lora_rank),
             shape_B=(max_lora_adapters, max_lora_rank, out_features),
-            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], None),
-            sharding_B=jax.sharding.PartitionSpec(None, None, sharding[1]),
+            sharding_A=(None, sharding[0], None),
+            sharding_B=(None, None, sharding[1]),
             dtype=param_dtype,
             rngs=rngs,
         )
@@ -204,7 +204,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
-        kernel_init: nnx.Initializer | None = None,
+        kernel_init: nnx.Initializer,
         rngs: nnx.Rngs,
     ) -> None:
         self.num_experts = num_experts
@@ -220,8 +220,8 @@ class LoRAExpert(LoRAMixin, nnx.Module):
             max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, num_experts, in_features, max_lora_rank),
             shape_B=(max_lora_adapters, num_experts, max_lora_rank, out_features),
-            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], sharding[1], None),
-            sharding_B=jax.sharding.PartitionSpec(None, sharding[0], None, sharding[2]),
+            sharding_A=(None, sharding[0], sharding[1], None),
+            sharding_B=(None, sharding[0], None, sharding[2]),
             dtype=dtype,
             rngs=rngs,
         )
