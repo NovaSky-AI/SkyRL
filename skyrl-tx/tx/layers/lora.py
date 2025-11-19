@@ -65,7 +65,7 @@ class LoRAMixin:
             return base_output
 
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
-            raise ValueError("LoRA parameters are not initialized. `init_lora` must be called.")
+            raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
@@ -238,7 +238,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
             return base_out
 
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
-            raise ValueError("LoRA parameters are not initialized. `init_lora` must be called.")
+            raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         # Reconstruct expert indices from group_sizes
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])

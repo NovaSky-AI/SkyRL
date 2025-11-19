@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Protocol, TYPE_CHECKING
+from typing import Protocol
 
 import jax
 from transformers import PretrainedConfig
