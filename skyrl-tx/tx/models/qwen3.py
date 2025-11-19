@@ -443,4 +443,5 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             hidden_states=outputs.hidden_states,
         )
 
+
 Qwen3MoeForCausalLM = Qwen3ForCausalLM
