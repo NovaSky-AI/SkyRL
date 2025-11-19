@@ -146,7 +146,7 @@ def load_lora_checkpoint(
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, adapter_config.rank)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(
@@ -177,7 +177,7 @@ def save_lora_checkpoint(
     """
     _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, adapter_config.rank)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
 
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
@@ -208,9 +208,7 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
-def extract_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, rank: int
-) -> nnx.GraphState:
+def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank: int) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
 
     def extract_state(path: tuple, p: jnp.ndarray):

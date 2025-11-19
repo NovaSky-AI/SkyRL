@@ -143,10 +143,10 @@ class TinkerEngine:
 
     def _extract_checkpoint_data(self, model_id: str) -> dict:
         """Extract adapter state and optimizer state for checkpointing."""
-        index = self.models[model_id].adapter_index
+        adapter_index = self.models[model_id].adapter_index
         rank = self.models[model_id].lora_config.rank
-        lora_weights = extract_adapter_state(index, self.lora_params, self.non_lora_params, rank)
-        optimizer_state = extract_adapter_state(index, nnx.state(self.optimizers[model_id]), self.non_lora_params, rank)
+        lora_weights = extract_adapter_state(adapter_index, self.lora_params, rank)
+        optimizer_state = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), rank)
         return {
             "lora_weights": lora_weights,
             "optimizer_state": optimizer_state,
