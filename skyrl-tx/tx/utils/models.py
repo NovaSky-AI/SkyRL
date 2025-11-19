@@ -93,11 +93,19 @@ def load_safetensors(
     nnx.update(model, nnx.from_flat_state(updates))
 
 
-def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path, prefix: str = "") -> None:
+def save_safetensors(
+    config: PretrainedConfig,
+    model: nnx.Module,
+    filename: Path,
+    prefix: str = "",
+    filter_fn: Callable[[tuple], bool] | None = None,
+) -> None:
     model_params = nnx.to_flat_state(nnx.state(model))
     tensors = {}
     for path, param in model_params:
         if "rngs" in path:
+            continue
+        if filter_fn is not None and not filter_fn(path):
             continue
         key = get_param_key(path, prefix=prefix)
         if "experts" in path:
@@ -152,12 +160,19 @@ def save_lora_checkpoint(
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
+
+    def filter_tensors(path: tuple) -> bool:
+        if not adapter_config.train_unembed and "embed_tokens" in path:
+            return False
+        return True
+
     with pack_and_upload(output_path) as temp_dir:
         save_safetensors(
             model.config,
             adapter_lora_params,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
+            filter_fn=filter_tensors,
         )
         peft_config.save_pretrained(temp_dir)
 
