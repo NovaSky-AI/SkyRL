@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import jax
+from transformers import PretrainedConfig
 
 from tx.utils.generator import KVCache
 

@@ -45,13 +45,13 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), tuple(sharding_A)),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), tuple(sharding_B)),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
                 rngs=rngs,
             )
 
