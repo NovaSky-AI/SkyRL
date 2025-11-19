@@ -123,13 +123,14 @@ def save_safetensors(
     safetensors.numpy.save_file(tensors, filename)
 
 
-def make_filter_fn(adapter_config: LoraConfig):
-    def filter_fn(path: tuple) -> bool:
-        if not adapter_config.train_unembed and "embed_tokens" in path:
-            return False
-        return True
-
-    return filter_fn
+def filter_lora(adapter_config: LoraConfig, path: tuple) -> bool:
+    if not adapter_config.train_attn and "self_attn" in path:
+        return False
+    if not adapter_config.train_mlp and ("mlp" in path or "experts" in path):
+        return False
+    if not adapter_config.train_unembed and ("embed_tokens" in path or "lm_head" in path):
+        return False
+    return True
 
 
 def load_lora_checkpoint(
@@ -155,7 +156,7 @@ def load_lora_checkpoint(
             adapter_lora_params,
             skip_lora=False,
             prefix="base_model.model.",
-            filter_fn=make_filter_fn(adapter_config),
+            filter_fn=lambda path: filter_lora(adapter_config, path),
         )
     insert_adapter_state(adapter_index, lora_params, adapter_lora_params, rank)
 
@@ -189,7 +190,7 @@ def save_lora_checkpoint(
             adapter_lora_params,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
-            filter_fn=make_filter_fn(adapter_config),
+            filter_fn=lambda path: filter_lora(adapter_config, path),
         )
         peft_config.save_pretrained(temp_dir)
 

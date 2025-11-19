@@ -2,6 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
+from tx.utils.models import filter_lora
 from tx.layers.util import Param, prepare_routing
 from tx.tinker.types import LoraConfig
 
@@ -275,20 +276,15 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
 
     def update_lora_config(path, value):
         effective_rank = lora_config.rank
-        path_str = "/".join(str(k) for k in path)
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
 
         # Apply rank normalization for MoE expert layers
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
-        if "experts" in path_str:
+        if "experts" in normalized_path:
             effective_rank = max(1, lora_config.rank // model.config.num_experts)
 
-        # Determine if this layer should be trained based on layer type
-        if not lora_config.train_attn and "self_attn" in path_str:
-            effective_rank = 0
-        if not lora_config.train_mlp and ("mlp" in path_str or "experts" in path_str):
-            effective_rank = 0
-        if not lora_config.train_unembed and ("embed_tokens" in path_str or "lm_head" in path_str):
+        if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
         if path[-2].key == "lora_ranks":
