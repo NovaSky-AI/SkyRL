@@ -45,13 +45,13 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), tuple(sharding_A)),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),  # type: ignore[invalid-argument-type]
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), tuple(sharding_B)),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),  # type: ignore[invalid-argument-type]
                 rngs=rngs,
             )
 
@@ -107,7 +107,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
-        embedding_init: nnx.Initializer | None = None,
+        embedding_init: nnx.Initializer,
         rngs: nnx.Rngs,
     ) -> None:
         param_dtype = param_dtype or dtype
@@ -153,13 +153,13 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
-        use_bias: bool = True,
-        kernel_init: nnx.Initializer | None = None,
+        use_bias: bool,
+        kernel_init: nnx.Initializer,
         bias_init: nnx.Initializer | None = None,
         rngs: nnx.Rngs,
     ) -> None:
         param_dtype = param_dtype or dtype
-        if use_bias and bias_init is None:
+        if bias_init is None:
             bias_init = nnx.initializers.zeros_init()
 
         super().__init__(
@@ -204,7 +204,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
-        kernel_init: nnx.Initializer | None = None,
+        kernel_init: nnx.Initializer,
         rngs: nnx.Rngs,
     ) -> None:
         self.num_experts = num_experts
