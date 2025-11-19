@@ -1,6 +1,6 @@
 from flax import nnx
 import jax.numpy as jnp
-from tx.models.outputs import CausalLMOutput
+from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache
 
