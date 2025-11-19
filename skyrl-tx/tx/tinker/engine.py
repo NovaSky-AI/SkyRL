@@ -842,8 +842,9 @@ class TinkerEngine:
                         self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
                     )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    rank = self.models[model_id].lora_config.rank
-                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path, rank)
+                    adapter_config = self.models[model_id].lora_config
+                    rank = adapter_config.rank
+                    load_lora_checkpoint(self.model, adapter_config, adapter_index, checkpoint_path, rank)
 
                     self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")

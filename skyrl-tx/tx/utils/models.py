@@ -68,6 +68,7 @@ def load_safetensors(
     model: nnx.Module,
     skip_lora: bool = True,
     prefix: str = "",
+    filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
@@ -77,6 +78,8 @@ def load_safetensors(
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
     for path, param in model_params:
+        if filter_fn is not None and not filter_fn(path):
+            continue
         key = get_param_key(path)
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
@@ -120,11 +123,23 @@ def save_safetensors(
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath, rank: int):
+def make_filter_fn(adapter_config: LoraConfig):
+    def filter_f(path: tuple) -> bool:
+        if not adapter_config.train_unembed and "embed_tokens" in path:
+            return False
+        return True
+
+    return filter_fn
+
+
+def load_lora_checkpoint(
+    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, checkpoint_path: Path | CloudPath, rank: int
+):
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
         model: The Qwen3ForCausalLM model to load the adapter into
+        adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
         rank: LoRA rank to extract
@@ -134,7 +149,14 @@ def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path:
     adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params, rank)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
-        load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
+        load_safetensors(
+            temp_dir,
+            model.config,
+            adapter_lora_params,
+            skip_lora=False,
+            prefix="base_model.model.",
+            filter_fn=make_filter_fn(adapter_config),
+        )
     insert_adapter_state(adapter_index, lora_params, adapter_lora_params, rank)
 
 
@@ -161,18 +183,13 @@ def save_lora_checkpoint(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
 
-    def filter_tensors(path: tuple) -> bool:
-        if not adapter_config.train_unembed and "embed_tokens" in path:
-            return False
-        return True
-
     with pack_and_upload(output_path) as temp_dir:
         save_safetensors(
             model.config,
             adapter_lora_params,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
-            filter_fn=filter_tensors,
+            filter_fn=make_filter_fn(adapter_config),
         )
         peft_config.save_pretrained(temp_dir)
 
