@@ -208,6 +208,7 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
+@nnx.jit(static_argnames=("adapter_index", "rank"))
 def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank: int) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
 
@@ -223,6 +224,8 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
     return jax.tree.map_with_path(extract_state, lora_params)
 
 
+# We need to use nnx.jit here instead of jax.jit so the nnx.update will be handled correctly
+@nnx.jit(static_argnames=("adapter_index", "rank"))
 def insert_adapter_state(
     adapter_index: int, lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int
 ) -> None:
