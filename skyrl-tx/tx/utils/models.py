@@ -123,7 +123,7 @@ def save_safetensors(
     safetensors.numpy.save_file(tensors, filename)
 
 
-def filter_lora(adapter_config: LoraConfig, path: tuple) -> bool:
+def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
     if not adapter_config.train_attn and "self_attn" in path:
         return False
     if not adapter_config.train_mlp and ("mlp" in path or "experts" in path):
