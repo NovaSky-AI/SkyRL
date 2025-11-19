@@ -1,10 +1,10 @@
+from __future__ import annotations
+
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from typing import Protocol, runtime_checkable
-from dataclasses import dataclass
 
-
+import tx.models.qwen3
 from tx.layers.util import Param, prepare_routing
 from tx.tinker.types import LoraConfig
 
@@ -269,13 +269,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-@runtime_checkable
-@dataclass(frozen=True)
-class HasNumExperts(Protocol):
-    num_experts: int
-
-
-def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: LoraConfig):
+def update_adapter_config(model: tx.models.qwen3.Qwen3ForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
@@ -288,10 +282,6 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         adapter_index: Index of the adapter to update
         lora_config: LoraConfig object containing rank, alpha, and training flags
     """
-    model_config = getattr(model, "config", None)
-    if not isinstance(model_config, HasNumExperts):
-        raise ValueError("Model config does not have num_experts")
-
     state = nnx.state(model)
 
     def update_lora_config(path, value):
@@ -302,7 +292,7 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: Lo
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
         if "experts" in path_str:
-            effective_rank = max(1, lora_config.rank // model_config.num_experts)
+            effective_rank = max(1, lora_config.rank // model.config.num_experts)
 
         # Determine if this layer should be trained based on layer type
         if not lora_config.train_attn and "self_attn" in path_str:
