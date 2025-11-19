@@ -223,7 +223,7 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
     return jax.tree.map_with_path(extract_state, lora_params)
 
 
-def insert_adapter_state(adapter_index: int, lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int):
+def insert_adapter_state(adapter_index: int, lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int) -> None:
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_state)."
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
