@@ -5,6 +5,7 @@ import jax
 from jax import numpy as jnp
 
 import tx.models.qwen3
+from tx.models.types import ModelForCausalLM
 from tx.layers.util import Param, prepare_routing
 from tx.tinker.types import LoraConfig
 
@@ -269,7 +270,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(model: tx.models.qwen3.Qwen3ForCausalLM, adapter_index: int, lora_config: LoraConfig):
+def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
