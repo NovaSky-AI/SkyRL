@@ -6,7 +6,7 @@ from jax.sharding import get_abstract_mesh
 from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
 from tx.layers.util import Param, prepare_routing
 from tx.models.configs import Qwen3Config
-from tx.models.outputs import CausalLMOutput, ModelOutput
+from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
@@ -442,3 +442,6 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
         )
+
+
+Qwen3MoeForCausalLM = Qwen3ForCausalLM

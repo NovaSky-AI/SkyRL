@@ -3,6 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.layers.util import Param, prepare_routing
+from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
 
 
@@ -44,13 +45,13 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), tuple(sharding_A)),
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), tuple(sharding_B)),
                 rngs=rngs,
             )
 
@@ -62,6 +63,9 @@ class LoRAMixin:
     ) -> jax.Array:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
+
+        if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+            raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
@@ -233,6 +237,9 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
 
+        if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+            raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
+
         # Reconstruct expert indices from group_sizes
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
 
@@ -258,7 +265,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(model: nnx.Module, adapter_index: int, lora_config: LoraConfig):
+def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
