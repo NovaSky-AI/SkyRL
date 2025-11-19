@@ -14,10 +14,7 @@ class RMSNorm(nnx.Module):
     def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.eps = eps
         self.weight = Param(
-            size,
-            dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.normal(), tuple(jax.P(None))),
-            rngs=rngs,
+            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), (None,)), rngs=rngs
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -56,7 +53,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, tp_shard))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
         self.k_proj = LoRALinear(
@@ -67,7 +64,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, tp_shard))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
         self.v_proj = LoRALinear(
@@ -78,7 +75,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, tp_shard))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
@@ -89,7 +86,7 @@ class Qwen3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(tp_shard, None))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, None)),
             rngs=rngs,
         )
 
@@ -147,7 +144,7 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, "tp"))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -158,7 +155,7 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, "tp"))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -169,7 +166,7 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P("tp", None))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -192,7 +189,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, None, "tp"))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None, "tp")),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
@@ -202,7 +199,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, None, "tp"))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None, "tp")),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
@@ -212,7 +209,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, "tp", None))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp", None)),
             rngs=rngs,
         )
 
@@ -257,7 +254,7 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, None))),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None)),
             rngs=rngs,
         )
         self.experts = Qwen3Experts(config, dtype=dtype, rngs=rngs)
@@ -335,7 +332,7 @@ class Qwen3Model(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), tuple(jax.P("tp", None))),
+            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
             rngs=rngs,
         )
         self.layers = nnx.List(
@@ -401,7 +398,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), tuple(jax.P(None, "tp"))),
+                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
