@@ -1,13 +1,9 @@
-from typing import TYPE_CHECKING
-
 from flax import nnx
 import jax
 from jax import numpy as jnp
 
-if TYPE_CHECKING:
-    from tx.models.types import ModelForCausalLM
-
 from tx.layers.util import Param, prepare_routing
+from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
 
 

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import jax
 from transformers import PretrainedConfig
 
-from tx.utils.generator import KVCache
+if TYPE_CHECKING:
+    from tx.utils.generator import KVCache
 
 
 class ModelForCausalLM(Protocol):
