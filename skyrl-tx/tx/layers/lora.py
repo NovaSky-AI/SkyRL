@@ -45,13 +45,13 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
+                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), tuple(sharding_A)),
                 rngs=rngs,
             )
             self.lora_B = Param(
                 *shape_B,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_B),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), tuple(sharding_B)),
                 rngs=rngs,
             )
 
@@ -64,7 +64,6 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        # Assert that the LoRA parameters are initialized
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise ValueError("LoRA parameters are not initialized. `init_lora` must be called.")
 
@@ -238,7 +237,6 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
 
-        # Assert that the LoRA parameters are initialized
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise ValueError("LoRA parameters are not initialized. `init_lora` must be called.")
 
