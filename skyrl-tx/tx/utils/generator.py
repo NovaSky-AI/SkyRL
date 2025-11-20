@@ -212,7 +212,7 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
         outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
-        
+
         # Capture prompt lengths and compute prompt logprobs if requested
         prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
         prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
@@ -255,12 +255,31 @@ class GeneratorMixin:
 
         # Single device-to-host transfer for all data
         if prompt_logprobs:
-            generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host, prompt_logprobs_host, prompt_lengths_host = jax.device_get(
-                (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length, prompt_logprobs_array, prompt_lengths)
+            (
+                generated_ids_host,
+                stop_pos_host,
+                all_logprobs_host,
+                end_positions_host,
+                prompt_logprobs_host,
+                prompt_lengths_host,
+            ) = jax.device_get(
+                (
+                    generated_ids[:, prompt_length:],
+                    stop_pos,
+                    all_logprobs[:, prompt_length:],
+                    end_positions - prompt_length,
+                    prompt_logprobs_array,
+                    prompt_lengths,
+                )
             )
         else:
             generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host = jax.device_get(
-                (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length)
+                (
+                    generated_ids[:, prompt_length:],
+                    stop_pos,
+                    all_logprobs[:, prompt_length:],
+                    end_positions - prompt_length,
+                )
             )
 
         return GenerateOutput(
