@@ -37,8 +37,8 @@ trainer:
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
-      offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
-      num_warmup_steps: 0
+      offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
+      num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
       scheduler: "constant_with_warmup"   
     fsdp_config:
       cpu_offload: false # offload params + optimizer state to cpu during fwd pass
@@ -50,6 +50,8 @@ trainer:
     # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
   ref:
+    model:
+      path: ${trainer.policy.model.path}
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
@@ -69,8 +71,8 @@ trainer:
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
       max_grad_norm: 1.0 # gradient clipping
-      offload_after_step: true # offload optimizer state to cpu after each step. Applicable only when `colocate_all=true`
-      num_warmup_steps: 0
+      offload_after_step: true # offload optimizer state to cpu after each full training step. Applicable only when `colocate_all=true`
+      num_warmup_steps: 0 # number of mini-batch steps to warmup the optimizer for
       scheduler: "constant_with_warmup"
     fsdp_config:
       cpu_offload: false
@@ -90,6 +92,9 @@ trainer:
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
     kl_loss_coef: 0.001
+    # entropy loss
+    use_entropy_loss: false
+    entropy_loss_coef: 0.01
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
@@ -121,9 +126,16 @@ trainer:
       clip_cov_lb: 1.0 # lower bound for covariance clipping
       clip_cov_ub: 5.0 # upper bound for covariance clipping
     
+    # kl-cov parameters (only used when policy_loss_type: "kl_cov")
     kl_cov:
       kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
       ppo_kl_coef: 1.0
+    
+    # cispo parameters (only used when policy_loss_type: "cispo")
+    cispo: 
+      cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+      cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -160,6 +172,14 @@ trainer:
   dump_data_batch: false
   dump_eval_results: true
 
+  # YaRN:
+  rope_scaling: null
+  rope_theta: null
+  # rope_scaling:
+  #   rope_type: yarn
+  #   factor: 1.0
+  #   original_max_position_embeddings: 32768
+
 
 generator:
   model_name: ${trainer.policy.model.path}
@@ -171,8 +191,9 @@ generator:
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
+  inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1
-  inference_engine_data_parallel_size: 1  # NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
+  inference_engine_data_parallel_size: 1
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
@@ -182,7 +203,9 @@ generator:
   enable_prefix_caching: true
   enable_chunked_prefill: true
   max_num_batched_tokens: 8192
-  enforce_eager: false
+  # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
+  enforce_eager: true
+  fully_sharded_loras: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
@@ -202,7 +225,7 @@ generator:
   # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}
-
+  
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:
@@ -251,6 +274,10 @@ generator:
   # For each trajectory that exceeds the max length (i.e., truncated and does not end with an
   # EOS token), this masks out every token in the loss mask.
   apply_overlong_filtering: false
+
+  # rope parameters, can be optionally different from the trainer , useful in some cases like with thinking models.
+  rope_scaling: ${trainer.rope_scaling}
+  rope_theta: ${trainer.rope_theta}
 
 environment:
   env_class: "gsm8k"

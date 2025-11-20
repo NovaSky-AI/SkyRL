@@ -88,7 +88,7 @@ Installation
 
 Setting up the Docker image
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8-megatron`` image instead of the default image.
+To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron`` image instead of the default image.
 
 This ensures that the necessary dependencies needed for Megatron (i.e. ``TransformerEngine``) are installed and don't need to be built on each node for each run, which can be time consuming.
 
@@ -104,13 +104,8 @@ After following the installation instructions, set the following environment var
 
 Flash Attention
 ~~~~~~~~~~~~~~~
-Next, in order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.5.0``.
-You can replace the ``flash-attn`` wheel in the ``pyproject.toml`` file with the following to use the ``2.7.4.post1`` release, and you can find wheels for other versions `here <https://github.com/Dao-AILab/flash-attention/releases>`_.
-
-.. code-block:: bash
-
-    flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
-
+In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.5.0``.
+This is handled in the ``pyproject.toml`` file for the ``mcore`` extra.
 
 Configuration
 -------------

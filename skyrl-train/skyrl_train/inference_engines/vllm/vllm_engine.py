@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorResponse,
-    ErrorInfo,
     CompletionRequest,
     CompletionResponse,
 )
@@ -33,8 +32,9 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype
+from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
+from packaging import version
 
 
 @dataclass
@@ -102,7 +102,7 @@ class WorkerWrap:
 
         self._model_update_group = init_custom_process_group(
             backend=backend,
-            init_method=f"tcp://{master_address}:{master_port}",
+            init_method=get_tcp_url(master_address, master_port),
             world_size=world_size,
             rank=rank,
             group_name=group_name,
@@ -203,6 +203,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Store common attributes
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._pp_size = kwargs.get("pipeline_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._is_lora = kwargs.get("enable_lora", False)
 
@@ -211,6 +212,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def tp_size(self):
         return self._tp_size
+
+    def pp_size(self):
+        return self._pp_size
 
     def dp_size(self):
         return self._dp_size
@@ -289,11 +293,20 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
+    async def abort_generation(self) -> None:
+        raise NotImplementedError("Abort generation is only supported for AsyncVLLMInferenceEngine.")
+
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
 
     def _create_engine(self, *args, **kwargs):
+        # Pipeline parallelism requires AsyncLLMEngine
+        if kwargs.get("pipeline_parallel_size", 1) > 1:
+            raise ValueError(
+                "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
+                "Please set `generator.async_engine=true` in your config."
+            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -302,7 +315,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Check if LoRA is enabled and create LoRA requests
         lora_requests = None
         if self._is_lora:
-            lora_int_ids = list(self.llm.list_loras())
+            lora_int_ids = list(self.llm.llm_engine.list_loras())
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
                 batch_size = len(prompt_token_ids)
@@ -332,6 +345,17 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
+        engine = self._get_engine().llm_engine
+        output_processor = engine.output_processor
+        if output_processor.has_unfinished_requests():
+            logger.warning(
+                "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
+                "generation should be done before sleep() is called. Check for potential failures or "
+                "dangling requests in your Generator/Env. Aborting all unfinished requests."
+            )
+            unfinished_request_ids = list(output_processor.request_states.keys())
+            await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
+
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await asyncio.to_thread(self.llm.sleep, level=level)
 
@@ -349,7 +373,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        result = self.llm.add_lora(lora_request)
+        result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -404,7 +428,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        else:
+            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
@@ -489,6 +516,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
 
     async def sleep(self, *args: Any, **kwargs: Any):
+        engine = self._get_engine()
+        output_processor = engine.output_processor
+        # make sure that the engine is alive
+        engine.engine_core.ensure_alive()
+        if output_processor.has_unfinished_requests():
+            logger.warning(
+                "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
+                "generation should be done before sleep() is called. Check for potential failures or "
+                "dangling requests in your Generator/Env. Aborting all unfinished requests."
+            )
+            unfinished_request_ids = list(output_processor.request_states.keys())
+            await engine.abort(unfinished_request_ids)
+
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
         await self.reset_prefix_cache()
@@ -576,13 +616,22 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.BAD_REQUEST.phrase,
+                        code=HTTPStatus.BAD_REQUEST.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
         # 2. Call vllm engine
         try:
@@ -598,13 +647,22 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                     code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.
@@ -625,6 +683,19 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    async def abort_generation(self) -> None:
+        """
+        Abort all running and waiting requests, which make the ongoing requests return the
+        already-generated tokens with a stop_reason of "abort".
+        """
+        engine = self._get_engine()
+        # Collect all request IDs currently tracked by the scheduler/output processor
+        unfinished_request_ids = list(engine.output_processor.request_states.keys())
+        if unfinished_request_ids:
+            await engine.abort(unfinished_request_ids)
+        await engine.reset_prefix_cache()  # avoid KV-cache pollution
+        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
 
 
 class _MinimalRequest:

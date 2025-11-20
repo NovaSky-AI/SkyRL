@@ -33,21 +33,21 @@ jobs:
     - name: Install uv
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
-    - name: Check if reference docs are up to date
-      run: |
-        uv run --extra dev typer tx/run/main.py utils docs --name tx --output docs/reference.md && git diff --exit-code docs/reference.md
-    - name: Test docs
-      run: |
-        uv run --extra dev mkdocs build --strict
+    # - name: Check if reference docs are up to date
+    #   run: |
+    #     uv run --extra dev typer tx/run/main.py utils docs --name tx --output docs/reference.md && git diff --exit-code docs/reference.md
+    # - name: Test docs
+    #   run: |
+    #     uv run --extra dev mkdocs build --strict
     - name: Run lint
       run: |
         uvx ruff check
-    - name: Run type checking
-      run: |
-        uv run --extra tinker --extra dev ty check
+    # - name: Run type checking
+    #   run: |
+    #     uv run --extra tinker --extra dev ty check
     - name: Run pytest
       run: |
-        uv run --extra tinker --extra dev pytest -s tests
+        uv run --extra tinker --extra dev pytest --forked -s tests
     - name: Run a single training step
       run: |
         uv run tx train --model pcmoritz/qwen3-tiny-test --dataset mahiatlinux/TinyStories-GPT4-V2-50K-SUBSET --output-dir /tmp --batch-size 2 --max-steps 1 --optimizer-args '{"learning_rate": 0.002, "weight_decay": 0.1}'

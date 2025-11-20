@@ -20,6 +20,8 @@ dependencies = [
     # "wandb>=0.22.0",
     "peft",
     "hf_transfer",
+    "cloudpathlib>=0.23.0",
+    "jax>=0.8",
 ]
 
 [project.optional-dependencies]
@@ -32,19 +34,35 @@ tpu = [
 ]
 
 tinker = [
-    "tinker",
+    "tinker>=0.2.1",
     "fastapi[standard]",
     "sqlmodel",
     "sqlalchemy[asyncio]",
     "aiosqlite",
+    "asyncpg",
+    "psycopg2-binary",
+]
+
+aws = [
+    "cloudpathlib[s3]",
+]
+
+gcp = [
+    "cloudpathlib[gs]",
+]
+
+azure = [
+    "cloudpathlib[azure]",
 ]
 
 dev = [
     "mkdocs",
     "mkdocs-material",
     "pytest",
+    "pytest-forked",
     "torch",
     "ty",
+    "cloudpathlib[s3]",
 ]
 
 [tool.setuptools]

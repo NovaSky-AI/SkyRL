@@ -5,10 +5,12 @@ uv run --extra dev --isolated pytest tests/cpu/generators/test_skyrl_gym_generat
 import pytest
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
+import numpy as np
+
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
-from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
 from skyrl_train.config.utils import get_default_config
 
 
@@ -336,9 +338,9 @@ def test_generator_output_concatenation():
         "prompt_token_ids": [[5, 6, 7], [8]],
         "response_ids": [[5, 6, 7], [8]],
         "rewards": [2.0, 3.0],
-        "loss_masks": [[1, 1, 1], [1, 1, 1]],
+        "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
-        "rollout_logprobs": [[0.5, 0.6], [0.7, 0.8]],
+        "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -347,9 +349,22 @@ def test_generator_output_concatenation():
     assert concatenated_output["prompt_token_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["response_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["rewards"] == [1.0, 2.0, 2.0, 3.0]
-    assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1, 1, 1]]
+    assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
-    assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]]
+    assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
+
+    # Validate rollout metrics
+    expected_rollout_metrics = {
+        "generate/min_num_tokens": 1,
+        "generate/max_num_tokens": 3,
+        "generate/avg_num_tokens": 2.0,
+        "generate/std_num_tokens": np.std([2, 2, 3, 1]).item(),
+        "generate/avg_tokens_non_zero_rewards": 2.0,
+        "generate/avg_tokens_zero_rewards": 0,
+    }
+    assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
+    for key, value in expected_rollout_metrics.items():
+        np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
 
 
 def test_get_metrics_from_generator_output():
@@ -759,13 +774,23 @@ async def test_apply_overlong_filtering_non_batched(
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
-    mock_llm.generate = AsyncMock(
-        return_value={
-            "responses": ["truncated response"],
-            "stop_reasons": ["length"],
-            "response_ids": [[10, 11, 12, 13, 14, 15, 16, 17, 18, 19]],  # 10 tokens, will be truncated
+    async def llm_generate_side_effect(input_batch):
+
+        if input_batch.get("sampling_params") is not None:
+            max_len = input_batch["sampling_params"]["max_generate_length"]
+        else:
+            max_len = generator_cfg.sampling_params.max_generate_length
+
+        base_response = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]  # 10 token base
+        num = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+        response_tokens = [base_response[:max_len] for _ in range(num)]
+        return {
+            "responses": ["truncated response"] * num,
+            "stop_reasons": ["length"] * num,
+            "response_ids": response_tokens,
         }
-    )
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     input_batch_truncated: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "Test prompt"}]],
@@ -777,7 +802,7 @@ async def test_apply_overlong_filtering_non_batched(
 
     # Verify truncated response has zeroed loss mask
     assert len(output_truncated["loss_masks"]) == 1
-    assert len(output_truncated["loss_masks"][0]) == 5  # Truncated to max_generate_length=5
+    assert len(output_truncated["loss_masks"][0]) == 5
     assert output_truncated["loss_masks"][0] == [
         0,
         0,
@@ -785,15 +810,15 @@ async def test_apply_overlong_filtering_non_batched(
         0,
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
-    # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
 
+    # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
     # Second test: response that ends with eos token (should not be filtered)
     # Reset the environment init to ensure clean state
     mock_env.init.return_value = ([{"role": "user", "content": "Fresh input"}], {})
     mock_llm.generate = AsyncMock(
         return_value={
-            "responses": ["truncated response"],
-            "stop_reasons": ["length"],
+            "responses": ["normal response"],
+            "stop_reasons": ["stop"],
             "response_ids": [[20, 21, 4]],  # 3 tokens, ends with eos token 4
         }
     )
@@ -930,8 +955,9 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Two-step env with rewards 0.3 then 1.7
-    class TwoStepEnv:
+    class TwoStepEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -945,9 +971,6 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
                 )
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=1.7, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = TwoStepEnv()
 
@@ -1021,8 +1044,9 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Env: two steps with rewards 0.5 then 0.25; first step has an observation, second has none
-    class MTEnv:
+    class MTEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -1036,9 +1060,6 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
                 )
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=0.25, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = MTEnv()
 
@@ -1114,8 +1135,9 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Env with rewards: None then 2.5
-    class RetokEnv:
+    class RetokEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
 
         def init(self, prompt):
@@ -1129,9 +1151,6 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
                 )  # noqa: E501
             else:
                 return BaseTextEnvStepOutput(observations=[], reward=2.5, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = RetokEnv()
 
@@ -1187,32 +1206,40 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     # LLM returns 4 assistant tokens per turn (no eos here; final EOS appended by generator for non-conv-mt)
     async def llm_generate_side_effect(input_batch):
         num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
+
+        if input_batch.get("sampling_params") is not None:
+            max_len = input_batch["sampling_params"]["max_generate_length"]
+        else:
+            max_len = cfg.sampling_params.max_generate_length
+
+        base_response = [10, 11, 12, 13]
+        response_tokens = [base_response[:max_len] for _ in range(num)]
         return {
             "responses": ["step"] * num,
             "stop_reasons": ["stop"] * num,
             "response_logprobs": None,
-            "response_ids": [[10, 11, 12, 13] for _ in range(num)],
+            "response_ids": response_tokens,
         }
 
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
 
     # Env with two steps, rewards on both; no observations to keep math simple
-    class TruncEnv:
+    class TruncEnv(BaseTextEnv):
         def __init__(self):
+            super().__init__()
             self.turns = 0
+            self.max_turns = 1
 
         def init(self, prompt):
             return prompt, {}
 
         def step(self, action):
             self.turns += 1
-            if self.turns == 1:
+            if self.turns < self.max_turns:
                 return BaseTextEnvStepOutput(observations=[], reward=1.0, done=False, metadata={})
             else:
+                # On the final turn, return the final reward.
                 return BaseTextEnvStepOutput(observations=[], reward=2.0, done=True, metadata={})
-
-        def close(self):
-            return None
 
     mock_make.return_value = TruncEnv()
 
@@ -1244,7 +1271,11 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     assert len(out.response_ids) == 5
     assert isinstance(out.reward, list)
     assert len(out.reward) == 5
-    # Step1 end index relative should be 3 (0-based), step2 end index would be 7 -> out of range after truncation
-    assert out.reward[3] == 1.0
-    assert sum(out.reward) == 1.0
-    assert out.stop_reason == "length"
+
+    # Step1 end index relative should be 4 (0-based) - reward placed at EOS token
+    # NOTE(Dev): Because we manually append the eos token to the response, the reward is placed at the last token;
+    # See Charlie's comment in skyrl_gym_generator.py for more details.
+
+    assert out.reward[4] == 2.0
+    assert sum(out.reward) == 2.0
+    assert out.stop_reason == "stop"

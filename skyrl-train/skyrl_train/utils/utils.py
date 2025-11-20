@@ -1,8 +1,10 @@
+import ipaddress
 import os
 import time
 import sys
 import logging
 import math
+import socket
 
 import ray
 import torch
@@ -166,7 +168,6 @@ def validate_megatron_cfg(cfg: DictConfig):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
-    assert cfg.trainer.placement.colocate_all, "only colocate_all=True is supported for megatron training"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     if cfg.trainer.flash_attn:
@@ -191,8 +192,7 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
-
-    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
+    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -228,13 +228,19 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    assert (
-        cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
-    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
+    # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
+    repopulate_all_registries()
+    available_policy_losses = PolicyLossRegistry.list_available()
+    assert available_policy_losses != [], "Policy loss registry is not populated."
 
     assert (
-        cfg.trainer.algorithm.advantage_estimator in AdvantageEstimatorRegistry.list_available()
-    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {AdvantageEstimatorRegistry.list_available()}"
+        cfg.trainer.algorithm.policy_loss_type in available_policy_losses
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+
+    available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
+    assert (
+        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
+    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
@@ -282,11 +288,10 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-
-        if not cfg.generator.batched:
-            raise ValueError(
-                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
-            )
+        assert cfg.trainer.algorithm.policy_loss_type in [
+            "regular",
+            "dual_clip",
+        ], "TIS is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
@@ -300,6 +305,7 @@ def validate_cfg(cfg: DictConfig):
         num_rollout_gpus = (
             cfg.generator.num_inference_engines
             * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
             * cfg.generator.inference_engine_data_parallel_size
         )
         assert (
@@ -373,10 +379,6 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.logprobs > 0:
             raise ValueError(
                 f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
-            )
-        if not cfg.generator.batched:
-            raise NotImplementedError(
-                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
             )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
@@ -578,12 +580,15 @@ def configure_ray_worker_logging() -> None:
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
     through Loguru so third-party logs match formatting
     """
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+
     # 1) Loguru formatting (force colors)
     logger.remove()
     logger.level("INFO", color="<bold><green>")
     logger.add(
         sys.stderr,
         colorize=True,  # keep ANSI even without a TTY
+        level=level_name,  # ensure Loguru filters below this level
         enqueue=True,
         backtrace=False,
         diagnose=False,
@@ -603,7 +608,6 @@ def configure_ray_worker_logging() -> None:
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
     logging.root.handlers = [_InterceptHandler()]
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.root.setLevel(level)
 
@@ -769,3 +773,30 @@ def update_model_config(module_config, override_config_kwargs):
             update_model_config(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
+
+
+def get_tcp_url(host: str, port: int) -> str:
+    """
+    Formats the TCP URL for the given host and port,
+    handling IPv6 addresses correctly.
+    Args:
+        host (str): The hostname or IP address.
+        port (int): The port number.
+    Returns:
+        str: The formatted TCP URL.
+    """
+    try:
+        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+            return f"tcp://[{host}]:{port}"
+    except ValueError:
+        # not a literal IP, probably a hostname
+        pass
+    return f"tcp://{host}:{port}"
+
+
+def get_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port

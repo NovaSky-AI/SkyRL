@@ -16,12 +16,22 @@ A typical PPO training workflow involves 5 model-based components:
 
 *Note: GRPO training generally uses the first 2-4 components depending on the setup – no critic model needed.*
 
+Inference Engine Management
+----------------------------
+
+The ``generator.run_engines_locally`` argument controls inference engine management. 
+
+If ``run_engines_locally=true``, then the inference engines are launched during the training run and managed by SkyRL.
+
+If ``run_engines_locally=false``, then the user can specify inference engine URLs managed externally (with the ``generator.remote_inference_engine_urls`` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines `here <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/remote_inference_engine>`_ for convenience.
+
+
 Inference Engine Placement
 --------------------------
 
-The ``generator.run_engines_locally`` setting controls inference engine placement.
+The ``generator.colocate_all`` setting controls inference engine placement.
 
-**Colocated Engines (run_engines_locally = true)**
+**Colocated Engines (colocate_all = true)**
 
 Inference engines share GPUs with training models:
 
@@ -29,12 +39,13 @@ Inference engines share GPUs with training models:
 - Engines will ``sleep()`` after generation to free GPU memory
 - Engines will ``wake_up()`` before the next generation round
 
-**Disaggregated Engines (run_engines_locally = false)**
+NOTE: As of now, colocated engines are only supported with ``generator.run_engines_locally=true``.
+
+**Disaggregated Engines (colocate_all = false)**
 
 Inference engines run on dedicated GPUs:
 
 - Inference engines do not need to sleep/wake_up
-- The trainer talks to Inference engines over HTTP (OpenAI API compatible)
 - Updated weights are still efficiently synced to Inference engines (via NCCL, RDMA, etc.)
 
 Training Model Placement

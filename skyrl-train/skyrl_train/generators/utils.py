@@ -6,6 +6,7 @@ from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, Traject
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
+from skyrl_gym.metrics import aggregate_for_environment
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
@@ -140,9 +141,10 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
     """
-    Used in eval to concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches.
 
-    `rollout_metrics` are not concatenated because they are already aggregated.
+    We only aggregate rollout metrics the can deduced by responses and rewards, but not
+    those that use `env_metrics` or `env_classes`.
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -155,14 +157,17 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
         "rewards": sum([output["rewards"] for output in generator_outputs], []),
         "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "stop_reasons": (
+            sum([output["stop_reasons"] for output in generator_outputs], [])
+            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
+            else None
+        ),
         "rollout_logprobs": (
             sum([output["rollout_logprobs"] for output in generator_outputs], [])
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
     }
-    if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
-        result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -172,6 +177,17 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
         result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+
+    # Re-aggregate rollout metrics
+    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    result["rollout_metrics"] = rollout_metrics
+
+    # Validate the generator output using the number of prompts
+    # Import here to avoid circular dependency.
+    from skyrl_train.utils.trainer_utils import validate_generator_output
+
+    num_prompts = len(result["prompt_token_ids"])
+    validate_generator_output(num_prompts, result)
 
     return result
 
@@ -195,7 +211,24 @@ def apply_overlong_filtering(
     ]
 
 
-def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], List[List[float]]]):
+def get_rollout_metrics(
+    responses: List[List[int]],
+    rewards: Union[List[float], List[List[float]]],
+    env_metrics: Optional[List[Dict[str, Any]]] = None,
+    env_classes: Optional[List[str]] = None,
+):
+    """
+    Computes rollout metrics including token statistics and optional environment-specific metrics.
+
+    Args:
+        responses: List of token ID sequences for each response
+        rewards: List of rewards (either per-trajectory or per-token)
+        env_metrics: Optional list of environment-specific metrics for each trajectory
+        env_classes: Optional list of environment class names for each trajectory
+
+    Returns:
+        Dictionary of aggregated metrics
+    """
     num_tokens_arr = np.array([len(response) for response in responses])
     # Support both response-level and token-level rewards
     flat_rewards = []
@@ -214,7 +247,7 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
     # average tokens for zero rewards
     avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
 
-    return {
+    rollout_metrics = {
         "generate/min_num_tokens": np.min(num_tokens_arr).item(),
         "generate/max_num_tokens": np.max(num_tokens_arr).item(),
         "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
@@ -222,6 +255,18 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+    if env_metrics is not None and env_classes is not None:
+        env_to_metrics = defaultdict(list)
+        for i, metrics in enumerate(env_metrics):
+            env_to_metrics[env_classes[i]].append(metrics)
+        for env_name, metrics in env_to_metrics.items():
+            # Aggregate metrics across all trajectories for the same environment
+            agg = aggregate_for_environment(env_name, metrics)
+            for key, value in agg.items():
+                rollout_metrics[f"environment/{key}"] = value
+
+    return rollout_metrics
 
 
 def prepare_generator_input(

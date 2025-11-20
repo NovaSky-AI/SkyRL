@@ -188,6 +188,8 @@ class MegatronStrategy(DistributedStrategy):
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
         dist.barrier()
+        ckpt_base.async_calls.close()
+        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
@@ -264,7 +266,7 @@ class MegatronStrategy(DistributedStrategy):
 
         # All ranks call into bridge.
         with io.local_work_dir(output_dir) as work_dir:
-            bridge.save_weights(model.actor_module, work_dir)
+            bridge.save_hf_weights(model.actor_module, work_dir)
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.

@@ -162,8 +162,9 @@ class RayPPOTrainer:
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
+        start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
-        for epoch in range(self.cfg.trainer.epochs):
+        for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
@@ -191,8 +192,9 @@ class RayPPOTrainer:
                             pbar.update(1)
                             continue
 
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
+                    if self.colocate_all:
+                        # if we are not continuing sampling, we sleep the inference engine
+                        asyncio.run(self.inference_engine_client.sleep())
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -334,6 +336,7 @@ class RayPPOTrainer:
             num_rollout_gpus = (
                 cfg.generator.num_inference_engines
                 * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
                 * cfg.generator.inference_engine_data_parallel_size
             )
             assert (
@@ -443,7 +446,7 @@ class RayPPOTrainer:
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
-                refs.extend(ref_model.async_init_model(cfg.trainer.policy.model.path))
+                refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
@@ -461,7 +464,7 @@ class RayPPOTrainer:
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.policy.model.path))
+                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
                 ref_model.offload_to_cpu()
             ray.get(
                 policy_model.async_init_model(
@@ -567,7 +570,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        validate_generator_output(input_batch, generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
         return generator_output
 
@@ -657,17 +660,17 @@ class RayPPOTrainer:
             data.metadata["metrics"] = {}
         data.metadata["metrics"].update(
             {
-                "avg_rewards": avg_rewards,
+                "avg_final_rewards": avg_rewards,
                 "avg_response_length": avg_response_length,
                 "avg_advantages": avg_advantages,
                 "avg_advantages_abs": avg_advantages_abs,
             }
         )
 
-        logger.info(f"avg_raw_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
+        logger.info(f"avg_final_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
         self.all_metrics.update(
             {
-                "loss/avg_raw_rewards": avg_rewards,
+                "loss/avg_final_rewards": avg_rewards,
                 "loss/avg_raw_advantages": avg_advantages,
                 "loss/avg_raw_advantages_abs": avg_advantages_abs,
             }

@@ -2,7 +2,7 @@
 Tests for ppo_train method in worker classes.
 
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_ppo_train.py
+uv run --isolated --extra dev --extra deepspeed pytest tests/gpu/gpu_ci/test_ppo_train.py
 """
 
 import pytest
@@ -23,12 +23,14 @@ def cfg() -> DictConfig:
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
+    cfg.generator.inference_engine_tensor_parallel_size = 2
     validate_cfg(cfg)
 
     return cfg
 
 
-def test_ppo_train_basic_execution(cfg):
+@pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False), (True, True), (True, False), (False, True)])
+def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_kl_loss):
     """
     Test that ppo_train runs and returns correct structure.
 
@@ -39,6 +41,12 @@ def test_ppo_train_basic_execution(cfg):
     """
     try:
         cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
+        if use_entropy_loss:
+            cfg.trainer.algorithm.use_entropy_loss = True
+            cfg.trainer.algorithm.entropy_loss_coef = 0.01
+        if use_kl_loss:
+            cfg.trainer.algorithm.use_kl_loss = True
+            cfg.trainer.algorithm.kl_loss_coef = 0.001
 
         actor_group = init_worker_with_type(
             "policy",
@@ -62,7 +70,14 @@ def test_ppo_train_basic_execution(cfg):
         train_status = result.metadata["train_status"]
 
         # Validate expected training metrics are present
-        expected_metrics = ["policy_loss", "policy_update_steps", "policy_lr", "ppo_clip_ratio", "policy_entropy"]
+        expected_metrics = [
+            "policy_loss",
+            "policy_update_steps",
+            "policy_lr",
+            "ppo_clip_ratio",
+            "policy_entropy",
+            "final_loss",
+        ]
 
         for metric in expected_metrics:
             assert metric in train_status, f"Should have {metric} in train_status"
@@ -76,7 +91,7 @@ def test_ppo_train_basic_execution(cfg):
         ray.shutdown()
 
 
-def test_ppo_train_critic_worker(cfg):
+def test_ppo_train_critic_worker(ray_init_fixture, cfg):
     """
     Test that ppo_train works for critic worker as well.
     """
@@ -128,6 +143,7 @@ def test_ppo_train_critic_worker(cfg):
     ids=["accumulation_calculation", "optimizer_stepping", "multiple_epochs"],
 )
 def test_gradient_accumulation_scenarios(
+    ray_init_fixture,
     test_id,
     micro_train_batch_size_per_gpu,
     policy_mini_batch_size,
@@ -154,6 +170,7 @@ def test_gradient_accumulation_scenarios(
         cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
         cfg.generator.n_samples_per_prompt = n_samples_per_prompt
         cfg.trainer.update_epochs_per_batch = update_epochs_per_batch
+        cfg.generator.inference_engine_tensor_parallel_size = 2
 
         # For logging and assertions, calculate expected accumulation steps
         dp_size = cfg.trainer.placement.policy_num_gpus_per_node
