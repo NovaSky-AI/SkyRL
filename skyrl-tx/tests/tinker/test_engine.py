@@ -95,11 +95,15 @@ def test_adapter_gradient_calculation():
     # Process round 1 batch
     engine.process_forward_backward_batch(reqs_round1)
 
-    grads_A1_round1 = jax.tree.map(lambda x: x.copy(), engine.accumulated_grads[adapter1_id].grad_sum)
+    adapter1_idx = engine.models[adapter1_id].adapter_index
+    adapter2_idx = engine.models[adapter2_id].adapter_index
+
+    # Extract gradients for adapter 1
+    grads_A1_round1 = jax.tree.map(lambda x: x[adapter1_idx], engine.accumulated_grads.grad_sum)
 
     # Clear stored grads so we can run another fwd/bwd without optimizer update.
-    engine.accumulated_grads[adapter1_id].reset()
-    engine.accumulated_grads[adapter2_id].reset()
+    engine.accumulated_grads = engine.accumulated_grads.reset_adapter(adapter1_idx)
+    engine.accumulated_grads = engine.accumulated_grads.reset_adapter(adapter2_idx)
 
     a1_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8]])
     a2_input2 = make_fwd_bwd_input([[9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20], [21, 22, 23, 24]])
@@ -111,7 +115,7 @@ def test_adapter_gradient_calculation():
     # Process round 2 batch
     engine.process_forward_backward_batch(reqs_round2)
 
-    grads_A1_round2 = jax.tree.map(lambda x: x.copy(), engine.accumulated_grads[adapter1_id].grad_sum)
+    grads_A1_round2 = jax.tree.map(lambda x: x[adapter1_idx], engine.accumulated_grads.grad_sum)
 
     # Compare gradients using 99% match threshold
     _assert_tree_allclose(grads_A1_round1, grads_A1_round2, rtol=1e-3, atol=1e-2, min_match_pct=99.0)
@@ -160,14 +164,16 @@ def test_micro_batch_grad_accumulation():
 
     # Run 1: micro-batching enabled
     engine.process_forward_backward_batch(reqs)
-    acc_micro_a1 = engine.accumulated_grads[adapter1_id]
-    acc_micro_a2 = engine.accumulated_grads[adapter2_id]
-    mean_micro_a1 = acc_micro_a1.get_mean()
-    mean_micro_a2 = acc_micro_a2.get_mean()
+
+    adapter1_idx = engine.models[adapter1_id].adapter_index
+    adapter2_idx = engine.models[adapter2_id].adapter_index
+
+    mean_micro_a1 = engine.accumulated_grads.get_mean(adapter1_idx)
+    mean_micro_a2 = engine.accumulated_grads.get_mean(adapter2_idx)
 
     # Sanity check gradient sum denominators with micro-batching
-    assert acc_micro_a1.denominator == 2
-    assert acc_micro_a2.denominator == 4
+    assert engine.accumulated_grads.counts[adapter1_idx] == 2
+    assert engine.accumulated_grads.counts[adapter2_idx] == 4
 
     # Build a second engine without micro-batching
     config = EngineConfig(
@@ -188,14 +194,19 @@ def test_micro_batch_grad_accumulation():
 
     # Run 2: micro-batching disabled
     engine.process_forward_backward_batch(reqs)
-    acc_full_a1 = engine.accumulated_grads[adapter1_id]
-    acc_full_a2 = engine.accumulated_grads[adapter2_id]
-    mean_full_a1 = acc_full_a1.get_mean()
-    mean_full_a2 = acc_full_a2.get_mean()
+
+    # Note: adapter indices might be different in new engine instance if logic changed,
+    # but here we create them in same order so it should be fine.
+    # Better to fetch them again to be safe.
+    adapter1_idx_full = engine.models[adapter1_id].adapter_index
+    adapter2_idx_full = engine.models[adapter2_id].adapter_index
+
+    mean_full_a1 = engine.accumulated_grads.get_mean(adapter1_idx_full)
+    mean_full_a2 = engine.accumulated_grads.get_mean(adapter2_idx_full)
 
     # Sanity check gradient sum denominators without micro-batching
-    assert acc_full_a1.denominator == 2
-    assert acc_full_a2.denominator == 4
+    assert engine.accumulated_grads.counts[adapter1_idx_full] == 2
+    assert engine.accumulated_grads.counts[adapter2_idx_full] == 4
 
     # Compare MEAN gradients with and without micro-batching
     _assert_tree_allclose(mean_micro_a1, mean_full_a1, rtol=1e-3, atol=5e-3)
