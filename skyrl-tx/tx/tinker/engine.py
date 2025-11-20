@@ -626,7 +626,7 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts), request_data))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
 
         total_batch_size = len(all_prompts)
         max_batch_size = (

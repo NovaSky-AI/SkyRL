@@ -212,6 +212,10 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
         outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
+        
+        # Capture prompt lengths and compute prompt logprobs if requested
+        prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
+        prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
 
         # Pad inputs to max_length
         pad_length = max_length - prompt_length
@@ -250,16 +254,21 @@ class GeneratorMixin:
         )
 
         # Single device-to-host transfer for all data
-        generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host = jax.device_get(
-            (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length)
-        )
+        if prompt_logprobs:
+            generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host, prompt_logprobs_host, prompt_lengths_host = jax.device_get(
+                (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length, prompt_logprobs_array, prompt_lengths)
+            )
+        else:
+            generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host = jax.device_get(
+                (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length)
+            )
 
         return GenerateOutput(
             generated_ids=[generated_ids_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
             stop_reasons=["stop" if stop_pos_host[i, 0] >= 0 else "length" for i in range(batch_size)],
             logprobs=[all_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
             prompt_logprobs=(
-                [prompt_logprobs_array[i, : int(prompt_lengths[i]) - 1].tolist() for i in range(batch_size)]
+                [prompt_logprobs_host[i, : int(prompt_lengths_host[i]) - 1].tolist() for i in range(batch_size)]
                 if prompt_logprobs
                 else None
             ),
