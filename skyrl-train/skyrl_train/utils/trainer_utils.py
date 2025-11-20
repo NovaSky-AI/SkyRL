@@ -662,7 +662,7 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
 #     return trainer_cfg.rope_theta
 
 
-def get_rope_parameters_config(trainer_cfg: DictConfig) -> dict[str, Any]:
+def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, Any]]:
     if "rope_parameters" not in trainer_cfg:
         return {}
     if trainer_cfg.rope_parameters is None:
