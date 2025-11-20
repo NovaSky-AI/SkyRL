@@ -63,8 +63,6 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
         use_torch_compile: bool = False,
-        # rope_scaling: Dict[str, Any] = {},
-        # rope_theta: float | None = None,
         rope_parameters: Dict[str, Any] = {},
         **kwargs,
     ) -> None:
@@ -115,10 +113,6 @@ class HFModelWrapper(nn.Module):
             rope_parameters_kwargs = {}
             if rope_parameters:
                 rope_parameters_kwargs["rope_parameters"] = rope_parameters
-            # if rope_scaling:
-            #     rope_scaling_kwargs["rope_scaling"] = rope_scaling
-            # if rope_theta:
-            #     rope_scaling_kwargs["rope_theta"] = rope_theta
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,

@@ -77,8 +77,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
-                # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-                # rope_theta=get_rope_theta_config(self.cfg.trainer),
                 rope_parameters=get_rope_parameters_config(self.cfg.trainer),
             )
             # in-place patch
