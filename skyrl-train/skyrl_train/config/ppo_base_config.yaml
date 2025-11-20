@@ -169,18 +169,7 @@ trainer:
   dump_data_batch: false
   dump_eval_results: true
 
-  # YaRN:
-  rope_scaling: null
-  rope_theta: null
-  # rope_scaling:
-  #   rope_type: yarn
-  #   factor: 1.0
-  #   original_max_position_embeddings: 32768
-
   # RoPE (Rotary Position Embedding) configuration
-  # rope_theta: null  # (float) The base period of the RoPE embeddings
-  
-  # YaRN: See https://huggingface.co/docs/transformers/main/en/internal/rope_utils for more details
   rope_parameters: 
     rope_type: null # ['default', 'linear', 'dynamic', 'yarn', 'longrope', 'llama3']
     rope_theta: null
@@ -193,6 +182,15 @@ trainer:
     long_factor: null
     low_freq_factor: null
     high_freq_factor: null
+
+  # Note: rope_scaling and rope_theta are deprecated, use rope_parameters instead. See https://huggingface.co/docs/transformers/main/en/internal/rope_utils for more details
+  
+  # rope_scaling: null
+  # rope_theta: null
+  # rope_scaling:
+  #   rope_type: yarn
+  #   factor: 1.0
+  #   original_max_position_embeddings: 32768  
 
 generator:
   model_name: ${trainer.policy.model.path}
