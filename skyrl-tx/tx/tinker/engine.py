@@ -160,6 +160,18 @@ class TinkerEngine:
 
         self._create_loss_and_grad_fn()
 
+    def _extract_checkpoint_data(self, model_id: str) -> dict:
+        """Extract adapter state and optimizer state for checkpointing."""
+        adapter_index = self.models[model_id].adapter_index
+        rank = self.models[model_id].lora_config.rank
+        lora_weights = extract_adapter_state(adapter_index, self.lora_params, rank)
+        optimizer_state = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), rank)
+        return {
+            "lora_weights": lora_weights,
+            "optimizer_state": optimizer_state,
+            "lora_config": self.models[model_id].lora_config.model_dump(),
+        }
+
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
         """Context manager to handle checkpoint DB status updates.
@@ -305,7 +317,9 @@ class TinkerEngine:
             # JIT the original function (kept for compatibility if needed)
             self._loss_and_grad_fn = jax.jit(
                 loss_and_grad_fn,
+                # One input sharding parameter for each argument of loss_for_lora
                 in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
+                # One output sharding parameter for each return value of loss_for_lora
                 out_shardings=((scalar, (replicated, replicated)), lora_shardings),
             )
 
@@ -755,23 +769,23 @@ class TinkerEngine:
         )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
-            restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
+            checkpoint = checkpoints.restore_checkpoint(
+                ckpt_dir=temp_dir, target=self._extract_checkpoint_data(model_id), prefix="checkpoint_"
+            )
 
-        if restored_data is None:
+        if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
         # Validate rank
-        rank = restored_data["lora_config"]["rank"]
+        rank = checkpoint["lora_config"]["rank"]
         if self.models[model_id].lora_config.rank != rank:
             raise ValueError(
                 f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
-        insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"]
-        )
+        insert_adapter_state(adapter_index, self.lora_params, checkpoint["lora_weights"], rank)
+        insert_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), checkpoint["optimizer_state"], rank)
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
@@ -784,23 +798,13 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
-            optimizer_params = extract_adapter_state(
-                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
-            )
-
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
-                    target={
-                        "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                        "optimizer_state": nnx.to_pure_dict(optimizer_params),
-                        "lora_config": self.models[model_id].lora_config.model_dump(),
-                    },
+                    target=self._extract_checkpoint_data(model_id),
                     ckpt_dir=temp_dir,
                     step=0,
                     prefix="checkpoint_",
@@ -873,7 +877,8 @@ class TinkerEngine:
                         self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
                     )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+                    adapter_config = self.models[model_id].lora_config
+                    load_lora_checkpoint(self.model, adapter_config, adapter_index, checkpoint_path)
 
                     self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
