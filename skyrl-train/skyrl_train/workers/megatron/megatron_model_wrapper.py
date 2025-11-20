@@ -24,15 +24,11 @@ class MegatronModelWrapper:
     def __init__(
         self,
         config,
-        hf_config,
-        tf_config,
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
     ):
         self.cfg = config
-        self.hf_config = hf_config
-        self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
@@ -113,7 +109,6 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    self.tf_config.sequence_parallel,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
                 packed_seq_params = None
@@ -286,7 +281,6 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    self.tf_config.sequence_parallel,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
                 packed_seq_params = None

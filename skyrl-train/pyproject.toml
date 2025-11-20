@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "loguru",
     "tqdm",
+    "ninja",
     "tensorboard",
     "func_timeout",
     "transformers>=4.51.0",
@@ -67,9 +68,15 @@ conflicts = [
         { extra = "flashrl" },
     ]
 ]
+no-build-isolation-package = [
+    "transformer-engine-torch",
+    "transformer-engine",
+]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
+transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools"]
+transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -136,13 +143,15 @@ mcore = [
   # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
   # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
   # "transformer-engine[pytorch]==2.5.0",
+  "transformer-engine[pytorch]==2.7.0",
   "flash-attn==2.7.4.post1",
   "vllm==0.10.1.1",
   "torch==2.7.1",
   "flashinfer-python",
   "torchvision",
   "mbridge==0.15.1",
-  "megatron-core==0.13.0",
+  "megatron-bridge==0.1.0rc4",
+  "megatron-core==0.14.0",
 ]
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.

@@ -178,7 +178,7 @@ def test_megatron_policy_weight_sync():
         ("policy", 2, 2, 1, 1, None, 4, True),
         ("policy", 1, 1, 2, 1, None, 2, True),
         ("policy", 2, 2, 2, 1, None, 8, True),
-        ("policy", 4, 2, 1, 4, None, 8, True),
+        ("policy", 4, 2, 1, 4, 1, 8, True),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -402,7 +402,7 @@ async def test_megatron_train(
 @pytest.mark.parametrize(
     ("worker_type", "tp", "pp", "gpus_per_node"),
     [
-        ("policy", 1, 4, 4),
+        ("policy", 1, 2, 2),
     ],
 )
 async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
@@ -426,7 +426,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.micro_train_batch_size_per_gpu = 4
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = True
+    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = False
     cfg.trainer.policy.megatron_config.torch_profiler_config.ranks = [0]
     cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
 

@@ -440,7 +440,6 @@ def remove_left_padding(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     position_ids: torch.Tensor,
-    sequence_parallel: bool = False,
     pre_process: bool = True,
 ):
     """
@@ -455,7 +454,7 @@ def remove_left_padding(
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if sequence_parallel:
+    if mpu.get_tensor_model_parallel_world_size() > 1:
         sp_world_size = mpu.get_tensor_model_parallel_world_size()
         pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
         seq_len = seq_len + pad_size
