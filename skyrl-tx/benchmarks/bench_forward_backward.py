@@ -79,7 +79,9 @@ def reset_accumulators(engine: TinkerEngine) -> None:
             acc.reset()
     else:
         # Pattern 2: Single global accumulator for all adapters
-        engine.accumulated_grads.reset()
+        engine.accumulated_grads = type(engine.accumulated_grads).create(
+            engine.lora_params, engine.config.max_lora_adapters
+        )
 
 
 def run_bench(
