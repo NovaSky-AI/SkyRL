@@ -617,6 +617,9 @@ class TinkerEngine:
         if not valid_requests:
             return results
 
+        # Computes prompt_logprobs for the whole batch if any request asked for them
+        needs_prompt_logprobs = any(request_data.prompt_logprobs for _, _, request_data in valid_requests)
+
         all_prompts = []
         all_sampling_params = []
         all_adapter_indices = []
@@ -635,7 +638,7 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
 
         total_batch_size = len(all_prompts)
         max_batch_size = (
@@ -666,6 +669,7 @@ class TinkerEngine:
                         attention_mask,
                         sampling_params=sampling_params,
                         adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
+                        prompt_logprobs=needs_prompt_logprobs,
                     )
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
@@ -678,9 +682,13 @@ class TinkerEngine:
                     )
                 )
 
-        for request_id, _, start_idx, end_idx in request_batch_slices:
+        for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+            # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
+            prompt_logprobs = (
+                result.prompt_logprobs[start_idx] if request_data.prompt_logprobs and result.prompt_logprobs else None
+            )
+            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
         return results
 

@@ -172,6 +172,7 @@ class SampleInput(BaseModel):
     sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
+    prompt_logprobs: bool
 
 
 class GeneratedSequence(BaseModel):
@@ -182,7 +183,7 @@ class GeneratedSequence(BaseModel):
 
 class SampleOutput(BaseModel):
     sequences: list[GeneratedSequence]
-    prompt_logprobs: list[float]
+    prompt_logprobs: list[float] | None = None
 
 
 # Metrics tracked in the engine
