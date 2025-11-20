@@ -91,8 +91,6 @@ def create_ray_wrapped_inference_engines(
     max_lora_rank=64,
     max_loras=1,
     engine_init_kwargs: Dict[str, Any] = {},
-    # rope_scaling: Dict[str, Any] = {},
-    # rope_theta: float | None = None,
     rope_parameters: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
     """

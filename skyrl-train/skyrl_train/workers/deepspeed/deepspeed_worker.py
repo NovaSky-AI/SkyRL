@@ -13,7 +13,6 @@ from skyrl_train.model_wrapper import get_llm_for_sequence_regression, HFModelWr
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
 from skyrl_train.utils import get_physical_gpu_id
 
-# from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 from skyrl_train.utils.trainer_utils import get_rope_parameters_config
 from skyrl_train.utils.utils import str_to_torch_dtype
 from skyrl_train.workers.worker import (
@@ -65,8 +64,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
             use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
-            # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-            # rope_theta=get_rope_theta_config(self.cfg.trainer),
             rope_parameters=get_rope_parameters_config(self.cfg.trainer),
         )
 
@@ -352,8 +349,6 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             ds_config=strategy.get_ds_eval_config(),
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
-            # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-            # rope_theta=get_rope_theta_config(self.cfg.trainer),
             rope_parameters=get_rope_parameters_config(self.cfg.trainer),
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
