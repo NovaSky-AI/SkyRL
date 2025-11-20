@@ -170,8 +170,8 @@ trainer:
   dump_eval_results: true
 
   # YaRN:
-  # rope_scaling: null
-  # rope_theta: null
+  rope_scaling: null
+  rope_theta: null
   # rope_scaling:
   #   rope_type: yarn
   #   factor: 1.0
@@ -288,8 +288,8 @@ generator:
   apply_overlong_filtering: false
 
   # rope parameters, can be optionally different from the trainer , useful in some cases like with thinking models.
-  # rope_scaling: ${trainer.rope_scaling}
-  # rope_theta: ${trainer.rope_theta}
+  rope_scaling: ${trainer.rope_scaling}
+  rope_theta: ${trainer.rope_theta}
   rope_parameters: ${trainer.rope_parameters}
 
 
