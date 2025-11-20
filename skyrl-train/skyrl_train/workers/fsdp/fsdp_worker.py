@@ -2,7 +2,7 @@ import asyncio
 from typing import Dict, List
 
 # from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
-from skyrl_train.utils.trainer_utils import get_rope_params_config
+from skyrl_train.utils.trainer_utils import get_rope_parameters_config
 import ray
 import torch
 import torch.distributed
@@ -80,7 +80,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
                 # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 # rope_theta=get_rope_theta_config(self.cfg.trainer),
-                rope_parameters=get_rope_params_config(self.cfg.trainer),
+                rope_parameters=get_rope_parameters_config(self.cfg.trainer),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -401,7 +401,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 # rope_theta=get_rope_theta_config(self.cfg.trainer),
-                rope_parameters=get_rope_params_config(self.cfg.trainer),
+                rope_parameters=get_rope_parameters_config(self.cfg.trainer),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

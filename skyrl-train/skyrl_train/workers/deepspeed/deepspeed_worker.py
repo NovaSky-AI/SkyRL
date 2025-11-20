@@ -14,7 +14,7 @@ from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
 from skyrl_train.utils import get_physical_gpu_id
 
 # from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
-from skyrl_train.utils.trainer_utils import get_rope_params_config
+from skyrl_train.utils.trainer_utils import get_rope_parameters_config
 from skyrl_train.utils.utils import str_to_torch_dtype
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -67,7 +67,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
             # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
             # rope_theta=get_rope_theta_config(self.cfg.trainer),
-            rope_parameters=get_rope_params_config(self.cfg.trainer),
+            rope_parameters=get_rope_parameters_config(self.cfg.trainer),
         )
 
         # configure optimizer
@@ -354,7 +354,7 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             use_sample_packing=self.cfg.trainer.use_sample_packing,
             # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
             # rope_theta=get_rope_theta_config(self.cfg.trainer),
-            rope_parameters=get_rope_params_config(self.cfg.trainer),
+            rope_parameters=get_rope_parameters_config(self.cfg.trainer),
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

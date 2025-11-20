@@ -181,7 +181,7 @@ trainer:
   # rope_theta: null  # (float) The base period of the RoPE embeddings
   
   # YaRN: See https://huggingface.co/docs/transformers/main/en/internal/rope_utils for more details
-  rope_params: 
+  rope_parameters: 
     rope_type: null # ['default', 'linear', 'dynamic', 'yarn', 'longrope', 'llama3']
     rope_theta: null
     factor: null
@@ -290,7 +290,7 @@ generator:
   # rope parameters, can be optionally different from the trainer , useful in some cases like with thinking models.
   # rope_scaling: ${trainer.rope_scaling}
   # rope_theta: ${trainer.rope_theta}
-  rope_parameters: ${trainer.rope_params}
+  rope_parameters: ${trainer.rope_parameters}
 
 
 environment:

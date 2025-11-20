@@ -58,7 +58,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
         "engine_init_kwargs": cfg.generator.engine_init_kwargs,
-        "rope_parameters": cfg.trainer.rope_params,
+        "rope_parameters": cfg.trainer.rope_parameters,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
