@@ -165,7 +165,9 @@ def create_ray_wrapped_inference_engines(
                     if "max_model_len" not in engine_init_kwargs:
                         rope_factor = rope_scaling.get("factor", None)
                         rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
-                        assert rope_factor is not None and rope_max_pos is not None, "Both `factor` and `original_max_position_embeddings` must be provided for rope scaling when `max_model_len` is not set."
+                        assert (
+                            rope_factor is not None and rope_max_pos is not None
+                        ), "Both `factor` and `original_max_position_embeddings` must be provided for rope scaling when `max_model_len` is not set."
                         rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
 
                 if rope_theta is not None:
