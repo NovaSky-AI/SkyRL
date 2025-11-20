@@ -1,7 +1,8 @@
 import asyncio
 from typing import Dict, List
 
-from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+# from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+from skyrl_train.utils.trainer_utils import get_rope_params_config
 import ray
 import torch
 import torch.distributed
@@ -77,8 +78,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
-                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-                rope_theta=get_rope_theta_config(self.cfg.trainer),
+                # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                # rope_theta=get_rope_theta_config(self.cfg.trainer),
+                rope_parameters=get_rope_params_config(self.cfg.trainer),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -397,8 +399,9 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 bf16=self.cfg.trainer.bf16,
                 sequence_parallel_size=self.cfg.trainer.ref.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
-                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-                rope_theta=get_rope_theta_config(self.cfg.trainer),
+                # rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                # rope_theta=get_rope_theta_config(self.cfg.trainer),
+                rope_parameters=get_rope_params_config(self.cfg.trainer),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

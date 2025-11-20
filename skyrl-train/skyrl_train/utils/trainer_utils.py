@@ -648,15 +648,23 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
     return dataloader
 
 
-def get_rope_scaling_config(trainer_cfg: DictConfig) -> dict[str, Any]:
-    if "rope_scaling" not in trainer_cfg:
+# def get_rope_scaling_config(trainer_cfg: DictConfig) -> dict[str, Any]:
+#     if "rope_scaling" not in trainer_cfg:
+#         return {}
+#     if trainer_cfg.rope_scaling is None:
+#         return None
+#     return OmegaConf.to_container(trainer_cfg.rope_scaling)
+
+
+# def get_rope_theta_config(trainer_cfg: DictConfig) -> int | None:
+#     if "rope_theta" not in trainer_cfg:
+#         return None
+#     return trainer_cfg.rope_theta
+
+
+def get_rope_params_config(trainer_cfg: DictConfig) -> dict[str, Any]:
+    if "rope_params" not in trainer_cfg:
         return {}
-    if trainer_cfg.rope_scaling is None:
+    if trainer_cfg.rope_params is None:
         return None
-    return OmegaConf.to_container(trainer_cfg.rope_scaling)
-
-
-def get_rope_theta_config(trainer_cfg: DictConfig) -> int | None:
-    if "rope_theta" not in trainer_cfg:
-        return None
-    return trainer_cfg.rope_theta
+    return OmegaConf.to_container(trainer_cfg.rope_params)

@@ -58,6 +58,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
         "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "rope_parameters": cfg.trainer.rope_params,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -67,10 +68,10 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
 
-    if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
-        engine_kwargs["rope_scaling"] = rope_scaling
-    if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
-        engine_kwargs["rope_theta"] = rope_theta
+    # if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
+    #     engine_kwargs["rope_scaling"] = rope_scaling
+    # if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
+    #     engine_kwargs["rope_theta"] = rope_theta
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
