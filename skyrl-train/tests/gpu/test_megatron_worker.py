@@ -109,27 +109,27 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     data.metadata = {"response_length": num_actions}
     return data
 
-
-def test_megatron_policy_weight_sync():
+@pytest.mark.parametrize("colocate_all", [True, False], ids=["colocate_all", "non_colocated"])
+def test_megatron_policy_weight_sync(colocate_all):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
-        cfg.trainer.placement.colocate_all = True
+        cfg = get_test_actor_config(model_name=MODEL_NAME)
+        cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = 8
+        cfg.generator.inference_engine_tensor_parallel_size = 2
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = None
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
-            model=MOE_MODEL_NAME,
+            model=MODEL_NAME,
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
