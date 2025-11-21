@@ -144,10 +144,11 @@ class TerminalBenchGenerator(GeneratorInterface):
         successful = False
         for i in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
+            results = None
             try:
                 results = await trial.run()
                 if not results.verifier_result:
-                    logger.warning(f"{prefix} failed: Exception info: {results.exception_info}")
+                    logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
                 reward = results.verifier_result.reward
                 logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
@@ -156,9 +157,9 @@ class TerminalBenchGenerator(GeneratorInterface):
                     successful = True
                     break
                 else:
-                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a response")
+                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a response. Results: {results}")
             except Exception as e:
-                logger.warning(f"{prefix} failed: Error running trial: {e}")
+                logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
 
         if not successful:
