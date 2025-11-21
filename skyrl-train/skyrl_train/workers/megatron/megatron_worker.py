@@ -25,11 +25,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-<<<<<<< HEAD
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
-=======
-from skyrl_train.distributed.megatron.megatron_utils import print_model_size
->>>>>>> 098674dfbe6dd5a3a31f952a6cd50a92106afaef
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch

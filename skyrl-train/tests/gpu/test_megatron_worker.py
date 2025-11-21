@@ -120,10 +120,11 @@ def test_megatron_policy_weight_sync(colocate_all):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = 2
+        cfg.generator.inference_engine_tensor_parallel_size = 4
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = 1
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = None
 
