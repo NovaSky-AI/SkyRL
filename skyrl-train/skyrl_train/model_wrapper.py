@@ -63,7 +63,8 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
         use_torch_compile: bool = False,
-        rope_parameters: Dict[str, Any] = {},
+        rope_scaling: Dict[str, Any] = {},
+        rope_theta: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -110,9 +111,11 @@ class HFModelWrapper(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
-            rope_parameters_kwargs = {}
-            if rope_parameters:
-                rope_parameters_kwargs["rope_parameters"] = rope_parameters
+            rope_scaling_kwargs = {}
+            if rope_scaling:
+                rope_scaling_kwargs["rope_scaling"] = rope_scaling
+            if rope_theta:
+                rope_scaling_kwargs["rope_theta"] = rope_theta
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
@@ -121,7 +124,7 @@ class HFModelWrapper(nn.Module):
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
-                **rope_parameters_kwargs,
+                **rope_scaling_kwargs,
             )
 
             # gpt oss
