@@ -39,3 +39,4 @@ docs/_spelling/
 /skyrl-gym/dist
 
 *.log
+trials/
