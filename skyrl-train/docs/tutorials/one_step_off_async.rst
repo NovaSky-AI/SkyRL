@@ -1,5 +1,5 @@
-Async Training: One-off Pipelining
-=========================================
+Async Training: One-Step Off-Policy Pipelining
+==============================================
 
 This example demonstrates how to implement asynchronous training with one-off pipelining, showcasing the flexibility of the training framework to support different execution plans with minimal code changes.
 

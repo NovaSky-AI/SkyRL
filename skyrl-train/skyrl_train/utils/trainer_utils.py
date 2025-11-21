@@ -619,9 +619,18 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
 
-def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> StatefulDataLoader:
+def build_dataloader(
+    cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+) -> StatefulDataLoader:
     """
-    Build the dataloader for the training or evaluation dataset
+    Build the dataloader for the training or evaluation dataset.
+
+    Args:
+        cfg: Config object
+        dataset: Dataset object
+        is_train: Whether to build the dataloader for training or evaluation
+        is_fully_async: If is_train, whether to build the dataloader for fully async training, which
+            mainly makes the batch size 1.
     """
     # prepare dataloader
     batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
@@ -632,7 +641,7 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
 
     dataloader = StatefulDataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=batch_size if not is_fully_async else 1,
         shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
@@ -641,7 +650,10 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
         generator=seeded_generator,
     )
     if is_train:
-        logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        if not is_fully_async:
+            logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        else:
+            logger.info(f"Total steps: {len(dataloader) // cfg.trainer.train_batch_size * cfg.trainer.epochs}")
     else:
         logger.info(f"Validation set size: {len(dataloader)}")
 
