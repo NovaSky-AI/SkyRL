@@ -40,16 +40,6 @@ from skyrl_train.utils.profiler import Profiler
 
 
 class MegatronWorker:
-    def check_te_import(self):
-        try:
-            import transformer_engine  # noqa: F401
-        except ImportError:
-            raise ValueError(
-                """
-                transformer_engine is required for using the megatron backend
-            """
-            )
-
     def init_configs(
         self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False
     ):
@@ -173,7 +163,6 @@ class MegatronWorker:
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.check_te_import()
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -532,7 +521,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.check_te_import()
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
 
