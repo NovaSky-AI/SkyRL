@@ -92,16 +92,6 @@ To get started, you can follow the instructions for installing via Docker in the
 
 This ensures that the necessary dependencies needed for Megatron (i.e. ``TransformerEngine``) are installed and don't need to be built on each node for each run, which can be time consuming.
 
-Environment Variables
-~~~~~~~~~~~~~~~~~~~~~
-After following the installation instructions, set the following environment variables for the ``TransformerEngine`` dependency to be correctly picked up by the uv + ray integration (since we currently exclude it from the pyproject.toml file to avoid building it on each node):
-
-.. code-block:: bash
-
-    export SKYRL_PYTHONPATH_EXPORT=1
-    # where TransformerEngine is installed (via pip) on your machine
-    export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
-
 Flash Attention
 ~~~~~~~~~~~~~~~
 In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.5.0``.

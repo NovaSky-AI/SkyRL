@@ -46,11 +46,7 @@ class MegatronWorker:
         except ImportError:
             raise ValueError(
                 """
-                transformer_engine is required for using the megatron backend.
-                For single node training follow the instructions in the pyproject.toml file to install transformer_engine.
-                For multi node training, please install transformer_engine in the docker image, and set the PYTHONPATH
-                to `/home/ray/anaconda3/lib/python3.12/site-packages` or wherever your base installation of
-                transformer_engine lives.
+                transformer_engine is required for using the megatron backend
             """
             )
 
