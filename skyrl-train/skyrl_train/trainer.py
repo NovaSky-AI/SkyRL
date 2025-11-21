@@ -192,14 +192,14 @@ class RayPPOTrainer:
                         self.global_step,
                     )
 
-                    if self.cfg.trainer.step_wise_training:
-                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
-                        uids = [trajectory_id.instance_id for trajectory_id in generator_input["trajectory_ids"]]
-
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+
+                    if self.cfg.trainer.step_wise_training:
+                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
+                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
+                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -727,18 +727,21 @@ class RayPPOTrainer:
         data["advantages"] = advantages
 
         # remove padding while calculating metrics
-        pad_size = data.metadata["pad_size"]
+        pad_size = data.metadata.get("pad_size", 0)
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
-        avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
+        if self.cfg.trainer.step_wise_training:
+            avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
+        else:
+            avg_rewards: float = return_sums.mean().item()
 
         avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
 
-        valid_advantages = torch.masked_select(data["advantages"], data["response_mask"].bool())[
-            : num_samples - pad_size, ...
-        ]
+        valid_advantages = torch.masked_select(
+            data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
+        )
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
 
