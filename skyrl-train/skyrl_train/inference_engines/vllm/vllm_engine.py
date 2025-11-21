@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorResponse,
-    ErrorInfo,
+    # ErrorInfo,  # TODO(tgriggs): Add back after upgrading vllm to 0.10.2
     CompletionRequest,
     CompletionResponse,
 )
@@ -334,7 +334,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         # TODO (erictang000): potentially enable log requests for a debugging mode
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
@@ -478,11 +478,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             return ErrorResponse(
-                error=ErrorInfo(
-                    message=str(e),
-                    type=HTTPStatus.BAD_REQUEST.phrase,
-                    code=HTTPStatus.BAD_REQUEST.value,
-                ),
+                # error=ErrorInfo(
+                message=str(e),
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+                # ),
             ).model_dump()
 
         # 2. Call vllm engine
@@ -500,11 +500,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
             return ErrorResponse(
-                error=ErrorInfo(
-                    message=str(e),
-                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                ),
+                # error=ErrorInfo(
+                message=str(e),
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                # ),
             ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
