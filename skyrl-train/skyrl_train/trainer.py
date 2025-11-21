@@ -625,7 +625,7 @@ class RayPPOTrainer:
                 uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
             ]
 
-        # only use `genrator_output_for_metrics` for metrics calculation
+        # only use `generator_output_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
         mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
             generator_output_for_metrics,
