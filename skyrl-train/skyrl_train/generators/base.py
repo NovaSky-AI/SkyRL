@@ -11,6 +11,9 @@ class TrajectoryID:
     instance_id: str  # Unique identifier for the instance in the dataset
     repetition_id: int  # Which sample/repetition for this UID (0, 1, 2... for GRPO)
 
+    def to_string(self) -> str:
+        return f"{self.instance_id}_{self.repetition_id}"
+
 
 @dataclass
 class BatchMetadata:
@@ -35,6 +38,9 @@ class GeneratorOutput(TypedDict):
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
+    trajectory_ids: Optional[List[TrajectoryID]]
+    # Applicable only for step-wise training
+    is_last_step: Optional[List[bool]]
 
 
 class GeneratorInterface(ABC):
