@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import List
 from loguru import logger
+from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import get_rollout_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -115,6 +116,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
+        # Generate session_id for sticky routing to inference engines
+        # All LLM requests in this trial will share the same session_id
+        session_id = uuid4().hex
+
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
@@ -123,7 +128,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
                     model_name=f"hosted_vllm/{self.model_name}",
-                    kwargs={"api_base": f"{self.base_url}/v1", "key": "fake_key", "max_episodes": self.max_episodes},
+                    kwargs={
+                        "api_base": f"{self.base_url}/v1",
+                        "key": "fake_key",
+                        "max_episodes": self.max_episodes,
+                        "session_id": session_id,
+                    },
                 ),
             )
         elif self.agent_name == "oracle":
