@@ -172,22 +172,7 @@ trainer:
   dump_data_batch: false
   dump_eval_results: true
 
-  # RoPE (Rotary Position Embedding) configuration
-  rope_parameters: 
-    rope_type: null # ['default', 'linear', 'dynamic', 'yarn', 'longrope', 'llama3']
-    rope_theta: null
-    factor: null
-    original_max_position_embeddings: null
-    attention_factor: null
-    beta_fast: null
-    beta_slow: null
-    short_factor: null
-    long_factor: null
-    low_freq_factor: null
-    high_freq_factor: null
-
-  # Note: rope_scaling and rope_theta are deprecated, use rope_parameters instead. See https://huggingface.co/docs/transformers/main/en/internal/rope_utils for more details
-
+  # YaRN:
   rope_scaling: null
   rope_theta: null
   # rope_scaling:
@@ -294,8 +279,6 @@ generator:
   # rope parameters, can be optionally different from the trainer , useful in some cases like with thinking models.
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}
-  rope_parameters: ${trainer.rope_parameters}
-
 
 environment:
   env_class: "gsm8k"
