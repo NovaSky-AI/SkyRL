@@ -71,4 +71,5 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
+  trainer.step_wise_training=true \
   $@
