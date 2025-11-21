@@ -1,12 +1,7 @@
 """
 Run with:
-<<<<<<< HEAD
-export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
-SKYRL_PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
-=======
 export PYTHONPATH=/home/ray/anaconda3/lib/python3.12/site-packages
 SKYRL_PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_megatron_worker.py
->>>>>>> 098674dfbe6dd5a3a31f952a6cd50a92106afaef
 """
 
 import ray
