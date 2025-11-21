@@ -2,10 +2,11 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
-from transformers import Qwen3Config
 
-from tx.layers.lora import LoRAExpert, LoRALinear
+from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
 from tx.layers.util import Param, prepare_routing
+from tx.models.configs import Qwen3Config
+from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
@@ -13,7 +14,7 @@ class RMSNorm(nnx.Module):
     def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.eps = eps
         self.weight = Param(
-            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P(None)), rngs=rngs
+            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), (None,)), rngs=rngs
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -37,58 +38,55 @@ class Qwen3Attention(nnx.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         tp = get_abstract_mesh().shape.get("tp", 1)
-        shard_attention_heads = getattr(config, "shard_attention_heads", True)
+        shard_attention_heads = config.shard_attention_heads
         if shard_attention_heads:
             assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         tp_shard = "tp" if shard_attention_heads else None
-
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
 
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(tp_shard, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, None)),
             rngs=rngs,
         )
 
@@ -102,7 +100,7 @@ class Qwen3Attention(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
@@ -115,10 +113,11 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Concatenate with cache
+        # Handle KV cache
         if kv_cache is not None:
-            k = jnp.concatenate([kv_cache[0], k], axis=1)
-            v = jnp.concatenate([kv_cache[1], v], axis=1)
+            k_cache, v_cache, cache_position = kv_cache
+            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
+            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
 
         updated_cache = (k, v)
 
@@ -139,17 +138,15 @@ class Qwen3Attention(nnx.Module):
 class Qwen3MLP(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
         self.up_proj = LoRALinear(
@@ -158,9 +155,9 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
@@ -169,9 +166,9 @@ class Qwen3MLP(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P("tp", None)),
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             rngs=rngs,
         )
 
@@ -185,37 +182,34 @@ class Qwen3Experts(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
-
         self.gate_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None, "tp")),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None, "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None, "tp")),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
             config.num_experts,
             config.moe_intermediate_size,
             config.hidden_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp", None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp", None)),
             rngs=rngs,
         )
 
@@ -260,7 +254,7 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None)),
             rngs=rngs,
         )
         self.experts = Qwen3Experts(config, dtype=dtype, rngs=rngs)
@@ -305,7 +299,7 @@ class Qwen3DecoderLayer(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -320,8 +314,8 @@ class Qwen3DecoderLayer(nnx.Module):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, adapter_indices=adapter_indices)
-        hidden_states = residual + hidden_states
+        mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
+        hidden_states = residual + mlp_output
 
         return hidden_states, updated_cache
 
@@ -330,12 +324,15 @@ class Qwen3Model(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.embed_tokens = nnx.Embed(
+
+        self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
             dtype=dtype,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
+            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
             rngs=rngs,
         )
         self.layers = nnx.List(
@@ -352,12 +349,12 @@ class Qwen3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-    ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
+    ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
@@ -370,7 +367,7 @@ class Qwen3Model(nnx.Module):
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
+                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
             )
             updated_keys.append(k)
             updated_values.append(v)
@@ -379,11 +376,14 @@ class Qwen3Model(nnx.Module):
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        return {
-            "last_hidden_state": hidden_states,
-            "hidden_states": all_hidden_states,
-            "kv_cache": KVCache(keys=updated_keys, values=updated_values),
-        }
+        # Increment cache_position if cache exists, or use sequence length for new cache
+        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
+
+        return ModelOutput(
+            last_hidden_state=hidden_states,
+            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
+            hidden_states=all_hidden_states if output_hidden_states else None,
+        )
 
 
 class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
@@ -392,13 +392,15 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
         if not self.config.tie_word_embeddings:
-            self.lm_head = nnx.Linear(
+            self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+                max_lora_adapters=config.max_lora_adapters,
+                max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
 
@@ -416,7 +418,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-    ) -> dict[str, jax.Array | list[jax.Array] | KVCache]:
+    ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
 
@@ -428,10 +430,18 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = outputs["last_hidden_state"]
+        hidden_states = outputs.last_hidden_state
         if self.config.tie_word_embeddings:
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
-        return {"logits": logits, **outputs}
+        return CausalLMOutput(
+            logits=logits,
+            last_hidden_state=outputs.last_hidden_state,
+            kv_cache=outputs.kv_cache,
+            hidden_states=outputs.hidden_states,
+        )
+
+
+Qwen3MoeForCausalLM = Qwen3ForCausalLM

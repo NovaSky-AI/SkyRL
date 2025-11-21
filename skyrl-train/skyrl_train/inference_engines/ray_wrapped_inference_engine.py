@@ -25,6 +25,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     def tp_size(self):
         return ray.get(self.inference_engine_actor.tp_size.remote())
 
+    def pp_size(self):
+        return ray.get(self.inference_engine_actor.pp_size.remote())
+
     def dp_size(self):
         return ray.get(self.inference_engine_actor.dp_size.remote())
 
@@ -59,6 +62,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)
 
+    async def abort_generation(self) -> None:
+        return await self.inference_engine_actor.abort_generation.remote()
+
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
@@ -70,6 +76,7 @@ def create_ray_wrapped_inference_engines(
     enable_prefix_caching: bool,
     enforce_eager: bool,
     expert_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
     shared_pg=None,
     gpu_memory_utilization=None,
@@ -83,7 +90,10 @@ def create_ray_wrapped_inference_engines(
     enable_lora=False,
     max_lora_rank=64,
     max_loras=1,
+    fully_sharded_loras=False,
     engine_init_kwargs: Dict[str, Any] = {},
+    rope_scaling: Dict[str, Any] = {},
+    rope_theta: float | None = None,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -106,19 +116,19 @@ def create_ray_wrapped_inference_engines(
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
-    # NOTE: we use the ray backend for tensor parallel size > 1 to explicitly manage resource allocation
+    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
     # TODO: we should be able to support mp backend by allocating resources at engine level
-    distributed_executor_backend = "uni" if tensor_parallel_size == 1 else "ray"
+    distributed_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
     data_parallel_backend = "mp"
     use_hybrid_engine = shared_pg is not None
-    num_gpus_per_actor = int(tensor_parallel_size == 1)
+    num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
 
-    if use_hybrid_engine and tensor_parallel_size == 1:
+    if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
         # Every worker will use 0.2 GPU, so that we can schedule
         # inference and training workers on the same GPUs.
         num_gpus_per_actor = 0.2
 
-    per_engine_gpu_count = tensor_parallel_size * data_parallel_size
+    per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
     if not use_hybrid_engine:
         # Create a big placement group to ensure that all inference engines are packed
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
@@ -141,17 +151,31 @@ def create_ray_wrapped_inference_engines(
                 "enable_lora": enable_lora,
                 "max_lora_rank": max_lora_rank,
                 "max_loras": max_loras,
+                "fully_sharded_loras": fully_sharded_loras,
             }
+
+            rope_engine_kwargs = {}
+            if rope_scaling:
+                rope_engine_kwargs["rope_scaling"] = rope_scaling
+                if "max_model_len" not in engine_init_kwargs:
+                    rope_factor = rope_scaling.get("factor", None)
+                    rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
+                    assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
+                    assert (
+                        rope_max_pos is not None
+                    ), "Please provide rope `original_max_position_embeddings` to compute model max length"
+                    rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
+            if rope_theta is not None:
+                rope_engine_kwargs["rope_theta"] = rope_theta
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
 
-                # Contiguous TP slice reserved for a single DP rank.
-                base_dp_pg_index = base_pg_index + dp_rank * tensor_parallel_size
+                # Contiguous TP*PP slice reserved for a single DP rank.
+                tp_pp_size = tensor_parallel_size * pipeline_parallel_size
+                base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
                 dp_rank_bundles = (
-                    list(range(base_dp_pg_index, base_dp_pg_index + tensor_parallel_size))
-                    if tensor_parallel_size > 1
-                    else None
+                    list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
                 )
                 dp_rank_sched = PlacementGroupSchedulingStrategy(
                     placement_group=shared_pg,
@@ -180,6 +204,7 @@ def create_ray_wrapped_inference_engines(
                     enforce_eager=enforce_eager,
                     worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
                     tensor_parallel_size=tensor_parallel_size,
+                    pipeline_parallel_size=pipeline_parallel_size,
                     enable_expert_parallel=expert_parallel_size > 1,
                     distributed_executor_backend=distributed_executor_backend,
                     seed=seed + i * data_parallel_size + dp_rank,
@@ -198,6 +223,7 @@ def create_ray_wrapped_inference_engines(
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
+                    **rope_engine_kwargs,
                 )
                 inference_engine_actors.append(engine)
         elif backend == "sglang":

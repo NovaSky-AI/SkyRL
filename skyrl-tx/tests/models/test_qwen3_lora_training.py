@@ -2,19 +2,20 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import optax
-from transformers import AutoConfig
 from huggingface_hub import snapshot_download
+from transformers import PretrainedConfig
 
-from tx.models import Qwen3ForCausalLM
+from tx.models.configs import Qwen3Config
+from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
+from tx.tinker.types import LoraConfig
 
 
 def test_lora_training():
     base_model = "Qwen/Qwen3-0.6B"
-    config = AutoConfig.from_pretrained(base_model)
-    config.max_lora_adapters = 5
-    config.max_lora_rank = 32
+    base_config = PretrainedConfig.from_pretrained(base_model)
+    config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
@@ -23,8 +24,8 @@ def test_lora_training():
         load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
-        update_adapter_config(model, adapter_index=0, lora_rank=16, lora_alpha=16)
-        update_adapter_config(model, adapter_index=1, lora_rank=8, lora_alpha=8)
+        update_adapter_config(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16))
+        update_adapter_config(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8))
 
         # Create optimizer that only targets LoRA A and B parameters
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
@@ -37,7 +38,7 @@ def test_lora_training():
 
         def loss_fn(model, input_ids, target_ids, attention_mask):
             outputs = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            logits = outputs["logits"]
+            logits = outputs.logits
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
         # Compute gradients - we need to use nnx.split to separate parameters

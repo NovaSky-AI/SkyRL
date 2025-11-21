@@ -23,6 +23,9 @@ class RequestType(str, Enum):
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
 
+    # External request that should not be processed by the engine
+    EXTERNAL = "external"
+
 
 class CheckpointType(str, Enum):
     """Type of checkpoint."""
@@ -60,6 +63,9 @@ class AdamParams(BaseModel):
 class LoraConfig(BaseModel):
     rank: int
     alpha: float
+    train_attn: bool = True
+    train_mlp: bool = True
+    train_unembed: bool = False
 
 
 class CreateModelInput(BaseModel):
@@ -107,7 +113,7 @@ class ForwardBackwardOutput(BaseModel):
     metrics: dict
 
 
-class ForwardBackwardError(BaseModel):
+class ErrorResponse(BaseModel):
     error: str
     status: str
 
@@ -151,11 +157,13 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
+    stop: list[int] | None = None
 
 
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+    loaded_checkpoint_id: str | None = None
 
 
 class SampleInput(BaseModel):
@@ -179,4 +187,5 @@ class SampleOutput(BaseModel):
 
 # Metrics tracked in the engine
 class EngineMetrics(BaseModel):
-    seq_len_jit_times: dict[int, float] = {}
+    train_seq_len_jit_times: dict[int, float] = {}
+    sample_seq_len_jit_times: dict[int, float] = {}

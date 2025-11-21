@@ -1,7 +1,12 @@
 """
 Run with:
+<<<<<<< HEAD
 export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
 SKYRL_PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra vllm --extra mcore -- pytest tests/gpu/test_megatron_worker.py
+=======
+export PYTHONPATH=/home/ray/anaconda3/lib/python3.12/site-packages
+SKYRL_PYTHONPATH_EXPORT=1 uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_megatron_worker.py
+>>>>>>> 098674dfbe6dd5a3a31f952a6cd50a92106afaef
 """
 
 import ray
@@ -178,7 +183,7 @@ def test_megatron_policy_weight_sync():
         ("policy", 2, 2, 1, 1, None, 4, True),
         ("policy", 1, 1, 2, 1, None, 2, True),
         ("policy", 2, 2, 2, 1, None, 8, True),
-        ("policy", 4, 2, 1, 4, None, 8, True),
+        ("policy", 4, 2, 1, 4, 1, 8, True),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -288,21 +293,25 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "use_entropy_loss"),
     [
-        ("policy", 2, 2, 1, 1, 1, 4, True),
-        ("policy", 2, 2, 1, 1, 1, 4, False),
-        ("policy", 2, 2, 2, 1, 1, 8, True),
-        ("policy", 2, 1, 1, 8, 1, 8, True),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False),
+        ("policy", 2, 2, 1, 1, 1, 4, True, True),
+        ("policy", 2, 2, 1, 1, 1, 4, False, False),
+        ("policy", 2, 2, 2, 1, 1, 8, True, False),
+        ("policy", 2, 1, 1, 8, 1, 8, True, False),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
+        "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_unpacked",
         "tp2_pp2_cp2_policy_seq_packing",
         "tp4_pp2_cp1_ep8_etp1_policy_seq_packing",
     ],
 )
-async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing):
+async def test_megatron_train(
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, use_entropy_loss
+):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
@@ -317,6 +326,9 @@ async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
+    if use_entropy_loss:
+        cfg.trainer.algorithm.use_entropy_loss = True
+        cfg.trainer.algorithm.entropy_loss_coef = 0.01
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -379,7 +391,7 @@ async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp
     print("\n\n")
     print("fsdp results: ", results_fsdp[0])
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl"]
+    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "final_loss"]
     for i, result in enumerate(results_fsdp):
         for k in keys_to_compare:
             if k == "policy_entropy":
@@ -395,7 +407,7 @@ async def test_megatron_train(ray_init_fixture, worker_type, tp, pp, cp, ep, etp
 @pytest.mark.parametrize(
     ("worker_type", "tp", "pp", "gpus_per_node"),
     [
-        ("policy", 1, 4, 4),
+        ("policy", 1, 2, 2),
     ],
 )
 async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
@@ -419,7 +431,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.micro_train_batch_size_per_gpu = 4
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = True
+    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = False
     cfg.trainer.policy.megatron_config.torch_profiler_config.ranks = [0]
     cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
 

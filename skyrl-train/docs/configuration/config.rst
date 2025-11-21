@@ -210,6 +210,13 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
+.. warning::
+  
+  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
+
+  We recommend leaving this setting to ``false``
+
+
 .. _deepspeed-configurations:
 
 DeepSpeed Configuration
@@ -241,7 +248,7 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.weight_decay``: L2 regularization strength for AdamW.
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
-- ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
+- ``optimizer_config.num_warmup_steps``: Number of mini-batch steps to warmup the optimizer for.
 - ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from `Huggingface <https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType>`_.
 
 Policy Configuration
@@ -331,6 +338,8 @@ Reference Model Configuration
 .. code-block:: yaml
 
     ref:
+      model:
+        path: ${trainer.policy.model.path}
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
         cpu_offload: false
@@ -338,6 +347,7 @@ Reference Model Configuration
         fsdp_size: -1
       sequence_parallel_size: 1
 
+- ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
@@ -398,9 +408,9 @@ Algorithm Configuration
         ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
       # cispo parameters (only used when policy_loss_type: "cispo")
-      cispo:
-        clip_low: 0.2 # lower bound for importance sampling ratio clipping
-        clip_high: 0.2 # upper bound for importance sampling ratio clipping
+      cispo: 
+        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+        cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
       # value loss parameters
       value_clip: 0.2
@@ -472,8 +482,8 @@ Algorithm Configuration
 
 - ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
 
-  - ``clip_low``: Lower bound for importance sampling ratio clipping.
-  - ``clip_high``: Upper bound for importance sampling ratio clipping.
+  - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
+  - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
 
 
 Policy Loss Formulation
@@ -517,6 +527,7 @@ Generator Configuration
     backend: "vllm"
     weight_sync_backend: "nccl"
     inference_engine_tensor_parallel_size: 4
+    inference_engine_pipeline_parallel_size: 1
     inference_engine_expert_parallel_size: 1  
     inference_engine_data_parallel_size: 1
     n_samples_per_prompt: 5
@@ -594,8 +605,9 @@ Inference Engine Configuration
 - ``generator.model_dtype``: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
 - ``generator.async_engine``:  Whether to use an asynchronous/ offline inference engine. Applicable only when ``backend="vllm"``.
 - ``generator.inference_engine_tensor_parallel_size``: Tensor parallel size for the inference engine.
+- ``generator.inference_engine_pipeline_parallel_size``: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
 - ``generator.inference_engine_expert_parallel_size``: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
-- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
+- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
 - ``generator.gpu_memory_utilization``: GPU memory utilization for the inference engine. Applicable only for ``run_engines_locally=true``.
 - ``generator.vllm_v1_disable_multiproc``: If ``true``, this will set ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
 - ``generator.enable_prefix_caching``: Whether to enable prefix caching for the inference engine. Applicable only when ``backend="vllm"``. This can be left to the default ``true`` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
