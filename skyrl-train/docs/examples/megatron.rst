@@ -94,7 +94,7 @@ This ensures that the necessary dependencies needed for Megatron (i.e. ``Transfo
 
 Flash Attention
 ~~~~~~~~~~~~~~~
-In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.5.0``.
+In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.7.0``.
 This is handled in the ``pyproject.toml`` file for the ``mcore`` extra.
 
 Configuration
