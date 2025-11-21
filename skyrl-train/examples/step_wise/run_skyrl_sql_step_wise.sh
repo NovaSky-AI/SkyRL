@@ -19,7 +19,7 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 MAX_TURNS=6
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm --with ray==2.48.0 -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -63,7 +63,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
-  trainer.project_name="skyrlsql_multiturn_stepwise" \
+  trainer.project_name="stepwise_multiturn" \
   trainer.run_name="skyrlsql_multiturn_test_7b" \
   trainer.resume_mode=null \
   trainer.ckpt_path=$CKPT_PATH \
