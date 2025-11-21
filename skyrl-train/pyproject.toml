@@ -149,7 +149,6 @@ mcore = [
   "torch==2.7.1",
   "flashinfer-python",
   "torchvision",
-  "mbridge==0.15.1",
   "megatron-bridge==0.1.0rc4",
   "megatron-core==0.14.0",
 ]
