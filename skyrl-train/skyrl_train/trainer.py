@@ -1,4 +1,3 @@
-import asyncio
 import math
 import os
 import shutil
@@ -221,7 +220,7 @@ class RayPPOTrainer:
 
         return eval_metrics
 
-    def train(self):
+    async def train(self):
         """
         Main training loop for PPO
         """
@@ -255,9 +254,9 @@ class RayPPOTrainer:
         # Eval before training
         inference_engine_is_active = False
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
-            with self.eval_weights_manager:
+            async with self.eval_weights_manager:
                 with Timer("eval", self.all_timings):
-                    eval_metrics = asyncio.run(self.eval())
+                    eval_metrics = await self.eval()
                     self.tracker.log(eval_metrics, step=self.global_step, commit=True)
             inference_engine_is_active = True
 
@@ -290,10 +289,10 @@ class RayPPOTrainer:
                     # in which case the inference engine is active and the policy model is on CPU.
                     # After exiting the context manager, the policy model is on CPU with `colocate_all` enabled
                     # Policy model stays on cpu because the training loop will carefully backload different models depending on colocation strategy
-                    with weights_manager:
+                    async with weights_manager:
                         # 1.1 generation phase
                         with Timer("generate", self.all_timings):
-                            generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+                            generator_output: GeneratorOutput = await self.generate(generator_input)
 
                         # dynamic sampling
                         if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -368,9 +367,9 @@ class RayPPOTrainer:
                     self.global_step % self.cfg.trainer.eval_interval == 0
                     or self.global_step == self.total_training_steps
                 ):
-                    with self.eval_weights_manager:
+                    async with self.eval_weights_manager:
                         with Timer("eval", self.all_timings):
-                            eval_metrics = asyncio.run(self.eval())
+                            eval_metrics = await self.eval()
                             self.all_metrics.update(eval_metrics)
                     inference_engine_is_active = True
 
@@ -391,7 +390,7 @@ class RayPPOTrainer:
 
             # Ensure that the policy model is on GPU at the end of every epoch
             if inference_engine_is_active and self.cfg.trainer.placement.colocate_all:
-                asyncio.run(self.inference_engine_client.sleep())
+                await self.inference_engine_client.sleep()
                 self.policy_model.backload_to_gpu()
                 inference_engine_is_active = False
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:

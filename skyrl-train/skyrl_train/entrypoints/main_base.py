@@ -22,6 +22,7 @@ import os
 import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
+import asyncio
 import multiprocessing as mp
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
@@ -275,7 +276,7 @@ class BasePPOExp:
     def run(self):
         trainer = self._setup_trainer()
         # Start the training loop
-        trainer.train()
+        asyncio.run(trainer.train())
 
 
 @ray.remote(num_cpus=1)
