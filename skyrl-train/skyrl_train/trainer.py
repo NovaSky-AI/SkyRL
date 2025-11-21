@@ -522,6 +522,11 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
 
+        if self.cfg.trainer.step_wise_training:
+            # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
+            # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
+            uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
+
         (
             sequences_tensor,
             attention_masks_tensor,
