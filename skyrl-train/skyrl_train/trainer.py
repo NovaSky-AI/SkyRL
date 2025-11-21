@@ -192,11 +192,15 @@ class RayPPOTrainer:
                         self.global_step,
                     )
 
+                    if self.cfg.trainer.step_wise_training:
+                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
+                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
+                        uids = [trajectory_id.instance_id for trajectory_id in generator_input["trajectory_ids"]]
+
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
 
-                    print("Number of samples:", len(generator_output["response_ids"]))
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
                         generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
@@ -521,11 +525,6 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-
-        if self.cfg.trainer.step_wise_training:
-            # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-            # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
-            uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
 
         (
             sequences_tensor,

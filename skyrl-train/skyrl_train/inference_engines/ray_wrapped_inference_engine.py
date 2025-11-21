@@ -92,8 +92,7 @@ def create_ray_wrapped_inference_engines(
     max_loras=1,
     fully_sharded_loras=False,
     engine_init_kwargs: Dict[str, Any] = {},
-    rope_scaling: Dict[str, Any] = {},
-    rope_theta: float | None = None,
+    rope_parameters: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -155,18 +154,26 @@ def create_ray_wrapped_inference_engines(
             }
 
             rope_engine_kwargs = {}
-            if rope_scaling:
-                rope_engine_kwargs["rope_scaling"] = rope_scaling
-                if "max_model_len" not in engine_init_kwargs:
-                    rope_factor = rope_scaling.get("factor", None)
-                    rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
-                    assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
-                    assert (
-                        rope_max_pos is not None
-                    ), "Please provide rope `original_max_position_embeddings` to compute model max length"
-                    rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
-            if rope_theta is not None:
-                rope_engine_kwargs["rope_theta"] = rope_theta
+            if rope_parameters:
+                rope_theta = rope_parameters.get("rope_theta", None)
+                rope_type = rope_parameters.get("rope_type", None)
+
+                # TODO(dev): remove this once vLLM supports updated rope_parameters, for now we use the old rope config format (rope_scaling, rope_theta) in vLLM.
+                if rope_type:
+                    rope_scaling = rope_parameters.copy()
+                    rope_scaling.pop("rope_theta", None)
+                    rope_engine_kwargs["rope_scaling"] = rope_scaling
+
+                    if "max_model_len" not in engine_init_kwargs:
+                        rope_factor = rope_scaling.get("factor", None)
+                        rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
+                        assert (
+                            rope_factor is not None and rope_max_pos is not None
+                        ), "Both `factor` and `original_max_position_embeddings` must be provided for rope scaling when `max_model_len` is not set."
+                        rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
+
+                if rope_theta is not None:
+                    rope_engine_kwargs["rope_theta"] = rope_theta
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
