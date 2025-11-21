@@ -90,9 +90,8 @@ Setting up the Docker image
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron`` image instead of the default image.
 
-This ensures that the necessary dependencies needed for Megatron (i.e. ``TransformerEngine``) are installed and don't need to be built on each node for each run, which can be time consuming.
+This ensures that the necessary dependencies needed for Megatron are installed and don't need to be built on each node for each run, which can be time consuming. Previously, we recommended setting PYTHONPATH to the location of TransformerEngine installation, but this is no longer necessary.
 
-Flash Attention
 ~~~~~~~~~~~~~~~
 In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.7.0``.
 This is handled in the ``pyproject.toml`` file for the ``mcore`` extra.
