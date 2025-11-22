@@ -1,0 +1,15 @@
+baseURL = 'https://novasky-ai.github.io/SkyRL/'
+languageCode = 'en-us'
+title = 'SkyRL'
+
+[params]
+  description = 'A modular full-stack RL library for training real-world agents with LLMs'
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    style = 'github'
+    lineNos = false
+    lineNumbersInTable = false
