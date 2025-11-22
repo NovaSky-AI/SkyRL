@@ -19,7 +19,7 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 MAX_TURNS=6
 
-uv run --isolated --extra vllm --with ray==2.48.0 -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
