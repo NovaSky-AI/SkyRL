@@ -109,21 +109,28 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     return data
 
 
-def test_megatron_policy_weight_sync():
+@pytest.mark.parametrize(
+    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp"),
+    [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None)],
+    ids=["colocate_all", "non_colocated"],
+)
+def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
         cfg = get_test_actor_config(model_name=MODEL_NAME)
-        cfg.trainer.placement.colocate_all = True
+        cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = 4
+        cfg.generator.inference_engine_tensor_parallel_size = inference_tp
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = megatron_tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = megatron_pp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = megatron_ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
@@ -526,6 +533,7 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer = False
     actor_group = init_worker_with_type(
         worker_type,
         shared_pg=None,

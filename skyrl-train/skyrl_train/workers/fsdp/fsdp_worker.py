@@ -195,7 +195,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 torch.distributed.barrier()
         # CUDA IPC
         else:
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
             current_size = 0
 
             module_to_params: Dict[str, List[str]] = {}
@@ -248,7 +248,13 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                             await inference_engine_client.update_named_weights(weights_update_request)
 
                             current_size = 0
-                            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                            weights_update_request = {
+                                "names": [],
+                                "dtypes": [],
+                                "shapes": [],
+                                "extras": [],
+                                "packed": False,
+                            }
                             # force collect any sent tensors if possible to be memory efficient
                             torch.cuda.ipc_collect()
                     torch.distributed.barrier()
