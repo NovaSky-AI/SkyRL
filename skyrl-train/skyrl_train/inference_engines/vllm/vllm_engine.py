@@ -143,6 +143,8 @@ class WorkerWrap:
             assert (
                 str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
             ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
+            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
+            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
 
             device = torch.cuda.current_device()
             props = torch.cuda.get_device_properties(device)
