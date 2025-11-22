@@ -4,31 +4,12 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
-from tx.layers.util import Param, prepare_routing
+from tx.layers.util import prepare_routing
 from tx.models.configs import Qwen3Config
+from tx.layers.common import RMSNorm, SwiGLUMLP
+from tx.layers.common import apply_rope
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
-
-
-class RMSNorm(nnx.Module):
-    def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.eps = eps
-        self.weight = Param(
-            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), (None,)), rngs=rngs
-        )
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-        return self.weight * x / rms
-
-
-def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta: int) -> jax.Array:
-    fraction = 2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32) / head_dim
-    timescale = jnp.pow(theta, fraction)
-    x = (position_ids[..., None] / timescale[None, None, :])[..., None, :]
-    sin, cos = jnp.sin(x), jnp.cos(x)
-    a, b = jnp.split(inputs, 2, axis=-1)
-    return jnp.concatenate([a * cos - b * sin, b * cos + a * sin], axis=-1).astype(inputs.dtype)
 
 
 class Qwen3Attention(nnx.Module):
@@ -133,49 +114,6 @@ class Qwen3Attention(nnx.Module):
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
-
-
-class Qwen3MLP(nnx.Module):
-
-    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.gate_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.up_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.down_proj = LoRALinear(
-            config.intermediate_size,
-            config.hidden_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-
-    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        gate_out = self.gate_proj(x, adapter_indices)
-        up_out = self.up_proj(x, adapter_indices)
-        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
 class Qwen3Experts(nnx.Module):
@@ -290,7 +228,16 @@ class Qwen3DecoderLayer(nnx.Module):
         if getattr(config, "num_experts", None):
             self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
         else:
-            self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
+            max_lora_adapters = getattr(config, "max_lora_adapters", 0)
+            max_lora_rank = getattr(config, "max_lora_rank", 8)
+            self.mlp = SwiGLUMLP(
+                config.hidden_size,
+                config.intermediate_size,
+                max_lora_adapters=max_lora_adapters,
+                max_lora_rank=max_lora_rank,
+                dtype=dtype,
+                rngs=rngs,
+            )
 
     def __call__(
         self,
