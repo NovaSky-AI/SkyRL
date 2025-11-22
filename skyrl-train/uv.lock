@@ -1820,15 +1820,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mbridge"
-version = "0.15.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/65/3f/04534fb2b4ddf6b293ee41f839de8ae6542ef2dc1b32c7d25a4b5b18c1bb/mbridge-0.15.1.tar.gz", hash = "sha256:26028dbe7dc9193c6c6b3de56e82691c9a484f46ded1ed18a41f2747a08e8104", size = 99287, upload-time = "2025-09-22T09:48:30.141Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/dc/8208746f41ff08d0b6eb8c261569d57af97648ee0d1631ea273e68c627dc/mbridge-0.15.1-py3-none-any.whl", hash = "sha256:5c7c007c2eb13bb2d0ce9bd6b313537024d0a7fad52179ff367635eafe5cd4cd", size = 122168, upload-time = "2025-09-22T09:48:28.384Z" },
-]
-
-[[package]]
 name = "mcp"
 version = "1.12.4"
 source = { registry = "https://pypi.org/simple" }
@@ -4334,7 +4325,6 @@ flashrl = [
 ]
 mcore = [
     { name = "flash-attn", version = "2.7.4.post1", source = { registry = "https://pypi.org/simple" } },
-    { name = "mbridge" },
     { name = "megatron-bridge" },
     { name = "megatron-core" },
     { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
@@ -4397,7 +4387,6 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'miniswe'" },
     { name = "litellm", extras = ["proxy"], marker = "extra == 'sandboxes'", specifier = ">=1.67.5" },
     { name = "loguru" },
-    { name = "mbridge", marker = "extra == 'mcore'", specifier = "==0.15.1" },
     { name = "megatron-bridge", marker = "extra == 'mcore'", specifier = "==0.1.0rc4" },
     { name = "megatron-core", marker = "extra == 'mcore'", specifier = "==0.14.0" },
     { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
