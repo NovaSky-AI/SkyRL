@@ -622,7 +622,7 @@ class RayPPOTrainer:
             - `["sequences"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["response_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["loss_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size"]
+            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `.metadata["uids"]`: List[str]
 
@@ -702,7 +702,7 @@ class RayPPOTrainer:
         Adds:
             - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size"]
+            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
         data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
 

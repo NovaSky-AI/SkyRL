@@ -41,6 +41,19 @@ class EngineConfig(BaseModel):
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
     )
+    external_inference_url: str | None = Field(
+        default=None,
+        description="URL of the external inference engine. If set, sample requests will be sent to the external engine instead (currently only VLLM is supported).",
+        json_schema_extra={"argparse_type": str},
+    )
+    external_inference_api_key: str = Field(
+        default="EMPTY",
+        description="API key for an external inference engine. If not provided will use vLLM 'EMPTY' key convention",
+    )
+    external_inference_lora_base: Path = Field(
+        default=Path("/tmp/lora_models"),
+        description="Directory where LoRA models will be extracted for external inference engines",
+    )
 
 
 def convert_env_var(env_name: str, env_value: str, expected_type: type):
