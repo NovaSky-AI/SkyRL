@@ -6,7 +6,7 @@ from transformers import LlamaConfig
 
 from tx.layers.lora import LoRALinear
 from tx.layers.common import RMSNorm, SwiGLUMLP, apply_rope
-from tx.models.outputs import CausalLMOutput, ModelOutput
+from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 

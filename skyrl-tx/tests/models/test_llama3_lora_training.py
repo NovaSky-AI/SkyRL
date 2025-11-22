@@ -8,6 +8,7 @@ from transformers import LlamaConfig
 from tx.models import Llama3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
+from tx.tinker.types import LoraConfig
 
 
 def test_lora_training():
@@ -25,8 +26,8 @@ def test_lora_training():
         load_safetensors(checkpoint_path, base_config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
-        update_adapter_config(model, adapter_index=0, lora_rank=16, lora_alpha=16)
-        update_adapter_config(model, adapter_index=1, lora_rank=8, lora_alpha=8)
+        update_adapter_config(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16))
+        update_adapter_config(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8))
 
         # Create optimizer that only targets LoRA A and B parameters
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)

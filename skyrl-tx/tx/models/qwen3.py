@@ -6,9 +6,9 @@ from jax.sharding import get_abstract_mesh
 from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
 from tx.layers.util import prepare_routing
 from tx.models.configs import Qwen3Config
-from tx.layers.common import RMSNorm, SwiGLU
-, apply_rope
-from tx.models.outputs import CausalLMOutput, ModelOutput
+from tx.layers.common import RMSNorm, SwiGLUMLP
+from tx.layers.common import apply_rope
+from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
