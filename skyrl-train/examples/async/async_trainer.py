@@ -47,9 +47,10 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        start_epoch = self.global_step // len(self.train_dataloader)
         # Start from step 1
         self.global_step += 1
-        for epoch in range(self.cfg.trainer.epochs):
+        for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # while this is just off by one, you can image a more general queue based approach
             # where the generation buffer holds a list of objects that the trainer can read from
             # bit by bit.
