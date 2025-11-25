@@ -54,11 +54,18 @@ def log_example(
     safe_prompt = prompt.replace("<", "\\<")
     safe_response = response.replace("<", "\\<")
 
+    def colorize_lines(text: str, start_tag: str, end_tag: str) -> str:
+        # Apply color tags to each line individually to handle Ray's line prefixing
+        return "\n".join(f"{start_tag}{line}{end_tag}" for line in text.splitlines())
+
+    colored_prompt = colorize_lines(safe_prompt, prompt_color, prompt_end_color)
+    colored_response = colorize_lines(safe_response, response_color, response_end_color)
+
     log_msg = (
         f"Example:\n"
-        f"  Input: {prompt_color}{safe_prompt}{prompt_end_color}\n"
+        f"  Input: {colored_prompt}\n"
         f"  Output (Reward: {reward_str}):\n"
-        f"{response_color}{safe_response}{response_end_color}"
+        f"{colored_response}"
     )
 
     logger.opt(colors=True).info(log_msg)
