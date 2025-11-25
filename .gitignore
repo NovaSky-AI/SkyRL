@@ -30,7 +30,6 @@ docs/_spelling/
 # .env files inside directories can be ignored
 /skyrl-train/.env
 /skyrl-gym/.env 
-/skyrl-train/tests/gpu/gpu_ci/distributed/test_rope_parameters.py
 
 /skyrl_train/.venv
 /skyrl-gym/.venv
