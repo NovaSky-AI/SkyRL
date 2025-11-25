@@ -649,12 +649,20 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
 
 
 def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, Any]]:
-
     rope_scaling = trainer_cfg.get("rope_scaling", None)
     rope_theta = trainer_cfg.get("rope_theta", None)
+    has_old_config = rope_scaling is not None or rope_theta is not None
 
-    # If rope_scaling or rope_theta are set, build rope_parameters from them
-    if rope_scaling is not None or rope_theta is not None:
+    rope_parameters_new = trainer_cfg.get("rope_parameters", None)
+    has_new_config = rope_parameters_new is not None
+
+    if has_old_config and has_new_config:
+        logger.warning(
+            "Both old ('rope_scaling', 'rope_theta') and new ('rope_parameters') RoPE configs are provided. "
+            "Prioritizing the old config for backward compatibility. Please migrate to 'rope_parameters'."
+        )
+
+    if has_old_config:
         rope_parameters = {}
         if rope_scaling is not None:
             rope_scaling_dict = (
@@ -662,11 +670,13 @@ def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, An
             )
             if isinstance(rope_scaling_dict, dict):
                 rope_parameters.update(rope_scaling_dict)
+            else:
+                logger.warning(f"Ignoring 'rope_scaling' as it is not a dictionary. Found: {rope_scaling_dict}")
         if rope_theta is not None:
             rope_parameters["rope_theta"] = rope_theta
         return rope_parameters
 
-    elif "rope_parameters" in trainer_cfg and trainer_cfg.rope_parameters is not None:
-        return OmegaConf.to_container(trainer_cfg.rope_parameters)
+    elif has_new_config:
+        return OmegaConf.to_container(rope_parameters_new)
     else:
         return None
