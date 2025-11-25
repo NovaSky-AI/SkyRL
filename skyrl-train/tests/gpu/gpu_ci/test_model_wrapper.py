@@ -278,16 +278,16 @@ def test_rope_parameters_set_on_config():
             patch("skyrl_train.model_wrapper.AutoConfig") as mock_config_class,
             patch("skyrl_train.model_wrapper.AutoModelForCausalLM") as mock_model_class,
         ):
-            # Create a mock config object
+
             mock_config = MagicMock()
             mock_config_class.from_pretrained.return_value = mock_config
 
-            # Create a mock model
             mock_model = MagicMock()
             mock_model_class.from_pretrained.return_value = mock_model
 
             # Initialize HFModelWrapper with rope_parameters
-            wrapper = HFModelWrapper(
+            # We don't need to use the wrapper, just need to trigger initialization to test the mocks
+            _ = HFModelWrapper(
                 pretrain_or_model=MODEL_NAME,
                 use_flash_attention_2=False,
                 bf16=False,
