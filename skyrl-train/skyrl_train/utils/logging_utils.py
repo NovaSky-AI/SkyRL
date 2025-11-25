@@ -43,11 +43,22 @@ def log_example(
     prompt_color = "<blue>"
     prompt_end_color = "</blue>"
 
+    # Escape tags in content to prevent loguru from interpreting them as color directives
+    # We only need to escape the opening bracket '<'
+    # Ensure inputs are strings
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
+    if not isinstance(response, str):
+        response = str(response)
+
+    safe_prompt = prompt.replace("<", "\\<")
+    safe_response = response.replace("<", "\\<")
+
     log_msg = (
-        f"AKRENTSEL Example:\n"
-        f"  Input: {prompt_color}{prompt}{prompt_end_color}\n"
+        f"Example:\n"
+        f"  Input: {prompt_color}{safe_prompt}{prompt_end_color}\n"
         f"  Output (Reward: {reward_str}):\n"
-        f"{response_color}{response}{response_end_color}"
+        f"{response_color}{safe_response}{response_end_color}"
     )
 
     logger.opt(colors=True).info(log_msg)

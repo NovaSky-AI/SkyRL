@@ -14,7 +14,6 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from collections import defaultdict
-from collections import defaultdict
 
 import numpy as np
 from skyrl_train.dataset import PromptDataset
