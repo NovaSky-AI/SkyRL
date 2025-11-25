@@ -44,10 +44,10 @@ def log_example(
     prompt_end_color = "</blue>"
 
     log_msg = (
-        f"Example:\n"
+        f"AKRENTSEL Example:\n"
         f"  Input: {prompt_color}{prompt}{prompt_end_color}\n"
         f"  Output (Reward: {reward_str}):\n"
         f"{response_color}{response}{response_end_color}"
     )
 
-    logger.info(log_msg)
+    logger.opt(colors=True).info(log_msg)
