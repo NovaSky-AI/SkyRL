@@ -681,4 +681,4 @@ def get_rope_parameters_config(trainer_cfg: DictConfig) -> dict[str, Any]:
     elif has_new_config:
         return OmegaConf.to_container(rope_parameters_new, resolve=True) or {}
     else:
-        return {}None
+        return {}
