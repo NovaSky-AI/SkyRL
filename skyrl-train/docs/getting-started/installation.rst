@@ -39,7 +39,7 @@ We provide a docker image with the base dependencies ``novaskyai/skyrl-train-ray
     cd SkyRL/skyrl-train
 
 
-That is it! You should now be able to run our :doc:`quick start example <quickstart>`.
+That is it! After installing dependencies and initializing the ray cluster (see below), you should now be able to run our :doc:`quick start example <quickstart>`.
 
 .. warning::
 
