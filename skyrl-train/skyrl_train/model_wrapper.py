@@ -110,18 +110,21 @@ class HFModelWrapper(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
-            rope_parameters_kwargs = {}
-            if rope_parameters:
-                rope_parameters_kwargs["rope_parameters"] = rope_parameters
+            # TODO(dev): check if more elegant solution rather than config first and set rope_parameters on it
+            config = AutoConfig.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+            )
+            config.rope_parameters = rope_parameters
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
+                config=config,
                 trust_remote_code=True,
                 attn_implementation=self.attn_implementation,
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
-                **rope_parameters_kwargs,
             )
 
             # gpt oss
