@@ -428,7 +428,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("abort_generation")
 
-    def resume_generation(self) -> None:
+    async def resume_generation(self) -> None:
         """
         Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
 
