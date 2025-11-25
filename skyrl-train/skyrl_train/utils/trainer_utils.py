@@ -648,7 +648,7 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
     return dataloader
 
 
-def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, Any]]:
+def get_rope_parameters_config(trainer_cfg: DictConfig) -> dict[str, Any]:
     rope_scaling = trainer_cfg.get("rope_scaling", None)
     rope_theta = trainer_cfg.get("rope_theta", None)
     has_old_config = rope_scaling is not None or rope_theta is not None
@@ -679,6 +679,6 @@ def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, An
         return rope_parameters
 
     elif has_new_config:
-        return OmegaConf.to_container(rope_parameters_new, resolve=True)
+        return OmegaConf.to_container(rope_parameters_new, resolve=True) or {}
     else:
-        return None
+        return {}None
