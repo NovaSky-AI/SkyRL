@@ -38,7 +38,7 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn",
+    "flash-attn; sys_platform == 'linux'",  # CUDA-only, skip on macOS
     "polars",
     "s3fs",
     "fastapi",
@@ -83,14 +83,20 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+# Use CUDA PyTorch index on Linux, PyPI (CPU) on macOS
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
 # We use `flashinfer-jit-cache` to avoid slow JIT compilation on first run.
 # Different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
-flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm'" }
+# CUDA-only, skip on macOS
+flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm' and sys_platform == 'linux'" }
 flashinfer-python = [
-    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'mcore' and extra != 'vllm'" },
-    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
+    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'mcore' and extra != 'vllm' and sys_platform == 'linux'" },
+    { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm' and sys_platform == 'linux'" }
 ]
 
 [project.optional-dependencies]
@@ -119,25 +125,25 @@ sandboxes = [
 ]
 vllm = [
     "vllm==0.11.0",
-    "flash-attn==2.8.3",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.8.0",
-    "flashinfer-python",
-    "flashinfer-jit-cache",
+    "flashinfer-python; sys_platform == 'linux'",
+    "flashinfer-jit-cache; sys_platform == 'linux'",
     "torchvision"
 ]
 sglang = [
     "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
-    "flashinfer-python",
-    "flash-attn==2.8.3",
+    "flashinfer-python; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.7.1",
     "torchvision",
 ]
 mcore = [
   "transformer-engine[pytorch]==2.7.0",
-  "flash-attn==2.7.4.post1",
+  "flash-attn==2.7.4.post1; sys_platform == 'linux'",
   "vllm==0.10.1.1",
   "torch==2.7.1",
-  "flashinfer-python",
+  "flashinfer-python; sys_platform == 'linux'",
   "torchvision",
   "megatron-bridge==0.1.0rc4",
   "megatron-core==0.14.0",
@@ -145,9 +151,9 @@ mcore = [
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
     # See examples/flash_rl/README.md for installation instructions.
-    "flash-attn==2.8.3",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.7.0",
-    "flashinfer-python",
+    "flashinfer-python; sys_platform == 'linux'",
     "torchvision",
 ]
 miniswe = [
