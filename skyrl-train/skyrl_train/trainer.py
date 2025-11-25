@@ -14,6 +14,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from collections import defaultdict
+from collections import defaultdict
 
 import numpy as np
 from skyrl_train.dataset import PromptDataset
@@ -59,6 +60,7 @@ from skyrl_train.utils.trainer_utils import (
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
+from skyrl_train.utils.logging_utils import log_example
 
 
 class RayPPOTrainer:
@@ -219,7 +221,12 @@ class RayPPOTrainer:
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                    logger.info(f"Example:\n" f"  Input: {generator_input['prompts'][0]}\n" f"  Output:\n{vis}")
+                    log_example(
+                        logger,
+                        prompt=generator_input["prompts"][0],
+                        response=vis,
+                        reward=generator_output["rewards"][0],
+                    )
 
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
