@@ -5,11 +5,12 @@ This file implements ``StepWiseGenerator`` for step-wise training
 import copy
 from uuid import uuid4
 import skyrl_gym
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Union, Tuple
 from tqdm.asyncio import tqdm
+from dataclasses import dataclass
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, AgentLoopOutput
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -23,6 +24,18 @@ from skyrl_train.generators.utils import (
 class StepWiseGeneratorOutput(GeneratorOutput):
     trajectory_ids: List[TrajectoryID]
     is_last_step: List[bool]
+
+
+@dataclass
+class AgentLoopOutput:
+    """Output from a single agent_loop execution."""
+
+    response_ids: List[int]
+    reward: Union[List[float], float]
+    stop_reason: str
+    loss_mask: List[int]
+    prompt_ids: List[int]
+    rollout_logprobs: Optional[List[float]]
 
 
 class StepWiseGenerator(SkyRLGymGenerator):
@@ -175,7 +188,6 @@ class StepWiseGenerator(SkyRLGymGenerator):
                 prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
                 rollout_logprobs=response_logprobs,
                 stop_reason=stop_reason,
-                env_metrics=env.get_metrics() if done else {},
             )
 
             assert len(per_step_output.loss_mask) == len(
