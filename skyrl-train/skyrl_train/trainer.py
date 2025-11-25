@@ -13,9 +13,7 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
-from collections import defaultdict
 
-import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -24,7 +22,6 @@ from skyrl_train.generators.base import (
     GeneratorOutput,
     GeneratorInterface,
 )
-import copy
 from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -58,7 +55,7 @@ from skyrl_train.utils.trainer_utils import (
     build_dataloader,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.evaluate import evaluate, evaluate_step_wise
+from skyrl_train.evaluate import evaluate
 
 
 class RayPPOTrainer:
@@ -117,22 +114,13 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
-        if self.cfg.trainer.step_wise_training:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-            )
+        eval_metrics = await evaluate(
+            eval_dataloader=self.eval_dataloader,
+            generator=self.generator,
+            cfg=self.cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
+        )
         return eval_metrics
 
     def train(self):
@@ -195,11 +183,6 @@ class RayPPOTrainer:
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
-
-                    if self.cfg.trainer.step_wise_training:
-                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
-                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -555,27 +538,16 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
-                "is_last_step": (
-                    torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
-                    if generator_output.get("is_last_step", None) is not None
-                    else None
-                ),
             },
         )
         training_input.metadata = {
             "uids": uids,
-            "trajectory_ids": [trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]],
         }
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
-
-        logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
-        training_input = self.pad_batch(training_input)
-        logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
-
         return training_input
 
     @torch.no_grad()
@@ -598,8 +570,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        if not self.cfg.trainer.step_wise_training:
-            validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_generator_output(len(input_batch["prompts"]), generator_output)
 
         return generator_output
 
@@ -610,29 +581,11 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        generator_output_for_metrics = generator_output
-        uids_for_metrics = uids
-        if self.cfg.trainer.step_wise_training:
-            generator_output_for_metrics = defaultdict(list)
-            for key in generator_output:
-                if isinstance(generator_output[key], list):
-                    generator_output_for_metrics[key] = [
-                        generator_output[key][i]
-                        for i in range(len(generator_output[key]))
-                        if generator_output["is_last_step"][i]
-                    ]
-            uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
-            ]
-
-        # only use `generator_output_for_metrics` for metrics calculation
-        # For step-wise training, we only calculate metrics for the last step of each trajectory
         mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
-            generator_output_for_metrics,
-            uids_for_metrics,
+            generator_output,
+            uids,
         )
 
-        # these use the full generator output
         rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]
         per_token_rewards: List[List[float]] = []
@@ -679,69 +632,27 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
-        if self.cfg.trainer.step_wise_training:
-            is_last_step = data["is_last_step"].bool()
-            response_mask = data["response_mask"]
-            index = np.array(data.metadata["uids"])
-            adv_estimator = self.cfg.trainer.algorithm.advantage_estimator
-            config = self.cfg.trainer.algorithm
-            values = data["values"]
-            gamma = self.cfg.trainer.algorithm.gamma
-            lambd = self.cfg.trainer.algorithm.lambd
-            grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
-            last_step_rewards = token_level_rewards[is_last_step]
-            # compatible with any advantage estimator
-            last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=last_step_rewards,
-                response_mask=response_mask[is_last_step],
-                index=index[is_last_step.cpu().numpy()],
-                adv_estimator=adv_estimator,
-                values=values[is_last_step] if values is not None else None,
-                config=config,
-                gamma=gamma,
-                lambd=lambd,
-                grpo_norm_by_std=grpo_norm_by_std,
-            )
-            traj_ids = (
-                torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
-            )
-            num_groups = traj_ids[-1].item() + 1
-            assert num_groups == len(
-                last_step_advantages
-            ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
-            advantages = last_step_advantages[traj_ids]
-            returns = last_step_returns[traj_ids]
-        else:
-            advantages, returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=token_level_rewards,
-                response_mask=data["response_mask"],
-                index=data.metadata["uids"],
-                adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
-                config=self.cfg.trainer.algorithm,
-                values=data["values"],
-                gamma=self.cfg.trainer.algorithm.gamma,
-                lambd=self.cfg.trainer.algorithm.lambd,
-                grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
-            )
+        advantages, returns = ppo_utils.compute_advantages_and_returns(
+            token_level_rewards=token_level_rewards,
+            response_mask=data["response_mask"],
+            index=data.metadata["uids"],
+            adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            config=self.cfg.trainer.algorithm,
+            values=data["values"],
+            gamma=self.cfg.trainer.algorithm.gamma,
+            lambd=self.cfg.trainer.algorithm.lambd,
+            grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+        )
         data["returns"] = returns
         data["advantages"] = advantages
 
-        # remove padding while calculating metrics
-        pad_size = data.metadata.get("pad_size", 0)
-        num_samples = len(token_level_rewards)
-
-        return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
-        if self.cfg.trainer.step_wise_training:
-            avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
-        else:
-            avg_rewards: float = return_sums.mean().item()
+        return_sums = token_level_rewards.sum(dim=-1)
+        avg_rewards: float = return_sums.mean().item()
 
         avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
 
-        valid_advantages = torch.masked_select(
-            data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
-        )
+        valid_advantages = torch.masked_select(data["advantages"], data["response_mask"].bool())
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
 
@@ -773,47 +684,6 @@ class RayPPOTrainer:
         data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
-
-    def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
-        """Pad the batch to be divisible by dp size"""
-        import math
-
-        dp_size = self.policy_model.actor_infos[0].rank.dp_size
-        if self.critic_model is not None:
-            dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
-        if self.ref_model is not None:
-            dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-
-        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
-        new_tensors = {}
-        training_input.metadata["pad_size"] = pad_size
-        if pad_size == 0:
-            return training_input
-        for key, tensor in training_input.items():
-            if tensor is not None:
-                additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
-
-                if key == "is_last_step":
-                    padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                elif key == "loss_mask":
-                    # ensures that padding tensors don't count towards the loss
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                else:
-                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    # `pad_size` is guaranteed to be smaller than batch_size
-                    padding_tensor = tensor[:pad_size].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-
-        new_training_input = TrainingInputBatch(new_tensors)
-        new_training_input.metadata = {}
-        new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
-        new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
-            f"pad{i}" for i in range(pad_size)
-        ]
-        for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
-                new_training_input.metadata[key] = copy.deepcopy(value)
-        return new_training_input
 
     @torch.no_grad()
     def fwd_logprobs_values_reward(
