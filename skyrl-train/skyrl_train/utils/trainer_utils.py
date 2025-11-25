@@ -666,7 +666,7 @@ def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, An
         rope_parameters = {}
         if rope_scaling is not None:
             rope_scaling_dict = (
-                OmegaConf.to_container(rope_scaling) if isinstance(rope_scaling, DictConfig) else rope_scaling
+                OmegaConf.to_container(rope_scaling, resolve=True) if isinstance(rope_scaling, DictConfig) else rope_scaling
             )
             if isinstance(rope_scaling_dict, dict):
                 rope_parameters.update(rope_scaling_dict)
@@ -677,6 +677,6 @@ def get_rope_parameters_config(trainer_cfg: DictConfig) -> Optional[dict[str, An
         return rope_parameters
 
     elif has_new_config:
-        return OmegaConf.to_container(rope_parameters_new)
+        return OmegaConf.to_container(rope_parameters_new, resolve=True)
     else:
         return None
