@@ -47,10 +47,6 @@ INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 # no kl loss, so just use the policy model
 USE_KL_LOSS=false
 
-export SKYRL_PYTHONPATH_EXPORT=1
-# make sure PYTHONPATH is set to the location of TransformerEngine installation
-export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
-
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \

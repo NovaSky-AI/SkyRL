@@ -12,15 +12,16 @@ from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from tx.layers.lora import update_adapter_config
-from tx.models import Qwen3Config, Qwen3ForCausalLM
+from tx.models.configs import Qwen3Config
+from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils import models
 from tx.utils.storage import download_and_unpack
 
 
-def create_test_model(rank: int, alpha: int, adapter_index: int):
+def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index: int):
     """Create a small Qwen3 model for testing with LoRA enabled."""
-    base_config = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    base_config = AutoConfig.from_pretrained(base_model_name)
     # Make it smaller for testing
     base_config.num_hidden_layers = 1
     base_config.hidden_size = 64
@@ -33,13 +34,14 @@ def create_test_model(rank: int, alpha: int, adapter_index: int):
     mesh = jax.make_mesh((1, 1), ("dp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        update_adapter_config(model, adapter_index=adapter_index, lora_rank=rank, lora_alpha=alpha)
+        update_adapter_config(model, adapter_index=adapter_index, lora_config=LoraConfig(rank=rank, alpha=alpha))
 
     return config, base_config, model
 
 
 @pytest.mark.parametrize("storage_type", ["local", "cloud"])
 def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Path):
+    base_model_name = "Qwen/Qwen3-0.6B"
     # Setup output path for tar.gz file based on storage type
     if storage_type == "cloud":
         monkeypatch.setitem(implementation_registry, "s3", local_s3_implementation)
@@ -49,7 +51,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
         output_path = tmp_path / "checkpoint.tar.gz"
 
     rank, alpha, adapter_index = 8, 16, 2
-    config, base_config, model = create_test_model(rank, alpha, adapter_index)
+    config, base_config, model = create_test_model(base_model_name, rank, alpha, adapter_index)
     adapter_config = LoraConfig(rank=rank, alpha=alpha)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
@@ -63,7 +65,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     expected_lora_B = np.array(q_proj.lora_B.value[adapter_index, :rank, :].T)
 
     # Save and verify checkpoint exists
-    models.save_lora_checkpoint(model, adapter_config, adapter_index, output_path)
+    models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path)
     assert output_path.exists()
 
     # Load with peft and verify

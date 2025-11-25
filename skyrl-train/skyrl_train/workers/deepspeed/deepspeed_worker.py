@@ -158,7 +158,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         else:
             from torch.multiprocessing.reductions import reduce_tensor
 
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
             current_size = 0
 
             module_to_params: Dict[str, List[str]] = {}
@@ -213,7 +213,13 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                             ):
                                 await inference_engine_client.update_named_weights(weights_update_request)
                                 current_size = 0
-                                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                                weights_update_request = {
+                                    "names": [],
+                                    "dtypes": [],
+                                    "shapes": [],
+                                    "extras": [],
+                                    "packed": False,
+                                }
                                 # force collect any sent tensors if possible to be memory efficient
                                 torch.cuda.ipc_collect()
 

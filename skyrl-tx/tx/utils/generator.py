@@ -191,10 +191,11 @@ class GeneratorMixin:
 
         # Extract stop tokens and pad to same length
         max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
-        stop_tokens = jnp.full((batch_size, max(1, max_stop_tokens)), -1, dtype=jnp.int32)
-        for i, sp in enumerate(sampling_params):
-            if sp.stop:
-                stop_tokens = stop_tokens.at[i, : len(sp.stop)].set(jnp.array(sp.stop))
+        stop_tokens = []
+        for sp in sampling_params:
+            stop = sp.stop or []
+            stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
+        stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
         # Prefill: process full prompt
         positions = compute_positions(attention_mask)
@@ -237,8 +238,13 @@ class GeneratorMixin:
             prompt_length + jnp.array([sp.max_tokens for sp in sampling_params]),
         )
 
+        # Single device-to-host transfer for all data
+        generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host = jax.device_get(
+            (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length)
+        )
+
         return GenerateOutput(
-            generated_ids=[generated_ids[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
-            stop_reasons=["stop" if stop_pos[i, 0] >= 0 else "length" for i in range(batch_size)],
-            logprobs=[all_logprobs[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
+            generated_ids=[generated_ids_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            stop_reasons=["stop" if stop_pos_host[i, 0] >= 0 else "length" for i in range(batch_size)],
+            logprobs=[all_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
         )

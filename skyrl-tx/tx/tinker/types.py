@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal, Sequence
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -22,6 +22,9 @@ class RequestType(str, Enum):
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
+
+    # External request that should not be processed by the engine
+    EXTERNAL = "external"
 
 
 class CheckpointType(str, Enum):
@@ -60,6 +63,9 @@ class AdamParams(BaseModel):
 class LoraConfig(BaseModel):
     rank: int
     alpha: float
+    train_attn: bool = True
+    train_mlp: bool = True
+    train_unembed: bool = False
 
 
 class CreateModelInput(BaseModel):
@@ -151,7 +157,7 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
-    stop: Sequence[int] | None = None
+    stop: list[int] | None = None
 
 
 class ModelMetadata(BaseModel):

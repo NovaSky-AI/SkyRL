@@ -20,11 +20,12 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     offload_megatron_optimizer,
     load_megatron_optimizer,
+    offload_megatron_grads_to_cpu,
+    load_megatron_grads_to_gpu,
 )
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
-
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
@@ -78,7 +79,6 @@ class MegatronStrategy(DistributedStrategy):
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.megatron_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.megatron_config.pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
             expert_model_parallel_size=self.megatron_config.expert_model_parallel_size,
             expert_tensor_parallel_size=self.megatron_config.expert_tensor_parallel_size,
             use_sharp=False,
@@ -97,6 +97,7 @@ class MegatronStrategy(DistributedStrategy):
         if offload_model:
             offload_megatron_model_to_cpu(model)
         if optimizer and offload_optimizer:
+            offload_megatron_grads_to_cpu(model)
             offload_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -106,6 +107,7 @@ class MegatronStrategy(DistributedStrategy):
         if backload_model:
             load_megatron_model_to_gpu(model)
         if optimizer and backload_optimizer:
+            load_megatron_grads_to_gpu(model)
             load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 
@@ -267,7 +269,7 @@ class MegatronStrategy(DistributedStrategy):
 
         # All ranks call into bridge.
         with io.local_work_dir(output_dir) as work_dir:
-            bridge.save_weights(model.actor_module, work_dir)
+            bridge.save_hf_weights(model.actor_module, work_dir)
             self.print(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.

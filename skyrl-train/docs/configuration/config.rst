@@ -252,6 +252,13 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
+.. warning::
+  
+  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
+
+  We recommend leaving this setting to ``false``
+
+
 .. _deepspeed-configurations:
 
 DeepSpeed Configuration
@@ -678,3 +685,4 @@ Misc Configuration
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
+- ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

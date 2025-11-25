@@ -27,6 +27,9 @@ torch_profiler_config:
 optimizer_config_kwargs:
   # set these all to true (and optimizer_offload_fraction=1.0) for optimizer cpu offloading
   overlap_cpu_optimizer_d2h_h2d: false
+  # NOTE: `use_precision_aware_optimizer=true` can cause checkpointing to fail. 
+  # See: https://github.com/nvidia/megatron-lm/issues/1820.
+  # We recommend leaving this as `false`
   use_precision_aware_optimizer: false
   optimizer_cpu_offload: false
   optimizer_offload_fraction: 0.0

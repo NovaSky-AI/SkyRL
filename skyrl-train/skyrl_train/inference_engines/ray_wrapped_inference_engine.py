@@ -90,6 +90,7 @@ def create_ray_wrapped_inference_engines(
     enable_lora=False,
     max_lora_rank=64,
     max_loras=1,
+    fully_sharded_loras=False,
     engine_init_kwargs: Dict[str, Any] = {},
     rope_parameters: Dict[str, Any] = {},
 ) -> List[InferenceEngineInterface]:
@@ -149,6 +150,7 @@ def create_ray_wrapped_inference_engines(
                 "enable_lora": enable_lora,
                 "max_lora_rank": max_lora_rank,
                 "max_loras": max_loras,
+                "fully_sharded_loras": fully_sharded_loras,
             }
 
             rope_engine_kwargs = {}

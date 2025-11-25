@@ -10,7 +10,7 @@ from torch.distributed.distributed_c10d import init_process_group
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.trainer_utils import get_rope_parameters_config
-from skyrl_train.distributed.utils import get_free_port
+from skyrl_train.utils.utils import get_free_port
 
 MODEL_NAME = "llamafactory/tiny-random-Llama-3"
 

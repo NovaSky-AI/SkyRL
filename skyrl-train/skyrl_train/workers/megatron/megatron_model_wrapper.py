@@ -24,15 +24,11 @@ class MegatronModelWrapper:
     def __init__(
         self,
         config,
-        hf_config,
-        tf_config,
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
     ):
         self.cfg = config
-        self.hf_config = hf_config
-        self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
@@ -113,7 +109,6 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    self.tf_config.sequence_parallel,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
                 packed_seq_params = None
@@ -233,10 +228,15 @@ class MegatronModelWrapper:
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-            with torch.no_grad():
+            with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
                 action_logits = logits[:, -num_actions - 1 : -1, :]
                 entropy_BS = vocab_parallel_entropy(action_logits)
-                entropy = entropy_BS.sum().item() / entropy_BS.numel()
+                entropy = masked_mean(entropy_BS, loss_mask)
+
+            if self.cfg.trainer.algorithm.use_entropy_loss:
+                entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
+            else:
+                entropy_loss_term = torch.tensor(0.0)
 
             if self.cfg.trainer.algorithm.use_kl_loss:
                 kl_loss = compute_approx_kl(
@@ -248,12 +248,14 @@ class MegatronModelWrapper:
                 kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
             else:
                 kl_loss = torch.tensor(0.0)
+            kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-            loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+            loss = policy_loss + kl_loss_term - entropy_loss_term
 
             metrics = {
+                "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
-                "policy_entropy": entropy,
+                "policy_entropy": entropy.detach().item(),
                 "ppo_clip_ratio": clip_ratio,
                 "policy_kl": kl_loss.detach().item(),
             }
@@ -279,7 +281,6 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    self.tf_config.sequence_parallel,
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
                 )
                 packed_seq_params = None
