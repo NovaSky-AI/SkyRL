@@ -7,7 +7,6 @@ uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_rope_parameters_e2e.p
 
 import pytest
 import hydra
-import ray
 from omegaconf import DictConfig, OmegaConf
 
 from tests.gpu.utils import init_worker_with_type
@@ -26,11 +25,11 @@ def get_test_config_with_rope_parameters(rope_parameters: dict) -> DictConfig:
         cfg.trainer.policy.model.path = MODEL
         cfg.trainer.critic.model.path = ""
         cfg.trainer.placement.policy_num_gpus_per_node = 1
-        cfg.trainer.placement.ref_num_gpus_per_node = 1  
-        cfg.trainer.placement.colocate_all = False  
+        cfg.trainer.placement.ref_num_gpus_per_node = 1
+        cfg.trainer.placement.colocate_all = False
         cfg.trainer.strategy = "fsdp"
         cfg.trainer.logger = "console"
-        
+
         cfg.generator.inference_engine_tensor_parallel_size = 1
         cfg.generator.num_inference_engines = 1
 
@@ -67,7 +66,7 @@ def get_test_config_with_rope_parameters(rope_parameters: dict) -> DictConfig:
 def test_rope_parameters_propagate_to_automodel_init(ray_init_fixture, rope_parameters):
     """
     E2E test that verifies RoPE parameters from config propagate all the way to AutoModel init.
-   
+
     1. Creates a config with RoPE parameters
     2. Initializes a worker with that config
     3. Verifies that the model initializes successfully (which confirms rope_parameters are read from config)
@@ -84,7 +83,7 @@ def test_rope_parameters_propagate_to_automodel_init(ray_init_fixture, rope_para
     )
 
     assert policy is not None, "Worker should be initialized successfully"
-    
+
 
 def test_rope_parameters_empty_dict(ray_init_fixture):
     """
@@ -102,4 +101,3 @@ def test_rope_parameters_empty_dict(ray_init_fixture):
     )
 
     assert policy is not None
-

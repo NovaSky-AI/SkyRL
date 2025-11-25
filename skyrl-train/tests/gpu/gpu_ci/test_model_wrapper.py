@@ -240,7 +240,6 @@ def test_actor_entropy_consistency_sample_packing():
 
 def test_rope_parameters_set_on_config():
     """Tests that RoPE parameters are properly set on the model config before AutoModel init"""
-    from transformers import AutoConfig, AutoModelForCausalLM
 
     # Test with various RoPE parameter configurations
     test_cases = [
@@ -268,16 +267,17 @@ def test_rope_parameters_set_on_config():
             },
         },
         {
-            "rope_parameters": {},  
+            "rope_parameters": {},
         },
     ]
 
     for test_case in test_cases:
         rope_params = test_case["rope_parameters"]
 
-        with patch("skyrl_train.model_wrapper.AutoConfig") as mock_config_class, patch(
-            "skyrl_train.model_wrapper.AutoModelForCausalLM"
-        ) as mock_model_class:
+        with (
+            patch("skyrl_train.model_wrapper.AutoConfig") as mock_config_class,
+            patch("skyrl_train.model_wrapper.AutoModelForCausalLM") as mock_model_class,
+        ):
             # Create a mock config object
             mock_config = MagicMock()
             mock_config_class.from_pretrained.return_value = mock_config
@@ -302,14 +302,14 @@ def test_rope_parameters_set_on_config():
 
             # Verify rope_parameters were set on the config
             assert hasattr(mock_config, "rope_parameters"), "rope_parameters should be set on config"
-            assert mock_config.rope_parameters == rope_params, (
-                f"rope_parameters mismatch. Expected {rope_params}, got {mock_config.rope_parameters}"
-            )
+            assert (
+                mock_config.rope_parameters == rope_params
+            ), f"rope_parameters mismatch. Expected {rope_params}, got {mock_config.rope_parameters}"
 
             # Verify AutoModelForCausalLM.from_pretrained was called with the config
             mock_model_class.from_pretrained.assert_called_once()
             call_kwargs = mock_model_class.from_pretrained.call_args
             assert call_kwargs.kwargs["config"] == mock_config, "Config should be passed to from_pretrained"
-            assert call_kwargs.kwargs["config"].rope_parameters == rope_params, (
-                "rope_parameters should be preserved in the config passed to from_pretrained"
-            )
+            assert (
+                call_kwargs.kwargs["config"].rope_parameters == rope_params
+            ), "rope_parameters should be preserved in the config passed to from_pretrained"
