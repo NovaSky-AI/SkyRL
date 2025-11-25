@@ -139,7 +139,7 @@ sglang = [
     "torchvision",
 ]
 mcore = [
-  "transformer-engine[pytorch]==2.7.0",
+  "transformer-engine[pytorch]==2.7.0; sys_platform == 'linux'",
   "flash-attn==2.7.4.post1; sys_platform == 'linux'",
   "vllm==0.10.1.1",
   "torch==2.7.1",
