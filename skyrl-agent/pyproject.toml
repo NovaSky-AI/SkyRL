@@ -85,7 +85,7 @@ conflicts = [
 [tool.uv.sources]
 openhands-ai = { git = "https://github.com/NovaSky-AI/SkyRL-OpenHands.git", rev = "main" }
 tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
-verl = { git = "https://github.com/sumanthrh/verl.git", rev = "skyagent" }
+verl = { git = "https://github.com/NovaSky-AI/verl-fork", rev = "main" }
 skyrl-train = { path = "./skyrl-train", editable = true }
 
 [tool.uv.extra-build-dependencies]
