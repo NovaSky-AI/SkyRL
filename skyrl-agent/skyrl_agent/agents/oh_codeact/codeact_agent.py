@@ -276,8 +276,8 @@ class OHCodeActAgent(CodeActAgent):
         current_step = wandb.run.step if wandb.run else 1
         run_name = wandb.run.name if wandb.run else "no_run"
         logger.info(f"Detected run name: {run_name}")
-        if  (current_step == 1) or (current_step % 2 == 0) :
-            instance_dir = Path(f"/home/ubuntu/skyagent-dev/trace/{run_name}/step{current_step}") / str(self.instance_id) / str(self.trajectory_id)
+        if  (current_step == 1) or (current_step % 10 == 0) :
+            instance_dir = Path(f"./trace/{run_name}/step{current_step}") / str(self.instance_id) / str(self.trajectory_id)
             instance_dir.mkdir(exist_ok=True, parents=True)
 
             # Generate a unique filename using a timestamp with microsecond resolution
