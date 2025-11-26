@@ -315,8 +315,14 @@ class RayPPOTrainer:
                         generator_output = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
-                    vis = self.tokenizer.decode(generator_output["response_ids"][0])
-                    logger.info(f"Example:\n" f"  Input: {generator_input['prompts'][0]}\n" f"  Output:\n{vis}")
+                    vis_prompt = self.tokenizer.decode(generator_output["prompt_token_ids"][0])
+                    vis_response = self.tokenizer.decode(generator_output["response_ids"][0])
+                    logger.info(
+                        f"Example:\n"
+                        f"  Prompt: {generator_input['prompts'][0]}\n"
+                        f"  Input decoded: {vis_prompt}\n"
+                        f"  Output decoded: {vis_response}"
+                    )
 
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
