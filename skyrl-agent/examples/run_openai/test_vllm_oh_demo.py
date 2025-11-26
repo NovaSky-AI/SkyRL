@@ -1,4 +1,4 @@
-from skyagent import AutoAgentRunner
+from skyrl_agent import AutoAgentRunner
 from transformers import AutoTokenizer
 from datasets import load_dataset
 import asyncio
