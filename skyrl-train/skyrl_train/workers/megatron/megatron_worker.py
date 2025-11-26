@@ -62,11 +62,7 @@ class MegatronWorker:
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         if self.cfg.trainer.gradient_checkpointing:
-            defaults = {
-                "recompute_granularity": "full",
-                "recompute_method": "uniform",
-                "recompute_num_layers": 1
-            }
+            defaults = {"recompute_granularity": "full", "recompute_method": "uniform", "recompute_num_layers": 1}
         else:
             defaults = {
                 "recompute_granularity": None,
