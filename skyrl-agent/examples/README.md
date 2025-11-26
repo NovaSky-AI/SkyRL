@@ -21,7 +21,7 @@ This directory contains runnable examples for multiple tasks. Each section outli
     ```
   - SkyRL-Train-based:
     ```bash
-    bash ./examples/run_skyrl/skyrl_oh.sh
+    bash ./examples/run_skyrl/skyrl_swe.sh
     ```
 
 - Run inference (demo):
