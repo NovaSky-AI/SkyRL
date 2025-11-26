@@ -1,13 +1,14 @@
 from skyrl_agent.tools.base import BaseTool, register_tool
+import requests
 import os
+import asyncio
 import time
 from typing import Union
 
-
-@register_tool("code_interpreter")
+@register_tool('code_interpreter')
 class CodeInterpreter(BaseTool):
     name = "code_interpreter"
-    description = "Executes code in a sandbox for supported languages. Supports Python, JavaScript, C++, and more."
+    description = "Executes code in a sandbox for supported languages. Supports Python, JavaScript, C++, and more." 
     parameters = {
         "type": "object",
         "properties": {
@@ -18,15 +19,15 @@ class CodeInterpreter(BaseTool):
             "language": {
                 "type": "string",
                 "description": "Programming language of the code (e.g., python, javascript, cpp). Defaults to python.",
-                "default": "python",
-            },
+                "default": "python"
+            }
         },
-        "required": ["code"],
+        "required": ["code"]
     }
     # Don't check at import time, only when tool is actually used
     sandbox_url = os.getenv("SANDBOX_FUSION_URL", None)
     memory_limit_mb = 1024  # 1 GB memory limit
-
+    
     # Adapted from https://arxiv.org/pdf/2502.14382.
     @staticmethod
     def _post_process_code(code: str) -> str:
@@ -36,20 +37,20 @@ class CodeInterpreter(BaseTool):
         """
         if not code:
             return code
-
+            
         # Remove markdown code block delimiters
         # Handle cases like ```python, ```javascript, ```cpp, or just ```
         import re
-
+        
         # Remove opening markdown code blocks (```language or just ```)
-        code = re.sub(r"^```\w*\s*\n?", "", code.strip(), flags=re.MULTILINE)
-
+        code = re.sub(r'^```\w*\s*\n?', '', code.strip(), flags=re.MULTILINE)
+        
         # Remove closing markdown code blocks
-        code = re.sub(r"\n?```\s*$", "", code, flags=re.MULTILINE)
-
+        code = re.sub(r'\n?```\s*$', '', code, flags=re.MULTILINE)
+        
         # Remove any remaining ``` that might be in the middle
-        code = code.replace("```", "")
-
+        code = code.replace('```', '')
+        
         code = code.strip()
 
         # From https://github.com/volcengine/verl/blob/7fc3029a1ec407f6e56f1f1ff02a659071da3b1d/recipe/retool/retool.py#L41C9-L49C32
@@ -72,9 +73,8 @@ class CodeInterpreter(BaseTool):
         if not self.sandbox_url:
             raise ValueError("SANDBOX_FUSION_URL environment variable must be set to use CodeInterpreter tool")
         from skyrl_agent.tasks.verifiers.sandbox_fusion.utils import _process_single_case
-
         result_status, metadata = _process_single_case(
-            0, None, None, self.sandbox_url + "/run_code", code, timeout, self.memory_limit_mb, language
+            0, None, None, self.sandbox_url+"/run_code", code, timeout, self.memory_limit_mb, language
         )
         # we should always expect this since we don't have correct answer
         if metadata["run_status"] == "Finished":
@@ -120,16 +120,17 @@ class CodeInterpreter(BaseTool):
                 time.sleep(5)
                 continue  # Retry the request
             return output
-
+        
         return {"error": "Max retries exceeded"}
-
 
 if __name__ == "__main__":
     # Example usage for testing
     tool = CodeInterpreter()
-    test_params = {"code": "print('Hello, World!')", "language": "python"}
+    test_params = {
+        "code": "print('Hello, World!')",
+        "language": "python"
+    }
     import json
-
-    test_params = json.dumps(test_params)  # Convert to JSON string if needed
+    test_params = json.dumps(test_params)  # Convert to JSON string if needed    
     result = tool.call(test_params)
     print("Test Result:", result)  # Should print: {'output': 'Hello, World!'} or an error message

@@ -1,8 +1,9 @@
 # https://github.com/QwenLM/Qwen-Agent/blob/main/qwen_agent/tools/base.py
 
 import json
+import os
 from abc import ABC, abstractmethod
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 import logging
 import json5
 from litellm import ChatCompletionToolParam, ChatCompletionToolParamFunctionChunk
@@ -11,11 +12,10 @@ logger = logging.getLogger(__name__)
 
 TOOL_REGISTRY = {}
 
-
 def json_loads(text: str) -> dict:
-    text = text.strip("\n")
-    if text.startswith("```") and text.endswith("\n```"):
-        text = "\n".join(text.split("\n")[1:-1])
+    text = text.strip('\n')
+    if text.startswith('```') and text.endswith('\n```'):
+        text = '\n'.join(text.split('\n')[1:-1])
     try:
         return json.loads(text)
     except json.decoder.JSONDecodeError as json_err:
@@ -23,21 +23,18 @@ def json_loads(text: str) -> dict:
             return json5.loads(text)
         except ValueError:
             raise json_err
-
-
+        
 class ToolServiceError(Exception):
 
-    def __init__(
-        self,
-        exception: Optional[Exception] = None,
-        code: Optional[str] = None,
-        message: Optional[str] = None,
-        extra: Optional[dict] = None,
-    ):
+    def __init__(self,
+                 exception: Optional[Exception] = None,
+                 code: Optional[str] = None,
+                 message: Optional[str] = None,
+                 extra: Optional[dict] = None):
         if exception is not None:
             super().__init__(exception)
         else:
-            super().__init__(f"\nError code: {code}. Error message: {message}")
+            super().__init__(f'\nError code: {code}. Error message: {message}')
         self.exception = exception
         self.code = code
         self.message = message
@@ -49,12 +46,12 @@ def register_tool(name, allow_overwrite=False):
     def decorator(cls):
         if name in TOOL_REGISTRY:
             if allow_overwrite:
-                logger.warning(f"Tool `{name}` already exists! Overwriting with class {cls}.")
+                logger.warning(f'Tool `{name}` already exists! Overwriting with class {cls}.')
             else:
-                raise ValueError(f"Tool `{name}` already exists! Please ensure that the tool name is unique.")
-        if cls.name and (cls.name != name):
-            raise ValueError(f'{cls.__name__}.name="{cls.name}" conflicts with @register_tool(name="{name}").')
-        cls.name = name
+                raise ValueError(f'Tool `{name}` already exists! Please ensure that the tool name is unique.')
+        # if cls.name and (cls.name != name):
+        #     raise ValueError(f'{cls.__name__}.name="{cls.name}" conflicts with @register_tool(name="{name}").')
+        # cls.name = name
         TOOL_REGISTRY[name] = cls
 
         return cls
@@ -86,23 +83,22 @@ def is_tool_schema(obj: dict) -> bool:
     }
     """
     import jsonschema
-
     try:
-        assert set(obj.keys()) == {"name", "description", "parameters"}
-        assert isinstance(obj["name"], str)
-        assert obj["name"].strip()
-        assert isinstance(obj["description"], str)
-        assert isinstance(obj["parameters"], dict)
+        assert set(obj.keys()) == {'name', 'description', 'parameters'}
+        assert isinstance(obj['name'], str)
+        assert obj['name'].strip()
+        assert isinstance(obj['description'], str)
+        assert isinstance(obj['parameters'], dict)
 
-        assert set(obj["parameters"].keys()) == {"type", "properties", "required"}
-        assert obj["parameters"]["type"] == "object"
-        assert isinstance(obj["parameters"]["properties"], dict)
-        assert isinstance(obj["parameters"]["required"], list)
-        assert set(obj["parameters"]["required"]).issubset(set(obj["parameters"]["properties"].keys()))
+        assert set(obj['parameters'].keys()) == {'type', 'properties', 'required'}
+        assert obj['parameters']['type'] == 'object'
+        assert isinstance(obj['parameters']['properties'], dict)
+        assert isinstance(obj['parameters']['required'], list)
+        assert set(obj['parameters']['required']).issubset(set(obj['parameters']['properties'].keys()))
     except AssertionError:
         return False
     try:
-        jsonschema.validate(instance={}, schema=obj["parameters"])
+        jsonschema.validate(instance={}, schema=obj['parameters'])
     except jsonschema.exceptions.SchemaError:
         return False
     except jsonschema.exceptions.ValidationError:
@@ -111,31 +107,30 @@ def is_tool_schema(obj: dict) -> bool:
 
 
 class BaseTool(ABC):
-    name: str = ""
-    description: str = ""
+    name: str = ''
+    description: str = ''
     parameters: Union[List[dict], dict] = []
 
     def __init__(self, cfg: Optional[dict] = None):
         self.cfg = cfg or {}
         if not self.name:
             raise ValueError(
-                f"You must set {self.__class__.__name__}.name, either by @register_tool(name=...) or explicitly setting {self.__class__.__name__}.name"
+                f'You must set {self.__class__.__name__}.name, either by @register_tool(name=...) or explicitly setting {self.__class__.__name__}.name'
             )
         if isinstance(self.parameters, dict):
-            if not is_tool_schema({"name": self.name, "description": self.description, "parameters": self.parameters}):
+            if not is_tool_schema({'name': self.name, 'description': self.description, 'parameters': self.parameters}):
                 raise ValueError(
-                    "The parameters, when provided as a dict, must confirm to a valid openai-compatible JSON schema."
-                )
-
+                    'The parameters, when provided as a dict, must confirm to a valid openai-compatible JSON schema.')
+    
     def get_tool_param(self) -> ChatCompletionToolParam:
         """Get the tool parameter for OpenAI API."""
         return ChatCompletionToolParam(
-            type="function",
+            type='function',
             function=ChatCompletionToolParamFunctionChunk(
                 name=self.name,
                 description=self.description,
                 parameters=self.parameters,
-            ),
+            )
         )
 
     @abstractmethod
@@ -162,17 +157,16 @@ class BaseTool(ABC):
                 else:
                     params_json: dict = json_loads(params)
             except json.decoder.JSONDecodeError:
-                raise ValueError("Parameters must be formatted as a valid JSON!")
+                raise ValueError('Parameters must be formatted as a valid JSON!')
         else:
             params_json: dict = params
         if isinstance(self.parameters, list):
             for param in self.parameters:
-                if "required" in param and param["required"]:
-                    if param["name"] not in params_json:
-                        raise ValueError("Parameters %s is required!" % param["name"])
+                if 'required' in param and param['required']:
+                    if param['name'] not in params_json:
+                        raise ValueError('Parameters %s is required!' % param['name'])
         elif isinstance(self.parameters, dict):
             import jsonschema
-
             jsonschema.validate(instance=params_json, schema=self.parameters)
         else:
             raise ValueError
@@ -182,19 +176,30 @@ class BaseTool(ABC):
     def function(self) -> dict:  # Bad naming. It should be `function_info`.
         return {
             # 'name_for_human': self.name_for_human,
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
+            'name': self.name,
+            'description': self.description,
+            'parameters': self.parameters,
             # 'args_format': self.args_format
         }
 
     @property
     def name_for_human(self) -> str:
-        return self.cfg.get("name_for_human", self.name)
+        return self.cfg.get('name_for_human', self.name)
 
     @property
     def args_format(self) -> str:
-        fmt = self.cfg.get("args_format")
+        fmt = self.cfg.get('args_format')
         if fmt is None:
-            fmt = "Format the arguments as a JSON object."
+            fmt = 'Format the arguments as a JSON object.'
         return fmt
+
+    def get_system_prompt_prefix(self) -> Optional[str]:
+        """Return an optional system prompt prefix that should be prepended to the system message.
+        
+        Tools can override this method to provide tool-specific system prompt instructions.
+        The returned prefix will be automatically prepended to the system message when the agent initializes.
+        
+        Returns:
+            Optional[str]: System prompt prefix string, or None if no prefix is needed.
+        """
+        return None

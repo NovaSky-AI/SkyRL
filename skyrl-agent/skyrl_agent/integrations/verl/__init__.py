@@ -7,7 +7,11 @@ register_backend(
         infer_backend_cls=VeRLBackend,
         generator_output_cls=VeRLGeneratorOutput,
         generator_input_cls=VeRLGeneratorInput,
-    ),
+    )
 )
 
-__all__ = ["VeRLGeneratorInput", "VeRLBackend", "VeRLGeneratorOutput"]
+__all__ = [
+    "VeRLGeneratorInput",
+    "VeRLBackend",
+    "VeRLGeneratorOutput"
+]

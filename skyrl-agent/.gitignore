@@ -9,3 +9,4 @@ outputs/*
 *.log
 *.wandb
 .env
+tinker_output*

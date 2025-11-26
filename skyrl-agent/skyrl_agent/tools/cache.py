@@ -159,9 +159,7 @@ class WebPageCache:
 
             saved_at = cache_data.get("saved_at", 0)
             saved_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(saved_at))
-            print(
-                f"[DEBUG] WebPageCache: Loaded {len(self.cache)} entries from {self.cache_file} (saved at {saved_time})"
-            )
+            print(f"[DEBUG] WebPageCache: Loaded {len(self.cache)} entries from {self.cache_file} (saved at {saved_time})")
 
         except Exception as e:
             print(f"[ERROR] WebPageCache: Failed to load cache from {self.cache_file}: {e}")

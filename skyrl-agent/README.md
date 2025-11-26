@@ -1,21 +1,34 @@
-# SkyRL-Agent
+<div align="center">
 
-SkyRL-Agent is a generic agent layer for training and evaluating agents.
+<img alt="SkyRL-Agent" src="./assets/new-cropped.png" width="320">
 
-SkyRL-Agent is designed primarly for researchers to have a unified interface around implementing agentic tasks. A modular design allows researchers to 
-1. bring in their own tasks
-2. use any training backend or simply run evaluation
-3. modify runtime implementation for a given task
-4. improve dispatching logic for a batch of trajectories
-5. and more ...
+Training and evaluating modern AI agents with modular tasks, tools, and backends.
 
-SkyRL-Agent is still under development. We are actively working on expanding available tasks and runtime implementations.
+[![arXiv](https://img.shields.io/badge/arXiv-2511.16108-b31b1b.svg)](https://arxiv.org/pdf/2511.16108)
+[![HF Model](https://img.shields.io/badge/HuggingFace-SA--SWE--32B-orange.svg)](https://huggingface.co/NovaSky-AI/SA-SWE-32B)
 
+<br/>
+<img alt="SkyRL Agent Overview" src="./assets/skyrl-agent-svg.svg" width="85%">
+<br/>
 
-## Getting Started
+</div>
 
+## News 📰✨
 
-The first step is the clone the repository. `skyrl_agent` is its own subpackage in the SkyRL repository.
+- 🚀 Initial public release with SWE, MemAgent (step-wise training), and Web Research examples!
+
+## Why SkyRL-Agent
+
+- Unified interface for agentic tasks and training backends
+- Pluggable tools (browser, search, code execution, finish, etc.)
+- Efficient and flexible async dispatching strategies
+- Works with OpenAI-compatible serving (vLLM/others), VERL, SkyRL-Train, Tinker. Switch the backend with one line configuration!
+
+<p align="center">
+  <img alt="Dispatcher Flow" src="./assets/skyrl-agent-dispatch-svg.svg" width="80%">
+</p>
+
+## Quickstart
 
 ```bash
 git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL.git 
@@ -23,26 +36,43 @@ git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL.git
 cd skyrl-agent
 ```
 
-### Installation
+Then head to the `examples/` folder to run tasks (training and inference). Each task’s script/YAML documents its own knobs and environment requirements.
 
-We use [uv](https://docs.astral.sh/uv/) to manage the dependencies.
+## Results & Profiling (glimpses)
 
-```bash
-uv venv
-uv sync
-```
+<p align="center">
+  <img alt="GPU Utilization" src="./assets/gpu_util_plot.png" width="46%">
+  &nbsp;&nbsp;
+  <img alt="Reward Usage Mix" src="./assets/reward_usage_none_combo_plot.png" width="46%">
+</p>
 
-### Running evaluation
+## Roadmap
 
-We support running evaluation with any OpenAI-compatible server, 
+- [ ] OSWorld Integration
+- [ ] Simplify SWE agent training code path
+- [ ] More training recipes
+- [ ] Evaluation harness unification
 
-For example: 
+## Acknowledgements
+Huge thanks to these projects:
+- [VERL](https://github.com/volcengine/verl)
+- [OpenHands](https://github.com/OpenHands/OpenHands)
+- [LocAgent](https://github.com/gersteinlab/LocAgent)
+- [R2E-Gym](https://github.com/R2E-Gym/R2E-Gym)
+- [Tinker Cookbook](https://github.com/thinking-machines-lab/tinker-cookbook)
+- [rLLM](https://github.com/rllm-org/rllm)
+- [WebThinker](https://github.com/RUC-NLPIR/WebThinker)
+- [WebSailor](https://github.com/Alibaba-NLP/DeepResearch)
+- [ARPO](https://github.com/dvlab-research/ARPO)
+- [MemAgent](https://github.com/BytedTsinghua-SIA/MemAgent)
 
-```bash
-vllm serve Qwen/Qwen2.5-1.5B-Instruct --host 0.0.0.0 --port 8000
-```
-You also need set up the sandbox fusion following instructions here: https://github.com/bytedance/SandboxFusion.
+## Citation
 
-```bash
-uv run --isolated --frozen --directory . --env-file .env --frozen python ./tests/react_task_tests/test.py --yaml tests/react_task_tests/react_interpreter.yaml --dataset NovaSky-AI/AIME-Repeated-8x-240 --split test
+```bibtex
+@article{cao2025skyrl,
+  title={SkyRL-Agent: Efficient RL Training for Multi-turn LLM Agent},
+  author={Cao, Shiyi and Li, Dacheng and Zhao, Fangzhou and Yuan, Shuo and Hegde, Sumanth R and Chen, Connor and Ruan, Charlie and Griggs, Tyler and Liu, Shu and Tang, Eric and others},
+  journal={arXiv preprint arXiv:2511.16108},
+  year={2025}
+}
 ```

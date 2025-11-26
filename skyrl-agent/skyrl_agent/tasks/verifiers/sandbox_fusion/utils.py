@@ -131,7 +131,8 @@ def call_sandbox_api(
             # Check for Gateway Timeout (504) specifically for retrying
             if response.status_code == 504:
                 last_error = (
-                    f"{log_prefix}API Request Error: Gateway Timeout (504) on attempt " f"{attempt + 1}/{MAX_RETRIES}"
+                    f"{log_prefix}API Request Error: Gateway Timeout (504) on attempt "
+                    f"{attempt + 1}/{MAX_RETRIES}"
                 )  # <-- Use internal log_prefix
                 logger.warning(last_error)
                 if attempt < MAX_RETRIES - 1:  # Don't sleep after the last attempt

@@ -1,21 +1,17 @@
-from typing import Any, List, TypedDict
-from skyrl_agent.integrations.base import (
-    AsyncInferBackend,
-    GeneratorOutput,
-    GeneratorInput,
-    register_backend,
-    BackendSpec,
-)
+from typing import Any, List, Dict, TypedDict
+import uuid
+from skyrl_agent.integrations.base import AsyncInferBackend, GeneratorOutput, GeneratorInput, register_backend, BackendSpec
+from vllm import SamplingParams
+from vllm.inputs import TokensPrompt
+from openai import AsyncOpenAI
 import omegaconf
 from loguru import logger
 import os
 import aiohttp
 
-
 class OpenAIBackendConfig(TypedDict):
-    model_name: str
-    api_url: str
-
+    model_name: str 
+    api_url: str 
 
 class OpenAIBackend(AsyncInferBackend):
     def __init__(self, infer_engine: Any, cfg: OpenAIBackendConfig):
@@ -26,12 +22,11 @@ class OpenAIBackend(AsyncInferBackend):
             self.model_max_len = cfg["model_max_len"]
         except omegaconf.errors.ConfigKeyError:
             logger.info("`model_max_len` not provided, using `max_position_embeddings` from the model config")
-            from transformers import AutoConfig
-
+            from transformers import AutoConfig 
             config = AutoConfig.from_pretrained(self.model_name)
             self.model_max_len = config.max_position_embeddings
             logger.info(f"Using `model_max_len` {self.model_max_len}")
-
+        
     async def async_generate_prompts(self, prompts: str, sampling_params: dict, **kwargs) -> str:
         # NOTE: In some agents like OpenHands, the generate calls are from a different thread, so the session needs to be created in the same thread
         # TODO: support long lived session depending on the task
@@ -60,20 +55,25 @@ class OpenAIBackend(AsyncInferBackend):
                 sampling_params = dict(sampling_params)
             payload = sampling_params.copy()
             payload["model"] = self.model_name
-            payload["max_tokens"] = self.model_max_len - len(input_ids) - 1
+            # payload["max_tokens"] = self.model_max_len - len(input_ids) - 1
             print(f"max tokens: {payload['max_tokens']}")
 
             payload["prompt"] = input_ids
             output = await session.post(f"{self.api_url}/v1/completions", json=payload, headers=headers)
             output = await output.json()
+        
+        meta_info = {
+            "output_tokens": None,
+            "finish_reason": output["choices"][0]["finish_reason"],
+            "logprobs": None,
+        }
 
-        return output["choices"][0]["text"], output["choices"][0]["finish_reason"]
+        return output["choices"][0]["text"], meta_info
 
 
 class OpenAIGeneratorOutput(GeneratorOutput):
     def __init__(self, result: Any):
         self.result = result
-
 
 class OpenAIGeneratorInput(GeneratorInput):
     def __init__(self, input_batch: Any):
@@ -86,5 +86,5 @@ register_backend(
         infer_backend_cls=OpenAIBackend,
         generator_output_cls=OpenAIGeneratorOutput,
         generator_input_cls=OpenAIGeneratorInput,
-    ),
+    )
 )

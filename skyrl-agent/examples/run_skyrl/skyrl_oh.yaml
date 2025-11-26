@@ -35,7 +35,6 @@ generator:
 
 dispatcher:
   type: async_pipeline
-  scheduler: naive
   max_parallel_agents: 80
   max_eval_parallel_agents: 80
 

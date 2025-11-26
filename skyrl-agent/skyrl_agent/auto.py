@@ -6,11 +6,9 @@ from importlib import import_module
 from skyrl_agent.agents.mapping import AGENT_GENERATOR_REGISTRY
 from skyrl_agent.agents import AgentRunner
 
-
 def _import_object(path: str):
     module_path, class_name = path.rsplit(".", 1)
     return getattr(import_module(module_path), class_name)
-
 
 class AutoAgentRunner:
     @classmethod
@@ -21,12 +19,10 @@ class AutoAgentRunner:
             raise FileNotFoundError(f"Task YAML not found: {task_yaml}")
         cfg = OmegaConf.load(task_yaml)
 
-        runner_path = AGENT_GENERATOR_REGISTRY.get(cfg.agent_cls, None)
+        runner_path =  AGENT_GENERATOR_REGISTRY.get(cfg.agent_cls, None)
         if not runner_path:
-            raise ValueError(
-                f"`AgentRunner` class for agent {cfg.agent_cls} is not specified. Please ensure that the agent is present in the registry"
-            )
-
+            raise ValueError(f"`AgentRunner` class for agent {cfg.agent_cls} is not specified. Please ensure that the agent is present in the registry")
+        
         runner_cls: Type[AgentRunner] = _import_object(runner_path)
-
+        
         return runner_cls.from_task(task_yaml, infer_engine, tokenizer)

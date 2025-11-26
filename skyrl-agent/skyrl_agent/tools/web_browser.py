@@ -3,38 +3,42 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Union
 import requests
-from skyrl_agent.tools.prompt import EXTRACTOR_PROMPT
-import os
+from skyrl_agent.tools.prompt import EXTRACTOR_PROMPT 
+import os 
 from openai import OpenAI
 import random
 from skyrl_agent.tools.cache import WebPageCache
 import copy
 
-
-@register_tool("web_browser")
+@register_tool('web_browser')
 class WebBrowser(BaseTool):
-    name = "web_browser"
+    name = 'web_browser'
     description = (
-        "Visit webpage(s) and return the summary of the content.\n\n"
-        "CRITICAL REQUIREMENTS:\n"
-        "- Search results alone are NOT sufficient - you need full webpage content\n"
-        "- If search returns papers/PDFs, you MUST visit them with web_browser to extract key findings\n"
-        "- Skipping web_browser will result in incomplete and unreliable answers"
+        'Visit webpage(s) and return the summary of the content.\n\n'
+        'CRITICAL REQUIREMENTS:\n'
+        '- Search results alone are NOT sufficient - you need full webpage content\n'
+        '- If search returns papers/PDFs, you MUST visit them with web_browser to extract key findings\n'
+        '- Skipping web_browser will result in incomplete and unreliable answers'
     )
     parameters = {
         "type": "object",
         "properties": {
             "url": {
                 "type": ["string", "array"],
-                "items": {"type": "string"},
+                "items": {
+                    "type": "string"
+                },
                 "minItems": 1,
-                "description": "The URL(s) of the webpage(s) to visit. Can be a single URL string or an array of URL strings. Use plain URLs only, never Markdown format.",
+                "description": "The URL(s) of the webpage(s) to visit. Can be a single URL string or an array of URL strings. Use plain URLs only, never Markdown format."
             },
-            "goal": {"type": "string", "description": "The goal of the visit for webpage(s)."},
+            "goal": {
+                "type": "string",
+                "description": "The goal of the visit for webpage(s)."
+            }
         },
-        "required": ["url", "goal"],
+        "required": ["url", "goal"]
     }
-
+    
     webcontent_maxlength = int(os.getenv("WEBCONTENT_MAXLENGTH", "150000"))
     ignore_jina = os.getenv("IGNORE_JINA", "false").lower() == "true"
     jina_reader_url_prefix = "https://r.jina.ai/"
@@ -63,8 +67,9 @@ class WebBrowser(BaseTool):
     # Optional domain/keyword blocklists to avoid benchmark leakage during eval
     _block_domains_env = os.getenv("WEB_BLOCKLIST_DOMAINS", os.getenv("SEARCH_BLOCKLIST_DOMAINS", "")).strip()
     _block_keywords_env = os.getenv("WEB_BLOCKLIST_KEYWORDS", os.getenv("SEARCH_BLOCKLIST_KEYWORDS", "")).strip()
-    block_domains = {d.strip().lower() for d in _block_domains_env.split(",") if d.strip()}
-    block_keywords = {k.strip().lower() for k in _block_keywords_env.split(",") if k.strip()}
+    block_domains = {d.strip().lower() for d in _block_domains_env.split(',') if d.strip()}
+    block_keywords = {k.strip().lower() for k in _block_keywords_env.split(',') if k.strip()}
+
 
     def _is_blocked_url(self, url: str) -> bool:
         try:
@@ -87,7 +92,6 @@ class WebBrowser(BaseTool):
         """
         try:
             from urllib.parse import urlparse, parse_qs, unquote, urlunparse
-
             u = (url or "").strip()
             if not u:
                 return url
@@ -125,7 +129,6 @@ class WebBrowser(BaseTool):
         """
         try:
             from urllib.parse import urlparse, urlunparse
-
             base = (url or "").strip()
             if not base:
                 return []
@@ -185,7 +188,7 @@ class WebBrowser(BaseTool):
         except Exception as e:
             return {
                 "error": f"Invalid parameters: {str(e)}",
-                "hint": "Pass plain URL string or an array of URL strings in 'url', and a non-empty 'goal' string.",
+                "hint": "Pass plain URL string or an array of URL strings in 'url', and a non-empty 'goal' string."
             }
 
         try:
@@ -195,10 +198,7 @@ class WebBrowser(BaseTool):
             return {"error": f"Missing required field: {str(e)}"}
 
         if not goal:
-            return {
-                "error": "Goal parameter is required.",
-                "hint": "Provide a concise description of what to extract from the page.",
-            }
+            return {"error": "Goal parameter is required.", "hint": "Provide a concise description of what to extract from the page."}
 
         try:
             # Handle case where url is a JSON string that looks like a list
@@ -208,20 +208,19 @@ class WebBrowser(BaseTool):
                 if (url.startswith('"') and url.endswith('"')) or (url.startswith("'") and url.endswith("'")):
                     url = url[1:-1]
                     print(f"Removed extra quotes from URL: {url}")
-
+                
                 # First, check if it's a Markdown link format [text](url)
                 import re
-
-                markdown_pattern = r"\[([^\]]+)\]\(([^)]+)\)"
+                markdown_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
                 markdown_match = re.match(markdown_pattern, url.strip())
                 if markdown_match:
                     # Extract the actual URL from Markdown format
                     url = markdown_match.group(2)
                     print(f"Extracted URL from Markdown format: {url}")
-
+                
                 # Check if it's a JSON array string
                 url_stripped = url.strip()
-                if url_stripped.startswith("[") and url_stripped.endswith("]"):
+                if url_stripped.startswith('[') and url_stripped.endswith(']'):
                     try:
                         parsed = json.loads(url_stripped)
                         if isinstance(parsed, list):
@@ -243,7 +242,7 @@ class WebBrowser(BaseTool):
                         # Try to extract URLs from malformed array like [url1, url2]
                         inner_content = url_stripped[1:-1]  # Remove brackets
                         # Split by comma and clean each URL
-                        potential_urls = inner_content.split(",")
+                        potential_urls = inner_content.split(',')
                         cleaned_urls = []
                         for u in potential_urls:
                             u = u.strip()
@@ -254,7 +253,7 @@ class WebBrowser(BaseTool):
                             md_match = re.match(markdown_pattern, u)
                             if md_match:
                                 cleaned_urls.append(md_match.group(2))
-                            elif u.startswith("http://") or u.startswith("https://"):
+                            elif u.startswith('http://') or u.startswith('https://'):
                                 cleaned_urls.append(u)
                         if cleaned_urls:
                             url = cleaned_urls
@@ -277,13 +276,13 @@ class WebBrowser(BaseTool):
                         print(f"Extracted URL(s) from freeform string: {url}")
                     else:
                         # If starts with stray '[' but no closing ']', strip and retry extraction once
-                        if url_stripped.startswith("[") and not url_stripped.endswith("]"):
-                            candidate = url_stripped.lstrip("[").rstrip("]")
+                        if url_stripped.startswith('[') and not url_stripped.endswith(']'):
+                            candidate = url_stripped.lstrip('[').rstrip(']')
                             candidates2 = re.findall(r'https?://[^\s\]\\)"\'<>]+', candidate)
                             if candidates2:
                                 url = candidates2[0] if len(candidates2) == 1 else candidates2
                                 print(f"Recovered URL(s) from stray-bracket string: {url}")
-
+                
             if isinstance(url, str):
                 url = self._normalize_url(url)
                 if self._is_blocked_url(url):
@@ -319,21 +318,21 @@ class WebBrowser(BaseTool):
                 response = "\n=======\n".join(response)
             else:
                 return {"error": "URL must be a string or array of strings."}
-
+            
             # print(f'Summary Length {len(response)}; Summary Content {response}')
             return {"results": response.strip()}
-
+            
         except Exception as e:
             return {"error": f"Web browsing failed: {str(e)}"}
-
+    
     def call_server(self, msgs, max_tries=10):
         """
         Call the OpenAI API server to process webpage content.
-
+        
         Args:
             msgs: Messages to send to the API
             max_tries: Maximum number of retry attempts
-
+            
         Returns:
             str: The API response content
         """
@@ -422,10 +421,10 @@ class WebBrowser(BaseTool):
                 json.loads(s)
                 return s
             except Exception:
-                left = s.find("{")
-                right = s.rfind("}")
+                left = s.find('{')
+                right = s.rfind('}')
                 if left != -1 and right != -1 and left <= right:
-                    return s[left : right + 1]
+                    return s[left:right+1]
                 return s
 
         def _combine_json_strs(a: str, b: str) -> str:
@@ -444,9 +443,7 @@ class WebBrowser(BaseTool):
             rational = (da.get("rational") or "").strip()
             if not rational:
                 rational = (db.get("rational") or "").strip()
-            ev = "\n\n".join(
-                [x for x in [str(da.get("evidence", "")).strip(), str(db.get("evidence", "")).strip()] if x]
-            )
+            ev = "\n\n".join([x for x in [str(da.get("evidence", "")).strip(), str(db.get("evidence", "")).strip()] if x])
             su = "\n\n".join([x for x in [str(da.get("summary", "")).strip(), str(db.get("summary", "")).strip()] if x])
             try:
                 return json.dumps({"rational": rational, "evidence": ev, "summary": su}, ensure_ascii=False)
@@ -498,12 +495,12 @@ class WebBrowser(BaseTool):
                 if content:
                     try:
                         json.loads(content)
-                    except Exception:
-                        # extract json from string
-                        left = content.find("{")
-                        right = content.rfind("}")
-                        if left != -1 and right != -1 and left <= right:
-                            content = content[left : right + 1]
+                    except:
+                        # extract json from string 
+                        left = content.find('{')
+                        right = content.rfind('}') 
+                        if left != -1 and right != -1 and left <= right: 
+                            content = content[left:right+1]
                     return content
             except Exception as e:
                 es = str(e).lower()
@@ -512,8 +509,7 @@ class WebBrowser(BaseTool):
                     or "context length" in es
                     or "reduce the length" in es
                     or "too many tokens" in es
-                    or "exceed" in es
-                    and "context" in es
+                    or "exceed" in es and "context" in es
                 )
                 if ctx_err:
                     a_msgs, b_msgs = _split_messages_into_two(msgs_local)
@@ -545,20 +541,24 @@ class WebBrowser(BaseTool):
         """
         if not self.jina_api_keys:
             return "[visit] No Jina API keys available."
-
+            
         headers = {
             "Authorization": f"Bearer {random.choice(self.jina_api_keys)}",
         }
         # Keep retries/timeouts conservative to reduce wall time; tunable via env
         max_retries = max(1, int(getattr(self, "_jina_retries", 2)))
         timeout = max(1.0, float(getattr(self, "_jina_timeout_s", 5.0)))
-
+        
         # Try generic URL variants (scheme/www) within each retry attempt
         for attempt in range(max_retries):
             try:
                 for target in self._url_variants(url) or [url]:
                     try:
-                        response = requests.get(f"https://r.jina.ai/{target}", headers=headers, timeout=timeout)
+                        response = requests.get(
+                            f"https://r.jina.ai/{target}",
+                            headers=headers,
+                            timeout=timeout
+                        )
                         if response.status_code == 200 and response.text:
                             return response.text
                         else:
@@ -577,7 +577,7 @@ class WebBrowser(BaseTool):
                 pass
             if attempt == max_retries - 1:
                 return "[visit] Failed to read page."
-
+        
         return "[visit] Failed to read page."
 
     def readpage(self, url: str, goal: str) -> str:
@@ -587,7 +587,7 @@ class WebBrowser(BaseTool):
         Args:
             url: The URL to read
             goal: The goal/purpose of reading the page
-
+            
         Returns:
             str: The processed webpage content or error message
         """
@@ -600,7 +600,7 @@ class WebBrowser(BaseTool):
                 self._recent_failures = {}
             ttl = int(os.getenv("WEB_BROWSER_FAIL_TTL", "10"))
         except Exception:
-            ttl = 10
+            ttl =10
         now = None
         try:
             now = __import__("time").time()
@@ -608,19 +608,9 @@ class WebBrowser(BaseTool):
             if last and (now - last) < ttl:
                 # Still print a concise note to signal skip
                 print(f"[web_browser][skip] recently failed url={url} since={int(now-last)}s ttl={ttl}s")
-                useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(
-                    url=url, goal=goal
-                )
-                useful_information += (
-                    "Evidence in page: \n"
-                    + "Recently attempted but unreachable; skipping re-access to avoid consecutive failures."
-                    + "\n\n"
-                )
-                useful_information += (
-                    "Summary: \n"
-                    + "Prior attempts failed very recently. Try alternative sources or retry later."
-                    + "\n\n"
-                )
+                useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(url=url, goal=goal)
+                useful_information += "Evidence in page: \n" + "Recently attempted but unreachable; skipping re-access to avoid consecutive failures." + "\n\n"
+                useful_information += "Summary: \n" + "Prior attempts failed very recently. Try alternative sources or retry later." + "\n\n"
                 return useful_information
         except Exception:
             pass
@@ -639,12 +629,7 @@ class WebBrowser(BaseTool):
 
             # print(service)
             # print(content)
-            if (
-                content
-                and not content.startswith("[visit] Failed to read page.")
-                and content != "[visit] Empty content."
-                and not content.startswith("[document_parser]")
-            ):
+            if content and not content.startswith("[visit] Failed to read page.") and content != "[visit] Empty content." and not content.startswith("[document_parser]"):
                 # On valid fetch (including first-time), populate cache
                 if service == "jina":
                     try:
@@ -666,7 +651,7 @@ class WebBrowser(BaseTool):
                 aggregated_summary = []
 
                 for chunk in chunks:
-                    messages = [{"role": "user", "content": EXTRACTOR_PROMPT.format(webpage_content=chunk, goal=goal)}]
+                    messages = [{"role":"user","content": EXTRACTOR_PROMPT.format(webpage_content=chunk, goal=goal)}]
                     raw = self.call_server(messages)
 
                     # Handle long chunk content by progressive truncation
@@ -697,29 +682,17 @@ class WebBrowser(BaseTool):
 
                 # Generate final aggregated response if any chunk succeeded
                 if aggregated_evidence or aggregated_summary:
-                    useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(
-                        url=url, goal=goal
-                    )
+                    useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(url=url, goal=goal)
                     useful_information += "Evidence in page: \n" + "\n\n".join(aggregated_evidence) + "\n\n"
                     useful_information += "Summary: \n" + "\n\n".join(aggregated_summary) + "\n\n"
                     return useful_information
 
                 # If all chunks failed to parse, fall back to original failure message
-                useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(
-                    url=url, goal=goal
-                )
-                useful_information += (
-                    "Evidence in page: \n"
-                    + "The provided webpage content could not be accessed. Please check the URL or file format."
-                    + "\n\n"
-                )
-                useful_information += (
-                    "Summary: \n"
-                    + "The webpage content could not be processed, and therefore, no information is available."
-                    + "\n\n"
-                )
+                useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(url=url, goal=goal)
+                useful_information += "Evidence in page: \n" + "The provided webpage content could not be accessed. Please check the URL or file format." + "\n\n"
+                useful_information += "Summary: \n" + "The webpage content could not be processed, and therefore, no information is available." + "\n\n"
                 return useful_information
-
+                
             # If we're on the last attempt, record failure and return failure message
             if attempt == max_attempts - 1:
                 try:
@@ -728,25 +701,17 @@ class WebBrowser(BaseTool):
                     self._recent_failures[url] = now
                 except Exception:
                     pass
-                useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(
-                    url=url, goal=goal
-                )
-                useful_information += (
-                    "Evidence in page: \n"
-                    + "The provided webpage content could not be accessed. Please check the URL or file format."
-                    + "\n\n"
-                )
-                useful_information += (
-                    "Summary: \n"
-                    + "The webpage content could not be processed, and therefore, no information is available."
-                    + "\n\n"
-                )
+                useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(url=url, goal=goal)
+                useful_information += "Evidence in page: \n" + "The provided webpage content could not be accessed. Please check the URL or file format." + "\n\n"
+                useful_information += "Summary: \n" + "The webpage content could not be processed, and therefore, no information is available." + "\n\n"
                 return useful_information
-
 
 if __name__ == "__main__":
     # Example usage for testing
     tool = WebBrowser()
-    test_params = {"url": "https://apple.com", "goal": "Find information about the company"}
+    test_params = {
+        "url": "https://apple.com",
+        "goal": "Find information about the company"
+    }
     result = tool.call(test_params)
     print("Test Result:", result)

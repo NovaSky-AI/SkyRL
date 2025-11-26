@@ -17,17 +17,13 @@ import re
 from contextlib import contextmanager
 from .eval import normalize_final_answer
 from math_verify import parse, verify
-
-
 class TimeoutException(Exception):
     pass
-
 
 @contextmanager
 def timeout(seconds):
     def signal_handler(signum, frame):
         raise TimeoutException("Timed out!")
-
     signal.signal(signal.SIGALRM, signal_handler)
     signal.alarm(seconds)
     try:
@@ -35,82 +31,72 @@ def timeout(seconds):
     finally:
         signal.alarm(0)
 
-
-timeout_seconds = 2
-chinese_pattern = re.compile(r"[\u4e00-\u9fff]")
-english_pattern = re.compile(r"[a-zA-Z]")
-boxed_pattern = re.compile(
-    r"\\boxed\{((?:[^{}]|\\{|\\}|(?:\{(?:[^{}]|\\{|\\}|(?:\{(?:[^{}]|\\{|\\}|(?:\{[^{}]*\}))*\}))*\}))*\})"
-)
+timeout_seconds=2
+chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+english_pattern = re.compile(r'[a-zA-Z]')
+boxed_pattern = re.compile(r"\\boxed\{((?:[^{}]|\\{|\\}|(?:\{(?:[^{}]|\\{|\\}|(?:\{(?:[^{}]|\\{|\\}|(?:\{[^{}]*\}))*\}))*\}))*\})")
 valid_char_pattern = re.compile(r'[a-zA-Z0-9\s\.,!?"\'\(\)\{\}\[\]_\-+=<>/@#$%^&*\\|:;~`\u2200-\u22FF]')
-repeat_pattern = re.compile(r"(.{5,}?)\1{4,}")
-
+repeat_pattern = re.compile(r'(.{5,}?)\1{4,}')
 
 def check_mixed_languages(text):
     chinese_chars = len(chinese_pattern.findall(text))
     english_chars = len(english_pattern.findall(text))
     return chinese_chars >= 20 and english_chars >= 20
 
-
 def undesired_format(text):
-    if "<|endoftext|>" not in text:
-        return True
-    else:
-        return False
+    if "<|endoftext|>" not in text: return True
+    else: return False
 
 
 def check_garbled_characters(text):
-    valid_chars = valid_char_pattern.sub("", text)
-    if not text:
+    valid_chars = valid_char_pattern.sub('', text)
+    if not text: 
         return False
     invalid_ratio = len(valid_chars) / len(text)
     return invalid_ratio > 0.3
 
-
 def has_repeated_patterns(text):
     return bool(repeat_pattern.search(text))
-
-
+    
 def correctness_score_default(response, gt):
     matches = boxed_pattern.findall(response)
-    if not matches:
-        return -1.0
+    if not matches: return -1.0
     pred = matches[-1][:-1]
     return 1.0 if is_equiv(pred, gt) else -1.0
 
 
 def correctness_score_v2(response, gt):
     matches = boxed_pattern.findall(response)
-    if not matches:
-        return -1.0
+    if not matches: return -1.0
     pred = matches[-1][:-1]
     return 1.0 if is_equiv(pred, gt) else -0.5
 
-
-def compute_score(solution_str, ground_truth, reward_type="default") -> float:
-    if reward_type == "default":
-        try:
+def compute_score(solution_str, ground_truth, reward_type="default") -> float:      
+    if reward_type=='default':
+        try:     
             # if undesired_format(solution_str): return -1.0
-            return correctness_score_default(solution_str, ground_truth)
+            return correctness_score_default(solution_str, ground_truth)            
         except TimeoutException:
             return -1.0
-        except Exception:
+        except Exception as e:
             return -1.0
-    elif reward_type == "v2.wformat":
+    elif reward_type=="v2.wformat":
         try:
             return correctness_score_v2(solution_str, ground_truth)
         except TimeoutException:
             return -1.0
-        except Exception:
+        except Exception as e:
             return -1.0
     else:
-        try:
+        try:     
             # if undesired_format(solution_str): return -1.0
-            return correctness_score_default(solution_str, ground_truth)
+            return correctness_score_default(solution_str, ground_truth)            
         except TimeoutException:
             return -1.0
-        except Exception:
+        except Exception as e:
             return -1.0
+
+
 
 
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
@@ -120,15 +106,14 @@ def is_equiv(str1, str2, verbose=False):
         return True
     if str1 is None or str2 is None:
         return False
-    if str1.strip().lower() == str2.strip().lower():
-        return True
+    if str1.strip().lower() == str2.strip().lower(): return True
     try:
-        str1 = normalize_final_answer(str1)
-        str2 = normalize_final_answer(str2)
-        str1 = parse(str1)
-        str2 = parse(str2)
+        str1=normalize_final_answer(str1)
+        str2=normalize_final_answer(str2)
+        str1=parse(str1)
+        str2=parse(str2)
         return verify(str1, str2)
-    except Exception:
+    except:
         pass
 
     try:
@@ -136,7 +121,7 @@ def is_equiv(str1, str2, verbose=False):
         ss2 = strip_string(str2)
         if verbose:
             print(ss1, ss2)
-        return ss1 == ss2
+        return ss1==ss2
     except Exception:
         return str1 == str2
 
@@ -144,15 +129,15 @@ def is_equiv(str1, str2, verbose=False):
 def remove_boxed(s):
     if "\\boxed " in s:
         left = "\\boxed "
-        assert s[: len(left)] == left
-        return s[len(left) :]
+        assert s[:len(left)] == left
+        return s[len(left):]
 
     left = "\\boxed{"
 
-    assert s[: len(left)] == left
+    assert s[:len(left)] == left
     assert s[-1] == "}"
 
-    return s[len(left) : -1]
+    return s[len(left):-1]
 
 
 def last_boxed_only_string(string):
@@ -180,7 +165,7 @@ def last_boxed_only_string(string):
     if right_brace_idx is None:
         retval = None
     else:
-        retval = string[idx : right_brace_idx + 1]
+        retval = string[idx:right_brace_idx + 1]
 
     return retval
 
@@ -323,7 +308,7 @@ def strip_string(string):
 
 
 if __name__ == "__main__":
-    response = 'To determine which digit appears in the 534th place after the decimal point in the decimal representation of $\\frac{5}{13}$, we need to first find the repeating decimal sequence of $\\frac{5}{13}$. \n\nLet\'s start by calculating the decimal representation of $\\frac{5}{13}$.\n```python\nfrom decimal import Decimal, getcontext\r\n\r\n# Set the precision high enough to see the repeating pattern clearly\r\ngetcontext().prec = 1000\r\n\r\n# Calculate the decimal representation of 5/13\r\ndecimal_rep = Decimal(5) / Decimal(13)\r\nprint(str(decimal_rep))\n```\n```output\n0.3846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846\n```\nThe decimal representation of $\\frac{5}{13}$ is $0.\\overline{384615}$. This means the repeating sequence is "384615" and it has a length of 6 digits.\n\nTo find the digit in the 534th place after the decimal point, we need to determine the position within the repeating sequence. Since the sequence repeats every 6 digits, we can find the position by calculating the remainder when 534 is divided by 6.\n\nLet\'s calculate this.\n```python\n# Length of the repeating sequence\r\nrepeating_sequence = "384615"\r\nsequence_length = len(repeating_sequence)\r\n\r\n# Find the position within the repeating sequence\r\nposition = (534 - 1) % sequence_length  # -1 because indexing starts from 0\r\n\r\n# Get the digit at that position\r\ndigit_in_534th_place = repeating_sequence[position]\r\nprint(digit_in_534th_place)\n```\n```output\n6\n```\nThe digit in the 534th place after the decimal point in the decimal representation of $\\frac{5}{13}$ is $\\boxed{6}$. <|endoftext|>'
-    answer = "6"
-    res = compute_score(response, answer)
+    response="To determine which digit appears in the 534th place after the decimal point in the decimal representation of $\\frac{5}{13}$, we need to first find the repeating decimal sequence of $\\frac{5}{13}$. \n\nLet's start by calculating the decimal representation of $\\frac{5}{13}$.\n```python\nfrom decimal import Decimal, getcontext\r\n\r\n# Set the precision high enough to see the repeating pattern clearly\r\ngetcontext().prec = 1000\r\n\r\n# Calculate the decimal representation of 5/13\r\ndecimal_rep = Decimal(5) / Decimal(13)\r\nprint(str(decimal_rep))\n```\n```output\n0.3846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846153846\n```\nThe decimal representation of $\\frac{5}{13}$ is $0.\\overline{384615}$. This means the repeating sequence is \"384615\" and it has a length of 6 digits.\n\nTo find the digit in the 534th place after the decimal point, we need to determine the position within the repeating sequence. Since the sequence repeats every 6 digits, we can find the position by calculating the remainder when 534 is divided by 6.\n\nLet's calculate this.\n```python\n# Length of the repeating sequence\r\nrepeating_sequence = \"384615\"\r\nsequence_length = len(repeating_sequence)\r\n\r\n# Find the position within the repeating sequence\r\nposition = (534 - 1) % sequence_length  # -1 because indexing starts from 0\r\n\r\n# Get the digit at that position\r\ndigit_in_534th_place = repeating_sequence[position]\r\nprint(digit_in_534th_place)\n```\n```output\n6\n```\nThe digit in the 534th place after the decimal point in the decimal representation of $\\frac{5}{13}$ is $\\boxed{6}$. <|endoftext|>"
+    answer="6"
+    res=compute_score(response, answer)
     print(res)
