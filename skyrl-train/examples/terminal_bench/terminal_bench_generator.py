@@ -4,7 +4,7 @@ from typing import List
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
+from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -187,33 +187,22 @@ class TerminalBenchGenerator(GeneratorInterface):
                 trajectory_id=trajectory_id,
             )
 
-        # Use the first message as the prompt
+        # Use the first message as the prompt. We assume to be no systems messages.
+        assert chat_history[0]["role"] == "user", "The first message should be a user message"
         prompt = [chat_history[0]]
         prompt_ids = self.tokenizer.apply_chat_template(
             prompt,
-            add_generation_prompt=True,  # Always add generation prompt for multi-turn
+            add_generation_prompt=False,  # the message below will add it themselves
             tokenize=True,
         )
         initial_prompt_length = len(prompt_ids)
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-
-        response_ids = []
-        loss_mask = []
-
-        for message in response_messages:
-            # Apply chat template and tokenize each message
-            msg_encoding = encode_messages_subset([message], self.tokenizer)
-
-            # Extend response_ids with the tokens
-            response_ids.extend(msg_encoding)
-
-            # Extend loss_mask: 0s for user, 1s for assistant
-            if message["role"] == "user":
-                loss_mask.extend([0] * len(msg_encoding))
-            else:  # assistant
-                loss_mask.extend([1] * len(msg_encoding))
+        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
+        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+            response_messages, self.tokenizer, assistant_logprobs
+        )
 
         # Determine stop reason
         max_response_tokens = (
