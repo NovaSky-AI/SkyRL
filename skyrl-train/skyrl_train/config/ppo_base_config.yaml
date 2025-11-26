@@ -208,7 +208,6 @@ trainer:
   #   rope_type: yarn
   #   factor: 1.0
   #   original_max_position_embeddings: 32768
-  step_wise_training: false
 
 generator:
   model_name: ${trainer.policy.model.path}
