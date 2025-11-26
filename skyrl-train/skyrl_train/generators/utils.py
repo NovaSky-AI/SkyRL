@@ -470,7 +470,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
                 msg_logprobs = assistant_logprobs[assistant_msg_idx]
                 if len(msg_logprobs) != len(generated_token_ids):
                     raise ValueError(
-                        f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(cur_token_ids)}) for assistant message #{assistant_msg_idx + 1}."
+                        f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(generated_token_ids)}) for assistant message #{assistant_msg_idx + 1}."
                     )
                 rollout_logprobs.extend(msg_logprobs)
 
