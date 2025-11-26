@@ -2,13 +2,6 @@ from skyrl_agent.integrations.base import AsyncInferBackend, GeneratorOutput, Ge
 from typing import Any, List, Dict
 from loguru import logger
 
-try: 
-    from verl.verl.protocol import DataProto
-    from tensordict import TensorDict
-except ImportError:
-    DataProto = None
-    tensordict = None
-
 
 class VeRLBackend(AsyncInferBackend):
     def __init__(self, infer_engine, tokenizer: Any = None, cfg: Dict[str, Any] = None):
