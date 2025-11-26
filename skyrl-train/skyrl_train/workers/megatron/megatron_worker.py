@@ -61,6 +61,24 @@ class MegatronWorker:
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
+        if self.cfg.trainer.gradient_checkpointing:
+            defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1
+            }
+        else:
+            defaults = {
+                "recompute_granularity": None,
+                "recompute_method": None,
+                "recompute_num_layers": None,
+            }
+
+        # set defaults for transformer config kwargs if no gradient checkpointing is enabled or the config key is not set explicitly
+        for key, default_value in defaults.items():
+            if not self.cfg.trainer.gradient_checkpointing or transformer_config_kwargs.get(key, None) is None:
+                transformer_config_kwargs[key] = default_value
+
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
