@@ -79,12 +79,13 @@ async def evaluate(
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
     vis = tokenizer.decode(generator_output["response_ids"][0])
     log_example(
-        logger,
-        prompt=generator_input["prompts"][0],
-        response=vis,
-        reward=generator_output["rewards"][0],
-    )
-
+    if concat_generator_outputs["response_ids"]:
+        log_example(
+            logger,
+            prompt=tokenizer.decode(concat_generator_outputs["prompt_token_ids"][0]),
+            response=tokenizer.decode(concat_generator_outputs["response_ids"][0]),
+            reward=concat_generator_outputs["rewards"][0],
+        )
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(
         concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
