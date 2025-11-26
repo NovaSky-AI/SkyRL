@@ -6,10 +6,10 @@ ensuring that training can resume exactly where it left off.
 
 Run with:
 For FSDP and DeepSpeed, run:
-uv run --isolated --extra dev --with deepspeed -- pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+uv run --isolated --extra dev --extra deepspeed --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
+uv run --isolated --extra dev --extra mcore --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
 import ray
@@ -231,10 +231,11 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         trainer2.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         # Load checkpoints
-        loaded_global_step = trainer2.load_checkpoints()
+        loaded_global_step, loaded_checkpoint_dir = trainer2.load_checkpoints()
         assert (
             loaded_global_step == saved_global_step
         ), f"Expected global_step={saved_global_step}, got {loaded_global_step}"
+        assert loaded_checkpoint_dir == checkpoint_dir, "Checkpoint path mismatch"
 
         # ============= PHASE 3: Continue Training =============
         print("Phase 3: Second checkpoint save")

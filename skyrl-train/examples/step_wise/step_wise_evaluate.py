@@ -4,10 +4,11 @@ from typing import Dict, List, Any
 from pathlib import Path
 from loguru import logger
 
+from collections import defaultdict
+
 from skyrl_train.utils import Timer
 
 from skyrl_train.generators.utils import (
-    concatenate_generator_outputs,
     get_metrics_from_generator_output,
     prepare_generator_input,
 )
@@ -18,7 +19,7 @@ from skyrl_train.generators.base import (
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
-    validate_generator_output,
+    concatenate_generator_outputs,
 )
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
@@ -36,6 +37,8 @@ async def evaluate(
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
+
+    Customized for step level generations, assuming we only have outcome rewards for the final step.
 
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
@@ -67,11 +70,19 @@ async def evaluate(
             global_step,
         )
         generator_output: GeneratorOutput = await generator.generate(generator_input)
-        validate_generator_output(len(generator_input["prompts"]), generator_output)
+        traj_id_to_input = {
+            traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
+            for traj_id, env_class, env_extra in zip(
+                generator_input["trajectory_ids"], generator_input["env_classes"], generator_input["env_extras"]
+            )
+        }
+        for traj_id in generator_output["trajectory_ids"]:
+            assert traj_id.instance_id in traj_id_to_input, f"Trajectory ID {traj_id.instance_id} not found in input"
+            concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
+            concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
+            concat_uids.append(traj_id.instance_id)
+        # validate_generator_output(generator_input, generator_output)
         generator_outputs.append(generator_output)
-        concat_all_envs.extend(generator_input["env_classes"])
-        concat_env_extras.extend(generator_input["env_extras"])
-        concat_uids.extend(uids)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
     # Extract data_sources from env_extras
@@ -79,13 +90,26 @@ async def evaluate(
     vis = tokenizer.decode(generator_output["response_ids"][0])
     logger.info(f"Eval output example: {vis}")
 
+    # Only use the final step metrics
+    generator_output_last_step = defaultdict(list)
+    is_last_step_mask = concat_generator_outputs["is_last_step"]
+    for key in concat_generator_outputs:
+        if isinstance(concat_generator_outputs[key], list):
+            assert len(concat_generator_outputs[key]) == len(is_last_step_mask)
+            generator_output_last_step[key] = [
+                val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
+            ]
+    uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
+    data_sources_last_step = [
+        data_source for data_source, is_last_step in zip(concat_data_sources, is_last_step_mask) if is_last_step
+    ]
+
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(
-        concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
+        generator_output_last_step, uids_last_step, data_sources_last_step, cfg.generator.eval_n_samples_per_prompt
     )
-
     # 3. Calculate overall metrics across all datasets
-    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+    overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_avg_score,

@@ -135,7 +135,21 @@ trainer:
     cispo: 
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+  
+  # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
+  fully_async:
+    # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
+    # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
+    # The larger the max_staleness_steps, the more off-policy the training is, and the more throughput we get.
+    max_staleness_steps: 4
 
+    # The number of generation workers to spawn, where each worker works on a group of trajcetories,
+    # being the same prompt repeated `generator.n_samples_per_prompt` times.
+    # It should be >= policy_mini_batch_size to avoid wasted throughput, and <= policy_mini_batch_size * (max_staleness_steps + 1)
+    # since it would be wasted due to capacity control.
+    # The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+    # Default value is: policy_mini_batch_size * (max_staleness_steps / 2 + 1) = 256 * (4 / 2 + 1) = 768
+    num_parallel_generation_workers: 768
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
