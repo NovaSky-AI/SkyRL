@@ -39,7 +39,7 @@ uv run --isolated --env-file .env --extra skyrl-train \
   trainer.placement.policy_num_nodes=$NNODES \
   trainer.placement.ref_num_nodes=$NNODES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
-  +generator.task="./tests/test_skyrl_oh_32b.yaml" \
+  +generator.task="./examples/run_skyrl/skyrl_swe.yaml" \
   trainer.epochs=10 \
   trainer.seed=$seed \
   trainer.eval_batch_size=128 \
