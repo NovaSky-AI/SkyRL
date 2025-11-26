@@ -1,4 +1,4 @@
-from skyrl_agent.integrations.base import AsyncInferBackend, GeneratorOutput, GeneratorInput, register_backend, BackendSpec
+from skyrl_agent.integrations.base import AsyncInferBackend, GeneratorOutput, GeneratorInput
 from typing import Any, List, Dict
 from loguru import logger
 
@@ -24,9 +24,11 @@ class VeRLBackend(AsyncInferBackend):
     async def async_generate_prompts(self, prompts: Any, sampling_params: Any) -> List[str]:
         raise NotImplementedError
 
+
 class VeRLGeneratorOutput(GeneratorOutput):
     def __init__(self, result: Dict[str, Any]):
         self.result = result
+
 
 class VeRLGeneratorInput(GeneratorInput):
     def __init__(self, input_batch: Any):

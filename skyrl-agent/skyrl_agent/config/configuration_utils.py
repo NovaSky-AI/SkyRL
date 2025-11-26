@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Optional
 
+
 # TODO(csy): a smarter way?
 def get_field_from_config(key_path, context):
     parts = key_path.split(".")
@@ -11,6 +12,7 @@ def get_field_from_config(key_path, context):
     except (KeyError, TypeError):
         raise ValueError(f"Path '{key_path}' not found in context.")
     return value
+
 
 @dataclass
 class TrajectoryConfig:
@@ -29,12 +31,12 @@ class TrajectoryConfig:
     early_step_threshold: int = 0  # Step count threshold for early reminder
     enable_turn_reminder: bool = False
 
+
 # DEPR
 @dataclass
 class AgentConfig:
     max_iterations: int = 5
     tools: Optional[list] = None
 
-TASK_CONFIG_REGISTRY = {
-    "swe_bench": "swe_bench.yaml"
-}
+
+TASK_CONFIG_REGISTRY = {"swe_bench": "swe_bench.yaml"}

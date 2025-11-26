@@ -8,7 +8,9 @@ Prerequisite:
        
 """
 
-import os, re, requests
+import os
+import re
+import requests
 from typing import Tuple
 
 # # ------------ Prompt template ------------------------------------------------
@@ -24,7 +26,7 @@ from typing import Tuple
 # Student Answer:
 # {STUDENT_ANSWER}
 
-# Carefully think and check whether the student answer is equivalent to the reference answer. 
+# Carefully think and check whether the student answer is equivalent to the reference answer.
 # You only need to refer to the reference answer to grade the student's answer. Sometimes the student's answer is expressed in a different way from the reference answer, but the meaning is the same, and you should still consider it correct. If they are not equivalent in mathematical sense, you should consider it incorrect.
 
 # <Final Grade>: CORRECT or INCORRECT
@@ -46,19 +48,19 @@ def _llm_judge(question: str, student: str, reference: str, verbose: bool = Fals
     # )
 
     prompt = (
-    f"User: ### Question: {question}\n\n"
-    f"### Ground Truth Answer: {reference}\n\n"
-    f"### Student Answer: {student}\n\n"
-    "For the above question, please verify if the student's answer is equivalent to the ground truth answer.\n"
-    "Do not solve the question by yourself; just check if the student's answer is equivalent to the ground truth answer.\n"
-    "If the student's answer is correct, output \"Final Decision: Yes\". If the student's answer is incorrect, output \"Final Decision: No\". Assistant:"
+        f"User: ### Question: {question}\n\n"
+        f"### Ground Truth Answer: {reference}\n\n"
+        f"### Student Answer: {student}\n\n"
+        "For the above question, please verify if the student's answer is equivalent to the ground truth answer.\n"
+        "Do not solve the question by yourself; just check if the student's answer is equivalent to the ground truth answer.\n"
+        'If the student\'s answer is correct, output "Final Decision: Yes". If the student\'s answer is incorrect, output "Final Decision: No". Assistant:'
     )
 
     payload = {
         "model": "openai/gpt-oss-20b",
         "messages": [{"role": "user", "content": prompt}],
         "chat_template_kwargs": {"enable_thinking": False},
-        "temperature": 0.0
+        "temperature": 0.0,
     }
 
     resp = requests.post(url, json=payload, timeout=120)
@@ -75,17 +77,18 @@ def _llm_judge(question: str, student: str, reference: str, verbose: bool = Fals
     else:
         score = float(decision)
 
-    marker = "✅" if score == 1. else "❌"
+    marker = "✅" if score == 1.0 else "❌"
 
     if verbose:
-        print(marker*50 )
+        print(marker * 50)
         print("student answer: ", student)
         print("gt: ", reference)
         import json as _json
+
         print(_json.dumps(data, indent=2, ensure_ascii=False))
-        print(marker*16 + " LLM Judge CONTENT " + marker*16 )
+        print(marker * 16 + " LLM Judge CONTENT " + marker * 16)
         print(text)
-        print(marker*16 + "End of LLM Judge Reply \n"+ marker*16 )
+        print(marker * 16 + "End of LLM Judge Reply \n" + marker * 16)
 
     return score
 
@@ -100,6 +103,7 @@ def _extract_final_decision(text: str):
         return None
     last_decision = matches[-1].group(1).lower()
     return last_decision == "yes"
+
 
 def _last_boxed_only_string(string):
     idx = string.rfind("\\boxed")
@@ -128,7 +132,7 @@ def _last_boxed_only_string(string):
     if left_brace_idx is None or right_brace_idx is None:
         return None
 
-    return string[left_brace_idx + 1:right_brace_idx].strip()
+    return string[left_brace_idx + 1 : right_brace_idx].strip()
 
 
 def match_answer(response):
@@ -139,15 +143,12 @@ def match_answer(response):
     if ans_boxed:
         is_matched = True
         response = ans_boxed
-    
+
     return is_matched, response
 
 
 # ------------ Public API -----------------------------------------------------
-def compute_score(data_source: str,
-                  model_output: str,
-                  ground_truth: str,
-                  extra_info: dict) -> Tuple[bool, float, str]:
+def compute_score(data_source: str, model_output: str, ground_truth: str, extra_info: dict) -> Tuple[bool, float, str]:
     """
     Arguments
     ---------
@@ -174,32 +175,33 @@ def compute_score(data_source: str,
         return 1.0 if student == gt else 0.0
 
     # Otherwise, require boxed for LLM judging (legacy behavior)
-    question    = extra_info["question"]
+    question = extra_info["question"]
     if is_matched == False:
-        return 0.
+        return 0.0
     else:
         try:
             is_correct = _llm_judge(question, extracted_model_output, ground_truth, verbose=False)
         except Exception as e:
             instance_id = extra_info.get("instance_id", "unknown") if isinstance(extra_info, dict) else "unknown"
             print(f"[judge-error] instance_id={instance_id} {e}")
-            return 0.
+            return 0.0
         return float(is_correct)
-    
+
+
 # ---------------- Demo -------------------------------------------------------
 if __name__ == "__main__":
     demo_item = {
         "question": "A cash-strapped young professional offers to buy your car "
-                    "with four equal annual payments of $3,000, beginning 2 "
-                    "years from today. Assuming you can invest at 10% and want "
-                    "to receive $9,000 for the car, should you accept?",
-        "answer": "$8,645.09"
+        "with four equal annual payments of $3,000, beginning 2 "
+        "years from today. Assuming you can invest at 10% and want "
+        "to receive $9,000 for the car, should you accept?",
+        "answer": "$8,645.09",
     }
-    agent_reply = "The answer is\\boxed{$8,645.09}"           # pretend this comes from your agent
+    agent_reply = "The answer is\\boxed{$8,645.09}"  # pretend this comes from your agent
     score = compute_score(
         data_source="",
         model_output=agent_reply,
         ground_truth=demo_item["answer"],
-        extra_info={"question": demo_item["question"]}
+        extra_info={"question": demo_item["question"]},
     )
     print("score =", score)

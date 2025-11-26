@@ -22,15 +22,12 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import PPO_RAY_RUNTIME_ENV
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
-from verl.utils.import_utils import load_extern_type
 
 from .verl_trainer import SkyAgentPPOTrainer
-import torch 
-from collections import defaultdict 
+import torch
+from collections import defaultdict
 
 
 from verl.workers.reward_manager import register
@@ -71,7 +68,9 @@ class SkyAgentRewardManager:
         reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
-        print(f"In Reward manager: data proto batch keys: {data.batch.keys()}, non tensor batch keys: {data.non_tensor_batch.keys()} meta info keys: {data.meta_info.keys()}")
+        print(
+            f"In Reward manager: data proto batch keys: {data.batch.keys()}, non tensor batch keys: {data.non_tensor_batch.keys()} meta info keys: {data.meta_info.keys()}"
+        )
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -153,9 +152,9 @@ def run_ppo(config) -> None:
         runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = TaskRunner.remote()
-    
+
     task = runner.run.remote(config)
-    try: 
+    try:
         ray.get(task)
     except KeyboardInterrupt:
         print("KeyboardInterrupt received, shutting down...")
@@ -167,6 +166,7 @@ def run_ppo(config) -> None:
     timeline_json_file = config.ray_init.get("timeline_json_file", None)
     if timeline_json_file:
         ray.timeline(filename=timeline_json_file)
+
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
@@ -202,21 +202,25 @@ class TaskRunner:
         # skyagent validation
         if getattr(config, "skyrl_agent", None) is not None:
             task_yaml = getattr(config.skyrl_agent, "task_yaml")
-            import yaml 
+            import yaml
 
             with open(task_yaml, "r") as f:
                 print("Using Skyrlagent now")
                 skyagent_config = OmegaConf.create(yaml.safe_load(f))
-                assert config.skyrl_agent.num_trajectories == skyagent_config.generator.num_trajectories, f"Verl configuration received num trajectories per instance `num_trajectories` of {config.skyrl_agent.num_trajectories} but the provided value in the `skyagent_task_yaml` is {skyagent_config.generator.num_trajectories}. Please ensure that both are consistent"
-
+                assert (
+                    config.skyrl_agent.num_trajectories == skyagent_config.generator.num_trajectories
+                ), f"Verl configuration received num trajectories per instance `num_trajectories` of {config.skyrl_agent.num_trajectories} but the provided value in the `skyagent_task_yaml` is {skyagent_config.generator.num_trajectories}. Please ensure that both are consistent"
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
         print(f"[{socket.gethostname()}] Starting model loading from: {config.actor_rollout_ref.model.path}")
         import time
+
         start_time = time.time()
         local_path = copy_to_local(
-            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False), verbose=True
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+            verbose=True,
         )
         print(f"[{socket.gethostname()}] Model loaded in {time.time() - start_time:.2f} seconds from: {local_path}")
 
@@ -305,12 +309,8 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         # Load the reward manager for training and validation.
-        reward_fn = SkyAgentRewardManager(
-            tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = SkyAgentRewardManager(
-            tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
+        reward_fn = SkyAgentRewardManager(tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
+        val_reward_fn = SkyAgentRewardManager(tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn

@@ -124,11 +124,15 @@ def timeout_limit(seconds: float, use_signals: bool = False):
                 except queue.Empty as err:
                     exitcode = process.exitcode
                     if exitcode is not None and exitcode != 0:
-                        raise RuntimeError(f"Child process exited with error (exitcode: {exitcode}) before returning result.") from err
+                        raise RuntimeError(
+                            f"Child process exited with error (exitcode: {exitcode}) before returning result."
+                        ) from err
                     else:
                         # Should have timed out if queue is empty after join unless process died unexpectedly
                         # Update function name in error message if needed (optional but good practice)
-                        raise TimeoutError(f"Operation timed out or process finished unexpectedly without result (exitcode: {exitcode}).") from err
+                        raise TimeoutError(
+                            f"Operation timed out or process finished unexpectedly without result (exitcode: {exitcode})."
+                        ) from err
                 finally:
                     q.close()
                     q.join_thread()
@@ -266,9 +270,11 @@ class DynamicEnum(metaclass=DynamicEnumMeta):
     def from_name(cls, name: str) -> Optional["DynamicEnum"]:
         return cls._registry.get(name.upper())
 
+
 def convert_to_regular_types(obj):
     """Convert Hydra configs and other special types to regular Python types."""
     from omegaconf import DictConfig, ListConfig
+
     if isinstance(obj, (ListConfig, DictConfig)):
         return {k: convert_to_regular_types(v) for k, v in obj.items()} if isinstance(obj, DictConfig) else list(obj)
     elif isinstance(obj, (list, tuple)):

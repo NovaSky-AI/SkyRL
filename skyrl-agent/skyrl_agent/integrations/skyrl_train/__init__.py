@@ -7,5 +7,5 @@ register_backend(
         infer_backend_cls=SkyRLBackend,
         generator_output_cls=SkyRLGeneratorOutput,
         generator_input_cls=SkyRLGeneratorInput,
-    )
+    ),
 )

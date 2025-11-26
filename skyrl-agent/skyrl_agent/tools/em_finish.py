@@ -29,9 +29,9 @@ class EMFinishTool(BaseTool):
                     "  - Multiple choice: \\boxed{A} or \\boxed{B}\n"
                     "- NEVER use plain text without \\boxed{} in the finish tool\n"
                     "- This format is MANDATORY for ALL answers"
-                )
+                ),
             },
-        }
+        },
     }
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
@@ -39,7 +39,7 @@ class EMFinishTool(BaseTool):
             params = self._verify_json_format_args(params)
         except ValueError as e:
             return {"error": f"Invalid parameters: {str(e)}"}
-        
+
         # If the parameters are valid, we can proceed to finish the task.
         answer = params.get("answer", "")
         # Enforce boxed format if missing (universal requirement per instruction)

@@ -13,7 +13,7 @@ EXTRACTOR_PROMPT = """Please process the following webpage content and user goal
 4. **Word limits**: "rational" ≤ 50 words; "evidence" ≤ 70 words; "summary" ≤ 90 words.
 
 **Final Output Format using JSON format has "rational", "evidence", "summary" feilds**
-""" 
+"""
 
 SIMPLE_MEMORY_SYSTEM_PROMPT = """You are presented with a problem and sections of articles that may contain the answer. 
 

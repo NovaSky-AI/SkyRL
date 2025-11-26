@@ -1,34 +1,23 @@
 import asyncio
-import heapq
-import logging
-import os
-import random
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import hydra
 import numpy as np
 import ray
 import torch
-from cachetools import LRUCache
-from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel
+from omegaconf import DictConfig
 from tensordict import TensorDict
-from transformers import AutoTokenizer
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayWorkerGroup
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
-from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 from verl.workers.rollout.async_server import AsyncServerBase
 
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopWorker, AgentLoopManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 
 from skyrl_agent import AutoAgentRunner
-
 
 
 def async_server_class(
@@ -67,6 +56,7 @@ def async_server_class(
 
     return load_extern_type(rollout_backend_module, rollout_backend_class)
 
+
 class SkyAgentLoopManager(AgentLoopManager):
     """Agent loop manager that manages a group of agent loop workers."""
 
@@ -82,7 +72,7 @@ class SkyAgentLoopManager(AgentLoopManager):
 
         self._initialize_llm_servers()
         # self._init_agent_loop_workers()
-        
+
         # init tokenizer
         model_path = config.actor_rollout_ref.model.path
         self.model_name = "/".join(model_path.split("/")[-2:])
@@ -91,12 +81,13 @@ class SkyAgentLoopManager(AgentLoopManager):
 
         # init generator
         self.server_manager = AsyncLLMServerManager(config, self.async_llm_servers)
-        self.skyagent_generator = AutoAgentRunner.from_task(task_yaml=config.skyrl_agent.task_yaml, infer_engine=self.server_manager,
-            tokenizer=self.tokenizer)
+        self.skyagent_generator = AutoAgentRunner.from_task(
+            task_yaml=config.skyrl_agent.task_yaml, infer_engine=self.server_manager, tokenizer=self.tokenizer
+        )
 
         # Initially we're in sleep mode.
         self.sleep()
-    
+
     # initialize here with the custom `async_server_class` implementation
     def _initialize_llm_servers(self):
         self.rollout_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
@@ -156,7 +147,10 @@ class SkyAgentLoopManager(AgentLoopManager):
 
         # inputs
         self.tokenizer.padding_side = "left"
-        max_prompt_length = max(max([len(input_ids) for input_ids in inputs["prompt_token_ids"]]), self.config.actor_rollout_ref.rollout.prompt_length)
+        max_prompt_length = max(
+            max([len(input_ids) for input_ids in inputs["prompt_token_ids"]]),
+            self.config.actor_rollout_ref.rollout.prompt_length,
+        )
         outputs = self.tokenizer.pad(
             [{"input_ids": input_ids} for input_ids in inputs["prompt_token_ids"]],
             padding="max_length",
@@ -168,7 +162,10 @@ class SkyAgentLoopManager(AgentLoopManager):
 
         # responses
         self.tokenizer.padding_side = "right"
-        max_response_length = max(max([len(response) for response in inputs["response_ids"]]), self.config.actor_rollout_ref.rollout.response_length)
+        max_response_length = max(
+            max([len(response) for response in inputs["response_ids"]]),
+            self.config.actor_rollout_ref.rollout.response_length,
+        )
         outputs = self.tokenizer.pad(
             [{"input_ids": response_ids} for response_ids in inputs["response_ids"]],
             padding="max_length",
@@ -180,11 +177,11 @@ class SkyAgentLoopManager(AgentLoopManager):
 
         # response_mask
         response_length = response_ids.shape[1]
-        loss_masks = [loss_mask + [0]*(response_length - len(loss_mask)) for loss_mask in inputs["loss_masks"]]
+        loss_masks = [loss_mask + [0] * (response_length - len(loss_mask)) for loss_mask in inputs["loss_masks"]]
         response_mask = torch.tensor(loss_masks, dtype=torch.long)
-        assert response_ids.shape == response_mask.shape, (
-            f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
-        )
+        assert (
+            response_ids.shape == response_mask.shape
+        ), f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
         response_mask = response_mask * response_attention_mask
 
         input_ids = torch.cat([prompt_ids, response_ids], dim=1)
@@ -203,7 +200,11 @@ class SkyAgentLoopManager(AgentLoopManager):
             batch_size=len(input_ids),
         )
 
-        return DataProto(batch=batch, non_tensor_batch={"rewards": np.array(inputs["rewards"])}, meta_info={"rollout_metrics": inputs["rollout_metrics"], "timing": {}})
+        return DataProto(
+            batch=batch,
+            non_tensor_batch={"rewards": np.array(inputs["rewards"])},
+            meta_info={"rollout_metrics": inputs["rollout_metrics"], "timing": {}},
+        )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
@@ -216,7 +217,9 @@ class SkyAgentLoopManager(AgentLoopManager):
         """
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.wake_up()
-        skyagent_output = asyncio.run(self.skyagent_generator.run(prompts, val_mode=prompts.meta_info.get("val_mode", False)))
+        skyagent_output = asyncio.run(
+            self.skyagent_generator.run(prompts, val_mode=prompts.meta_info.get("val_mode", False))
+        )
         output = self._postprocess(skyagent_output)
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()

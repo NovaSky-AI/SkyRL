@@ -1,7 +1,7 @@
 """
 Web Research Task - Uses search_engine and web_browser tools together
 """
-import asyncio
+
 from typing import Dict, Any, List
 from skyrl_agent.tasks.base import BaseTask
 
@@ -11,13 +11,13 @@ class WebResearchTask(BaseTask):
     A task that combines search_engine and web_browser tools for web research.
     This task uses the existing tools without modification.
     """
-    
+
     @classmethod
     async def initialize_runtime(cls, *args, **kwargs) -> Any:
         """Initialize the runtime for the web research task"""
         # No special runtime initialization needed
         return {}
-    
+
     @classmethod
     def get_instruction(cls, instance: Dict[str, Any]) -> List[Dict[str, str]]:
         """
@@ -26,26 +26,27 @@ class WebResearchTask(BaseTask):
         """
         # Handle pandas Series or dict input
         import pandas as pd
-        
+
         # Extract prompt - simplified since our unified dataset has 'prompt' field
         if isinstance(instance, pd.Series):
             # Use the prompt field from our unified dataset
-            prompt = instance.get('prompt', '')
-            
+            prompt = instance.get("prompt", "")
+
             # Debug output (optional)
             if prompt:
                 print(f"[DEBUG] Using prompt from unified dataset (length: {len(prompt)})")
             else:
                 # Fallback to Question field if using old format
-                prompt = instance.get('Question', '')
+                prompt = instance.get("Question", "")
                 if prompt:
-                    print(f"[DEBUG] Using Question field as fallback")
+                    print("[DEBUG] Using Question field as fallback")
         else:
             # Handle dict-like objects
-            prompt = instance.get("prompt", instance.get("Question", "")) if hasattr(instance, 'get') else str(instance)
-        
+            prompt = instance.get("prompt", instance.get("Question", "")) if hasattr(instance, "get") else str(instance)
+
         # Debug: show raw prompt source when enabled
         import os as _os
+
         _debug = _os.getenv("SKYAGENT_DEBUG_LOG", "0") == "1"
 
         # Handle different input formats
@@ -55,10 +56,10 @@ class WebResearchTask(BaseTask):
             prompt = [prompt]
         elif not isinstance(prompt, list):
             prompt = [{"role": "user", "content": str(prompt)}]
-        
+
         # Check if there's already a system message
         has_system = any(msg.get("role") == "system" for msg in prompt)
-        
+
         if not has_system:
             # Add system prompt that explains how to use the tools
             system_prompt = {
@@ -75,31 +76,33 @@ Typical workflow:
 1) search_engine → get URLs
 2) web_browser → extract key facts from sources
 3) finish → \\boxed{YOUR_ANSWER}
-"""
+""",
             }
             prompt = [system_prompt] + prompt
-        
+
         if _debug:
             # Print system + first user message preview
             def _preview(msg, w=300):
                 s = str(msg).replace("\n", " ")
                 return s[:w] + ("..." if len(s) > w else "")
+
             if isinstance(prompt, list) and len(prompt) > 0:
                 sys_msg = next((m for m in prompt if m.get("role") == "system"), prompt[0])
-                usr_msg = next((m for m in prompt if m.get("role") == "user"), prompt[min(1, len(prompt)-1)])
+                usr_msg = next((m for m in prompt if m.get("role") == "user"), prompt[min(1, len(prompt) - 1)])
                 print("[WebResearchTask] System prompt preview:", _preview(sys_msg.get("content", "")))
                 print("[WebResearchTask] User prompt preview:", _preview(usr_msg.get("content", "")))
         return prompt
-    
+
     @classmethod
     def complete_runtime(cls, *args, **kwargs) -> Dict[str, Any]:
         """Complete or finalize the runtime for the task"""
         # No special cleanup needed
         return {}
-    
+
     @classmethod
-    async def evaluate_result(cls, result: Any, instance: Any, data_source: str = None, 
-                            instance_id: int = None, trajectory_id: int = None) -> float:
+    async def evaluate_result(
+        cls, result: Any, instance: Any, data_source: str = None, instance_id: int = None, trajectory_id: int = None
+    ) -> float:
         """
         STEM evaluation using LLM judge for textbook data; otherwise simple pass-through.
         """
@@ -111,7 +114,7 @@ Typical workflow:
 
         # Debug logging for instance type and content
         print(f"[evaluate_result] instance_id={instance_id} instance type: {type(instance).__name__}")
-        
+
         # Normalize instance into a dict
         try:
             if isinstance(instance, pd.Series):
@@ -120,15 +123,15 @@ Typical workflow:
         except Exception as e:
             print(f"[evaluate_result] Failed to convert Series for instance_id={instance_id}: {e}")
             pass
-        
+
         # Log instance structure after normalization
         if isinstance(instance, dict):
             print(f"[evaluate_result] instance_id={instance_id} keys: {list(instance.keys())}")
-            if 'reward_model' in instance:
-                rm_type = type(instance['reward_model']).__name__
+            if "reward_model" in instance:
+                rm_type = type(instance["reward_model"]).__name__
                 print(f"[evaluate_result] reward_model type: {rm_type}")
-            if 'extra_info' in instance:
-                ei_type = type(instance['extra_info']).__name__ 
+            if "extra_info" in instance:
+                ei_type = type(instance["extra_info"]).__name__
                 print(f"[evaluate_result] extra_info type: {ei_type}")
 
         # Determine data_source
@@ -142,8 +145,9 @@ Typical workflow:
             try:
                 # Extract fields with robust GT fallback (align with training-side logic)
                 import json as _json
-                rm_raw = (instance.get("reward_model") if isinstance(instance, dict) else None)
-                ei_raw = (instance.get("extra_info") if isinstance(instance, dict) else None)
+
+                rm_raw = instance.get("reward_model") if isinstance(instance, dict) else None
+                ei_raw = instance.get("extra_info") if isinstance(instance, dict) else None
                 # Handle JSON-serialized dicts
                 if isinstance(rm_raw, str):
                     try:
@@ -183,13 +187,15 @@ Typical workflow:
                 if not ground_truth:
                     # No GT → cannot judge; return 0 and emit a concise trace
                     try:
-                        print(f"[rollout-judge-skip] instance_id={instance_id} traj={trajectory_id} ds={ds_lower} reason=missing_ground_truth")
+                        print(
+                            f"[rollout-judge-skip] instance_id={instance_id} traj={trajectory_id} ds={ds_lower} reason=missing_ground_truth"
+                        )
                         # Debug why ground truth is missing
                         print(f"  [DEBUG] rm keys: {list(rm.keys()) if isinstance(rm, dict) else 'not dict'}")
                         print(f"  [DEBUG] ei keys: {list(ei.keys()) if isinstance(ei, dict) else 'not dict'}")
-                        if isinstance(rm, dict) and 'ground_truth' in rm:
+                        if isinstance(rm, dict) and "ground_truth" in rm:
                             print(f"  [DEBUG] rm.ground_truth exists but is: {rm['ground_truth']!r}")
-                        if isinstance(ei, dict) and 'reference_answer' in ei:
+                        if isinstance(ei, dict) and "reference_answer" in ei:
                             print(f"  [DEBUG] ei.reference_answer exists but is: {ei['reference_answer']!r}")
                     except Exception:
                         pass
@@ -204,6 +210,7 @@ Typical workflow:
 
                 # Call synchronous judge safely from async context
                 from skyrl_agent.dispatcher.async_utils import call_sync_from_async
+
                 # Use the original minimal web-search STEM judge (as before)
                 from skyrl_agent.tasks.verifiers.web_search.stem_llm_judge import compute_score as _compute_score
 
@@ -217,8 +224,11 @@ Typical workflow:
                 # Lightweight trace to confirm rollout-side LLM judge usage
                 try:
                     import os as _os
+
                     _base = _os.environ.get("STEM_LLM_JUDGE_URL", "") or _os.environ.get("MATH_LLM_JUDGE_URL", "") or ""
-                    print(f"[rollout-judge-used] instance_id={instance_id} traj={trajectory_id} ds={ds_lower} score={float(score)} base={_base}")
+                    print(
+                        f"[rollout-judge-used] instance_id={instance_id} traj={trajectory_id} ds={ds_lower} score={float(score)} base={_base}"
+                    )
                 except Exception:
                     pass
                 return float(score)
@@ -229,7 +239,9 @@ Typical workflow:
             # For non-STEM datasets, do not call judge; emit a concise trace once per item when result exists
             try:
                 if result:
-                    print(f"[rollout-judge-skip] instance_id={instance_id} traj={trajectory_id} ds={ds_lower} reason=non_stem_dataset")
+                    print(
+                        f"[rollout-judge-skip] instance_id={instance_id} traj={trajectory_id} ds={ds_lower} reason=non_stem_dataset"
+                    )
             except Exception:
                 pass
 

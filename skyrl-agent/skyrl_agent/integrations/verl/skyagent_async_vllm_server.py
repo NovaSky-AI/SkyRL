@@ -1,18 +1,15 @@
-from typing import List, Any, Tuple
-import logging
-import os
-import pickle
-from typing import Any, Callable, Optional
+from typing import Any, Tuple
+from typing import Optional
 
 import ray
-import zmq
 from vllm import SamplingParams
 from typing import Dict
+
 try:
     from omegaconf import DictConfig, ListConfig, OmegaConf
 except Exception:
     DictConfig = None  # type: ignore
-    ListConfig = None  # type: ignore 
+    ListConfig = None  # type: ignore
     OmegaConf = None  # type: ignore
 
 from vllm.inputs import TokensPrompt
@@ -22,7 +19,9 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServerR
 
 @ray.remote(num_cpus=1)
 class SkyAgentAsyncvLLMServer(AsyncvLLMServerRegular):
-    async def generate(self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str) -> Tuple[str, str]:
+    async def generate(
+        self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str
+    ) -> Tuple[str, str]:
         # max_tokens = self.max_model_len - len(prompt_ids)
         # sampling_params.pop("max_tokens", None)
         # sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)

@@ -52,10 +52,10 @@ extracted_answer_format_for_confidence = {
                 "strict": {"type": "boolean"},
             },
             "required": ["extracted_final_answer", "reasoning", "correct", "confidence", "strict"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
-        "strict": True
-    }
+        "strict": True,
+    },
 }
 
 JUDGE_PROMPT_RULER_OFFICIAL = """Does the [response] correctly answer the [question] based on [correct_answer]?
@@ -77,11 +77,12 @@ ruler_answer_format = {
                 "correct": {"type": "string", "enum": ["yes", "no"]},
             },
             "required": ["correct"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
-        "strict": True
-    }
+        "strict": True,
+    },
 }
+
 
 def normalize_answer(s):
     def remove_articles(text):
@@ -96,7 +97,7 @@ def normalize_answer(s):
 
     def lower(text):
         return text.lower()
-    
+
     # remove \boxed{} if it exists
     s = re.sub(r"\\boxed\{([^}]+)\}", r"\1", s)
 
@@ -115,6 +116,7 @@ def em_check(prediction, golden_answers):
             break
     return score
 
+
 def bool_mapping(s):
     """Map boolean strings to yes/no format"""
     if s == "True":
@@ -124,23 +126,26 @@ def bool_mapping(s):
     else:
         return s
 
+
 def contains_chinese(text):
     """Check if the given text contains Chinese characters"""
     for char in text:
-        if '\u4e00' <= char <= '\u9fff':
+        if "\u4e00" <= char <= "\u9fff":
             return True
-        if '\u3400' <= char <= '\u4dbf':
+        if "\u3400" <= char <= "\u4dbf":
             return True
-        if '\uf900' <= char <= '\ufaff':
+        if "\uf900" <= char <= "\ufaff":
             return True
     return False
+
 
 def normalize_text(text: str) -> str:
     """Normalize text for F1 scoring"""
     for punct in string.punctuation:
-        text = text.replace(punct, ' ')
-    text = re.sub(r'\s+', ' ', text)
+        text = text.replace(punct, " ")
+    text = re.sub(r"\s+", " ", text)
     return text.strip().lower()
+
 
 def f1_score(answer_content, gt):
     """Compute F1 score between answer and ground truth"""
@@ -148,56 +153,60 @@ def f1_score(answer_content, gt):
     gt = normalize_text(bool_mapping(gt))
 
     if contains_chinese(gt):
+
         def parse_chinese_str(s):
             numbers = []
             for i, c in enumerate(s):
                 if c.isdigit():
-                    if i > 0 and s[i-1].isdigit():
+                    if i > 0 and s[i - 1].isdigit():
                         numbers[-1] = numbers[-1] + c
                     else:
                         numbers.append(c)
             for c in "0123456789，。 ,.-":
                 s = s.replace(c, "")
             return set(list(s) + numbers)
+
         pred_tokens = parse_chinese_str(answer_content)
         gt_tokens = parse_chinese_str(gt)
     else:
         pred_tokens = set(answer_content.split())
         gt_tokens = set(gt.split())
-    
+
     if not gt_tokens or not pred_tokens:
         return 0
-    
+
     common_tokens = pred_tokens & gt_tokens
     precision = len(common_tokens) / len(pred_tokens)
     recall = len(common_tokens) / len(gt_tokens)
-    
+
     if precision + recall > 0:
         return 2 * (precision * recall) / (precision + recall)
     return 0
 
-def compute_score_f1(solution_str, ground_truth, format_score=0., score=1.):
+
+def compute_score_f1(solution_str, ground_truth, format_score=0.0, score=1.0):
     """Compute F1 score - handles both single targets and lists"""
-    target = ground_truth['target']
-    
+    target = ground_truth["target"]
+
     if solution_str is None:
         return {"score": 0}
-    
+
     # Handle numpy arrays and lists
-    if hasattr(target, 'tolist'):
+    if hasattr(target, "tolist"):
         target = target.tolist()
-    
+
     # Handle lists by computing F1 against each and taking max
     if isinstance(target, list):
         scores = []
         for gt in target:
             scores.append(f1_score(solution_str, gt))
         return {"score": max(scores) if scores else 0}
-    
+
     # Single target case
     return {"score": f1_score(solution_str, target)}
 
-def compute_score_em(solution_str, ground_truth, format_score=0., score=1.):
+
+def compute_score_em(solution_str, ground_truth, format_score=0.0, score=1.0):
     """The scoring function for exact match (EM).
 
     Args:
@@ -208,67 +217,72 @@ def compute_score_em(solution_str, ground_truth, format_score=0., score=1.):
         score: the score for the correct answer
     """
     do_print = random.randint(1, 64) == 1
-    
+
     if do_print:
-        print(f"--------------------------------")
+        print("--------------------------------")
         print(f"Golden answers: {ground_truth['target']}")
         print(f"Solution string: {solution_str}")
-    
+
     if solution_str is None:
         return {"score": 0}
     else:
-        if em_check(solution_str, ground_truth['target']):
+        if em_check(solution_str, ground_truth["target"]):
             return {"score": score}
         else:
             return {"score": format_score}
+
 
 # use llm as a verifier
 def compute_score_browsecomp(solution_str, ground_truth, question):
     """The scoring function for LLM"""
 
-    if isinstance(ground_truth['target'], list):
-        assert len(ground_truth['target']) == 1, "Only one correct answer is supported for browsecomp"
-        ground_truth['target'] = ground_truth['target'][0]
-    
+    if isinstance(ground_truth["target"], list):
+        assert len(ground_truth["target"]) == 1, "Only one correct answer is supported for browsecomp"
+        ground_truth["target"] = ground_truth["target"][0]
+
     if solution_str is None:
         return {"score": 0}
     else:
         # use llm as a verifier
-        prompt = JUDGE_PROMPT_BROWSECOMP_OFFICIAL.format(question=question, response=solution_str, correct_answer=ground_truth['target'])
+        prompt = JUDGE_PROMPT_BROWSECOMP_OFFICIAL.format(
+            question=question, response=solution_str, correct_answer=ground_truth["target"]
+        )
         print(f"Prompt for judge model: {prompt}")
         response = litellm.completion(
             model="gpt-4o-2024-08-06",
             messages=[{"role": "user", "content": prompt}],
             num_retries=5,
-            response_format=extracted_answer_format_for_confidence
+            response_format=extracted_answer_format_for_confidence,
         )
         print(f"Response from judge model: {response}")
         raw_content = response.choices[0].message["content"]
         raw_judge = json.loads(raw_content)
         judgement = "Correct" if raw_judge["correct"].lower() == "yes" else ""
-        
+
         return {"score": 1 if judgement == "Correct" else 0}
+
 
 # use llm as a verifier
 def compute_score_ruler(solution_str, ground_truth, question):
     """The scoring function for LLM"""
-    import numpy as np
     if solution_str is None:
         return {"score": 0}
     else:
         # use llm as a verifier
-        prompt = JUDGE_PROMPT_RULER_OFFICIAL.format(question=question, response=solution_str, correct_answer=ground_truth)
+        prompt = JUDGE_PROMPT_RULER_OFFICIAL.format(
+            question=question, response=solution_str, correct_answer=ground_truth
+        )
         print(f"Prompt for judge model: {prompt}")
         response = litellm.completion(
             model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
             num_retries=1,
-            response_format=ruler_answer_format
+            response_format=ruler_answer_format,
         )
         print(f"Response from judge model: {response}")
         raw_content = response.choices[0].message["content"]
         print(f"Raw content from judge model: {raw_content}")
         raw_judge = json.loads(raw_content)
         judgement = "Correct" if raw_judge["correct"].lower() == "yes" else ""
-        
+
         return {"score": 1 if judgement == "Correct" else 0}

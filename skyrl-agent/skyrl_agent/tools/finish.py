@@ -16,11 +16,8 @@ class FinishTool(BaseTool):
         "type": "object",
         "required": ["answer"],
         "properties": {
-            "answer": {
-                "type": "string",
-                "description": "Final message summarizing the task or containing the answer."
-            },
-        }
+            "answer": {"type": "string", "description": "Final message summarizing the task or containing the answer."},
+        },
     }
 
     def call(self, params: Union[str, dict], **kwargs) -> str:
@@ -28,7 +25,7 @@ class FinishTool(BaseTool):
             params = self._verify_json_format_args(params)
         except ValueError as e:
             return {"error": f"Invalid parameters: {str(e)}"}
-        
+
         # If the parameters are valid, we can proceed to finish the task.
         answer = params.get("answer", "")
         return answer

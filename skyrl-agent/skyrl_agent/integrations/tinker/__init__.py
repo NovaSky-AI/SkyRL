@@ -7,6 +7,5 @@ register_backend(
         infer_backend_cls=TinkerBackend,
         generator_output_cls=TinkerGeneratorOutput,
         generator_input_cls=TinkerGeneratorInput,
-    )
+    ),
 )
-

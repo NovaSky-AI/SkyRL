@@ -1,29 +1,28 @@
 from skyrl_agent.tools.base import BaseTool, register_tool, json_loads
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Union
+from typing import Union
 import requests
 import os
 
-@register_tool('search_engine')
+
+@register_tool("search_engine")
 class SearchEngine(BaseTool):
     name = "search_engine"
     description = (
         "Performs batched web searches: supply an array 'query'; the tool retrieves the top 10 results for each query in one call.\n\n"
-        "For search_engine, query must be JSON array: [\"term1\", \"term2\"] NOT [term1, term2] or [[\"term1\", \"term2\"]]"
+        'For search_engine, query must be JSON array: ["term1", "term2"] NOT [term1, term2] or [["term1", "term2"]]'
     )
     parameters = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "array",
-                "items": {
-                    "type": "string"
-                },
+                "items": {"type": "string"},
                 "description": (
                     "Array of query strings. Include multiple complementary search queries in a single call.\n\n"
-                    "For search_engine, query must be JSON array: [\"term1\", \"term2\"] NOT [term1, term2] or [[\"term1\", \"term2\"]]"
-                )
+                    'For search_engine, query must be JSON array: ["term1", "term2"] NOT [term1, term2] or [["term1", "term2"]]'
+                ),
             },
         },
         "required": ["query"],
@@ -37,42 +36,36 @@ class SearchEngine(BaseTool):
     #   SEARCH_BLOCKLIST_DOMAINS: comma-separated domains to exclude (e.g., "huggingface.co,github.com")
     #   SEARCH_BLOCKLIST_KEYWORDS: comma-separated keywords to filter out (e.g., "gpqa,web_research_hle")
     #   SEARCH_NEGATIVE_FILTERS: if "true" (default), append -site:domain to the query for blocklisted domains
-    _default_block_domains = (
-        os.getenv(
-            "SEARCH_BLOCKLIST_DOMAINS",
-            # Sensible defaults to avoid benchmark leakage and paywalled homework sites
-            "huggingface.co,github.com,gitlab.com,chegg.com,coursehero.com,studocu.com,brainly.com,quizlet.com"
-        )
-        .strip()
-    )
-    _default_block_keywords = (
-        os.getenv(
-            "SEARCH_BLOCKLIST_KEYWORDS",
-            # Common benchmark/dataset keywords observed in HLE/GPQA scenarios
-            "gpqa,Chemistry-GPQA,gpqa-diamond"
-        )
-        .strip()
-    )
+    _default_block_domains = os.getenv(
+        "SEARCH_BLOCKLIST_DOMAINS",
+        # Sensible defaults to avoid benchmark leakage and paywalled homework sites
+        "huggingface.co,github.com,gitlab.com,chegg.com,coursehero.com,studocu.com,brainly.com,quizlet.com",
+    ).strip()
+    _default_block_keywords = os.getenv(
+        "SEARCH_BLOCKLIST_KEYWORDS",
+        # Common benchmark/dataset keywords observed in HLE/GPQA scenarios
+        "gpqa,Chemistry-GPQA,gpqa-diamond",
+    ).strip()
     _use_negative_filters = os.getenv("SEARCH_NEGATIVE_FILTERS", "true").lower() == "true"
 
     # Normalize to sets for faster checks
-    blocklist_domains = {d.strip().lower() for d in _default_block_domains.split(',') if d.strip()}
-    blocklist_keywords = {k.strip().lower() for k in _default_block_keywords.split(',') if k.strip()}
+    blocklist_domains = {d.strip().lower() for d in _default_block_domains.split(",") if d.strip()}
+    blocklist_keywords = {k.strip().lower() for k in _default_block_keywords.split(",") if k.strip()}
 
     def google_search(self, query: str):
         """
         Performs a Google search using the Serper API.
-        
+
         Args:
             query (str): The search query string
-            
+
         Returns:
             str: Formatted search results or error message
         """
-        url = 'https://google.serper.dev/search'
+        url = "https://google.serper.dev/search"
         headers = {
-            'X-API-KEY': self.google_search_key,
-            'Content-Type': 'application/json',
+            "X-API-KEY": self.google_search_key,
+            "Content-Type": "application/json",
         }
         # Optionally add negative site filters directly to the query
         q = query
@@ -96,11 +89,11 @@ class SearchEngine(BaseTool):
                 response = requests.post(url, headers=headers, data=json.dumps(data), timeout=10)
                 results = response.json()
                 break
-            except Exception as e:
+            except Exception:
                 if i == 4:
                     return f"Google search timeout for query '{query}'. Please try again later."
                 continue
-        
+
         if response.status_code != 200:
             return f"Search API error: {response.status_code} - {response.text}"
 
@@ -119,9 +112,13 @@ class SearchEngine(BaseTool):
                     link_l = link.lower()
                     combined_l = f"{title} {snippet} {link}".lower()
                     # Domain filtering based on URL substring match
-                    blocked_domain = any(d in link_l for d in self.blocklist_domains) if self.blocklist_domains else False
+                    blocked_domain = (
+                        any(d in link_l for d in self.blocklist_domains) if self.blocklist_domains else False
+                    )
                     # Keyword filtering anywhere in title/snippet/link
-                    blocked_keyword = any(k in combined_l for k in self.blocklist_keywords) if self.blocklist_keywords else False
+                    blocked_keyword = (
+                        any(k in combined_l for k in self.blocklist_keywords) if self.blocklist_keywords else False
+                    )
                     if not blocked_domain and not blocked_keyword:
                         filtered_pages.append(p)
                 except Exception:
@@ -141,7 +138,10 @@ class SearchEngine(BaseTool):
                 redacted_version = redacted_version.replace("Your browser can't play this video.", "")
                 web_snippets.append(redacted_version)
 
-            content = f"A Google search for '{query}' found {len(web_snippets)} results:\n\n## Web Results\n" + "\n\n".join(web_snippets)
+            content = (
+                f"A Google search for '{query}' found {len(web_snippets)} results:\n\n## Web Results\n"
+                + "\n\n".join(web_snippets)
+            )
             return content
         except Exception as e:
             return f"Error parsing search results for '{query}': {str(e)}"
@@ -175,7 +175,7 @@ class SearchEngine(BaseTool):
             # If it's a JSON-like string representing an array, try to parse
             if isinstance(q, str):
                 s = q.strip()
-                if (s.startswith("[") and s.endswith("]")):
+                if s.startswith("[") and s.endswith("]"):
                     try:
                         parsed = json.loads(s)
                         q = parsed
@@ -227,17 +227,16 @@ class SearchEngine(BaseTool):
                 response = "\n=======\n".join(response)
             else:
                 return {"error": "Query must be a string or array of strings."}
-            
+
             return {"results": response}
-            
+
         except Exception as e:
             return {"error": f"Search failed: {str(e)}"}
+
 
 if __name__ == "__main__":
     # Example usage for testing
     tool = SearchEngine()
-    test_params = {
-        "query": ["python programming", "machine learning"]
-    }
+    test_params = {"query": ["python programming", "machine learning"]}
     result = tool.call(test_params)
     print("Test Result:", result)

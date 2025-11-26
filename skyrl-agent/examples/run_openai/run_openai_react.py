@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 import datasets
 import asyncio
 
-os.environ["OPENAI_API_KEY"] = "sc" # dummy key, assumes an unath'ed vLLM service running locally
+os.environ["OPENAI_API_KEY"] = "sc"  # dummy key, assumes an unath'ed vLLM service running locally
 model = "Qwen/Qwen3-32B"
 
 tokenizer = AutoTokenizer.from_pretrained(model)
@@ -20,8 +20,8 @@ agent_generator = AutoAgentRunner.from_task(
     yaml_path,
     # no explicit inference engine with OpenAI
     infer_engine=None,
-    tokenizer=tokenizer
+    tokenizer=tokenizer,
 )
 
 output = asyncio.run(agent_generator.run(dataset, val_mode=True))
-print(output['rewards'])
+print(output["rewards"])

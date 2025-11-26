@@ -3,14 +3,16 @@ import subprocess
 import shlex
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
-from .utils import _ERROR_MSG_PREFIX, _DEFAULT_TIMEOUT_SECONDS
+from .utils import _ERROR_MSG_PREFIX
 
 CLI_ARG_SIZE_LIMIT = 1024 * 3
 MEMORY_LIMIT_KB = 10 * 1024 * 1024  # 10GB in KB
 
+
 def wrap_command_with_ulimit(command):
-    cmd_str = ' '.join(shlex.quote(c) for c in command)
+    cmd_str = " ".join(shlex.quote(c) for c in command)
     return ["bash", "-c", f"ulimit -v {MEMORY_LIMIT_KB}; exec {cmd_str}"]
+
 
 def code_exec_local(
     code,

@@ -30,47 +30,28 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.dataset import PromptDataset
 
 import asyncio
-import math
-import os
-import shutil
-from typing import Any, List, Optional, Dict, Tuple, Union
-from jaxtyping import Float
 from pathlib import Path
 import ray
-import torch
-from loguru import logger
-from omegaconf import DictConfig
-from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
-from skyrl_train.dataset import PromptDataset
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.base import (
-    GeneratorInput,
-    GeneratorOutput,
-)
 from skyrl_train.generators.utils import prepare_generator_input, get_metrics_from_generator_output
 from skyrl_train.utils import Timer
 from skyrl_train.utils.ppo_utils import (
     get_kl_controller,
     normalize_advantages_dict,
 )
-from skyrl_train.weights_manager import InferenceWeightsManager, ConditionalWeightsManager
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.trainer_utils import (
     validate_generator_output,
     ResumeMode,
     build_dataloader,
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
-    get_node_ids,
-    concatenate_generator_outputs
+    concatenate_generator_outputs,
 )
-from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
-from skyrl_train.utils.io import io
 
 from skyrl_train.utils.ppo_utils import register_advantage_estimator
+
 
 @register_advantage_estimator("loop")
 def compute_advantages_and_returns_loop(
@@ -82,8 +63,8 @@ def compute_advantages_and_returns_loop(
     gamma,
     lambd,
     grpo_norm_by_std,
-    **kwargs,):
-    from loguru import logger as logger_
+    **kwargs,
+):
     from collections import defaultdict
 
     scores = token_level_rewards.sum(dim=-1)
@@ -100,7 +81,7 @@ def compute_advantages_and_returns_loop(
         for group in id2samples.values():
             group_size = len(group)
             total_score = sum(score for _, score in group)
-            for i, score in group: # i is original index
+            for i, score in group:  # i is original index
                 loo_baseline = 0
                 if group_size == 1:
                     print("Cannot compute LOO advantage using 1 sample. 0 baseline is used")
@@ -114,7 +95,7 @@ def compute_advantages_and_returns_loop(
 def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
     """
     Validate the generator output.
-    
+
     This is exactly the same as the one in SkyRL, except that we do not use the len(input_batch["prompts"])
     since it is not repeated n_samples_per_prompt times.
     """
@@ -220,7 +201,7 @@ def prepare_generator_input(
     """
     # skyagent's AgentRunner will repeat trajectories internally
     all_prompts = [prompt["prompt"] for prompt in prompts]
-    
+
     # all the other columns are env_extras
     env_extras = [prompt["env_extras"] for prompt in prompts]
 
@@ -228,7 +209,8 @@ def prepare_generator_input(
     # the trainer and for metrics
     all_envs = [
         prompt["env_class"] if prompt["env_class"] is not None else default_env_class
-        for prompt in prompts for _ in range(n_samples_per_prompt)
+        for prompt in prompts
+        for _ in range(n_samples_per_prompt)
     ]
     # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
     trajectory_ids = []
@@ -251,6 +233,7 @@ def prepare_generator_input(
     }
 
     return generator_input, uids
+
 
 class SkyRLAgentPPOTrainer(RayPPOTrainer):
     def __init__(self, *args, **kwargs):
@@ -287,7 +270,6 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         return generator_output
 
-    
     def train(self):
         """
         Main training loop for PPO
@@ -473,7 +455,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                 self.save_models()
                 logger.info("Saved final model.")
         logger.info("Training done!")
-    
+
     @torch.no_grad()
     async def eval(self):
         """
@@ -487,11 +469,11 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         """
         # NOTE: We've only injected the custom `prepare_generator_input` function here
 
-        eval_dataloader=self.eval_dataloader
-        generator=self.generator
-        cfg=self.cfg
-        global_step=self.global_step
-        tokenizer=self.tokenizer
+        eval_dataloader = self.eval_dataloader
+        generator = self.generator
+        cfg = self.cfg
+        global_step = self.global_step
+        tokenizer = self.tokenizer
 
         # 1. Get all generator outputs
         generator_outputs: List[GeneratorOutput] = []

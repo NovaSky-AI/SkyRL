@@ -14,7 +14,6 @@ import numpy as np
 import tinker
 import torch
 import wandb
-from termcolor import colored
 from tinker import types
 from tinker.types.tensor_data import TensorData
 from transformers.models.auto.tokenization_auto import AutoTokenizer
@@ -36,6 +35,7 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
     logger.info(f"Set random seed to {seed}")
 
+
 @contextmanager
 def timed(key: str, metrics: dict[str, Any]):
     logger.info(f"Starting {key}")
@@ -44,7 +44,9 @@ def timed(key: str, metrics: dict[str, Any]):
     logger.info(f"{key} took {time.time() - tstart:.2f} seconds")
     metrics[f"time/{key}"] = time.time() - tstart
 
+
 safezip = cast(type[zip], lambda *args, **kwargs: zip(*args, **kwargs, strict=True))
+
 
 def normalize_advantages(advantages: List[float]) -> List[float]:
     """Normalize advantages to have mean 0 and std 1 (standard normalization)."""
@@ -64,54 +66,53 @@ def compute_advantages_grpo(
 ) -> List[float]:
     """
     GRPO (Group Relative Policy Optimization) advantage estimation.
-    
+
     For each group of trajectories from the same prompt, compute advantages
-    as deviations from the group mean. This is particularly useful for 
+    as deviations from the group mean. This is particularly useful for
     best-of-N sampling scenarios.
-    
+
     Reference: https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py
-    
+
     Args:
         rewards: List of rewards for all trajectories
-        group_size: Number of trajectories per prompt group. 
+        group_size: Number of trajectories per prompt group.
                    If None, treats all as one group.
         normalize: Whether to apply additional global normalization
-    
+
     Returns:
         List of advantages, same length as rewards
     """
     rewards = np.array(rewards)
-    
+
     if group_size is None:
         # Treat all trajectories as one group (equivalent to simple baseline)
         group_size = len(rewards)
-    
+
     n_groups = len(rewards) // group_size
     advantages = []
-    
+
     for i in range(n_groups):
         start_idx = i * group_size
         end_idx = start_idx + group_size
         group_rewards = rewards[start_idx:end_idx]
-        
+
         # GRPO: advantage = reward - mean(group_rewards)
         group_mean = group_rewards.mean()
         group_advantages = group_rewards - group_mean
         advantages.extend(group_advantages.tolist())
-    
+
     # Handle remaining trajectories if not evenly divisible
     remaining = len(rewards) % group_size
     assert remaining == 0, f"Remaining trajectories: {remaining} is not divisible by group_size: {group_size}"
-    
+
     # Optional: Apply global normalization for extra stability
     if normalize:
         advantages = normalize_advantages(advantages)
-    
+
     return advantages
 
-def compute_kl_sample_train(
-    data_D: List[tinker.Datum], training_logprobs_D: List[torch.Tensor]
-) -> Dict[str, float]:
+
+def compute_kl_sample_train(data_D: List[tinker.Datum], training_logprobs_D: List[torch.Tensor]) -> Dict[str, float]:
     """Compute KL divergence metrics between sampling and training logprobs."""
     all_diffs: list[torch.Tensor] = []
     all_sampling_logprobs: list[torch.Tensor] = []
@@ -159,12 +160,12 @@ class Config:
     skyrl_agent_task_yaml: str = None
     dataset_file: str = None  # Path to the training dataset parquet file
     eval_dataset_file: str = None  # Path to the evaluation dataset parquet file
-    
+
     # Loss function configuration
     loss_fn: Literal["importance_sampling", "ppo", "custom_ppo"] = "ppo"
     # Options:
     #   "ppo" or "importance_sampling": Use Tinker's built-in loss (forward_backward)
-    
+
     # GRPO (Group Relative Policy Optimization) settings
     group_size: int = 8  # Trajectories per prompt group (None = auto-infer from task yaml)
     normalize_advantages: bool = True  # Apply global normalization after group-relative computation
@@ -207,7 +208,7 @@ async def save_checkpoint_async(
 
 def collate_fn(batch):
     """Custom collate function that returns batch as-is without tensor collation.
-    
+
     This is needed because the agent runner expects to handle the raw batch data
     through build_generator_input, rather than having PyTorch stack tensors.
     """
@@ -217,7 +218,7 @@ def collate_fn(batch):
 async def main(config: Config):
     # Set random seed for reproducibility
     set_seed(config.seed)
-    
+
     # Setup logging
     if config.resume_exp_name:
         wandb_name = config.resume_exp_name
@@ -239,7 +240,7 @@ async def main(config: Config):
         print(f"Resuming training from step {resume_from_step}")
     else:
         resume_from_step = 0
-        print(f"Starting training from scratch")
+        print("Starting training from scratch")
 
     wandb.init(
         project=config.wandb_project,
@@ -251,29 +252,29 @@ async def main(config: Config):
     # dataset and dataloader
     train_dataset = load_dataset("parquet", data_files=config.dataset_file)["train"]
     eval_dataset = load_dataset("parquet", data_files=config.eval_dataset_file)["train"]
-    
+
     # Calculate steps per epoch for tracking
     steps_per_epoch = (len(train_dataset) + config.batch_size - 1) // config.batch_size
     logger.info(f"Dataset size: {len(train_dataset)}, Steps per epoch: {steps_per_epoch}")
-    
+
     # Create function to get dataloader for a specific epoch
     def create_train_dataloader(epoch: int):
         """Create dataloader with epoch-specific seed for different shuffle orders."""
         return DataLoader(
-            train_dataset, 
-            batch_size=config.batch_size, 
-            shuffle=True, 
+            train_dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
             collate_fn=collate_fn,
-            generator=torch.Generator().manual_seed(config.seed + epoch)  # Different shuffle per epoch
+            generator=torch.Generator().manual_seed(config.seed + epoch),  # Different shuffle per epoch
         )
-    
+
     # Initialize iterator state for resuming
     current_epoch = resume_from_step // steps_per_epoch
     batch_offset_in_epoch = resume_from_step % steps_per_epoch
-    
+
     train_dataloader = create_train_dataloader(current_epoch)
     train_iterator = iter(train_dataloader)
-    
+
     # Skip batches within the current epoch if resuming mid-epoch
     if batch_offset_in_epoch > 0:
         logger.info(f"Resuming from epoch {current_epoch}, batch {batch_offset_in_epoch}/{steps_per_epoch}")
@@ -289,10 +290,8 @@ async def main(config: Config):
         future = await training_client.load_state_async(load_state_path)
         _ = await future.result_async()
         logger.info(f"Loaded state from {load_state_path}")
-        
-    adam_params = types.AdamParams(
-        learning_rate=config.learning_rate, beta1=0.9, beta2=0.95, eps=1e-8
-    )
+
+    adam_params = types.AdamParams(learning_rate=config.learning_rate, beta1=0.9, beta2=0.95, eps=1e-8)
     skyrl_agent_task_yaml_path = config.skyrl_agent_task_yaml
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
 
@@ -306,11 +305,7 @@ async def main(config: Config):
         }
 
         # save model
-        if (
-            config.save_every > 0
-            and policy_iteration_step > 0
-            and policy_iteration_step % config.save_every == 0
-        ):
+        if config.save_every > 0 and policy_iteration_step > 0 and policy_iteration_step % config.save_every == 0:
             await save_checkpoint_async(
                 training_client,
                 f"{policy_iteration_step:06d}",
@@ -319,25 +314,17 @@ async def main(config: Config):
                 loop_state={"policy_iteration_step": policy_iteration_step},
             )
 
-        sampling_path = (
-            training_client.save_weights_for_sampler(
-                name=f"{policy_iteration_step:06d}"
-            )
-            .result()
-            .path
-        )
-        sampling_client = service_client.create_sampling_client(
-            model_path=sampling_path
-        )
+        sampling_path = training_client.save_weights_for_sampler(name=f"{policy_iteration_step:06d}").result().path
+        sampling_client = service_client.create_sampling_client(model_path=sampling_path)
 
         agent_generator = AutoAgentRunner.from_task(
-            skyrl_agent_task_yaml_path,
-            infer_engine=sampling_client,
-            tokenizer=tokenizer
+            skyrl_agent_task_yaml_path, infer_engine=sampling_client, tokenizer=tokenizer
         )
 
         if policy_iteration_step % config.eval_every == 0:
-            eval_dataloader = DataLoader(eval_dataset, batch_size=config.eval_batch_size, shuffle=False, collate_fn=collate_fn)
+            eval_dataloader = DataLoader(
+                eval_dataset, batch_size=config.eval_batch_size, shuffle=False, collate_fn=collate_fn
+            )
             data_source_rewards = {}
             for batch in eval_dataloader:
                 input_batch = batch
@@ -355,7 +342,7 @@ async def main(config: Config):
         # Collect rollouts using AgentRunner
         print(f"🎲 Start collecting episodes at step {policy_iteration_step}")
         st = time.time()
-        
+
         # Get next batch, handling epoch transitions
         try:
             input_batch = next(train_iterator)
@@ -366,12 +353,12 @@ async def main(config: Config):
             train_dataloader = create_train_dataloader(current_epoch)
             train_iterator = iter(train_dataloader)
             input_batch = next(train_iterator)
-        
+
         rollouts = await agent_generator.run(input_batch, val_mode=False)
         metrics["time/sample"] = time.time() - st
         # rollout time
         print(f"Rollout time: {metrics['time/sample']}")
-        
+
         # Write rollout_metrics to wandb
         rollout_metrics = rollouts.get("rollout_metrics", {})
         wandb.log({f"rollout/{k}": v for k, v in rollout_metrics.items()}, step=policy_iteration_step)
@@ -386,38 +373,36 @@ async def main(config: Config):
 
         actual_batch_size = len(response_ids)
         logger.info(f"Processing {actual_batch_size} rollouts for training")
-        
+
         # Compute advantages using GRPO (Group Relative Policy Optimization)
         all_returns = [float(r) for r in traj_rewards_list]
-        
+
         # Determine group size for GRPO
         group_size = config.group_size
         if group_size is None:
             # Try to infer from task config
             from omegaconf import OmegaConf
+
             task_config = OmegaConf.load(skyrl_agent_task_yaml_path)
             group_size = task_config.generator.get("num_trajectories", 1)
             logger.info(f"Auto-inferred group_size={group_size} from task config")
-        
+
         # Compute GRPO advantages
         logger.info(f"Computing GRPO advantages: group_size={group_size}, normalize={config.normalize_advantages}")
         all_advantages = compute_advantages_grpo(
-            all_returns, 
-            group_size=group_size,
-            normalize=config.normalize_advantages
+            all_returns, group_size=group_size, normalize=config.normalize_advantages
         )
         # broadcast advantages to num_steps per trajectory
         step_advantages = []
         for idx, num_steps in enumerate(num_steps_per_trajectory):
             step_advantages.extend([all_advantages[idx]] * num_steps)
-        
-        
+
         metrics["reward/mean"] = np.mean(all_returns)
         metrics["reward/max"] = np.max(all_returns)
         metrics["reward/min"] = np.min(all_returns)
         metrics["advantage/mean"] = np.mean(all_advantages)
         metrics["advantage/std"] = np.std(all_advantages)
-        
+
         # Prepare training datums compatible with Tinker API
         # For each trajectory, we need to provide:
         # - model_input: the full sequence (prompt + response)
@@ -427,15 +412,14 @@ async def main(config: Config):
             # Concatenate prompt and response to get full sequence
             full_sequence = prompt_token_ids[idx] + response_ids[idx]
             prompt_len = len(prompt_token_ids[idx])
-            
+
             # Target tokens are same as input (autoregressive training)
             target_tokens = full_sequence[1:]
             logprobs = ([0] * prompt_len + sampled_logprobs[idx])[1:]
-            
-            
+
             # Base mask: 0 for prompt, loss_mask value for response
-            mask = ([0] * prompt_len + loss_masks[idx])
-            
+            mask = [0] * prompt_len + loss_masks[idx]
+
             # Advantages: broadcast the single advantage value across all response tokens
             advantage_value = step_advantages[idx]
             advantages = torch.zeros(len(full_sequence))
@@ -447,7 +431,6 @@ async def main(config: Config):
             advantages = advantages[1:]
             mask = mask[1:]
 
-            
             datum = types.Datum(
                 model_input=types.ModelInput.from_ints(tokens=full_sequence[:-1]),
                 loss_fn_inputs={
@@ -461,15 +444,13 @@ async def main(config: Config):
         # Training step
         print(f"🎈 Start training at step {policy_iteration_step}")
         st = time.time()
-        
+
         # Use Tinker's built-in loss function ("ppo" or "importance_sampling")
-        fwd_bwd_future = training_client.forward_backward(
-            training_datums, loss_fn=config.loss_fn
-        )
+        fwd_bwd_future = training_client.forward_backward(training_datums, loss_fn=config.loss_fn)
         # Optimize
         optim_step_future = training_client.optim_step(adam_params)
         fwd_bwd_result = fwd_bwd_future.result()
-        
+
         # Extract training logprobs from loss_fn_outputs
         training_logprobs_D: list[torch.Tensor] = []
         for output in fwd_bwd_result.loss_fn_outputs:
@@ -478,7 +459,7 @@ async def main(config: Config):
         # with timed("compute_kl_sample_train", metrics):
         #     kl_sample_train_metrics = compute_kl_sample_train(training_datums, training_logprobs_D)
         #     metrics.update(kl_sample_train_metrics)
-        
+
         _ = optim_step_future.result()
         metrics["time/train"] = time.time() - st
 
@@ -494,7 +475,7 @@ async def main(config: Config):
             kind="both",
             loop_state={"policy_iteration_step": config.max_steps},
         )
-    
+
     wandb.finish()
     logger.info("Training completed successfully")
 

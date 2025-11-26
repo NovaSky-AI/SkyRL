@@ -1,6 +1,6 @@
 import hydra
 import os
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
@@ -20,21 +20,18 @@ class SkyRLAgentGenerator(GeneratorInterface):
             raise FileNotFoundError(f"Task YAML not found: {skyagent_task_yaml_path}")
 
         self.agent_generator = AutoAgentRunner.from_task(
-            skyagent_task_yaml_path,
-            infer_engine=llm_endpoint_client,
-            tokenizer=tokenizer
+            skyagent_task_yaml_path, infer_engine=llm_endpoint_client, tokenizer=tokenizer
         )
-        
+
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         val_mode = input_batch["batch_metadata"].training_phase == "eval"
         return await self.agent_generator.run(input_batch, val_mode=val_mode)
 
+
 class SkyRLAgentPPOExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, llm_endpoint_client):
         generator = SkyRLAgentGenerator(
-            generator_cfg=cfg.generator,
-            llm_endpoint_client=llm_endpoint_client,
-            tokenizer=tokenizer
+            generator_cfg=cfg.generator, llm_endpoint_client=llm_endpoint_client, tokenizer=tokenizer
         )
         return generator
 
@@ -65,6 +62,7 @@ class SkyRLAgentPPOExp(BasePPOExp):
             colocate_pg=colocate_pg,
         )
 
+
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
@@ -79,7 +77,7 @@ def main(cfg: DictConfig) -> None:
 
     initialize_ray(cfg)
     task = skyrl_entrypoint.remote(cfg)
-    try: 
+    try:
         ray.get(task)
     except KeyboardInterrupt:
         print("KeyboardInterrupt received, shutting down...")

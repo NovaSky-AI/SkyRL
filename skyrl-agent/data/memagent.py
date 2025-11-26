@@ -105,7 +105,9 @@ def _process_train_row(args: Tuple[int, pd.Series]) -> Dict[str, Any]:
         pass
 
     try:
-        data_source = ("ruler_" + str(row.get("data_source"))) if isinstance(row, dict) else ("ruler_" + str(row["data_source"]))
+        data_source = (
+            ("ruler_" + str(row.get("data_source"))) if isinstance(row, dict) else ("ruler_" + str(row["data_source"]))
+        )
     except Exception:
         data_source = "ruler_hotpotqa"
 

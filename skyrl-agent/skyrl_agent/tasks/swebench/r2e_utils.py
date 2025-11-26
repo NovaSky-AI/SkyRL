@@ -35,9 +35,11 @@ def parse_log_pytest(log: str | None) -> dict[str, str]:
             test_status_map[test_name] = "ERROR"
     return test_status_map
 
+
 def decolor_dict_keys(key):
     decolor = lambda key: re.sub(r"\u001b\[\d+m", "", key)
     return {decolor(k): v for k, v in key.items()}
+
 
 def get_reward(parse, instance):
     parse = decolor_dict_keys(parse)
@@ -64,5 +66,5 @@ def get_reward(parse, instance):
                 match = False
                 break
         reward = 1.0 if match else 0.0
-    
+
     return reward
