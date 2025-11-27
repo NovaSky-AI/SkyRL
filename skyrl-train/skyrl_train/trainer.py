@@ -563,6 +563,8 @@ class RayPPOTrainer:
             },
         )
         training_input.metadata = {"uids": uids}
+        # padded response length
+        training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self.cfg.trainer.step_wise_training:
             assert (
                 "trajectory_ids" in generator_output
@@ -570,11 +572,15 @@ class RayPPOTrainer:
             training_input.metadata["trajectory_ids"] = [
                 trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
             ]
-        # padded response length
-        training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        training_input.metadata["avg_response_length"] = sum(
-            len(sample_response_ids) for sample_response_ids in response_ids
-        ) / len(response_ids)
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids)
+                for sample_response_ids, is_last_step in zip(response_ids, generator_output["is_last_step"])
+                if is_last_step
+            ) / len(response_ids)
+        else:
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids) for sample_response_ids in response_ids
+            ) / len(response_ids)
 
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)
