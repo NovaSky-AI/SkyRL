@@ -202,3 +202,51 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
+
+
+def test_sample_top_k(service_client):
+    """Test that top_k sampling restricts token selection."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
+
+    # Sample with top_k=1 (greedy-like) - should always pick the same token
+    results_top_1 = []
+    for i in range(3):
+        result = sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(
+                temperature=1.0,
+                max_tokens=5,
+                seed=42 + i,
+                top_k=1,
+            ),
+            num_samples=1,
+        ).result()
+        results_top_1.append(result.sequences[0].tokens)
+
+    # All sequences should be identical (top_k=1 ignores the seed)
+    assert (
+        results_top_1[0] == results_top_1[1] == results_top_1[2]
+    ), "top_k=1 should produce identical outputs regardless of seed"
+
+    # Sample with top_k=-1 (disabled) - should vary with different seeds
+    results_no_top_k = []
+    for i in range(3):
+        result = sampling_client.sample(
+            prompt=prompt,
+            sampling_params=types.SamplingParams(
+                temperature=1.0,
+                max_tokens=5,
+                seed=42 + i,
+                top_k=-1,
+            ),
+            num_samples=1,
+        ).result()
+        results_no_top_k.append(result.sequences[0].tokens)
+
+    # At least some should be different (probabilistic, but very likely)
+    assert not all(
+        seq == results_no_top_k[0] for seq in results_no_top_k
+    ), "Without top_k, different seeds should produce different outputs"
