@@ -7,8 +7,9 @@ chat_template = (
     "{% elif (message['role'] == 'assistant')%}"
     "{{'<|im_start|>' + message['role'] + '\n'}}"
     "{% generation %}"
-    "{{message['content'] + '<|im_end|>\n'}}"
+    "{{message['content'] + '<|im_end|>'}}"
     "{% endgeneration %}"
+    "{{'\n'}}"
     "{% endif %}"
     "{% endfor %}"
 )

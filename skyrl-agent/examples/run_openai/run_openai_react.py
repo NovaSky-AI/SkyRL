@@ -6,10 +6,10 @@ import datasets
 import asyncio
 
 os.environ["OPENAI_API_KEY"] = "sc"  # dummy key, assumes an unath'ed vLLM service running locally
-model = "Qwen/Qwen2.5-1.5B-Instruct"
+model = "Qwen/Qwen3-32B"
 
 tokenizer = AutoTokenizer.from_pretrained(model)
-dataset = "/reasoning_data/train_filtered_80/math__combined_10.1k.parquet"
+dataset = "datasets/browsecomp-plus/browsecomp-plus-skyagent.parquet"
 # read a few samples from the dataset
 dataset = datasets.load_dataset("parquet", data_files=dataset)["train"].select(range(10))
 print(dataset[0])
@@ -23,5 +23,5 @@ agent_generator = AutoAgentRunner.from_task(
     tokenizer=tokenizer,
 )
 
-output = asyncio.run(agent_generator.run(dataset))
+output = asyncio.run(agent_generator.run(dataset, val_mode=True))
 print(output["rewards"])

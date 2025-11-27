@@ -2,6 +2,7 @@ from typing import Dict, Any
 import asyncio
 
 from skyrl_agent.tasks.base import BaseTask
+from skyrl_agent.dispatcher.async_utils import call_sync_from_async
 
 
 class GeneralReactTask(BaseTask):
@@ -30,6 +31,7 @@ class GeneralReactTask(BaseTask):
 
         print(f"Prompt: {prompt}")
 
+        # assume prompt is a list of messages
         assert isinstance(prompt, list), f"Prompt must be a list, but got {type(prompt)}"
 
         # Check if there's already a system message
@@ -57,6 +59,33 @@ class GeneralReactTask(BaseTask):
                     <function=finish> \
                     <parameter=answer>```python\n# The final answer goes here.\n```</parameter> \
                     </function>",
+                }
+            elif data_source in ["2wikimultihopqa", "bamboogle", "hotpotqa", "musique", "nq", "popqa", "triviaqa"]:
+                system_prompt = {
+                    "role": "system",
+                    "content": "Please solve the problem with the following tools AS MUCH AS POSSIBLE and return the final answer inside the finish tool. \
+                    Please return the final answer in the format of \
+                    <function=finish> \
+                    <parameter=answer>The final answer goes here.</parameter> \
+                    </function>",
+                }
+            elif data_source.startswith("browsecomp"):
+                system_prompt = {
+                    "role": "system",
+                    "content": "Please solve the problem with the following tools and return the final answer inside the finish tool. You need to follow these steps: \
+                    1. Analyze the problem carefully and break it down into smaller parts. \
+                    2. Use the available tools to gather information and answer sub-questions as needed. \
+                    3. Synthesize the information you have gathered to arrive at the final answer. For each conclusion you reach, make sure to provide evidence from the gathered information. \
+                    4. Return the final answer in the format of \
+                    <function=finish> \
+                    <parameter=answer>The final answer goes here.</parameter> \
+                    </function>",
+                }
+            elif data_source.startswith("ruler"):
+                system_prompt = {
+                    "role": "system",
+                    "content": "When you find the answer (or finish reading all chunks), provide your final answer using:\
+                    \n<function=finish>\n<parameter=answer>The final answer goes here.</parameter>\n</function>",
                 }
             else:
                 assert False, f"Data source {data_source} is not supported for ReAct agent."
@@ -100,6 +129,41 @@ class GeneralReactTask(BaseTask):
             print(f"Evaluated codegen task with data_source: {data_source}, got {res=}")
             # print(f"Evaluating codegen task with data_source: {data_source}, got {score=} {extracted_model_output=}")
             print(f"Evaluating codegen task with data_source: {data_source}, got {res['score']=}")
+            return res["score"]
+        elif data_source in ["2wikimultihopqa", "bamboogle", "hotpotqa", "musique", "nq", "popqa", "triviaqa"]:
+            ground_truth = instance["reward_model"]["ground_truth"]
+            from skyrl_agent.tasks.verifiers import qa
+
+            print(f"Evaluating nq / hotpotqa like task with data_source: {data_source}, got {result=}")
+            res = qa.compute_score_em(result, ground_truth)
+            print(f"Evaluated nq / hotpotqa like task with data_source: {data_source}, got {res=}")
+            return res["score"]
+        elif data_source.startswith("browsecomp"):
+            ground_truth = instance["reward_model"]["ground_truth"]
+            from skyrl_agent.tasks.verifiers import qa
+
+            print(f"Evaluating {data_source} task with data_source: {data_source}, got {result=}")
+            # FIXME: This is a hack to get the question from the prompt. Now inference only supports prompt, not raw_prompt.
+            if "raw_prompt" in instance:
+                question = instance["raw_prompt"][0]["content"].replace("Answer the given question:", "")
+            else:
+                question = instance["prompt"][0]["content"].replace("Answer the given question:", "")
+            print(f"during evaluation, Question: {question}")
+            res = await call_sync_from_async(qa.compute_score_browsecomp, result, ground_truth, question)
+            print(f"Evaluated {data_source} task with data_source: {data_source}, got {res=}")
+            return res["score"]
+        elif data_source.startswith("ruler"):
+            from skyrl_agent.tasks.verifiers import qa
+
+            ground_truth = instance["reward_model"]["ground_truth"]
+            print(f"Evaluating ruler task with data_source: {data_source}, got {result=}")
+            if "raw_prompt" in instance:
+                question = instance["raw_prompt"][0]["content"]
+            else:
+                question = instance["prompt"][0]["content"]
+            print(f"Question: {question}")
+            res = await call_sync_from_async(qa.compute_score_ruler, result, ground_truth, question)
+            print(f"Evaluated ruler task with data_source: {data_source}, got {res=}")
             return res["score"]
         else:
             raise NotImplementedError(f"Reward function is not implemented for {data_source=}")

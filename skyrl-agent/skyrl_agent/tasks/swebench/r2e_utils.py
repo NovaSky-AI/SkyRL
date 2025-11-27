@@ -37,7 +37,7 @@ def parse_log_pytest(log: str | None) -> dict[str, str]:
 
 
 def decolor_dict_keys(key):
-    decolor = lambda key: re.sub(r"\u001b\[\d+m", "", key)  # noqa: E731
+    decolor = lambda key: re.sub(r"\u001b\[\d+m", "", key)
     return {decolor(k): v for k, v in key.items()}
 
 

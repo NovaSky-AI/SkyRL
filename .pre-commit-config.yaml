@@ -4,14 +4,13 @@ repos:
     hooks:
       - id: ruff
         args: [ --fix, --exit-non-zero-on-fix ]
-        exclude: (^(skyagent)/.*)$
+        exclude: (^(skyrl-agent)/.*)$
 
   # Black needs to be ran after ruff with --fix
   - repo: https://github.com/psf/black
     rev: 24.10.0
     hooks:
       - id: black
-        exclude: (^(skyagent)/.*)$
 
   # Detect secrets and sensitive information
   - repo: https://github.com/gitleaks/gitleaks

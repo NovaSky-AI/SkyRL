@@ -39,14 +39,13 @@ def async_server_class(
         # importlib.import_module and from ... import ... have subtle differences in ray
 
         if rollout_backend == "vllm":
-            from .skagent_async_vllm_server import SkyAgentAsyncvLLMServer
+            from .skyagent_async_vllm_server import SkyAgentAsyncvLLMServer
 
             return SkyAgentAsyncvLLMServer
         elif rollout_backend == "sglang":
 
             raise NotImplementedError("Sglang backend for verl with skyagent is not implemented right now")
 
-            # return AsyncSglangServer
         else:
             raise NotImplementedError(f"rollout backend {rollout_backend} is not supported")
 

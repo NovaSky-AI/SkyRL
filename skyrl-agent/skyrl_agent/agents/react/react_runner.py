@@ -19,11 +19,10 @@ class ReActTrajectory(BaseTrajectory):
             infer_engine=self.infer_engine,
             tokenizer=self.tokenizer,
         )
-
         # sys + user messages
         instruction = self.task.get_instruction(instance)
 
-        finish_reason, result = await self.agent.run(instruction)
+        finish_reason, result = await self.agent.run(instruction, instance)
         # Optional tool profile snapshot (env-gated inside agent)
         tool_profile = None
         try:
@@ -34,6 +33,7 @@ class ReActTrajectory(BaseTrajectory):
             "instance_id": instance_id,
             "trajectory_id": self.cfg.trajectory_id,
             "messages": self.agent.get_messages(),
+            "transitions": self.agent.get_transitions(),
             "results": result,
             "finish_reason": finish_reason,
             "state": {"tool_profile": tool_profile} if tool_profile is not None else {},

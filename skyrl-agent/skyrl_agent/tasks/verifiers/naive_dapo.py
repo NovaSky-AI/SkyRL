@@ -15,7 +15,6 @@
 
 import re
 import signal
-import math
 
 import sympy
 from pylatexenc import latex2text
@@ -25,7 +24,7 @@ from .prime_math import math_normalize
 from .prime_math.grader import math_equal
 
 
-class Timeout:
+class timeout:
 
     def __init__(self, seconds=1, error_message="Timeout"):
         self.seconds = seconds
@@ -213,7 +212,7 @@ def _is_float(num: str) -> bool:
 def _is_int(x: float) -> bool:
     try:
         return abs(x - int(round(x))) <= 1e-7
-    except Exception:
+    except:
         return False
 
 
@@ -226,7 +225,7 @@ def _str_is_int(x: str) -> bool:
         x = _strip_properly_formatted_commas(x)
         x = float(x)
         return abs(x - int(round(x))) <= 1e-7
-    except Exception:
+    except:
         return False
 
 
@@ -309,7 +308,7 @@ def _normalize(expr: str) -> str:
     if "\\" in expr:
         try:
             expr = _parse_latex(expr)
-        except Exception:
+        except:
             pass
 
     # edge case with mixed numbers and negative signs
@@ -359,7 +358,7 @@ def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
             simplified = sympy.simplify(sympy_diff)
             if simplified == 0:
                 are_equal = True
-    except Exception:
+    except:
         pass
     return are_equal
 
@@ -481,6 +480,9 @@ def match_answer(response):
     return is_matched, response
 
 
+import math
+
+
 def compute_score(solution_str: str, ground_truth: str, extra_info: dict) -> float:
     """Compute the reward score for a solution. This draws heavily from the LLM-as-judge and PRIME reward functions
 
@@ -513,7 +515,7 @@ def compute_score(solution_str: str, ground_truth: str, extra_info: dict) -> flo
                     correct = any(equivs)
             else:
                 correct = math_equal(extracted_model_output, ground_truth, timeout=True)
-        except Exception:
+        except:
             correct = False
 
     # reward = 1.0 if correct else -1.0

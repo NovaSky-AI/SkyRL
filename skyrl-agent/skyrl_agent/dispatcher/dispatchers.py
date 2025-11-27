@@ -103,6 +103,7 @@ async def async_pipeline_dispatcher(
 async def async_batch_dispatcher(cfg, trajectories: Dict[int, Dict[int, Any]], init_fn: str, run_fn: str, eval_fn: str):
     async def run_all():
         tasks = []
+        total_instances = cfg["num_instances"]
         num_trajectories = cfg["num_trajectories"]
 
         async def one_traj(instance_id, trajectory_id):
