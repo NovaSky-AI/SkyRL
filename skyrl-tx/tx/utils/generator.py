@@ -47,15 +47,17 @@ class DecodeState:
 
     # Constant throughout decode loop:
     model: nnx.Module
-    temperatures: jax.Array
+    inv_temperatures: jax.Array  # Pre-computed 1/temperature, shape [B, 1]
+    zero_temp_mask: jax.Array  # Pre-computed temperature == 0 mask, shape [B, 1]
     stop_tokens: jax.Array
     adapter_indices: jax.Array
+    cache_index_array: jax.Array  # Pre-computed jnp.arange(max_length) for mask generation
+    valid_start_positions: jax.Array  # Per-sequence start of valid tokens (after padding), shape [B, 1]
 
     # Updated each iteration:
     kv_cache: KVCache
     rngs: jax.Array  # of shape [B, key_dim]
     generated_ids: jax.Array
-    attention_mask: jax.Array
     last_positions: jax.Array
     logits: jax.Array
     all_logprobs: jax.Array
@@ -77,12 +79,11 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
-def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
+def batched_sample_token(
+    logits: jax.Array, *, inv_temperatures: jax.Array, zero_temp_mask: jax.Array, sample_keys: jax.Array
+) -> jax.Array:
     """Sample next token per-example using a per-example PRNGKey."""
-    temperatures = temperatures[:, None]
-    zero_temp_mask = temperatures == 0.0
-    scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
-    # Draw one sample per example
+    scaled_logits = logits * inv_temperatures
     sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
     greedy = jnp.argmax(logits, axis=-1)
     next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
@@ -103,7 +104,9 @@ def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.A
     """Sample next token and compute logprobs, updating the logprobs array."""
     split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(s.logits, temperatures=s.temperatures, sample_keys=sample_keys)
+    next_token = batched_sample_token(
+        s.logits, inv_temperatures=s.inv_temperatures, zero_temp_mask=s.zero_temp_mask, sample_keys=sample_keys
+    )
 
     logprobs = jax.nn.log_softmax(s.logits, axis=-1)
     sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
@@ -122,11 +125,11 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(s)
 
     generated_ids = lax.dynamic_update_slice(s.generated_ids, next_token, (0, s.kv_cache.cache_position))
-    attention_mask = lax.dynamic_update_slice(
-        s.attention_mask,
-        jnp.ones((s.generated_ids.shape[0], 1), dtype=s.attention_mask.dtype),
-        (0, s.kv_cache.cache_position),
-    )
+
+    # Generate attention mask on-the-fly from cache_position (cheap broadcast, no state update)
+    # Mask is 2D [batch, max_length]: valid positions are >= valid_start and <= cache_position
+    indices = s.cache_index_array[None, :]  # [1, max_length]
+    attention_mask = (indices >= s.valid_start_positions) & (indices <= s.kv_cache.cache_position)
 
     outputs = s.model(
         next_token,
@@ -137,13 +140,15 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     )
     next_state = DecodeState(
         model=s.model,
-        temperatures=s.temperatures,
+        inv_temperatures=s.inv_temperatures,
+        zero_temp_mask=s.zero_temp_mask,
         stop_tokens=s.stop_tokens,
         adapter_indices=s.adapter_indices,
+        cache_index_array=s.cache_index_array,
+        valid_start_positions=s.valid_start_positions,
         kv_cache=outputs.kv_cache,
         rngs=rngs,
         generated_ids=generated_ids,
-        attention_mask=attention_mask,
         last_positions=s.last_positions + 1,
         logits=outputs.logits[:, -1, :],
         all_logprobs=all_logprobs,
@@ -184,6 +189,10 @@ class GeneratorMixin:
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
+        # Pre-compute inverse temperatures to avoid division in the decode loop
+        zero_temp_mask = (temperatures == 0.0)[:, None]
+        inv_temperatures = jnp.where(zero_temp_mask, 1.0, 1.0 / jnp.where(temperatures == 0.0, 1.0, temperatures)[:, None])
+
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
         # per-request streams will be identical.
         seeds = [sampling_param.seed for sampling_param in sampling_params]
@@ -202,22 +211,28 @@ class GeneratorMixin:
         outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
-        # Pad inputs to max_length
+        # Pad inputs to max_length (no longer need to pad attention_mask - generated on-the-fly)
         pad_length = max_length - prompt_length
-        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
         generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
         all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
         stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
 
+        # Pre-compute index array for generating attention mask on-the-fly in decode loop
+        cache_index_array = jnp.arange(max_length)
+        # Valid start positions: where the first real token (non-padding) is for each sequence
+        valid_start_positions = jnp.argmax(attention_mask, axis=1, keepdims=True)
+
         initial_state = DecodeState(
             model=self,
-            temperatures=temperatures,
+            inv_temperatures=inv_temperatures,
+            zero_temp_mask=zero_temp_mask,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
+            cache_index_array=cache_index_array,
+            valid_start_positions=valid_start_positions,
             kv_cache=kv_cache,
             rngs=rngs,
             generated_ids=generated_ids,
-            attention_mask=attention_mask,
             last_positions=positions[:, -1:],
             logits=outputs.logits[:, -1, :],
             all_logprobs=all_logprobs,
