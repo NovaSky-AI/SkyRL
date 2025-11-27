@@ -811,7 +811,7 @@ class RayPPOTrainer:
         new_training_input = TrainingInputBatch(new_tensors)
         new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
-        if "trajectory_ids" in new_training_input.metadata:
+        if "trajectory_ids" in training_input.metadata:
             new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
                 f"pad{i}" for i in range(pad_size)
             ]
