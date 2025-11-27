@@ -10,6 +10,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as SA_TimeoutError
 import asyncio
 import subprocess
 import random
@@ -245,6 +246,16 @@ class ForwardBackwardInput(BaseModel):
 class ForwardBackwardRequest(BaseModel):
     model_id: str
     forward_backward_input: ForwardBackwardInput
+
+
+class ForwardInput(ForwardBackwardInput):
+    def to_types(self) -> types.ForwardInput:
+        return types.ForwardInput(data=[datum.to_types() for datum in self.data], loss_fn=self.loss_fn)
+
+
+class ForwardRequest(BaseModel):
+    model_id: str
+    forward_input: ForwardInput
 
 
 class AdamParams(BaseModel):
@@ -561,6 +572,23 @@ async def forward_backward(request: ForwardBackwardRequest, session: AsyncSessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
+@app.post("/api/v1/forward", response_model=FutureResponse)
+async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+    """Forward pass to obtain logprobs without accumulating gradients"""
+    await get_model(session, request.model_id)
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.FORWARD_ONLY,
+        model_id=request.model_id,
+        request_data=request.forward_input.to_types(),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
 @app.post("/api/v1/optim_step", response_model=FutureResponse)
 async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(get_session)):
     """Update model using accumulated gradients."""
@@ -732,26 +760,32 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    poll_interval = 0.1  # 100ms
+    poll_interval = 0.2  # 200ms
 
     for _ in range(int(timeout / poll_interval)):
-        async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-            result = await session.exec(statement)
-            future = result.first()
+        try:
+            async with AsyncSession(req.app.state.db_engine) as session:
+                statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+                result = await session.exec(statement)
+                future = result.first()
 
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
+                if not future:
+                    raise HTTPException(status_code=404, detail="Future not found")
 
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
+                if future.status == RequestStatus.COMPLETED:
+                    return future.result_data
 
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
+                if future.status == RequestStatus.FAILED:
+                    # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                    if future.result_data and "error" in future.result_data:
+                        raise HTTPException(status_code=400, detail=future.result_data["error"])
+                    else:
+                        raise HTTPException(status_code=500, detail="Unknown error")
+        except SA_TimeoutError:
+            # Connection pool saturated; back off and retry
+            logger.info(f"DB timeout. Sleeping for {poll_interval}")
+            await asyncio.sleep(poll_interval)
+            continue
 
         await asyncio.sleep(poll_interval)
 
