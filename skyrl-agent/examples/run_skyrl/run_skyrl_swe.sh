@@ -19,7 +19,7 @@ LOGGER=wandb
 INFERENCE_BACKEND=vllm
 seed=1
 
-export LD_LIBRARY_PATH="/opt/amazon/efa/lib:$LD_LIBRARY_PATH"
+# export LD_LIBRARY_PATH="/opt/amazon/efa/lib:$LD_LIBRARY_PATH"
 
 uv run --isolated --env-file .env --extra skyrl-train \
     --with vllm==0.9.2 \
