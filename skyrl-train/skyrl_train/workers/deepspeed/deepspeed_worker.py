@@ -294,6 +294,7 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
             init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
+            rope_parameters=get_rope_parameters_config(self.cfg.trainer),
         )
         # configure optimizer
         critic_optim = strategy.create_optimizer(

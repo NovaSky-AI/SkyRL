@@ -340,6 +340,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
                 sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
+                rope_parameters=get_rope_parameters_config(self.cfg.trainer),
             )
             self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
