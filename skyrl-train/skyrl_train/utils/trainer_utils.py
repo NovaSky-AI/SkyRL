@@ -691,6 +691,12 @@ def get_rope_parameters_config(trainer_cfg: DictConfig) -> dict[str, Any]:
         return rope_parameters
 
     elif has_new_config:
-        return OmegaConf.to_container(rope_parameters_new, resolve=True) or {}
+        new_params = OmegaConf.to_container(rope_parameters_new, resolve=True)
+        if isinstance(new_params, dict):
+            return new_params
+        if new_params is not None:
+            logger.warning(f"Ignoring 'rope_parameters' as it is not a dictionary. Found: {new_params}")
+        return {}
+
     else:
         return {}
