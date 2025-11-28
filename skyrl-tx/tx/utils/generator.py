@@ -47,7 +47,6 @@ class DecodeState:
     rngs: jax.Array  # of shape [B, key_dim]
     last_positions: jax.Array
     logits: jax.Array
-    stop_pos: jax.Array
 
 
 @dataclass
@@ -99,8 +98,8 @@ class GeneratorMixin:
         # Pre-compute index array for mask generation
         cache_index_array = jnp.arange(max_length)
 
-        def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
-            """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
+        def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array, jax.Array]]:
+            """Decode one token step. Returns (state, (token, logprob, is_stop)) for scan accumulation."""
             # Sample next token
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
@@ -113,9 +112,8 @@ class GeneratorMixin:
             next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
-            # Update stop position if we hit a stop token
+            # Check if we hit a stop token
             is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
-            stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
 
             # Generate attention mask on-the-fly from cache_position
             attention_mask = (cache_index_array >= first_token_idx) & (cache_index_array <= s.kv_cache.cache_position)
@@ -132,11 +130,8 @@ class GeneratorMixin:
                 rngs=rngs,
                 last_positions=s.last_positions + 1,
                 logits=outputs.logits[:, -1, :],
-                stop_pos=stop_pos,
             )
-            return next_state, (next_token, sampled_logprob)
-
-        stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
+            return next_state, (next_token, sampled_logprob, is_stop)
 
         # Build initial state for decode loop
         initial_state = DecodeState(
@@ -144,19 +139,19 @@ class GeneratorMixin:
             rngs=rngs,
             last_positions=positions[:, -1:],
             logits=outputs.logits[:, -1, :],
-            stop_pos=stop_pos,
         )
 
         # Decode loop - scan accumulates outputs automatically
-        final_state, (tokens_stacked, logprobs_stacked) = jax.lax.scan(
+        _, (tokens_stacked, logprobs_stacked, is_stop_stacked) = jax.lax.scan(
             decode_fn, initial_state, xs=None, length=max_new_tokens
         )
 
         # Post-process: transpose scan outputs from [Steps, Batch, 1] to [Batch, Steps]
         new_tokens = jnp.swapaxes(tokens_stacked, 0, 1).squeeze(-1)
         new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)
+        is_stop = jnp.swapaxes(is_stop_stacked, 0, 1).squeeze(-1)
 
-        return new_tokens, new_logprobs, final_state.stop_pos
+        return new_tokens, new_logprobs, is_stop
 
     def generate(
         self,
@@ -194,7 +189,7 @@ class GeneratorMixin:
         stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
         # FAST: Single fused JIT call for prefill + decode
-        new_tokens, new_logprobs, stop_pos = self._prefill_and_decode(
+        new_tokens, new_logprobs, is_stop = self._prefill_and_decode(
             self,
             input_ids,
             attention_mask,
@@ -207,20 +202,22 @@ class GeneratorMixin:
             stop_tokens,
         )
 
-        # Compute end position for each sequence
+        # Compute stop position: argmax gives first True, returns 0 if none found
+        has_stop = jnp.any(is_stop, axis=1)
+        first_stop_idx = jnp.argmax(is_stop, axis=1)
         end_positions = jnp.where(
-            stop_pos[:, 0] >= 0,
-            stop_pos[:, 0] + 1 - prompt_length,  # Convert to offset from prompt
+            has_stop,
+            first_stop_idx + 1,  # Include the stop token
             jnp.array([sp.max_tokens for sp in sampling_params]),
         )
 
         # Single device-to-host transfer
-        new_tokens_host, stop_pos_host, new_logprobs_host, end_positions_host = jax.device_get(
-            (new_tokens, stop_pos, new_logprobs, end_positions)
+        new_tokens_host, has_stop_host, new_logprobs_host, end_positions_host = jax.device_get(
+            (new_tokens, has_stop, new_logprobs, end_positions)
         )
 
         return GenerateOutput(
             generated_ids=[new_tokens_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
-            stop_reasons=["stop" if stop_pos_host[i, 0] >= 0 else "length" for i in range(batch_size)],
+            stop_reasons=["stop" if has_stop_host[i] else "length" for i in range(batch_size)],
             logprobs=[new_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
         )
