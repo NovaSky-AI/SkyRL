@@ -51,7 +51,6 @@ class DecodeState:
     zero_temp_mask: jax.Array  # Pre-computed temperature == 0 mask, shape [B, 1]
     stop_tokens: jax.Array
     adapter_indices: jax.Array
-    cache_index_array: jax.Array  # Pre-computed jnp.arange(max_length) for mask generation
     valid_start_positions: jax.Array  # Per-sequence start of valid tokens (after padding), shape [B, 1]
 
     # Updated each iteration:
@@ -75,52 +74,6 @@ class GenerateOutput:
     generated_ids: list[list[int]]
     stop_reasons: list[str]
     logprobs: list[list[float]]
-
-
-def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
-    """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
-    # Sample next token
-    split_keys = jax.vmap(jax.random.split)(s.rngs)
-    rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-
-    log_probs = jax.nn.log_softmax(s.logits, axis=-1)
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
-        sample_keys, log_probs * s.inv_temperatures
-    )
-    greedy = jnp.argmax(s.logits, axis=-1)
-    next_token = jnp.where(s.zero_temp_mask, greedy[:, None], sampled[:, None])
-    sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
-
-    # Update stop position if we hit a stop token
-    is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
-    stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
-
-    # Generate attention mask on-the-fly from cache_position
-    attention_mask = (s.cache_index_array >= s.valid_start_positions) & (s.cache_index_array <= s.kv_cache.cache_position)
-
-    outputs = s.model(
-        next_token,
-        attention_mask=attention_mask,
-        positions=s.last_positions + 1,
-        kv_cache=s.kv_cache,
-        adapter_indices=s.adapter_indices,
-    )
-    next_state = DecodeState(
-        model=s.model,
-        inv_temperatures=s.inv_temperatures,
-        zero_temp_mask=s.zero_temp_mask,
-        stop_tokens=s.stop_tokens,
-        adapter_indices=s.adapter_indices,
-        cache_index_array=s.cache_index_array,
-        valid_start_positions=s.valid_start_positions,
-        kv_cache=outputs.kv_cache,
-        rngs=rngs,
-        last_positions=s.last_positions + 1,
-        logits=outputs.logits[:, -1, :],
-        stop_pos=stop_pos,
-    )
-    # Return (next_state, (token, logprob)) - scan will stack the outputs
-    return next_state, (next_token, sampled_logprob)
 
 
 class GeneratorMixin:
@@ -157,6 +110,49 @@ class GeneratorMixin:
         # Pre-compute index array for mask generation
         cache_index_array = jnp.arange(max_length)
 
+        def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
+            """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
+            # Sample next token
+            split_keys = jax.vmap(jax.random.split)(s.rngs)
+            rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
+
+            log_probs = jax.nn.log_softmax(s.logits, axis=-1)
+            sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
+                sample_keys, log_probs * s.inv_temperatures
+            )
+            greedy = jnp.argmax(s.logits, axis=-1)
+            next_token = jnp.where(s.zero_temp_mask, greedy[:, None], sampled[:, None])
+            sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
+
+            # Update stop position if we hit a stop token
+            is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
+            stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
+
+            # Generate attention mask on-the-fly from cache_position
+            attention_mask = (cache_index_array >= s.valid_start_positions) & (cache_index_array <= s.kv_cache.cache_position)
+
+            outputs = s.model(
+                next_token,
+                attention_mask=attention_mask,
+                positions=s.last_positions + 1,
+                kv_cache=s.kv_cache,
+                adapter_indices=s.adapter_indices,
+            )
+            next_state = DecodeState(
+                model=s.model,
+                inv_temperatures=s.inv_temperatures,
+                zero_temp_mask=s.zero_temp_mask,
+                stop_tokens=s.stop_tokens,
+                adapter_indices=s.adapter_indices,
+                valid_start_positions=s.valid_start_positions,
+                kv_cache=outputs.kv_cache,
+                rngs=rngs,
+                last_positions=s.last_positions + 1,
+                logits=outputs.logits[:, -1, :],
+                stop_pos=stop_pos,
+            )
+            return next_state, (next_token, sampled_logprob)
+
         stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
 
         # Build initial state for decode loop
@@ -166,7 +162,6 @@ class GeneratorMixin:
             zero_temp_mask=zero_temp_mask,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
-            cache_index_array=cache_index_array,
             valid_start_positions=first_token_idx,
             kv_cache=kv_cache,
             rngs=rngs,
