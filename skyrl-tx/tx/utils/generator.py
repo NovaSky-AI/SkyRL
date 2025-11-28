@@ -80,13 +80,22 @@ class GenerateOutput:
 
 def batched_sample_token(
     logits: jax.Array, *, inv_temperatures: jax.Array, zero_temp_mask: jax.Array, sample_keys: jax.Array
-) -> jax.Array:
-    """Sample next token per-example using a per-example PRNGKey."""
-    scaled_logits = logits * inv_temperatures
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
+) -> tuple[jax.Array, jax.Array]:
+    """Sample next token per-example and return log probabilities.
+
+    Returns:
+        Tuple of (next_token, log_softmax_logits) where log_softmax is computed once
+        and reused for both sampling (via gumbel trick equivalence) and logprob extraction.
+    """
+    # Compute log_softmax once - used for both sampling and logprob
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    scaled_log_probs = log_probs * inv_temperatures
+
+    # Sample using categorical (which internally uses log_softmax, but we pass pre-computed)
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_log_probs)
     greedy = jnp.argmax(logits, axis=-1)
     next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
-    return next_token
+    return next_token, log_probs
 
 
 def compute_positions(attention_mask: jax.Array) -> jax.Array:
@@ -99,17 +108,18 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
-def sample_and_logprob(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def sample_and_logprob(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sample next token and compute its logprob. Returns (next_rngs, next_token, logprob, stop_pos)."""
     split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(
+
+    # Sample token and get log_probs in one pass (avoids redundant log_softmax)
+    next_token, log_probs = batched_sample_token(
         s.logits, inv_temperatures=s.inv_temperatures, zero_temp_mask=s.zero_temp_mask, sample_keys=sample_keys
     )
 
-    # Compute logprob for just the sampled token
-    logprobs = jax.nn.log_softmax(s.logits, axis=-1)
-    sampled_logprob = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
+    # Extract logprob for just the sampled token (reuses log_probs from sampling)
+    sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)  # [batch_size, 1]
 
     # Check if sampled token is in stop tokens and update stop position
     is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
@@ -155,15 +165,21 @@ class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_length",))
-    def _prefill_and_initialize(
+    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens"))
+    def _prefill_and_decode(
         model,
         input_ids: jax.Array,
         attention_mask: jax.Array,
         max_length: int,
+        max_new_tokens: int,
         adapter_indices: jax.Array | None,
+        inv_temperatures: jax.Array,
+        zero_temp_mask: jax.Array,
+        rngs: jax.Array,
+        stop_tokens: jax.Array,
     ):
-        """JIT-compiled prefill with fused KV cache padding. Avoids eager pad overhead."""
+        """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
+        batch_size = input_ids.shape[0]
         prompt_length = input_ids.shape[1]
 
         # Compute positions from attention mask
@@ -179,7 +195,34 @@ class GeneratorMixin:
         # Pre-compute index array for mask generation
         cache_index_array = jnp.arange(max_length)
 
-        return outputs.logits, kv_cache, positions[:, -1:], first_token_idx, cache_index_array
+        stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
+
+        # Build initial state for decode loop
+        initial_state = DecodeState(
+            model=model,
+            inv_temperatures=inv_temperatures,
+            zero_temp_mask=zero_temp_mask,
+            stop_tokens=stop_tokens,
+            adapter_indices=adapter_indices,
+            cache_index_array=cache_index_array,
+            valid_start_positions=first_token_idx,
+            kv_cache=kv_cache,
+            rngs=rngs,
+            last_positions=positions[:, -1:],
+            logits=outputs.logits[:, -1, :],
+            stop_pos=stop_pos,
+        )
+
+        # Decode loop - scan accumulates outputs automatically
+        final_state, (tokens_stacked, logprobs_stacked) = lax.scan(
+            decode_fn, initial_state, xs=None, length=max_new_tokens
+        )
+
+        # Post-process: transpose scan outputs from [Steps, Batch, 1] to [Batch, Steps]
+        new_tokens = jnp.swapaxes(tokens_stacked, 0, 1).squeeze(-1)
+        new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)
+
+        return new_tokens, new_logprobs, final_state.stop_pos
 
     def generate(
         self,
@@ -216,41 +259,21 @@ class GeneratorMixin:
             stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
         stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
-        # FAST: Fused prefill and initialization inside JIT
-        logits, kv_cache, last_positions, valid_start_positions, cache_index_array = self._prefill_and_initialize(
-            self, input_ids, attention_mask, max_length, adapter_indices
+        # FAST: Single fused JIT call for prefill + decode
+        new_tokens, new_logprobs, stop_pos = self._prefill_and_decode(
+            self,
+            input_ids,
+            attention_mask,
+            max_length,
+            max_new_tokens,
+            adapter_indices,
+            inv_temperatures,
+            zero_temp_mask,
+            rngs,
+            stop_tokens,
         )
-
-        stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
-
-        # Lightweight initial state - no large buffers
-        initial_state = DecodeState(
-            model=self,
-            inv_temperatures=inv_temperatures,
-            zero_temp_mask=zero_temp_mask,
-            stop_tokens=stop_tokens,
-            adapter_indices=adapter_indices,
-            cache_index_array=cache_index_array,
-            valid_start_positions=valid_start_positions,
-            kv_cache=kv_cache,
-            rngs=rngs,
-            last_positions=last_positions,
-            logits=logits[:, -1, :],
-            stop_pos=stop_pos,
-        )
-
-        # FAST: scan accumulates outputs automatically - no dynamic_update_slice in loop
-        # tokens_stacked: [max_new_tokens, batch, 1], logprobs_stacked: [max_new_tokens, batch, 1]
-        final_state, (tokens_stacked, logprobs_stacked) = jax.lax.scan(
-            decode_fn, initial_state, xs=None, length=max_new_tokens
-        )
-
-        # Post-process: transpose scan outputs from [Steps, Batch, 1] to [Batch, Steps]
-        new_tokens = jnp.swapaxes(tokens_stacked, 0, 1).squeeze(-1)  # [batch, max_new_tokens]
-        new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)  # [batch, max_new_tokens]
 
         # Compute end position for each sequence
-        stop_pos = final_state.stop_pos
         end_positions = jnp.where(
             stop_pos[:, 0] >= 0,
             stop_pos[:, 0] + 1 - prompt_length,  # Convert to offset from prompt
