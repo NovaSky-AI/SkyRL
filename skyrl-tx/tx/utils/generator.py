@@ -41,12 +41,8 @@ class KVCache:
 @jax.tree_util.register_dataclass
 @dataclass
 class DecodeState:
-    """State of the decode loop. Lightweight - no large buffers carried."""
+    """State of the decode loop."""
 
-    # Constant throughout decode loop:
-    adapter_indices: jax.Array
-
-    # Updated each iteration:
     kv_cache: KVCache
     rngs: jax.Array  # of shape [B, key_dim]
     last_positions: jax.Array
@@ -129,10 +125,9 @@ class GeneratorMixin:
                 attention_mask=attention_mask,
                 positions=s.last_positions + 1,
                 kv_cache=s.kv_cache,
-                adapter_indices=s.adapter_indices,
+                adapter_indices=adapter_indices,
             )
             next_state = DecodeState(
-                adapter_indices=s.adapter_indices,
                 kv_cache=outputs.kv_cache,
                 rngs=rngs,
                 last_positions=s.last_positions + 1,
@@ -145,7 +140,6 @@ class GeneratorMixin:
 
         # Build initial state for decode loop
         initial_state = DecodeState(
-            adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             rngs=rngs,
             last_positions=positions[:, -1:],
