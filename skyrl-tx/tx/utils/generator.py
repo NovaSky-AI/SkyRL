@@ -77,37 +77,26 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
-def sample_and_logprob(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Sample next token and compute its logprob. Returns (next_rngs, next_token, logprob, stop_pos)."""
+def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
+    """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
+    # Sample next token
     split_keys = jax.vmap(jax.random.split)(s.rngs)
-    next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
+    rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
 
-    # Compute log_softmax once - used for both sampling and logprob extraction
     log_probs = jax.nn.log_softmax(s.logits, axis=-1)
-    scaled_log_probs = log_probs * s.inv_temperatures
-
-    # Sample: temperature-scaled categorical or greedy argmax
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_log_probs)
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
+        sample_keys, log_probs * s.inv_temperatures
+    )
     greedy = jnp.argmax(s.logits, axis=-1)
     next_token = jnp.where(s.zero_temp_mask, greedy[:, None], sampled[:, None])
-
-    # Extract logprob for the sampled token
     sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
-    # Check if sampled token is in stop tokens and update stop position
+    # Update stop position if we hit a stop token
     is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
     stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
 
-    return next_rngs, next_token, sampled_logprob, stop_pos
-
-
-def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
-    """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
-    rngs, next_token, sampled_logprob, stop_pos = sample_and_logprob(s)
-
-    # Generate attention mask on-the-fly from cache_position (cheap broadcast, no state update)
-    indices = s.cache_index_array[None, :]  # [1, max_length]
-    attention_mask = (indices >= s.valid_start_positions) & (indices <= s.kv_cache.cache_position)
+    # Generate attention mask on-the-fly from cache_position
+    attention_mask = (s.cache_index_array >= s.valid_start_positions) & (s.cache_index_array <= s.kv_cache.cache_position)
 
     outputs = s.model(
         next_token,
