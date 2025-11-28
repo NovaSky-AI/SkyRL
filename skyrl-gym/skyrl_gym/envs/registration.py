@@ -8,8 +8,12 @@ import importlib
 import json
 from dataclasses import dataclass, field
 from skyrl_gym import Env, error
+from skyrl_gym.utils import get_logger
 
 from typing import Protocol, Dict, Any
+
+# Initialize logger for this module
+logger = get_logger("registration")
 
 __all__ = [
     "registry",
@@ -131,7 +135,7 @@ class EnvSpec:
         if disable_print:
             return output
         else:
-            print(output)
+            logger.info(output)
 
 
 # Global registry of environments. Meant to be accessed through `register` and `make`
@@ -320,7 +324,7 @@ def pprint_registry(
         if disable_print:
             return output
         else:
-            print(output)
+            logger.info(output)
             return
 
     # Find the max width for nice column alignment
@@ -342,4 +346,4 @@ def pprint_registry(
     if disable_print:
         return final_output
     else:
-        print(final_output)
+        logger.info(final_output)
