@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import functools
 
 import jax
-from jax import lax
 import jax.numpy as jnp
 from flax import nnx
 
@@ -78,48 +77,22 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
-def batched_sample_token(
-    logits: jax.Array, *, inv_temperatures: jax.Array, zero_temp_mask: jax.Array, sample_keys: jax.Array
-) -> tuple[jax.Array, jax.Array]:
-    """Sample next token per-example and return log probabilities.
-
-    Returns:
-        Tuple of (next_token, log_softmax_logits) where log_softmax is computed once
-        and reused for both sampling (via gumbel trick equivalence) and logprob extraction.
-    """
-    # Compute log_softmax once - used for both sampling and logprob
-    log_probs = jax.nn.log_softmax(logits, axis=-1)
-    scaled_log_probs = log_probs * inv_temperatures
-
-    # Sample using categorical (which internally uses log_softmax, but we pass pre-computed)
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_log_probs)
-    greedy = jnp.argmax(logits, axis=-1)
-    next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
-    return next_token, log_probs
-
-
-def compute_positions(attention_mask: jax.Array) -> jax.Array:
-    """Compute positions from attention mask.
-
-    Positions start at 0 from the first non-zero value in the attention mask
-    and increment sequentially.
-    """
-    first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
-    return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
-
-
 def sample_and_logprob(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sample next token and compute its logprob. Returns (next_rngs, next_token, logprob, stop_pos)."""
     split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
 
-    # Sample token and get log_probs in one pass (avoids redundant log_softmax)
-    next_token, log_probs = batched_sample_token(
-        s.logits, inv_temperatures=s.inv_temperatures, zero_temp_mask=s.zero_temp_mask, sample_keys=sample_keys
-    )
+    # Compute log_softmax once - used for both sampling and logprob extraction
+    log_probs = jax.nn.log_softmax(s.logits, axis=-1)
+    scaled_log_probs = log_probs * s.inv_temperatures
 
-    # Extract logprob for just the sampled token (reuses log_probs from sampling)
-    sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)  # [batch_size, 1]
+    # Sample: temperature-scaled categorical or greedy argmax
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_log_probs)
+    greedy = jnp.argmax(s.logits, axis=-1)
+    next_token = jnp.where(s.zero_temp_mask, greedy[:, None], sampled[:, None])
+
+    # Extract logprob for the sampled token
+    sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
     # Check if sampled token is in stop tokens and update stop position
     is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
@@ -214,7 +187,7 @@ class GeneratorMixin:
         )
 
         # Decode loop - scan accumulates outputs automatically
-        final_state, (tokens_stacked, logprobs_stacked) = lax.scan(
+        final_state, (tokens_stacked, logprobs_stacked) = jax.lax.scan(
             decode_fn, initial_state, xs=None, length=max_new_tokens
         )
 
@@ -245,7 +218,7 @@ class GeneratorMixin:
 
         # Pre-compute inverse temperatures to avoid division in the decode loop
         zero_temp_mask = (temperatures == 0.0)[:, None]
-        inv_temperatures = jnp.where(zero_temp_mask, 1.0, 1.0 / jnp.where(temperatures == 0.0, 1.0, temperatures)[:, None])
+        inv_temperatures = (1.0 / jnp.maximum(temperatures, 1e-10))[:, None]
 
         # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]
