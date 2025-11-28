@@ -51,7 +51,6 @@ class DecodeState:
     zero_temp_mask: jax.Array  # Pre-computed temperature == 0 mask, shape [B, 1]
     stop_tokens: jax.Array
     adapter_indices: jax.Array
-    valid_start_positions: jax.Array  # Per-sequence start of valid tokens (after padding), shape [B, 1]
 
     # Updated each iteration:
     kv_cache: KVCache
@@ -129,7 +128,7 @@ class GeneratorMixin:
             stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
 
             # Generate attention mask on-the-fly from cache_position
-            attention_mask = (cache_index_array >= s.valid_start_positions) & (cache_index_array <= s.kv_cache.cache_position)
+            attention_mask = (cache_index_array >= first_token_idx) & (cache_index_array <= s.kv_cache.cache_position)
 
             outputs = s.model(
                 next_token,
@@ -144,7 +143,6 @@ class GeneratorMixin:
                 zero_temp_mask=s.zero_temp_mask,
                 stop_tokens=s.stop_tokens,
                 adapter_indices=s.adapter_indices,
-                valid_start_positions=s.valid_start_positions,
                 kv_cache=outputs.kv_cache,
                 rngs=rngs,
                 last_positions=s.last_positions + 1,
@@ -162,7 +160,6 @@ class GeneratorMixin:
             zero_temp_mask=zero_temp_mask,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
-            valid_start_positions=first_token_idx,
             kv_cache=kv_cache,
             rngs=rngs,
             last_positions=positions[:, -1:],
