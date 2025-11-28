@@ -44,7 +44,6 @@ class DecodeState:
     """State of the decode loop. Lightweight - no large buffers carried."""
 
     # Constant throughout decode loop:
-    stop_tokens: jax.Array
     adapter_indices: jax.Array
 
     # Updated each iteration:
@@ -119,7 +118,7 @@ class GeneratorMixin:
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
             # Update stop position if we hit a stop token
-            is_stop = jnp.any(next_token == s.stop_tokens, axis=1, keepdims=True)
+            is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
             stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
 
             # Generate attention mask on-the-fly from cache_position
@@ -133,7 +132,6 @@ class GeneratorMixin:
                 adapter_indices=s.adapter_indices,
             )
             next_state = DecodeState(
-                stop_tokens=s.stop_tokens,
                 adapter_indices=s.adapter_indices,
                 kv_cache=outputs.kv_cache,
                 rngs=rngs,
@@ -147,7 +145,6 @@ class GeneratorMixin:
 
         # Build initial state for decode loop
         initial_state = DecodeState(
-            stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             rngs=rngs,
