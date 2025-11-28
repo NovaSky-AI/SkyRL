@@ -47,8 +47,6 @@ class DecodeState:
 
     # Constant throughout decode loop:
     model: nnx.Module
-    inv_temperatures: jax.Array  # Pre-computed 1/temperature, shape [B, 1]
-    zero_temp_mask: jax.Array  # Pre-computed temperature == 0 mask, shape [B, 1]
     stop_tokens: jax.Array
     adapter_indices: jax.Array
 
@@ -117,10 +115,10 @@ class GeneratorMixin:
 
             log_probs = jax.nn.log_softmax(s.logits, axis=-1)
             sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
-                sample_keys, log_probs * s.inv_temperatures
+                sample_keys, log_probs * inv_temperatures
             )
             greedy = jnp.argmax(s.logits, axis=-1)
-            next_token = jnp.where(s.zero_temp_mask, greedy[:, None], sampled[:, None])
+            next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
             # Update stop position if we hit a stop token
@@ -139,8 +137,6 @@ class GeneratorMixin:
             )
             next_state = DecodeState(
                 model=s.model,
-                inv_temperatures=s.inv_temperatures,
-                zero_temp_mask=s.zero_temp_mask,
                 stop_tokens=s.stop_tokens,
                 adapter_indices=s.adapter_indices,
                 kv_cache=outputs.kv_cache,
@@ -156,8 +152,6 @@ class GeneratorMixin:
         # Build initial state for decode loop
         initial_state = DecodeState(
             model=model,
-            inv_temperatures=inv_temperatures,
-            zero_temp_mask=zero_temp_mask,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
