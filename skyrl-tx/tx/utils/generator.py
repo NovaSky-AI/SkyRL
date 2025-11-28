@@ -6,8 +6,6 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from flax import nnx
-
 import tx.utils.models
 from tx.tinker import types
 
@@ -46,7 +44,6 @@ class DecodeState:
     """State of the decode loop. Lightweight - no large buffers carried."""
 
     # Constant throughout decode loop:
-    model: nnx.Module
     stop_tokens: jax.Array
     adapter_indices: jax.Array
 
@@ -128,7 +125,7 @@ class GeneratorMixin:
             # Generate attention mask on-the-fly from cache_position
             attention_mask = (cache_index_array >= first_token_idx) & (cache_index_array <= s.kv_cache.cache_position)
 
-            outputs = s.model(
+            outputs = model(
                 next_token,
                 attention_mask=attention_mask,
                 positions=s.last_positions + 1,
@@ -136,7 +133,6 @@ class GeneratorMixin:
                 adapter_indices=s.adapter_indices,
             )
             next_state = DecodeState(
-                model=s.model,
                 stop_tokens=s.stop_tokens,
                 adapter_indices=s.adapter_indices,
                 kv_cache=outputs.kv_cache,
@@ -151,7 +147,6 @@ class GeneratorMixin:
 
         # Build initial state for decode loop
         initial_state = DecodeState(
-            model=model,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
