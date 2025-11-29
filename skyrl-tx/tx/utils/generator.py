@@ -110,7 +110,9 @@ class GeneratorMixin:
 
             zero_temp_mask = temperatures == 0.0
             scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
-            sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
+            sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
+                sample_keys, scaled_logits
+            )
             greedy = jnp.argmax(s.logits, axis=-1)
             next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
             log_probs = jax.nn.log_softmax(s.logits, axis=-1)
