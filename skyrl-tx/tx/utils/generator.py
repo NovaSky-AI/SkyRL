@@ -45,6 +45,7 @@ class DecodeState:
 
     kv_cache: KVCache
     rngs: jax.Array  # of shape [B, key_dim]
+    attention_mask: jax.Array
     last_positions: jax.Array
     logits: jax.Array
 
@@ -93,16 +94,13 @@ class GeneratorMixin:
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
         # Compute positions from attention mask
         positions = compute_positions(attention_mask)
-        first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
 
         # Prefill: process full prompt
         outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
-        # Pad KV cache inside JIT (fast)
+        # Pad KV cache and attention mask
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
-
-        # Pre-compute index array for mask generation
-        cache_index_array = jnp.arange(max_length)
+        decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
         def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array, jax.Array]]:
             """Decode one token step. Returns (state, (token, logprob, is_stop)) for scan accumulation."""
@@ -121,12 +119,12 @@ class GeneratorMixin:
             # Check if we hit a stop token
             is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
 
-            # Generate attention mask on-the-fly from cache_position
-            attention_mask = (cache_index_array >= first_token_idx) & (cache_index_array <= s.kv_cache.cache_position)
+            # Update attention mask: set next position to 1
+            next_attention_mask = s.attention_mask.at[:, s.kv_cache.cache_position].set(1)
 
             outputs = model(
                 next_token,
-                attention_mask=attention_mask,
+                attention_mask=next_attention_mask,
                 positions=s.last_positions + 1,
                 kv_cache=s.kv_cache,
                 adapter_indices=adapter_indices,
@@ -134,6 +132,7 @@ class GeneratorMixin:
             next_state = DecodeState(
                 kv_cache=outputs.kv_cache,
                 rngs=rngs,
+                attention_mask=next_attention_mask,
                 last_positions=s.last_positions + 1,
                 logits=outputs.logits[:, -1, :],
             )
@@ -143,6 +142,7 @@ class GeneratorMixin:
         initial_state = DecodeState(
             kv_cache=kv_cache,
             rngs=rngs,
+            attention_mask=decode_attention_mask,
             last_positions=positions[:, -1:],
             logits=outputs.logits[:, -1, :],
         )
