@@ -176,7 +176,7 @@ def compute_score(data_source: str, model_output: str, ground_truth: str, extra_
 
     # Otherwise, require boxed for LLM judging (legacy behavior)
     question = extra_info["question"]
-    if not is_matched:
+    if is_matched == False:
         return 0.0
     else:
         try:

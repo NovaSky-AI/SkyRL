@@ -19,7 +19,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.utils import (
     get_rollout_metrics,
-    encode_messages_subset,
+    get_response_ids_and_loss_mask_from_messages,
 )
 
 
@@ -171,9 +171,6 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         initial_input_ids = self.tokenizer.apply_chat_template(messages[:2], add_generation_prompt=False, tokenize=True)
         initial_prompt_length = len(initial_input_ids)
 
-        response_ids: List[int] = []
-        loss_mask: List[int] = []
-
         # We remove trailing `user` messages - this is added by Mini-SWE-Agent to capture the final git diff for the trajectory
         last_idx = len(response_messages) - 1
         while response_messages[last_idx]["role"] == "user":
@@ -184,18 +181,12 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
             )
         response_messages = response_messages[: last_idx + 1]
 
-        for message in response_messages:
-            # Apply chat template and tokenize each message
-            msg_encoding = encode_messages_subset([message], self.tokenizer)
+        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+            response_messages,
+            self.tokenizer,
+            assistant_logprobs=None,
+        )
 
-            # Extend response_ids with the tokens
-            response_ids.extend(msg_encoding)
-
-            # Extend loss_mask: 0s for user, 1s for assistant
-            if message["role"] == "user":
-                loss_mask.extend([0] * len(msg_encoding))
-            else:  # assistant
-                loss_mask.extend([1] * len(msg_encoding))
         # Extract prompt ids
         prompt_ids = initial_input_ids
 

@@ -12,10 +12,10 @@ build-backend = "setuptools.build_meta"
 # project (PEP 621 metadata)
 # -------------------------------
 [project]
-name = "skyagent"
+name = "skyrl_agent"
 version = "0.0.1"
 
-description = "SkyAgent: Training and evaluating AI agents in complex environments."
+description = "SkyRL-Agent: Training and evaluating AI agents in complex environments."
 license = {file = "LICENSE"}  # or "Apache-2.0", if you prefer an SPDX identifier
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = "==3.12.*"
@@ -24,6 +24,7 @@ dependencies=[
   'codetiming',
   'datasets',
   'dill',
+  'faiss-cpu>=1.11.0.post1',
   'hydra-core',
   'numpy',
   'pandas',
@@ -32,10 +33,9 @@ dependencies=[
   'pybind11',
   'pylatexenc',
   'ray[default]>=2.10',
-  'torchdata',
+  'tevatron',
   'transformers',
   "hf_transfer",
-  "torchdata",
   "openhands-ai",
   "streamlit",
   "whatthepatch",
@@ -63,11 +63,13 @@ dependencies=[
   "wandb",
   "vllm>=0.8.5",
   "together",
+  "litellm",
 ]
 
 [project.optional-dependencies]
-skyrl-train = ["skyrl-train[vllm]"]
+skyrl-train = ["skyrl-train[vllm]", 'torchdata']
 verl = ["verl[vllm,gpu]","vllm==0.8.5"]
+tinker = ["tinker", "chz"]
 
 
 [tool.uv]
@@ -76,13 +78,21 @@ conflicts = [
   [
     { extra = "skyrl-train" },
     { extra = "verl" },
+    { extra = "tinker" },
   ],
 ]
 
 [tool.uv.sources]
-openhands-ai = { path = "./SkyRL-OpenHands", editable = true }
-verl = { path = "./verl", editable = true }
+openhands-ai = { git = "https://github.com/NovaSky-AI/SkyRL-OpenHands.git", rev = "main" }
+tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
+verl = { git = "https://github.com/NovaSky-AI/verl-fork", rev = "main" }
 skyrl-train = { path = "./skyrl-train", editable = true }
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{requirement = "torch", match-runtime = true}]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 # -------------------------------
 # tool.setuptools - Additional config
