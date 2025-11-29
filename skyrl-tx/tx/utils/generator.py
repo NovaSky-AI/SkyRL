@@ -64,6 +64,16 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
+def compute_positions(attention_mask: jax.Array) -> jax.Array:
+    """Compute positions from attention mask.
+
+    Positions start at 0 from the first non-zero value in the attention mask
+    and increment sequentially.
+    """
+    first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
+    return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -83,11 +93,10 @@ class GeneratorMixin:
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
         batch_size = input_ids.shape[0]
-        prompt_length = input_ids.shape[1]
 
         # Compute positions from attention mask
+        positions = compute_positions(attention_mask)
         first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
-        positions = jnp.arange(prompt_length)[None, :] - first_token_idx
 
         # Prefill: process full prompt
         outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
