@@ -138,7 +138,6 @@ class GeneratorMixin:
             )
             return next_state, (next_token, sampled_logprob, is_stop)
 
-        # Build initial state for decode loop
         initial_state = DecodeState(
             kv_cache=kv_cache,
             rngs=rngs,
@@ -147,7 +146,6 @@ class GeneratorMixin:
             logits=outputs.logits[:, -1, :],
         )
 
-        # Decode loop - scan accumulates outputs automatically
         _, (tokens_stacked, logprobs_stacked, is_stop_stacked) = jax.lax.scan(
             decode_fn, initial_state, xs=None, length=max_new_tokens
         )
