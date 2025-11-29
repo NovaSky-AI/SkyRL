@@ -86,14 +86,11 @@ class GeneratorMixin:
         max_length: int,
         max_new_tokens: int,
         adapter_indices: jax.Array | None,
-        inv_temperatures: jax.Array,
-        zero_temp_mask: jax.Array,
+        temperatures: jax.Array,
         rngs: jax.Array,
         stop_tokens: jax.Array,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
-        batch_size = input_ids.shape[0]
-
         # Compute positions from attention mask
         positions = compute_positions(attention_mask)
         first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
@@ -106,6 +103,9 @@ class GeneratorMixin:
 
         # Pre-compute index array for mask generation
         cache_index_array = jnp.arange(max_length)
+
+        inv_temperatures = (1.0 / jnp.maximum(temperatures, 1e-10))[:, None]
+        zero_temp_mask = (temperatures == 0.0)[:, None]
 
         def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array, jax.Array]]:
             """Decode one token step. Returns (state, (token, logprob, is_stop)) for scan accumulation."""
@@ -181,10 +181,6 @@ class GeneratorMixin:
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
-        # Pre-compute inverse temperatures to avoid division in the decode loop
-        zero_temp_mask = (temperatures == 0.0)[:, None]
-        inv_temperatures = (1.0 / jnp.maximum(temperatures, 1e-10))[:, None]
-
         # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]
         rngs = jax.vmap(jax.random.PRNGKey)(jnp.array(seeds))
@@ -205,8 +201,7 @@ class GeneratorMixin:
             max_length,
             max_new_tokens,
             adapter_indices,
-            inv_temperatures,
-            zero_temp_mask,
+            temperatures,
             rngs,
             stop_tokens,
         )
