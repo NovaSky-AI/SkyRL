@@ -104,21 +104,17 @@ class GeneratorMixin:
         # Pre-compute index array for mask generation
         cache_index_array = jnp.arange(max_length)
 
-        temperatures = temperatures[:, None]
-        zero_temp_mask = temperatures == 0.0
-        inv_temperatures = 1.0 / jnp.where(zero_temp_mask, 1.0, temperatures)
-
         def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array, jax.Array]]:
             """Decode one token step. Returns (state, (token, logprob, is_stop)) for scan accumulation."""
             # Sample next token
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
 
-            sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
-                sample_keys, s.logits * inv_temperatures
-            )
+            zero_temp_mask = temperatures == 0.0
+            scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
+            sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
             greedy = jnp.argmax(s.logits, axis=-1)
-            next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
+            next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
             log_probs = jax.nn.log_softmax(s.logits, axis=-1)
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
