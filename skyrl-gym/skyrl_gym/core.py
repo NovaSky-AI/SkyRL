@@ -63,7 +63,7 @@ class Env(Generic[ObsType, ActType]):
 
         Returns:
             observations (ObsType): Observations of the initial state. This is analogous to the observations returned by `step`.
-            info (Dict:  This dictionary contains auxiliary information complementing ``observation``. It should be analogous to
+            info (Dict): This dictionary contains auxiliary information complementing ``observation``. It should be analogous to
                 the ``info`` returned by `step`.
         """
         raise NotImplementedError
