@@ -1,76 +1,24 @@
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
 from tx.layers.util import prepare_routing
 from tx.models.configs import Qwen3Config
 from tx.layers.common import RMSNorm, SwiGLUMLP
-from tx.layers.common import apply_rope
+from tx.models.llama3 import Llama3Attention, Llama3Model, Llama3ForCausalLM
 from tx.models.types import CausalLMOutput, ModelOutput
-from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+from tx.utils.generator import KVCache, compute_positions
 
 
-class Qwen3Attention(nnx.Module):
+class Qwen3Attention(Llama3Attention):
+    """Qwen3 attention with QK normalization, inheriting from Llama3Attention."""
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
-        tp = get_abstract_mesh().shape.get("tp", 1)
-        shard_attention_heads = config.shard_attention_heads
-        if shard_attention_heads:
-            assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
-            assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
-        tp_shard = "tp" if shard_attention_heads else None
-        self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
+        # Initialize parent Llama3Attention
+        super().__init__(config, dtype=dtype, rngs=rngs)
 
-        self.q_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_heads * self.head_dim,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
-            rngs=rngs,
-        )
-        self.k_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_kv_heads * self.head_dim,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
-            rngs=rngs,
-        )
-        self.v_proj = LoRALinear(
-            in_features=config.hidden_size,
-            out_features=self.num_kv_heads * self.head_dim,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
-            rngs=rngs,
-        )
-        self.o_proj = LoRALinear(
-            in_features=self.num_heads * self.head_dim,
-            out_features=config.hidden_size,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            param_dtype=dtype,
-            use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, None)),
-            rngs=rngs,
-        )
-
+        # Add QK-Norm layers specific to Qwen3
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
@@ -86,13 +34,22 @@ class Qwen3Attention(nnx.Module):
         B, T, _ = x.shape
 
         # Project and reshape to [B, T, num_heads, head_dim]
-        q = self.q_norm(self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim))
-        k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim))
+        q = self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim)
+        k = self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
+        # Apply QK-Norm (Qwen3-specific)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        # Get rope_theta from config
+        from tx.layers.common import apply_rope
+
+        rope_theta = getattr(self.config, "rope_theta", 500000.0)
+
         # Apply RoPE
-        q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
-        k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
+        q = apply_rope(q, positions, self.head_dim, rope_theta)
+        k = apply_rope(k, positions, self.head_dim, rope_theta)
 
         # Handle KV cache
         if kv_cache is not None:
@@ -102,7 +59,7 @@ class Qwen3Attention(nnx.Module):
 
         updated_cache = (k, v)
 
-        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
+        # Attention computation
         attn_output = jax.nn.dot_product_attention(
             q,
             k,
@@ -267,11 +224,13 @@ class Qwen3DecoderLayer(nnx.Module):
         return hidden_states, updated_cache
 
 
-class Qwen3Model(nnx.Module):
+class Qwen3Model(Llama3Model):
+    """Qwen3 model inheriting from Llama3Model, using LoRAEmbed instead of regular Embed."""
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
 
+        # Use LoRAEmbed for embeddings (Qwen3-specific)
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
@@ -282,9 +241,13 @@ class Qwen3Model(nnx.Module):
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
             rngs=rngs,
         )
+
+        # Use Qwen3DecoderLayer instead of Llama3DecoderLayer
         self.layers = nnx.List(
             [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
         )
+
+        # Final layer normalization
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -301,6 +264,7 @@ class Qwen3Model(nnx.Module):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
+        # Use LoRAEmbed with adapter_indices
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
@@ -333,11 +297,15 @@ class Qwen3Model(nnx.Module):
         )
 
 
-class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
+class Qwen3ForCausalLM(Llama3ForCausalLM):
+    """Qwen3 for causal LM, inheriting from Llama3ForCausalLM with LoRA support for lm_head."""
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
+        # Use Qwen3Model instead of Llama3Model
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
+
+        # Use LoRALinear for lm_head (Qwen3-specific)
         if not self.config.tie_word_embeddings:
             self.lm_head = LoRALinear(
                 config.hidden_size,
@@ -350,11 +318,6 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
-
-    @staticmethod
-    def is_lora_param(path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
 
     def __call__(
         self,
@@ -381,6 +344,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         if self.config.tie_word_embeddings:
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
+            # Use LoRALinear lm_head with adapter_indices
             logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(

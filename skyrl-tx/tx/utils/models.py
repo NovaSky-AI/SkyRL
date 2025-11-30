@@ -87,7 +87,9 @@ def load_safetensors(
         if "experts" in path:
             tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
         else:
-            tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
+            # Don't transpose embeddings or norm weights (they are 1D)
+            should_transpose = "embed_tokens" not in path and "norm" not in path
+            tensors[key] = tensors[key].T if should_transpose else tensors[key]
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
             tensors[key] = tensors[key].reshape(param.shape)
         assert param.shape == tensors[key].shape, f"shape mismatch for {key}"

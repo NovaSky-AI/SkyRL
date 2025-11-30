@@ -25,7 +25,8 @@ class Llama3Attention(nnx.Module):
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         tp_shard = "tp" if shard_attention_heads else None
 
-        self.head_dim = config.hidden_size // self.num_heads
+        # Allow config to override head_dim (used by Qwen3)
+        self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
         max_lora_adapters = getattr(config, "max_lora_adapters", 0)
         max_lora_rank = getattr(config, "max_lora_rank", 8)
 

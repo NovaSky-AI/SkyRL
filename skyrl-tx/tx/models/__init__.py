@@ -1,4 +1,3 @@
-from tx.layers.common import RMSNorm, SwiGLUMLP, apply_rope
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.configs import Qwen3Config
 from tx.models.mnist import Mnist
@@ -20,8 +19,4 @@ __all__ = [
     CausalLMOutput,
     ModelOutput,
     Qwen3Config,
-    # Shared layers
-    RMSNorm,
-    SwiGLUMLP,
-    apply_rope,
 ]
