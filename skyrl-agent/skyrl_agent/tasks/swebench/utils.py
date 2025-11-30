@@ -6,6 +6,7 @@ import json
 import tempfile
 import time
 import re
+import asyncio
 
 from openhands.core.main import create_runtime
 from openhands.utils.shutdown_listener import sleep_if_should_continue
@@ -195,6 +196,17 @@ def initialize_runtime(runtime: Runtime, instance: pd.Series, dataset: str):
         f"Failed to create /swe_util/eval_data/instances: {str(obs)}",
     )
 
+    # @(csy)todo: make it go through all the tools
+    # copy the search tools to the runtime
+    for tool_name in ["search", "str_replace_editor"]:
+        runtime.copy_to(
+            str(os.path.join(script_dir, f"scripts/tools/{tool_name}.py")),
+            "/usr/local/bin",
+        )
+        # strip the .py suffix
+        runtime.run_action(CmdRunAction(command=f"mv /usr/local/bin/{tool_name}.py /usr/local/bin/{tool_name}"))
+        runtime.run_action(CmdRunAction(command=f"chmod +x /usr/local/bin/{tool_name}"))
+
     swe_instance_json_name = "swe-bench-instance.json"
     with tempfile.TemporaryDirectory() as temp_dir:
         # Construct the full path for the desired file name within the temporary directory
@@ -303,11 +315,6 @@ def initialize_runtime(runtime: Runtime, instance: pd.Series, dataset: str):
         assert_and_raise(obs.exit_code == 0, f"Failed to remove git remotes: {str(obs)}")
 
     if dataset == "swt-ci":
-        from skyrl_agent.tasks.swebench.swt_constants import (
-            MAP_REPO_TO_INSTALL,
-            MAP_VERSION_TO_INSTALL,
-        )
-
         # set up repo
         setup_commands = []
         if instance["repo"] in MAP_REPO_TO_INSTALL:
@@ -364,16 +371,15 @@ class SWEBenchTask(BaseTask):
 
     Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
     I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
-    Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
     Your task is to make the minimal changes to non-test files in the {workspace_dir_name} directory to ensure the <issue_description> is satisfied.
 
     Follow these steps to resolve the issue:
-
-    1. EXPLORATION: First, thoroughly explore the repository structure using tools like `find` and `grep`.
-    - Identify all files mentioned in the problem statement
-    - Locate where the issue occurs in the codebase
-    - Understand the surrounding context and dependencies
-    - Use `grep` to search for relevant functions, classes, or error messages
+    1. First, explore the codebase to locate and understand the code relevant to the <issue_description>. 
+    - Use efficient search commands to identify key files and functions. 
+    - You should err on the side of caution and look at various relevant files and build your understanding of 
+        - how the code works
+        - what are the expected behaviors and edge cases
+        - what are the potential root causes for the given issue
 
     2. Assess whether you can reproduce the issue:
         - Create a script at {workspace_dir_name}/reproduce_issue.py that demonstrates the error.
@@ -381,31 +387,58 @@ class SWEBenchTask(BaseTask):
         - You should reproduce the issue before fixing it.
         - Your reproduction script should also assert the expected behavior for the fixed code. 
 
-    3. IMPLEMENTATION: Edit the source code to implement your chosen solution.
-    - Make minimal, focused changes to fix the issue
+    3. Analyze the root cause:
+        - Identify the underlying problem based on your code exploration and reproduction results.
+        - Critically analyze different potential approaches to fix the issue. 
+        - You NEED to explicitly reason about multiple approaches to fix the issue. Next, find the most elegant and effective solution among them considering the tradeoffs (correctness, generality, side effects, etc.).
+        - You would need to reason about execution paths, edge cases, and other potential issues. You should look at the unit tests to understand the expected behavior of the relevant code.
 
-    4. VERIFICATION: Test your implementation thoroughly.
-    - Run your reproduction script to verify the fix works
-    - Add edge cases to your test script to ensure comprehensive coverage
-    - Run existing tests related to the modified code to ensure you haven't broken anything
+    4. Implement your solution:
+        - Make targeted changes to the necessary files following idiomatic code patterns once you determine the root cause.
+        - You should be thorough and methodical.
 
-    5. FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit {instance["base_commit"]}.
-    - Ensure you've fully addressed all requirements
+    5. Verify your solution:
+        - Rerun your reproduction script to confirm the error is fixed.
+        - If verification fails, iterate on your solution until successful. If you identify the reproduction script is buggy, adjust it as needed.
 
-    Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity.
-    """
+    6. Run unit tests:
+        - Find and run the relevant unit tests relevant to the performed fix.
+        - You should run the unit tests to ensure your solution is correct and does not cause any regressions.
+        - In cases where the unit tests are do not pass, you should consider whether the unit tests does not reflect the *new* expected behavior of the code. If so, you can test it by writing additional edge test cases.
+        - Use the existing test runner to run the unit tests you identify as relevant to the changes you made. For example:
+            - `python -m pytest -xvs sympy/physics/units/tests/test_dimensions_transcendental.py`
+            - `python -m pytest tests/test_domain_py.py::test_pymethod_options`
+            - `./tests/runtests.py constraints.tests.CheckConstraintTests -v 2`
+        - RUN ALL relevant unit tests to ensure your solution is correct and does not cause any regressions.
 
-        if RUN_WITH_BROWSING:
-            instruction += """
-    <IMPORTANT!>
-    You SHOULD NEVER attempt to browse the web.
-    </IMPORTANT!>
+    7. Test edge cases:
+        - Identify potential edge cases that might challenge your solution.
+        - Create additional test cases in a separate file {workspace_dir_name}/edge_case_tests.py.
+        - Execute these tests to verify your solution's robustness.
+        - You should run multiple rounds of edge cases. When creating edge cases:
+        - Consider complex scenarios beyond the original issue description
+        - Test for regressions to ensure existing functionality remains intact
+
+    8. Refine if necessary:
+        - If edge case testing reveals issues, refine your solution accordingly.
+        - Ensure your final implementation handles all identified scenarios correctly.
+        - Document any assumptions or limitations of your solution.
+
+    9. Submit your solution:
+        - Once you have verified your solution, submit your solution using the `finish` tool.
+
+    A successful resolution means:
+    - The specific error/issue described no longer occurs
+    - Your changes maintain compatibility with existing functionality
+    - Edge cases are properly handled
+
     """
         return MessageAction(content=instruction)
 
     @classmethod
     def get_config(cls, instance, data_source, agent_config=None, max_iterations=None) -> AppConfig:
         # Configure sandbox
+        RUN_WITH_BROWSING = os.environ.get("RUN_WITH_BROWSING", "false").lower() == "true"
         SWE_BENCH_CONTAINER_IMAGE = "ghcr.io/opendevin/eval-swe-bench:full-v1.2.1"
 
         if os.environ.get("USE_INSTANCE_IMAGE", "true").lower() == "true":
@@ -454,7 +487,24 @@ class SWEBenchTask(BaseTask):
         runtime = create_runtime(app_config)
 
         # Connect runtime
-        await runtime.connect()
+        # Retry loop for runtime_initializer
+        max_retries = 3
+        retry_delay = 2  # initial delay in seconds
+        for attempt in range(1, max_retries + 1):
+            try:
+                await runtime.connect()
+                break  # success, exit retry loop
+            except Exception as e_inner:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"[Retry {attempt}/{max_retries}] runtime_initializer failed for "
+                        f"{str(e_inner)}. "
+                        f"Retrying in {retry_delay} sec..."
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # exponential backoff
+                else:
+                    raise  # re-raise if max retries exceeded
 
         await call_sync_from_async(initialize_runtime, runtime, instance, dataset)
 
@@ -537,6 +587,7 @@ class SWEBenchTask(BaseTask):
                 reward = get_reward(results, instance)
                 return {"reward": reward}
             else:
+                logger.info(f"Running bash /root/run_tests.sh, but got unexpected observation type: {str(obs)}")
                 return {"reward": 0, "finish_reason": "error_evaluation"}
 
         action = CmdRunAction(command='git config --global core.pager ""')
@@ -618,6 +669,9 @@ class SWEBenchTask(BaseTask):
                     obs = runtime.run_action(action)
                     logger.info(obs, extra={"msg_type": "OBSERVATION"})
                     if isinstance(obs, FileReadObservation):
+                        git_patch = obs.content
+                        break
+                    elif isinstance(obs, CmdOutputObservation):
                         git_patch = obs.content
                         break
                     elif isinstance(obs, ErrorObservation):
@@ -708,6 +762,12 @@ def evaluate_result(runtime, instance, run_results, instance_id, trajectory_id, 
         raise Exception(f"No git patch found for instance {instance_id}, trajectory {trajectory_id}")
 
     test_spec = make_test_spec(instance=instance)
+    if "sphinx-doc" in instance["instance_id"]:
+        for item in test_spec.eval_script_list:
+            if "tox" in item:
+                # remove --current-env to avoid issues
+                new_item = item.replace("--current-env", "")
+                test_spec.eval_script_list[test_spec.eval_script_list.index(item)] = new_item
     model_patch = process_git_patch(model_patch)
     # Get patch and save it to /tmp/patch.diff
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -775,7 +835,7 @@ def evaluate_result(runtime, instance, run_results, instance_id, trajectory_id, 
 
             # Poll for completion
             start_time = time.time()
-            timeout = 1200  # 20 minutes
+            timeout = 1800  # 30 minutes
             while True:
                 seconds_elapsed = time.time() - start_time
                 if seconds_elapsed > timeout:
@@ -922,7 +982,7 @@ def remove_binary_files_from_git():
         str: A bash command that removes binary files from git staging
     """
     return """
-    for file in $(git status --porcelain | grep -E "^(M| M|\?\?|A| A)" | cut -c4-); do
+    for file in $(git status --porcelain | grep -E "^(M| M|\\?\\?|A| A)" | cut -c4-); do
         if [ -f "$file" ] && (test -x "$file" || git check-attr binary "$file" | grep -q "binary: set"); then
             git rm -f "$file" 2>/dev/null || rm -f "$file"
             echo "Removed: $file"

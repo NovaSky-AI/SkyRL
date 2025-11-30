@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from datetime import datetime
 from uuid import uuid4
+import traceback
+import copy
 
 from skyrl_agent.functional.function_calling import convert_str_to_completion_format
 from skyrl_agent.functional.chat_template import get_templates_path
@@ -58,7 +60,7 @@ class OHCodeActAgent(CodeActAgent):
         Initialize a single OHCodeActAgent instance.
         """
         # dummy value to let openhands tracks the name
-        llm = LLM(LLMConfig(model="dummy", max_message_chars=32768))
+        llm = LLM(LLMConfig(model="dummy", max_message_chars=128000))
 
         self.agent_config = AgentConfig(
             enable_jupyter=traj_config.tools.get("enable_jupyter", False),
@@ -66,6 +68,7 @@ class OHCodeActAgent(CodeActAgent):
             enable_llm_editor=traj_config.tools.get("enable_llm_editor", False),
             enable_editor=traj_config.tools.get("enable_editor", False),
             enable_think=traj_config.tools.get("enable_think", False),
+            enable_search=traj_config.tools.get("enable_search", False),
             condenser=NoOpCondenserConfig(),
             enable_prompt_extensions=traj_config.tools.get("enable_prompt_extensions", False),
         )
@@ -89,6 +92,28 @@ class OHCodeActAgent(CodeActAgent):
         self.app_config = None
 
         self.agent_id = uuid4().hex
+        # record the messages ourselves
+        self.messages = []
+        self.prompt_token_len = 0
+        self.response_token_len = 0
+
+    def _encode_prompt(self, messages):
+        if self.qwen3_acc_thinking:
+            # Use the Qwen3 thinking mode chat template
+            assert self.qwen3_enable_thinking, "Qwen3 thinking mode should for accumulating thinking."
+            chat_template = get_templates_path() / "qwen3_acc_thinking.jinja2"
+            input_ids = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                enable_thinking=self.qwen3_enable_thinking,
+                chat_template=chat_template.read_text(),
+            )
+        else:
+            input_ids = self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True, enable_thinking=self.qwen3_enable_thinking
+            )
+        return input_ids
 
     def close(self):
         """Close the agent runtime."""
@@ -127,42 +152,58 @@ class OHCodeActAgent(CodeActAgent):
             messages, self.tools, add_in_context_learning_example=False
         )
 
-        try:
-            if self.qwen3_acc_thinking:
-                # Use the Qwen3 thinking mode chat template
-                assert self.qwen3_enable_thinking, "Qwen3 thinking mode should for accumulating thinking."
-                chat_template = get_templates_path() / "qwen3_acc_thinking.jinja2"
-                input_ids = self.tokenizer.apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    enable_thinking=self.qwen3_enable_thinking,
-                    chat_template=chat_template.read_text(),
-                )
+        # the first step, use the constructed messages from openhands
+        if len(self.messages) == 0:
+            self.messages = messages
+        else:
+            obs = messages[-1]
+            assert obs["role"] == "user", f"The last message should always be a user message, but got {obs['role']}"
+            remaining_steps = self.app_config.max_iterations - self.step_count + 1
+            if remaining_steps > 1:
+                obs["content"] += f"\nSteps remaining: {remaining_steps}."
             else:
-                input_ids = self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True, enable_thinking=self.qwen3_enable_thinking
-                )
-            if len(input_ids) >= self.max_prompt_length:
+                obs[
+                    "content"
+                ] += "\nThis is your last step, make sure to use the finish tool to submit your final answer."
+            self.messages.append(obs)
+            print(f"Obs: {obs['content']}")
+
+        response_str = None
+        try:
+            input_ids = self._encode_prompt(self.messages)
+            if len(self.messages) == 2:
+                # system + first user message
+                self.prompt_token_len = len(input_ids)
+            else:
+                self.response_token_len = len(input_ids) - self.prompt_token_len
+
+            if self.response_token_len >= self.max_prompt_length - 3000:
+                # modify the last user message to inform context window exceeded
+                self.messages[-1][
+                    "content"
+                ] += "\nNote: You are running out of tokens, submit your solution through finish tool now."
+                input_ids = self._encode_prompt(self.messages)
+                self.response_token_len = len(input_ids) - self.prompt_token_len
+            if self.response_token_len >= self.max_prompt_length:
                 return AgentFinishAction(thought="CONTEXT_WINDOW_EXCEEDED")
 
-            response_str, stop_reason = call_async_from_sync(
+            sampling_params = copy.deepcopy(self.sampling_params)
+            sampling_params["max_tokens"] = self.max_prompt_length - self.response_token_len
+
+            response_str, meta_info = call_async_from_sync(
                 self.infer_engine.async_generate_ids,
                 input_ids=input_ids,
-                sampling_params=self.sampling_params,
+                sampling_params=sampling_params,
                 request_id=self.agent_id,
             )
+            stop_reason = meta_info.get("finish_reason")
             print(
-                f"instance id {self.instance_id}, trajectory {self.trajectory_id}, stop reason {stop_reason}, response {response_str} "
+                f"instance id {self.instance_id}, trajectory {self.trajectory_id}, response {response_str} stop reason {stop_reason}"
             )
 
             if not response_str:
                 # If we got an empty response (possible error), return a message action
-                self.pending_actions.append(
-                    MessageAction(
-                        content="I encountered an error processing your request. Let's try again.",
-                    )
-                )
+                return AgentFinishAction(thought="BAD_LLM_RESPONSE")
             else:
                 # Convert to actions
                 message = [
@@ -171,16 +212,18 @@ class OHCodeActAgent(CodeActAgent):
                         "content": response_str,
                     }
                 ]
+                self.messages.append({"role": "assistant", "content": response_str})
+                if stop_reason == "length":
+                    return AgentFinishAction(thought="CONTEXT_WINDOW_EXCEEDED")
                 fn_call_messages = convert_non_fncall_messages_to_fncall_messages(message, self.tools)
                 actions = codeact_function_calling.response_to_actions(
                     convert_str_to_completion_format(fn_call_messages), mcp_tool_names=list(self.mcp_tools.keys())
                 )
                 print(f"Take action: {[type(action) for action in actions]}")
-
-                for action in actions:
-                    self.pending_actions.append(action)
-                if stop_reason == "length":
-                    self.pending_actions.append(AgentFinishAction(thought="CONTEXT_WINDOW_EXCEEDED"))
+                if len(actions) > 1:
+                    logger.warning("Multiple actions detected, only the first action will be executed.")
+                # for action in actions:
+                self.pending_actions.append(actions[0])
 
         except (
             LLMMalformedActionError,
@@ -188,12 +231,12 @@ class OHCodeActAgent(CodeActAgent):
             LLMResponseError,
             FunctionCallValidationError,
             FunctionCallNotExistsError,
-        ) as e:
-            e.response_str = response_str
+        ):
             raise
 
         except Exception as e:
             logger.error(f"Error in agent step: {str(e)}")
+            logger.debug(f"{traceback.format_exc()}")
             # Handle errors gracefully by creating a message action
             self.pending_actions.append(
                 MessageAction(
@@ -232,11 +275,9 @@ class OHCodeActAgent(CodeActAgent):
         current_step = wandb.run.step if wandb.run else 1
         run_name = wandb.run.name if wandb.run else "no_run"
         logger.info(f"Detected run name: {run_name}")
-        if (current_step == 1) or (current_step % 5 == 0):
+        if (current_step == 1) or (current_step % 10 == 0):
             instance_dir = (
-                Path(f"/mnt/shared_storage/trace/{run_name}/step{current_step}")
-                / str(self.instance_id)
-                / str(self.trajectory_id)
+                Path(f"./trace/{run_name}/step{current_step}") / str(self.instance_id) / str(self.trajectory_id)
             )
             instance_dir.mkdir(exist_ok=True, parents=True)
 
@@ -245,22 +286,21 @@ class OHCodeActAgent(CodeActAgent):
             trace_file = instance_dir / f"trace_{timestamp}.json"
 
             with open(trace_file, "w") as f:
-                result_json = json.dumps(messages, default=lambda x: str(x))
+                result_json = json.dumps(self.messages, default=lambda x: str(x))
                 f.write(result_json)
 
-        return messages
+        return self.messages
 
     def _is_last_action_finish(self, state: State):
         finish_reason = None
+        mask_out_reason = ["CONTEXT_WINDOW_EXCEEDED", "BAD_LLM_RESPONSE", "NO_FUNCTION_CALL", "cmd_timeout"]
         if state and state.history:
             last_action = next(
                 (event for event in reversed(state.history) if isinstance(event, Action)),
                 None,
             )
             if isinstance(last_action, AgentFinishAction):
-                finish_reason = (
-                    last_action.thought if last_action.thought == "CONTEXT_WINDOW_EXCEEDED" else "FINISH_TOOL"
-                )
+                finish_reason = last_action.thought if last_action.thought in mask_out_reason else "FINISH_TOOL"
                 return True, finish_reason
         return False, finish_reason
 

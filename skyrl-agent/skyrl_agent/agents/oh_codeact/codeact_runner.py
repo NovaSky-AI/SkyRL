@@ -5,7 +5,7 @@ import traceback
 from skyrl_agent.agents.oh_codeact.codeact_agent import OHCodeActAgent
 from skyrl_agent.dispatcher.async_utils import call_sync_from_async
 from skyrl_agent.config.configuration_utils import TrajectoryConfig
-from skyrl_agent.agents.base import BaseTrajectory, TrajectoryResult, AsyncInferBackend, AutoTokenizer
+from skyrl_agent.agents.base import BaseTrajectory, TrajectoryResult, TrajectoryConfig, AsyncInferBackend, AutoTokenizer
 
 from openhands.core.main import run_controller
 from openhands.controller.state.state import State
@@ -63,8 +63,16 @@ def codeact_user_response(
     encapsulate_solution: bool = False,
     try_parse: Callable[[Action], str] | None = None,
 ) -> str:
+    encaps_str = (
+        (
+            "Please encapsulate your final answer (answer ONLY) within <solution> and </solution>.\n"
+            "For example: The answer to the question is <solution> 42 </solution>.\n"
+        )
+        if encapsulate_solution
+        else ""
+    )
     msg = (
-        "No function call detected.\n"
+        "No function call detected. You should always include one action in your response.\n"
         'If you think you have solved the task, please use the "finish" tool to finish the interaction.\n'
     )
 
@@ -95,8 +103,9 @@ class CodeActTrajectory(BaseTrajectory):
         infer_engine: AsyncInferBackend,
         tokenizer: AutoTokenizer,
         task: SWEBenchTask,
+        val_mode: bool,
     ) -> None:
-        super().__init__(cfg, data, infer_engine, tokenizer, task)
+        super().__init__(cfg, data, infer_engine, tokenizer, task, val_mode)
         assert isinstance(task, SWEBenchTask)
 
     async def initialize_trajectory(self):
@@ -263,7 +272,7 @@ class CodeActTrajectory(BaseTrajectory):
             logger.error(f"Failed to evaluate traj {trajectory_id} for instance {instance_id}: {str(e)}")
             self.result["reward"] = False
             self.result["eval_error"] = str(e)
-            self.result["finish_reason"] = "error_evaluation" if "No git patch found" not in str(e) else None
+            self.result["finish_reason"] = "error_evaluation" if "No git patch found" not in str(e) else "no_git_patch"
 
     def _cleanup_agent(self):
         try:

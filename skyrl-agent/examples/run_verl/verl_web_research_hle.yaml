@@ -38,6 +38,5 @@ generator:
 
 dispatcher:
   type: async_batch
-  scheduler: naive
   max_parallel_agents: 200
   max_eval_parallel_agents: 200

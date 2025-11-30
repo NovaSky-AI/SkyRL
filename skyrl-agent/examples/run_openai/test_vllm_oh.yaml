@@ -1,0 +1,53 @@
+agent_cls: skyrl_agent.agents.oh_codeact.OHCodeActAgent
+
+task: skyrl_agent.tasks.swebench.utils.SWEBenchTask
+
+tools:
+  enable_bash_tool: false
+  enable_browsing: false
+  enable_llm_editor: false
+  enable_editor: true
+  enable_jupyter: false
+  enable_cmd: true
+  enable_think: false
+  enable_finish: true
+  enable_mcp: false
+  enable_search: true
+
+data:
+  instance_key: instance
+  instance_id_key: instance.instance_id
+  data_source_key: data_source
+
+generator:
+  infer_backend: openai_server
+  backend_config: 
+    # TODO: model_name need not be in config
+    model_name: Qwen/Qwen3-32B
+    api_url: http://localhost:8000
+    model_max_len: 40960
+  num_trajectories: 1
+  max_iterations: 50
+  max_prompt_length: 32768
+  sampling_params:
+    temperature: 1
+    top_p: 1
+    max_tokens: 32768
+  # not needed for inference
+  val_config:
+    num_trajectories: 1
+    sampling_params:
+      temperature: 1
+      top_p: 0.95
+      max_tokens: 32768
+  remove_think_tokens: false
+  vision_is_active: false
+  qwen3_enable_thinking: true
+  qwen3_acc_thinking: true
+
+dispatcher:
+  type: async_pipeline
+  scheduler: naive
+  max_parallel_agents: 32
+  max_eval_parallel_agents: 32
+

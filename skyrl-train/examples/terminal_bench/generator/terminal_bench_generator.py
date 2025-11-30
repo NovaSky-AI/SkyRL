@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from skyrl_train.generators.utils import get_rollout_metrics, encode_messages_subset
+from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -139,56 +139,22 @@ class TerminalBenchGenerator(GeneratorInterface):
                 print(f"Error running trial: {e}")
                 continue
 
-        # Use the first message as the prompt
+        # Use the first message as the prompt. We assume to be no systems messages.
+        assert chat_history[0]["role"] == "user", "The first message should be a user message"
         prompt = [chat_history[0]]
         prompt_ids = self.tokenizer.apply_chat_template(
             prompt,
-            add_generation_prompt=True,  # Always add generation prompt for multi-turn
+            add_generation_prompt=False,  # the message below will add it themselves
             tokenize=True,
         )
         initial_prompt_length = len(prompt_ids)
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-
-        response_ids = []
-        loss_mask = []
-        rollout_logprobs = []
-
-        # Get logprobs for assistant messages from trial results
-        # Format: [[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]
         assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
-        assistant_msg_idx = 0
-
-        for message in response_messages:
-            # Apply chat template and tokenize each message
-            # NOTE(Charlie): for Qwen3, this preserves all the thinking tokens.
-            msg_encoding = encode_messages_subset([message], self.tokenizer)
-
-            # Extend response_ids with the tokens
-            response_ids.extend(msg_encoding)
-
-            # Extend loss_mask: 0s for user, 1s for assistant
-            if message["role"] == "user":
-                loss_mask.extend([0] * len(msg_encoding))
-                if assistant_logprobs:
-                    rollout_logprobs.extend([0.0] * len(msg_encoding))
-            else:  # assistant
-                loss_mask.extend([1] * len(msg_encoding))
-                if assistant_logprobs:
-                    if assistant_msg_idx >= len(assistant_logprobs):
-                        raise ValueError(
-                            f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists."
-                        )
-                    msg_logprobs = assistant_logprobs[assistant_msg_idx]
-                    if len(msg_logprobs) != len(msg_encoding):
-                        # TODO(Charlie): We should get the raw tokens from the agent, or not use logprobs at all.
-                        raise ValueError(
-                            f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(msg_encoding)}) "
-                            f"for assistant message #{assistant_msg_idx + 1}."
-                        )
-                    rollout_logprobs.extend(msg_logprobs)
-                    assistant_msg_idx += 1
+        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+            response_messages, self.tokenizer, assistant_logprobs
+        )
 
         # Determine stop reason
         max_response_tokens = (
