@@ -91,6 +91,10 @@ async def get_model(session: AsyncSession, model_id: str) -> ModelDB:
         raise HTTPException(status_code=404, detail="Model not found")
     return model
 
+async def get_models(limit: int, offset: int, session: AsyncSession) -> list[ModelDB]:
+    statement = select(ModelDB).offset(offset).limit(limit)
+    result = await session.exec(statement)
+    return result.all()
 
 async def create_future(
     session: AsyncSession,
@@ -413,6 +417,16 @@ class GetServerCapabilitiesResponse(BaseModel):
 
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
+
+class Cursor(BaseModel):
+    offset: int
+    limit: int
+    total_count: int
+
+
+class TrainingRunsResponse(BaseModel):
+    training_runs: list[TrainingRun]
+    cursor: Cursor
 
 
 @app.get("/api/v1/healthz", response_model=HealthResponse)
@@ -782,6 +796,40 @@ async def validate_checkpoint(
 
     subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
     return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
+
+
+@app.get("/api/v1/training_runs")
+async def list_training_runs(
+    limit: int = 20, offset: int = 0, session: AsyncSession = Depends(get_session)
+) -> TrainingRunsResponse:
+    """List all training runs"""
+
+    models = await get_models(limit, offset, session)
+
+    training_runs = []
+
+    for model in models:
+        lora_config = types.LoraConfig.model_validate(model.lora_config)
+
+        training_runs.append(
+            TrainingRun(
+                training_run_id=model.model_id,
+                base_model=model.base_model,
+                model_owner="default",
+                is_lora=True,
+                corrupted=False,
+                lora_rank=lora_config.rank,
+                last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+                last_checkpoint=None,
+                last_sampler_checkpoint=None,
+                user_metadata=None,
+            )
+        )
+
+    return TrainingRunsResponse(
+        training_runs=training_runs,
+        cursor=Cursor(offset=offset, limit=limit, total_count=len(training_runs))
+    )
 
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
