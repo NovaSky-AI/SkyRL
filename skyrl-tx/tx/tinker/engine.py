@@ -644,8 +644,9 @@ class TinkerEngine:
         max_batch_size = (
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
-        # Collect generated sequences across batches
+        # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
+        all_prompt_logprobs: list[list[float]] = []
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
@@ -681,12 +682,14 @@ class TinkerEngine:
                         result.logprobs[:batch_size],
                     )
                 )
+                if needs_prompt_logprobs and result.prompt_logprobs:
+                    all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
 
         for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (
-                result.prompt_logprobs[start_idx] if request_data.prompt_logprobs and result.prompt_logprobs else None
+                all_prompt_logprobs[start_idx] if request_data.prompt_logprobs and all_prompt_logprobs else None
             )
             results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
