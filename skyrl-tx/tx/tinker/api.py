@@ -91,10 +91,12 @@ async def get_model(session: AsyncSession, model_id: str) -> ModelDB:
         raise HTTPException(status_code=404, detail="Model not found")
     return model
 
+
 async def get_models(limit: int, offset: int, session: AsyncSession) -> list[ModelDB]:
     statement = select(ModelDB).offset(offset).limit(limit)
     result = await session.exec(statement)
     return result.all()
+
 
 async def create_future(
     session: AsyncSession,
@@ -417,6 +419,7 @@ class GetServerCapabilitiesResponse(BaseModel):
 
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
+
 
 class Cursor(BaseModel):
     offset: int
@@ -827,8 +830,7 @@ async def list_training_runs(
         )
 
     return TrainingRunsResponse(
-        training_runs=training_runs,
-        cursor=Cursor(offset=offset, limit=limit, total_count=len(training_runs))
+        training_runs=training_runs, cursor=Cursor(offset=offset, limit=limit, total_count=len(training_runs))
     )
 
 
