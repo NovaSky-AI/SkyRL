@@ -6,7 +6,7 @@ from typing import Literal, Any, AsyncGenerator, Sequence
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError
@@ -90,12 +90,6 @@ async def get_model(session: AsyncSession, model_id: str) -> ModelDB:
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     return model
-
-
-async def get_models(limit: int, offset: int, session: AsyncSession) -> list[ModelDB]:
-    statement = select(ModelDB).offset(offset).limit(limit)
-    result = await session.exec(statement)
-    return result.all()
 
 
 async def create_future(
@@ -807,7 +801,16 @@ async def list_training_runs(
 ) -> TrainingRunsResponse:
     """List all training runs"""
 
-    models = await get_models(limit, offset, session)
+    count_future = select(func.count()).select_from(ModelDB)
+    models_future = select(ModelDB).offset(offset).limit(limit)
+
+    count_result, models_result = await asyncio.gather(
+        session.exec(count_future),
+        session.exec(models_future),
+    )
+
+    total_count = count_result.one()
+    models = models_result.all()
 
     training_runs = []
 
@@ -830,7 +833,7 @@ async def list_training_runs(
         )
 
     return TrainingRunsResponse(
-        training_runs=training_runs, cursor=Cursor(offset=offset, limit=limit, total_count=len(training_runs))
+        training_runs=training_runs, cursor=Cursor(offset=offset, limit=limit, total_count=total_count)
     )
 
 
