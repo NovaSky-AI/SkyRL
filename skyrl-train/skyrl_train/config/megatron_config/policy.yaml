@@ -40,7 +40,7 @@ transformer_config_kwargs:
   # Recompute config - used for gradient/activation checkpointing
   # for details see: https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
   # for the most aggresive memory savings, set recompute_granularity to "full", recompute_method to "uniform", and recompute_num_layers to 1
-  recompute_granularity: null
+  recompute_granularity: full
   recompute_modules: ["core_attn"]
-  recompute_method: null
-  recompute_num_layers: null
+  recompute_method: uniform
+  recompute_num_layers: 1

@@ -61,15 +61,7 @@ class MegatronWorker:
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
-        if self.cfg.trainer.gradient_checkpointing:
-            defaults = {
-                "recompute_granularity": "full",
-                "recompute_method": "uniform",
-                "recompute_num_layers": 1,
-            }
-            for key, value in defaults.items():
-                transformer_config_kwargs.setdefault(key, value)
-        else:
+        if not self.cfg.trainer.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
