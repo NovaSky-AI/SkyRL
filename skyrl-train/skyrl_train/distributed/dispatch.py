@@ -163,7 +163,6 @@ class MeshDispatch(Dispatch):
         # pass dummy actor_infos and method_name
         bound_args = sig.bind([], "dummy", *args, **kwargs)
         bound_args.apply_defaults()
-        data = bound_args.arguments.get("data")
 
         # Check if there are any extra arguments
         if len(bound_args.arguments) > 3:  #  data, actor_infos, method_name
