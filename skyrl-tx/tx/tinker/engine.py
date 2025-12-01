@@ -572,24 +572,26 @@ class TinkerEngine:
         # Collect full padded arrays on device, slice after transfer
         token_losses_device = []
         logprobs_device = []
+        seq_len = input_ids.shape[1]
 
-        for mb_start in range(0, total_bs, micro_bs):
-            mb_end = min(mb_start + micro_bs, total_bs)
-            self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
-                self.accumulated_grads,
-                self.lora_params,
-                self.non_lora_params,
-                input_ids[mb_start:mb_end],
-                attention_mask[mb_start:mb_end],
-                adapter_indices[mb_start:mb_end],
-                target_ids[mb_start:mb_end],
-                loss_mask[mb_start:mb_end],
-                loss_fn_types[mb_start:mb_end],
-                sampling_logprobs[mb_start:mb_end],
-                advantages[mb_start:mb_end],
-            )
-            token_losses_device.append(per_token_losses)
-            logprobs_device.append(target_logprobs)
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
+            for mb_start in range(0, total_bs, micro_bs):
+                mb_end = min(mb_start + micro_bs, total_bs)
+                self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
+                    self.accumulated_grads,
+                    self.lora_params,
+                    self.non_lora_params,
+                    input_ids[mb_start:mb_end],
+                    attention_mask[mb_start:mb_end],
+                    adapter_indices[mb_start:mb_end],
+                    target_ids[mb_start:mb_end],
+                    loss_mask[mb_start:mb_end],
+                    loss_fn_types[mb_start:mb_end],
+                    sampling_logprobs[mb_start:mb_end],
+                    advantages[mb_start:mb_end],
+                )
+                token_losses_device.append(per_token_losses)
+                logprobs_device.append(target_logprobs)
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
