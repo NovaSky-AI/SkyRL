@@ -9,7 +9,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.distributed_c10d import init_process_group
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+from skyrl_train.utils.trainer_utils import get_rope_parameters_config
 from skyrl_train.utils.utils import get_free_port
 
 MODEL_NAME = "llamafactory/tiny-random-Llama-3"
@@ -48,8 +48,7 @@ def test_fsdp1_wrap_policy():
         sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
         use_sample_packing=cfg.trainer.use_sample_packing,
         use_torch_compile=cfg.trainer.policy.use_torch_compile,
-        rope_scaling=get_rope_scaling_config(cfg.trainer),
-        rope_theta=get_rope_theta_config(cfg.trainer),
+        rope_parameters=get_rope_parameters_config(cfg.trainer),
     )
 
     model, _, _ = strategy.prepare(

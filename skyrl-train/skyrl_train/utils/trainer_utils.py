@@ -660,15 +660,43 @@ def build_dataloader(
     return dataloader
 
 
-def get_rope_scaling_config(trainer_cfg: DictConfig) -> dict[str, Any]:
-    if "rope_scaling" not in trainer_cfg:
+def get_rope_parameters_config(trainer_cfg: DictConfig) -> dict[str, Any]:
+    rope_scaling = trainer_cfg.get("rope_scaling", None)
+    rope_theta = trainer_cfg.get("rope_theta", None)
+    has_old_config = rope_scaling is not None or rope_theta is not None
+
+    rope_parameters_new = trainer_cfg.get("rope_parameters", None)
+    has_new_config = rope_parameters_new is not None
+
+    if has_old_config and has_new_config:
+        logger.warning(
+            "Both old ('rope_scaling', 'rope_theta') and new ('rope_parameters') RoPE configs are provided. "
+            "Prioritizing the old config for backward compatibility. Please migrate to 'rope_parameters'."
+        )
+
+    if has_old_config:
+        rope_parameters = {}
+        if rope_scaling is not None:
+            rope_scaling_dict = (
+                OmegaConf.to_container(rope_scaling, resolve=True)
+                if isinstance(rope_scaling, DictConfig)
+                else rope_scaling
+            )
+            if isinstance(rope_scaling_dict, dict):
+                rope_parameters.update(rope_scaling_dict)
+            else:
+                logger.warning(f"Ignoring 'rope_scaling' as it is not a dictionary. Found: {rope_scaling_dict}")
+        if rope_theta is not None:
+            rope_parameters["rope_theta"] = rope_theta
+        return rope_parameters
+
+    elif has_new_config:
+        new_params = OmegaConf.to_container(rope_parameters_new, resolve=True)
+        if isinstance(new_params, dict):
+            return new_params
+        if new_params is not None:
+            logger.warning(f"Ignoring 'rope_parameters' as it is not a dictionary. Found: {new_params}")
         return {}
-    if trainer_cfg.rope_scaling is None:
-        return None
-    return OmegaConf.to_container(trainer_cfg.rope_scaling)
 
-
-def get_rope_theta_config(trainer_cfg: DictConfig) -> int | None:
-    if "rope_theta" not in trainer_cfg:
-        return None
-    return trainer_cfg.rope_theta
+    else:
+        return {}

@@ -86,6 +86,48 @@ Global LoRA Configuration
 - ``target_modules``: Specifies which modules to apply LoRA to. Set to ``"all-linear"`` to apply LoRA to all linear layers, or provide a list of specific module names.
 - ``exclude_modules``: List of modules to exclude from LoRA application. Set to ``null`` to exclude none.
 
+RoPE Configuration
+------------------
+
+.. code-block:: yaml
+
+  # RoPE (Rotary Position Embedding) configuration
+  rope_parameters: 
+    rope_type: null # ['default', 'linear', 'dynamic', 'yarn', 'longrope', 'llama3']
+    rope_theta: null
+    factor: null
+    original_max_position_embeddings: null
+    attention_factor: null
+    beta_fast: null
+    beta_slow: null
+    short_factor: null
+    long_factor: null
+    low_freq_factor: null
+    high_freq_factor: null
+
+  # Note: rope_scaling and rope_theta are deprecated, use rope_parameters instead.
+  rope_scaling: null
+  rope_theta: null
+
+- ``rope_parameters``: Configuration for Rotary Position Embedding (RoPE). This allows you to configure different RoPE scaling strategies for extending context length. See `Hugging Face RoPE utils documentation <https://huggingface.co/docs/transformers/main/en/internal/rope_utils>`_ for more details.
+  - ``rope_type``: The sub-variant of RoPE to use. Can be one of [`default`, `linear`, `dynamic`, `yarn`, `longrope`, `llama3`], with `default` being the original RoPE implementation.
+  - ``rope_theta``: The base period of the RoPE embeddings.
+  - ``factor``: (optional) Scaling factor for RoPE, used with all rope types except ``default``. For most types, setting this to ``x`` allows the model to handle sequences up to ``x`` times longer than the original maximum length.
+  - ``original_max_position_embeddings``: (optional) Original max position embeddings before scaling. Used with ``dynamic``, ``longrope``, and ``llama3`` rope types.
+  - ``attention_factor``: (optional) RoPE attention scaling factor used with ``yarn`` and ``longrope`` rope types. If unset, defaults are inferred from ``factor``.
+  - ``beta_fast``: (optional) RoPE parameter for ``yarn``. Controls fast boundary for extrapolation. Defaults to ``32`` if unset.
+  - ``beta_slow``: (optional) RoPE parameter for ``yarn``. Controls slow boundary for interpolation. Defaults to ``1`` if unset.
+  - ``short_factor``: (optional) Only for ``longrope``. Scaling factors for short contexts. Must match hidden size divided by number of attention heads divided by 2.
+  - ``long_factor``: (optional) Only for ``longrope``. Scaling factors for long contexts. Must match hidden size divided by number of attention heads divided by 2.
+  - ``low_freq_factor``: (optional) Only for ``llama3``. Scaling factor applied to low-frequency RoPE components.
+  - ``high_freq_factor``: (optional) Only for ``llama3``. Scaling factor applied to high-frequency RoPE components.
+
+- ``rope_scaling``: (Deprecated) Legacy RoPE scaling configuration. Use ``rope_parameters`` instead.
+- ``rope_theta``: (Deprecated) Legacy RoPE theta configuration. Use ``rope_parameters.rope_theta`` instead.
+
+.. note::
+  The generator can optionally use different RoPE parameters by setting ``generator.rope_parameters`` (which defaults to ``${trainer.rope_parameters}``).
+
 Evaluation Configuration
 ------------------------------
 .. code-block:: yaml

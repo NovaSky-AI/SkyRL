@@ -63,8 +63,7 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
         use_torch_compile: bool = False,
-        rope_scaling: Dict[str, Any] = {},
-        rope_theta: float | None = None,
+        rope_parameters: Dict[str, Any] = {},
         **kwargs,
     ) -> None:
         super().__init__()
@@ -111,20 +110,21 @@ class HFModelWrapper(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
-            rope_scaling_kwargs = {}
-            if rope_scaling:
-                rope_scaling_kwargs["rope_scaling"] = rope_scaling
-            if rope_theta:
-                rope_scaling_kwargs["rope_theta"] = rope_theta
+            # TODO(dev): check if more elegant solution rather than config first and set rope_parameters on it
+            config = AutoConfig.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+            )
+            config.rope_parameters = rope_parameters
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
+                config=config,
                 trust_remote_code=True,
                 attn_implementation=self.attn_implementation,
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
-                **rope_scaling_kwargs,
             )
 
             # gpt oss
@@ -534,6 +534,7 @@ def get_llm_for_sequence_regression(
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    rope_parameters: Dict[str, Any] = {},
     **kwargs,
 ) -> nn.Module:
     """Get transformer with a sequence classification head on top (linear layer).
@@ -545,6 +546,7 @@ def get_llm_for_sequence_regression(
         use_flash_attention_2 (bool, optional): Whether use Flash Attention 2.0. Defaults to False.
         ds_config (dict, optional): Deepspeed config, used to automatically splitting the model onto
             multiple gpus during from_pretrained when ZeRO-3 enabled. Defaults to None.
+        rope_parameters (Dict[str, Any], optional): RoPE configuration parameters. Defaults to {}.
 
     Returns:
         nn.Module: pretrained transformer model.
@@ -552,6 +554,7 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    config.rope_parameters = rope_parameters
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
     base_class = AutoModel._model_mapping[type(config)]
