@@ -14,6 +14,7 @@ from skyrl_train.inference_engines.remote_inference_engine import create_remote_
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
+from skyrl_train.generators.trajectory_logger import TrajectoryLogger
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
 import ray
@@ -188,13 +189,25 @@ class BasePPOExp:
         else:
             return None
 
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
+    def get_generator(self, cfg, tokenizer, inference_engine_client, tracker):
         """Initializes the generator.
+
+        Args:
+            cfg: Configuration object
+            tokenizer: Tokenizer object
+            inference_engine_client: InferenceEngineClient object
+            tracker: Tracking object for logging
 
         Returns:
             GeneratorInterface: The generator.
         """
         from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+        # Create trajectory logger if trajectory logging is enabled
+        # trajectory_logger = None
+        # if cfg.generator.get("log_trajectories", False):
+        # sample_rate = cfg.generator.get("trajectory_sample_rate", 0.05)
+        trajectory_logger = TrajectoryLogger(tracker=tracker, sample_rate=0.5)
 
         return SkyRLGymGenerator(
             generator_cfg=cfg.generator,
@@ -202,6 +215,7 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             model_name=cfg.trainer.policy.model.path,
+            trajectory_logger=trajectory_logger,
         )
 
     def get_trainer(
@@ -281,7 +295,7 @@ class BasePPOExp:
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client, tracker)
 
         trainer = self.get_trainer(
             cfg=self.cfg,

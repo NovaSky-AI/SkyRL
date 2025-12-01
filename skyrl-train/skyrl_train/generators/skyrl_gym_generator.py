@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl_train.generators.trajectory_logger import TrajectoryLogger
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -32,6 +33,8 @@ from skyrl_train.generators.utils import (
 class AgentLoopOutput:
     """Output from a single agent_loop execution."""
 
+    prompt_text: ConversationType
+    response_text: ConversationType
     response_ids: List[int]
     reward: Union[List[float], float]
     stop_reason: str
@@ -49,12 +52,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
+        trajectory_logger: Optional[TrajectoryLogger] = None,
     ):
         """
         Args:
             generator_cfg: DictConfig object containing the generator configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            trajectory_logger: TrajectoryLogger object to log trajectories
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
@@ -63,6 +68,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
+        self.trajectory_logger = trajectory_logger
+
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
@@ -143,12 +150,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             max_input_length: int
             sampling_params: Optional[Dict[str, Any]]
         Returns:
-            response_ids: List[int]
-            reward: Union[float, List[float]]
-            stop_reason: str
-            loss_mask: List[int]
-            prompt_token_ids: List[int]
-            rollout_logprobs: Optional[List[float]]
+            AgentLoopOutput: Output from a single agent_loop execution.
         """
         retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
 
@@ -254,6 +256,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     input_ids, loss_mask, output_ids, new_obs, done, added_eos
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
+                chat_history.append({"role": "assistant", "content": output})
+                chat_history += new_obs
             else:
                 # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
                 loss_mask, input_ids, rollout_logprobs, response_end_idx = (
@@ -262,6 +266,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     )
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
+                chat_history.append({"role": "assistant", "content": output})
+                chat_history += new_obs
 
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
@@ -317,7 +323,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward_out = token_level_rewards
 
         return AgentLoopOutput(
+            prompt_text=chat_history[:initial_chat_history_length],
             response_ids=response_ids,
+            response_text=chat_history[initial_chat_history_length:],
             reward=reward_out,
             stop_reason=stop_reason,
             loss_mask=loss_mask,
@@ -499,6 +507,21 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
         }
+
+        if self.trajectory_logger:
+            # Convert all rewards to scalars.
+            rewards = [
+                sum(output.reward) if isinstance(output.reward, list) else float(output.reward)
+                for output in all_outputs
+            ]
+            self.trajectory_logger.log(
+                trajectory_ids=trajectory_ids or [None] * len(all_outputs),
+                prompts=[output.prompt_text for output in all_outputs],
+                responses=[output.response_text for output in all_outputs],
+                rewards=rewards,
+                model_version=input_batch["batch_metadata"].global_step,
+                phase=input_batch["batch_metadata"].training_phase,
+            )
 
         return generator_output
 

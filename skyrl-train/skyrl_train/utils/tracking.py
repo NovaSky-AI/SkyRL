@@ -73,12 +73,18 @@ class Tracking:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
 
-    def log(self, data, step, commit=False):
-        for logger_name, logger_instance in self.logger.items():
-            if logger_name == "wandb":
-                logger_instance.log(data=data, step=step, commit=commit)
-            else:
-                logger_instance.log(data=data, step=step)
+    def log(self, data, step: int, commit: bool = False):
+        for logger_name in self.logger:
+            self.log_to_backend(logger_name, data, step, commit)
+
+    def log_to_backend(self, backend: str, data, step: int, commit: bool = False):
+        if backend not in self.logger:
+            return
+
+        if backend == "wandb":
+            self.logger[backend].log(data=data, step=step, commit=commit)
+        else:
+            self.logger[backend].log(data=data, step=step)
 
     def __del__(self):
         # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
