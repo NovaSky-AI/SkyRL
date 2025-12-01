@@ -75,6 +75,7 @@ class GenerateOutput:
     generated_ids: list[list[int]]
     stop_reasons: list[str]
     logprobs: list[list[float]]
+    prompt_logprobs: list[list[float]] | None = None
 
 
 def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
@@ -115,6 +116,16 @@ def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.A
     stop_pos = jnp.where((s.stop_pos == -1) & is_stop, s.kv_cache.cache_position, s.stop_pos)
 
     return next_rngs, next_token, all_logprobs, stop_pos
+
+
+def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
+    """Compute log probabilities of prompt tokens from prefill logits"""
+    # TODO: Optimize memory usage by avoiding allocation of full vocab dimension.
+    logits_for_prompt = prefill_logits[:, :-1, :]
+    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
+    prompt_tokens = input_ids[:, 1:]
+    prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
+    return prompt_logprobs
 
 
 def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
@@ -169,6 +180,7 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
+        prompt_logprobs: bool = False,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
@@ -201,6 +213,10 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
         outputs = self._prefill_fn(self, input_ids, attention_mask, positions, adapter_indices)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
+
+        # Capture prompt lengths and compute prompt logprobs if requested
+        prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
+        prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
 
         # Pad inputs to max_length
         pad_length = max_length - prompt_length
@@ -239,12 +255,31 @@ class GeneratorMixin:
         )
 
         # Single device-to-host transfer for all data
-        generated_ids_host, stop_pos_host, all_logprobs_host, end_positions_host = jax.device_get(
-            (generated_ids[:, prompt_length:], stop_pos, all_logprobs[:, prompt_length:], end_positions - prompt_length)
+        (
+            generated_ids_host,
+            stop_pos_host,
+            all_logprobs_host,
+            end_positions_host,
+            prompt_logprobs_host,
+            prompt_lengths_host,
+        ) = jax.device_get(
+            (
+                generated_ids[:, prompt_length:],
+                stop_pos,
+                all_logprobs[:, prompt_length:],
+                end_positions - prompt_length,
+                prompt_logprobs_array,
+                prompt_lengths,
+            )
         )
 
         return GenerateOutput(
             generated_ids=[generated_ids_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
             stop_reasons=["stop" if stop_pos_host[i, 0] >= 0 else "length" for i in range(batch_size)],
             logprobs=[all_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            prompt_logprobs=(
+                [prompt_logprobs_host[i, : prompt_lengths_host[i] - 1].tolist() for i in range(batch_size)]
+                if prompt_logprobs
+                else None
+            ),
         )
