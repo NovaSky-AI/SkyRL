@@ -120,6 +120,7 @@ def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.A
 
 def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
     """Compute log probabilities of prompt tokens from prefill logits"""
+    # TODO: Optimize memory usage by avoiding allocation of full vocab dimension.
     logits_for_prompt = prefill_logits[:, :-1, :]
     log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
     prompt_tokens = input_ids[:, 1:]
