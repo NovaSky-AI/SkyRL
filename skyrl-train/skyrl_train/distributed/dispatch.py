@@ -66,7 +66,7 @@ class Dispatch(ABC):
     @classmethod
     @abstractmethod
     def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
-        """Dispatches method calls to the actors with data sharing if necessary."""
+        """Dispatches method calls to the actors with data sharding if necessary."""
         pass
 
     @classmethod
