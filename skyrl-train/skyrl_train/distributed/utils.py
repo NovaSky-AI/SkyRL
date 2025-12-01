@@ -5,7 +5,7 @@ sourced from PyTorch:
 
 1. Provides init process group capability without being restricted by default
    process group. PyTorch assumes users always use its default process group.
-2. Provides CUDAIPC capability, which allows bypassing torch's multiprocessing
+2. Provides CUDA IPC capability, which allows bypassing torch's multiprocessing
    to use GPU shared memory, for example to communicate with vllm workers using
    shared memory.
 """
