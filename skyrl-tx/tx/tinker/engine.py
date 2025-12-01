@@ -618,7 +618,7 @@ class TinkerEngine:
             return results
 
         # Computes prompt_logprobs for the whole batch if any request asked for them
-        needs_prompt_logprobs = any(request_data.prompt_logprobs for _, (_, request_data) in valid_requests.items())
+        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in valid_requests.values())
 
         all_prompts = []
         all_sampling_params = []

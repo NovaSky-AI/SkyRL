@@ -278,7 +278,7 @@ class GeneratorMixin:
             stop_reasons=["stop" if stop_pos_host[i, 0] >= 0 else "length" for i in range(batch_size)],
             logprobs=[all_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
             prompt_logprobs=(
-                [prompt_logprobs_host[i, : int(prompt_lengths_host[i]) - 1].tolist() for i in range(batch_size)]
+                [prompt_logprobs_host[i, : prompt_lengths_host[i] - 1].tolist() for i in range(batch_size)]
                 if prompt_logprobs
                 else None
             ),
