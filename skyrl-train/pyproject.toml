@@ -245,3 +245,11 @@ extend-ignore = [
 ignore = [
     "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
 ]
+
+[pytest]
+markers = [
+    "vllm",
+    "sglang",
+    "integrations",
+    "megatron",
+]
