@@ -172,13 +172,18 @@ def validate_consistency_for_latest_checkpoint(
         if checkpoint_dirs:
             global_step_values = [extract_step_from_path(d) for d in checkpoint_dirs]
             max_global_step_in_folder = max(global_step_values)
-            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
+            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint
+            # in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
             if max_global_step_in_folder - ckpt_iteration > save_interval:
                 max_global_step_in_folder_path = os.path.join(
                     root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
                 )
                 raise ValueError(
-                    f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to {ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps {max_global_step_in_folder_path}. This is likely because checkpoint {max_global_step_in_folder_path} was created in a previous run while the latest run is at {checkpoint_path}. Please delete/move checkpoints from older runs and try again."
+                    f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to "
+                    f"{ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps "
+                    f"{max_global_step_in_folder_path}. This is likely because checkpoint "
+                    f"{max_global_step_in_folder_path} was created in a previous run while the latest run is at "
+                    f"{checkpoint_path}. Please delete/move checkpoints from older runs and try again."
                 )
 
 
@@ -329,7 +334,8 @@ def handle_dynamic_sampling(
         )
         return processed_output, processed_uids, keep_sampling, collected_state
     elif sampling_type == "filter":
-        # For filter strategies, accumulate the generator output and UIDs across batches in collected_state if we are sampling repeatedly.
+        # For filter strategies, accumulate the generator output and UIDs 
+        # across batches in collected_state if we are sampling repeatedly.
         return handle_filter_sampling(generator_output, uids, sampling_config, collected_state)
     else:
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
@@ -584,24 +590,37 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         ]:
             assert len(generator_output[key]) == len(
                 generator_output["response_ids"]
-            ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+            ), (
+                f"Generator output {key} length must be equal to response_ids length, "
+                f"got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+            )
 
-    # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
+    # make sure that each element of response ids and loss masks are all the same length
+    # (and token level rewards if used)
     for i, (response_ids, loss_masks, rewards) in enumerate(
         zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
     ):
         assert len(response_ids) == len(
             loss_masks
-        ), f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        ), (
+            f"Response ids and loss masks must have the same length, "
+            f"for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        )
         if isinstance(rewards, list):
             assert len(rewards) == len(
                 response_ids
-            ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
+            ), (
+                f"Token rewards and response ids must have the same length, "
+                f"for sample {i} got {len(rewards)} and {len(response_ids)}"
+            )
 
         if generator_output["rollout_logprobs"]:
             assert len(response_ids) == len(
                 generator_output["rollout_logprobs"][i]
-            ), f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            ), (
+                f"Response ids and rollout logprobs must have the same length, "
+                f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            )
 
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:
