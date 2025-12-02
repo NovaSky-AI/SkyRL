@@ -327,6 +327,7 @@ def test_sample_max_num_sequences():
             sampling_params=sampling_params,
             num_samples=1,
             checkpoint_id="",  # Empty for base model sampling
+            prompt_logprobs=False,
         )
 
     # Build a batch of 5 sample requests
@@ -356,3 +357,142 @@ def test_sample_max_num_sequences():
             assert len(seq.logprobs) == len(
                 tokens
             ), f"Request {request_id}: {len(tokens)} tokens but {len(seq.logprobs)} logprobs"
+
+
+def test_sample_with_prompt_logprobs():
+    """Test correct handling of prompt_logprobs in sampling requests."""
+    cfg = EngineConfig(
+        base_model=BASE_MODEL,
+        checkpoints_base=AnyPath(""),
+        max_lora_adapters=2,
+        max_lora_rank=32,
+    )
+    engine = TinkerEngine(cfg)
+
+    prompts = [
+        [1, 2, 3, 4],
+        [5, 6, 7, 8, 9],
+        [10, 11, 12],
+    ]
+
+    sampling_params = api.SamplingParams(temperature=0.0, max_tokens=8, seed=42).to_types()
+
+    # Test with prompt_logprobs enabled
+    reqs_with_logprobs = {
+        f"req_{i}": (
+            "",
+            types.SampleInput(
+                base_model=BASE_MODEL,
+                prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+                sampling_params=sampling_params,
+                num_samples=1,
+                checkpoint_id="",
+                prompt_logprobs=True,
+            ),
+        )
+        for i, tokens in enumerate(prompts)
+    }
+
+    results_with = engine.process_sample_batch(reqs_with_logprobs)
+
+    for i, tokens in enumerate(prompts):
+        request_id = f"req_{i}"
+        result = results_with[request_id]
+
+        # Verify prompt_logprobs are returned
+        assert result.prompt_logprobs is not None, f"Request {request_id}: prompt_logprobs should not be None"
+        # Prompt logprobs should have length = prompt_length - 1
+        expected_length = len(tokens) - 1
+        assert (
+            len(result.prompt_logprobs) == expected_length
+        ), f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
+
+    # Test mixed batch: one request with prompt_logprobs=True and one with =False
+    reqs_mixed = {
+        "req_with_0": (
+            "",
+            types.SampleInput(
+                base_model=BASE_MODEL,
+                prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=prompts[0])]),
+                sampling_params=sampling_params,
+                num_samples=1,
+                checkpoint_id="",
+                prompt_logprobs=True,
+            ),
+        ),
+        "req_without_1": (
+            "",
+            types.SampleInput(
+                base_model=BASE_MODEL,
+                prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=prompts[1])]),
+                sampling_params=sampling_params,
+                num_samples=1,
+                checkpoint_id="",
+                prompt_logprobs=False,
+            ),
+        ),
+    }
+
+    results_mixed = engine.process_sample_batch(reqs_mixed)
+
+    # Verify request with prompt_logprobs=True has logprobs
+    assert results_mixed["req_with_0"].prompt_logprobs is not None
+    assert len(results_mixed["req_with_0"].prompt_logprobs) == len(prompts[0]) - 1
+
+    # Verify request with prompt_logprobs=False has None
+    assert results_mixed["req_without_1"].prompt_logprobs is None
+
+
+def test_sample_prompt_logprobs_with_microbatching():
+    """Test that prompt_logprobs work correctly with micro-batching."""
+    cfg = EngineConfig(
+        base_model=BASE_MODEL,
+        checkpoints_base=AnyPath(""),
+        max_lora_adapters=2,
+        max_lora_rank=32,
+        sample_max_num_sequences=2,  # Force micro-batching with batch size of 2
+    )
+    engine = TinkerEngine(cfg)
+
+    # Create 5 prompts, which will be split into 3 micro-batches (2, 2, 1)
+    prompts = [
+        [1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9, 10],
+        [11, 12, 13, 14],
+        [15, 16],
+    ]
+
+    sampling_params = api.SamplingParams(temperature=0.0, max_tokens=8, seed=42).to_types()
+
+    # All requests ask for prompt_logprobs
+    reqs = {
+        f"req_{i}": (
+            "",
+            types.SampleInput(
+                base_model=BASE_MODEL,
+                prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+                sampling_params=sampling_params,
+                num_samples=1,
+                checkpoint_id="",
+                prompt_logprobs=True,
+            ),
+        )
+        for i, tokens in enumerate(prompts)
+    }
+
+    results = engine.process_sample_batch(reqs)
+
+    # Verify that each request got its correct prompt_logprobs
+    for i, tokens in enumerate(prompts):
+        request_id = f"req_{i}"
+        result = results[request_id]
+
+        # Verify prompt_logprobs are returned
+        assert result.prompt_logprobs is not None, f"Request {request_id}: prompt_logprobs should not be None"
+
+        # Verify correct length
+        expected_length = len(tokens) - 1
+        assert (
+            len(result.prompt_logprobs) == expected_length
+        ), f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
