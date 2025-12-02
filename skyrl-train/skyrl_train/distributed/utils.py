@@ -5,7 +5,7 @@ sourced from PyTorch:
 
 1. Provides init process group capability without being restricted by default
    process group. PyTorch assumes users always use its default process group.
-2. Provides CUDAIPC capability, which allows bypassing torch's multiprocessing
+2. Provides CUDA IPC capability, which allows bypassing torch's multiprocessing
    to use GPU shared memory, for example to communicate with vllm workers using
    shared memory.
 """
@@ -17,7 +17,6 @@ from datetime import timedelta
 from typing import Any, Optional, Union, Tuple
 
 import torch
-import torch.distributed
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -185,7 +184,7 @@ class CUDAIPCHandle:
     @staticmethod
     def from_tensor(tensor: torch.Tensor) -> CUDAIPCHandle:
         if not tensor.is_cuda:
-            raise ValueError("Tensor must be on CUDA device to use CUDAIPC")
+            raise ValueError("Tensor must be on CUDA device to use CUDA IPC")
         tensor = tensor.share_memory_()
         storage = tensor._typed_storage()
         (
