@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List, Any, Dict, Optional
 from dataclasses import dataclass
 from loguru import logger
@@ -21,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.v1.metrics.loggers import LoggingStatLogger
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
@@ -43,6 +45,7 @@ class Logprob:
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"  # TODO(Charlie): may not be needed.
     if kwargs.get("distributed_executor_backend") == "ray":
         # a hack to make the script work.
         # stop ray from manipulating *_VISIBLE_DEVICES
@@ -288,7 +291,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
             unfinished_request_ids = list(output_processor.request_states.keys())
-            await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
+            # TODO(Charlie): change to the following when we bump vllm to 0.11.0
+            # await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
+            
+            for request_id in unfinished_request_ids:
+                await asyncio.to_thread(engine.abort_request, request_id)
 
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await asyncio.to_thread(self.llm.sleep, level=level)
@@ -341,14 +348,31 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
 
+class V1LoggingStatLoggerFixed(LoggingStatLogger):
+    """
+    A fixed version of LoggingStatLogger that actually logs during the record method.
+    The log method is otherwise not called in the VLLM codebase.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.log_interval = 5
+
+    def record(self, *args: Any, **kwargs: Any) -> None:
+        super().record(*args, **kwargs)
+        now = time.monotonic()
+        if now - self.last_log_time > self.log_interval:
+            self.log()
+            self.last_log_time = now
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
 
     def _create_engine(self, *args, **kwargs):
         # TODO (erictang000): potentially enable log requests for a debugging mode
-        engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+        stat_loggers = [V1LoggingStatLoggerFixed]
+        engine_args = vllm.AsyncEngineArgs(**kwargs)
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
@@ -420,7 +444,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
             unfinished_request_ids = list(output_processor.request_states.keys())
-            await engine.abort(unfinished_request_ids)
+            # TODO(Charlie): change to the following when we bump vllm to 0.11.0
+            # await engine.abort(unfinished_request_ids)
+
+            for request_id in unfinished_request_ids:
+                await engine.abort(request_id)
 
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
@@ -492,6 +520,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+
+        # TODO(Charlie): remove this logging
+        # all_stuff = {{k}: {v} for k, v in body.items() if k != 'messages'}
+        print(f"SAMPLING PARAMS: {body}")
 
         # 1. Build request
         try:
