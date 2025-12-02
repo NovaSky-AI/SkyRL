@@ -184,12 +184,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 reward = results.verifier_result.rewards["reward"]
                 chat_history = results.agent_result.metadata['all_messages']
                 summarization_count = results.agent_result.metadata['summarization_count']
-                if len(chat_history) > 0:
+                if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
                     logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
                     break
                 else:
-                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a response. Results: {results}")
+                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}")
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
