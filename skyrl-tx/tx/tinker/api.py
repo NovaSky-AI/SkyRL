@@ -881,7 +881,7 @@ async def list_checkpoints_models(
 
 
 @app.post("/api/v1/weights_info", response_model=WeightsInfoResponse)
-async def get_weights_info(request: WeightsInfoRequest, session: AsyncSession = Depends(get_session)):
+async def get_weights_info(request: WeightsInfoRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Get information about weights/checkpoint from a tinker path."""
     path = types.TinkerPath.parse(request.tinker_path)
 
@@ -897,17 +897,7 @@ async def get_weights_info(request: WeightsInfoRequest, session: AsyncSession = 
     model = await get_model(session, model_id)
 
     # Validate checkpoint exists and is completed
-    checkpoint_db = await session.get(CheckpointDB, (model_id, checkpoint_id, types.CheckpointType.TRAINING))
-    if not checkpoint_db:
-        raise HTTPException(
-            status_code=404, detail=f"Training checkpoint not found: {model_id}/weights/{checkpoint_id}"
-        )
-
-    if checkpoint_db.status == CheckpointStatus.PENDING:
-        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
-
-    if checkpoint_db.status == CheckpointStatus.FAILED:
-        raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
+    await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     is_lora = lora_config.rank > 0
