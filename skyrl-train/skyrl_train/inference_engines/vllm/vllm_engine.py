@@ -540,10 +540,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             "min_p": 0.0,
         })
 
-        # TODO(Charlie): remove this logging
-        # all_stuff = {{k}: {v} for k, v in body.items() if k != 'messages'}
-        print(f"SAMPLING PARAMS: {body}")
-
         # 1. Build request
         try:
             if endpoint == "/chat/completions":

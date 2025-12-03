@@ -36,13 +36,13 @@ def get_custom_chat_template(model_name: str) -> str:
         return None
 
 
-def get_generation_prompt_ids(tokenizer) -> List[int]:
+def get_generation_prompt_ids(tokenizer, custom_chat_template=None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
     """
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
+    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, chat_template=custom_chat_template)
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=custom_chat_template
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -166,7 +166,7 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
 
-def encode_messages_subset(messages: ConversationType, tokenizer):
+def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -203,6 +203,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=custom_chat_template,
     )
 
     full_conversation = base_conversation + messages
@@ -210,12 +211,13 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=custom_chat_template,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -235,7 +237,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, custom_chat_template=custom_chat_template)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -246,7 +248,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, custom_chat_template=custom_chat_template)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.

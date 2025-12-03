@@ -61,6 +61,15 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         logger.info(f"TerminalBenchGenerator initialized with overrides: memory={self.override_memory_mb}, storage={self.override_storage_mb}, cpus={self.override_cpus}")
 
+        # Read custom chat template
+        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("custom_chat_template_chat_completion_path", None)
+        if custom_chat_template_path:
+            with open(custom_chat_template_path, "r") as f:
+                self.custom_chat_template_content = f.read()
+            logger.info(f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}")
+        else:
+            self.custom_chat_template_content = None
+
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
         for i in range(len(input_batch["prompts"])):
@@ -215,6 +224,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             prompt,
             add_generation_prompt=False,  # the message below will add it themselves
             tokenize=True,
+            chat_template=self.custom_chat_template_content,
         )
         initial_prompt_length = len(prompt_ids)
 
@@ -222,7 +232,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         response_messages = chat_history[1:]
         assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs
+            response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
         )
 
         # Determine stop reason
