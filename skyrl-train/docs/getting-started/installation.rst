@@ -206,9 +206,7 @@ We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <http
 Installing SkyRL-Train from PyPI
 --------------------------------
 
-We publish wheels for SkyRL-Train on PyPI: https://pypi.org/project/skyrl-train/. For using the latest release of SkyRL-Train (0.3.0) as a dependency in your project, you should
-
-You will need to configure your ``pyproject.toml`` to correctly install ``skyrl-train`` and its dependencies like ``flash-attn`` and ``flashinfer-jit-cache``. Below is an example configuration using ``uv``:
+We publish wheels for SkyRL-Train on PyPI: https://pypi.org/project/skyrl-train/. For using the latest release of SkyRL-Train (0.3.0) as a dependency in your project, you will need to configure your ``pyproject.toml`` to correctly install ``skyrl-train`` and its dependencies that depend on custom indexes/ wheels, such as ``flash-attn`` and ``flashinfer-jit-cache``. Below is an example configuration using ``uv``:
 
 .. code-block:: toml
 
@@ -217,6 +215,7 @@ You will need to configure your ``pyproject.toml`` to correctly install ``skyrl-
        "skyrl-train==0.2.0",
        "flashinfer-jit-cache",
        # Find the appropriate wheel for your CUDA/PyTorch version from their `releases page <https://github.com/Dao-AILab/flash-attention/releases>`_
+       # Alternatively use the match-runtime feature from uv: https://docs.astral.sh/uv/concepts/projects/config/#augmenting-build-dependencies
        "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.8/flash_attn-2.5.8+cu122torch2.3-cp312-cp312-linux_x86_64.whl"
    ]
 
