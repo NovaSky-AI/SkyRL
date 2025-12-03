@@ -52,6 +52,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.trials_dir = terminal_bench_cfg.trials_dir
         self.agent_name = terminal_bench_cfg.agent_name
         self.max_episodes = terminal_bench_cfg.max_episodes
+        self.enable_summarize = terminal_bench_cfg.get("enable_summarize", True)
 
         # Optional overrides for the environment
         self.override_memory_mb = terminal_bench_cfg.get("override_memory_mb")
@@ -149,6 +150,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         "key": "fake_key",
                         "max_episodes": self.max_episodes,
                         "session_id": session_id,
+                        "enable_summarize": self.enable_summarize,
                     },
                 ),
             )
