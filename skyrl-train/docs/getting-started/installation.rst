@@ -202,6 +202,16 @@ We include these dependencies in the legacy Dockerfile: `Dockerfile.ray244 <http
     
     ⚠️ We do not recommend using uv versions 0.8.0, 0.8.1, or 0.8.2 due to a `bug <https://github.com/astral-sh/uv/issues/14860>`_ in the ``--with`` flag behaviour.
 
+
+Installing SkyRL-Train from PyPI
+--------------------------------
+
+We publish wheels for SkyRL-Train on PyPI: https://pypi.org/project/skyrl-train/. For using the latest release of SkyRL-Train (0.3.0) as a dependency in your project, you should
+
+- Use `uv` + `pyproject.toml` for dependency management
+- Include `flashinfer-jit-cache` as a separate dependency and specify the appropriate index for `uv` (example: "https://flashinfer.ai/whl/cu128")
+- Include `flash-attn` as a separate dependency with the appropriate wheel to avoid building from source (wheels can be found `here <https://github.com/Dao-AILab/flash-attention/releases>`_)
+
 Development 
 -----------
 
