@@ -70,7 +70,6 @@ class AccumulatedGradients:
         counts = jnp.zeros((max_adapters,), dtype=jnp.int32)
         return cls(grad_sum=grad_sum, counts=counts)
 
-    @jax.jit
     def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
         """Accumulate gradients and increment counts."""
         # Update counts
