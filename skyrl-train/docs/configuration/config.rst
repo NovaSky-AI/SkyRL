@@ -75,17 +75,6 @@ General Training Configuration
 .. tip::
   If you're facing issues with tuning the right values for ``micro_train_batch_size_per_gpu``, ``policy_mini_batch_size`` and ``micro_forward_batch_size_per_gpu``, see ``utils/utils.py::validate_batch_sizes`` for details on constraints.
 
-Global LoRA Configuration
--------------------------
-
-.. code-block:: yaml
-
-    target_modules: "all-linear"
-    exclude_modules: null
-
-- ``target_modules``: Specifies which modules to apply LoRA to. Set to ``"all-linear"`` to apply LoRA to all linear layers, or provide a list of specific module names.
-- ``exclude_modules``: List of modules to exclude from LoRA application. Set to ``null`` to exclude none.
-
 Evaluation Configuration
 ------------------------------
 .. code-block:: yaml
@@ -266,6 +255,9 @@ This section configures the policy model used for training, including optimizer,
          alpha: 16                  # LoRA scaling parameter
          dropout: 0                 # LoRA dropout rate
          lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for LoRA adapter sync
+         target_modules: "all-linear"  # Apply to all linear layers OR
+         # specify specific modules as a list
+         exclude_modules: null  # Modules to exclude from LoRA
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
      optimizer_config:
@@ -317,6 +309,8 @@ We support similar configuration options as the policy model, including LoRA.
           rank: 0                    # LoRA rank (0 = disabled)
           alpha: 16                  # LoRA scaling parameter
           dropout: 0                 # LoRA dropout rate
+          target_modules: "all-linear"
+          exclude_modules: null  # Modules to exclude from LoRA
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6

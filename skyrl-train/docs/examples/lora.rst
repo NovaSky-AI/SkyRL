@@ -24,6 +24,9 @@ LoRA can be configured for both policy and critic models in the training configu
             alpha: 32             # LoRA scaling parameter
             dropout: 0            # LoRA dropout rate
             lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for adapter sync
+            target_modules: "all-linear"  # Apply to all linear layers OR
+            # specify specific modules as a list
+            exclude_modules: null  # Modules to exclude from LoRA
       critic:
         model:
           path: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -31,6 +34,8 @@ LoRA can be configured for both policy and critic models in the training configu
             rank: 32
             alpha: 32
             dropout: 0
+            target_modules: "all-linear"
+            exclude_modules: null
 
 Key Parameters
 ~~~~~~~~~~~~~~
@@ -39,18 +44,8 @@ Key Parameters
 - **``alpha``**: The scaling parameter for LoRA. Often set equal to rank, but can be tuned independently.
 - **``dropout``**: Dropout rate applied to LoRA layers. Helps with regularization.
 - **``lora_sync_path``**: Directory path where LoRA adapters are saved and synchronized between training and inference engines.
-
-Target Modules
-~~~~~~~~~~~~~~
-
-By default, LoRA is applied to all linear layers in the model. You can customize which modules to target:
-
-.. code-block:: yaml
-
-    trainer:
-      target_modules: "all-linear"  # Apply to all linear layers OR
-      # specify specific modules as a list
-      exclude_modules: null  # Modules to exclude from LoRA
+- **``target_modules``**: Specifies which modules to apply LoRA to. By default, LoRA is applied to all linear layers in the model - you can customize which modules to target by providing a list of specific module names.
+- **``exclude_modules``**: Specifies which modules to exclude from LoRA application. By default, no modules are excluded.
 
 Running LoRA Training
 ---------------------
