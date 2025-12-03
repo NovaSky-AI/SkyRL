@@ -258,7 +258,7 @@ class TinkerEngine:
 
             per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
-            return per_seq_loss.sum(), (logits, per_token_losses)
+            return per_seq_loss.sum(), (target_logprobs, per_token_losses)
 
         # Only differentiate with respect to lora_params (argnums=0)
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
@@ -278,7 +278,7 @@ class TinkerEngine:
         ) -> tuple[AccumulatedGradients, jax.Array, jax.Array, jax.Array]:
             """Fused forward-backward-accumulate operation."""
             # Forward-backward
-            (loss, (logits, per_token_losses)), lora_grads = loss_and_grad_fn(
+            (loss, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
                 lora_params,
                 non_lora_params,
                 input_ids,
@@ -291,10 +291,6 @@ class TinkerEngine:
                 advantages,
             )
 
-            # Compute target logprobs for output
-            logprobs = jax.nn.log_softmax(logits, axis=-1)
-            target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
-
             # Accumulate gradients (this inlines the JIT from AccumulatedGradients.add)
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
 
@@ -302,7 +298,6 @@ class TinkerEngine:
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
-            self._loss_and_grad_fn = loss_and_grad_fn
             self._forward_backward_and_accumulate = forward_backward_and_accumulate
 
         else:
@@ -320,15 +315,6 @@ class TinkerEngine:
 
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
-
-            # JIT the original function (kept for compatibility if needed)
-            self._loss_and_grad_fn = jax.jit(
-                loss_and_grad_fn,
-                # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
-            )
 
             # JIT the fused function
             self._forward_backward_and_accumulate = jax.jit(

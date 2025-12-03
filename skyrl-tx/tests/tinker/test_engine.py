@@ -289,7 +289,8 @@ def test_gradient_checkpointing():
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
 
         # Compute loss, using gradient checkpointing if enabled
-        (loss_full, _), _ = engine._loss_and_grad_fn(
+        _, _, _, loss_full = engine._forward_backward_and_accumulate(
+            engine.accumulated_grads,
             engine.lora_params,
             engine.non_lora_params,
             input_ids,
