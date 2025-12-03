@@ -208,9 +208,25 @@ Installing SkyRL-Train from PyPI
 
 We publish wheels for SkyRL-Train on PyPI: https://pypi.org/project/skyrl-train/. For using the latest release of SkyRL-Train (0.3.0) as a dependency in your project, you should
 
-- Use `uv` + `pyproject.toml` for dependency management
-- Include `flashinfer-jit-cache` as a separate dependency and specify the appropriate index for `uv` (example: "https://flashinfer.ai/whl/cu128")
-- Include `flash-attn` as a separate dependency with the appropriate wheel to avoid building from source (wheels can be found `here <https://github.com/Dao-AILab/flash-attention/releases>`_)
+You will need to configure your ``pyproject.toml`` to correctly install ``skyrl-train`` and its dependencies like ``flash-attn`` and ``flashinfer-jit-cache``. Below is an example configuration using ``uv``:
+
+.. code-block:: toml
+
+   [project]
+   dependencies = [
+       "skyrl-train==0.2.0",
+       "flashinfer-jit-cache",
+       # Find the appropriate wheel for your CUDA/PyTorch version from their `releases page <https://github.com/Dao-AILab/flash-attention/releases>`_
+       "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.8/flash_attn-2.5.8+cu122torch2.3-cp312-cp312-linux_x86_64.whl"
+   ]
+
+   [tool.uv.sources]
+   flashinfer-jit-cache = { index = "flashinfer-cu128" }
+
+   [[tool.uv.index]]
+   name = "flashinfer-cu128"
+   url = "https://flashinfer.ai/whl/cu128"
+   explicit = true
 
 Development 
 -----------
