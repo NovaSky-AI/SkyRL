@@ -34,7 +34,7 @@ def get_test_actor_config(enable_lora: bool = False) -> DictConfig:
             cfg.trainer.policy.model.lora.rank = 32
             cfg.trainer.policy.model.lora.alpha = 32
             cfg.trainer.policy.model.lora.dropout = 0.1
-            cfg.trainer.target_modules = "all-linear"
+            cfg.trainer.policy.model.lora.target_modules = "all-linear"
 
         return cfg
 
