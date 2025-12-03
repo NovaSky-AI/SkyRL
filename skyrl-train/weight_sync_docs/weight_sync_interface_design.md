@@ -47,12 +47,12 @@
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key Insight:** Components run on **different processes**:
-- **Controller**: `WeightTransferStrategy` factory runs on controller (trainer.py) - lightweight
-- **Training side**: `WeightExtractor` + `WeightTransferSender` (created via strategy) run on training Ray actors
-- **Inference side**: `WeightTransferReceiver` (created via strategy) + `WeightLoader` run on inference Ray actors
-- **Initialization**: Happens on workers, not controller (process groups must be initialized where they're used)
-- **Communication**: Process groups, IPC handles, Ray RPC
+**Key Insight:** Components run on **different Ray actors**:
+- **Controller**: `WeightTransferStrategy` factory runs on controller (trainer.py) – lightweight coordinator.
+- **Training actors**: One actor per training rank owns extraction + the “send” half of the transfer. Training actor rank 0 orchestrates transfer; helper actors participate in collectives triggered inside the extractor.
+- **Inference actors**: One actor per inference rank owns the “receive + load” half. They stay agnostic to training backend details.
+- **Initialization**: Happens on actors, not controller (process groups / CUDA contexts must be created where they are used).
+- **Communication**: Ray RPC, torch process groups (broadcast path), and CUDA IPC handles.
 
 ## Core Components
 
@@ -424,23 +424,23 @@ class PackedCudaIpcWeightUpdateRequest(WeightUpdateRequest):
 - **Extensibility**: Easy to add new request types for new transfer strategies
 - **Serialization Friendly**: `dtypes` and `shapes` are stored as strings / lists-of-int so the dataclasses can be serialized directly over Ray RPC without needing custom tensor codecs
 
-### 7. WeightSyncInfo (Data Structure)
+### 7. WeightSyncInitInfo (Data Structure)
 
-**Purpose:** Encapsulates information needed for weight sync initialization
+**Purpose:** Encapsulates initialization-only information training actor rank 0 must share with inference actors (e.g., process-group endpoints).
 
-**Location:** Created on training side, passed to inference side via controller
+**Location:** Created on training actor rank 0, passed to inference actors via the controller during initialization.
 
-**Note:** The structure is strategy-specific. Each transfer strategy defines what information it needs.
+**Note:** The structure is strategy-specific. Each transfer strategy defines what initialization data it requires.
 
 ```python
 # Base interface (abstract)
-class WeightSyncInfo(ABC):
-    """Base interface for weight sync information."""
+class WeightSyncInitInfo(ABC):
+    """Base interface for weight sync initialization information."""
     pass
 
 @dataclass
-class TorchDistributedWeightSyncInfo(WeightSyncInfo):
-    """Information needed for weight sync using torch.distributed process groups."""
+class TorchDistributedWeightSyncInitInfo(WeightSyncInitInfo):
+    """Initialization info for torch.distributed process groups."""
     master_addr: str  # Master address for process group (from training rank 0)
     master_port: int  # Master port for process group (from training rank 0)
     world_size: int  # Total world size (training rank 0 + all inference ranks)
@@ -448,17 +448,15 @@ class TorchDistributedWeightSyncInfo(WeightSyncInfo):
     backend: str  # Backend for process group (nccl/gloo)
 
 @dataclass
-class EmptyWeightSyncInfo(WeightSyncInfo):
-    """No sync info needed - strategy uses existing process groups or other mechanisms."""
+class EmptyWeightSyncInitInfo(WeightSyncInitInfo):
+    """No explicit init info needed (e.g., CUDA IPC reuses existing training PG)."""
     pass
 ```
 
 **Rationale:**
-- Training rank 0 determines master_addr/master_port
-- This info needs to be shared with all inference engines
-- Clean data structure for passing sync configuration
-- Serializable for Ray RPC
-- Strategy-specific: Different strategies may need different sync info
+- Training actor rank 0 determines master_addr/master_port once per sync session.
+- Inference actors need this information only during initialization, so we keep it in a dedicated structure.
+- Typed data makes strategy requirements explicit and keeps payloads Ray-serializable.
 
 ### 8. WeightTransferStrategy (Factory/Strategy)
 
@@ -476,7 +474,7 @@ class WeightTransferStrategy(ABC):
         self,
         cfg: DictConfig,
         inference_client: InferenceEngineClient,
-        sync_info: WeightSyncInfo
+        sync_info: WeightSyncInitInfo
     ) -> WeightTransferSender:
         """
         Create and initialize a sender instance for training side.
@@ -486,7 +484,7 @@ class WeightTransferStrategy(ABC):
         Args:
             cfg: Configuration for the sender
             inference_client: Client for communicating with inference engines
-            sync_info: Weight sync information (strategy-specific type)
+            sync_info: Weight sync initialization info (strategy-specific)
 
         Returns:
             WeightTransferSender instance, fully initialized and ready to use
@@ -497,7 +495,7 @@ class WeightTransferStrategy(ABC):
     async def create_receiver(
         self,
         cfg: DictConfig,
-        sync_info: WeightSyncInfo,
+        sync_info: WeightSyncInitInfo,
         rank_offset: int
     ) -> WeightTransferReceiver:
         """
@@ -507,7 +505,7 @@ class WeightTransferStrategy(ABC):
 
         Args:
             cfg: Configuration for the receiver
-            sync_info: Weight sync information (strategy-specific type, from training rank 0)
+            sync_info: Weight sync initialization info (strategy-specific)
             rank_offset: Rank offset for this inference engine
 
         Returns:
@@ -521,13 +519,13 @@ class WeightTransferStrategy(ABC):
         pass
 
     @abstractmethod
-    async def create_sync_info(
+    async def create_init_info(
         self,
         cfg: DictConfig,
         inference_client: InferenceEngineClient
-    ) -> WeightSyncInfo:
+    ) -> WeightSyncInitInfo:
         """
-        Create WeightSyncInfo for this strategy.
+        Create WeightSyncInitInfo for this strategy.
         Called on training Ray actor (rank 0).
 
         Args:
@@ -535,7 +533,7 @@ class WeightTransferStrategy(ABC):
             inference_client: Client for communicating with inference engines
 
         Returns:
-            WeightSyncInfo instance appropriate for this strategy
+            WeightSyncInitInfo instance appropriate for this strategy
         """
         pass
 ```
@@ -543,23 +541,23 @@ class WeightTransferStrategy(ABC):
 **Implementations:**
 - `BroadcastTransferStrategy`
   - Creates `BroadcastTransferSender` and `BroadcastTransferReceiver`
-  - Uses `TorchDistributedWeightSyncInfo` with `backend="nccl"` or `backend="gloo"`
-  - Requires `_model_update_group` (training rank 0 + all inference ranks) for broadcast
+  - Uses `TorchDistributedWeightSyncInitInfo` with `backend="nccl"` or `backend="gloo"`
+  - Requires `_model_update_group` (training actor rank 0 + all inference actors) for broadcast
 - `CudaIpcTransferStrategy`
   - Creates `CudaIpcTransferSender` and `CudaIpcTransferReceiver`
-  - Uses `EmptyWeightSyncInfo` (no process group needed)
-  - Uses default training process group (already exists) for `all_gather_object` (to gather IPC handles from training ranks)
+  - Uses `EmptyWeightSyncInitInfo` (no additional process group needed beyond the training PG)
+  - Uses default training process group for `all_gather_object` (to gather IPC handles from training ranks)
   - Does NOT use `_model_update_group` - weights transferred via IPC handles sent via Ray RPC
 - `PackedCudaIpcTransferStrategy`
   - Creates `PackedCudaIpcTransferSender` and `PackedCudaIpcTransferReceiver`
-  - Uses `EmptyWeightSyncInfo` (no process group needed)
+  - Uses `EmptyWeightSyncInitInfo` (no additional process group needed)
   - Similar to `CudaIpcTransferStrategy` - uses default training process group, not `_model_update_group`
 
 **Key Points:**
 - **Lightweight**: Just a factory, no heavy initialization
-- **Controller**: Lives on controller, passed to workers via Ray RPC or config
+- **Controller**: Lives on controller, passed to actors via Ray RPC or config
 - **Factory Pattern**: Each side creates their own sender/receiver instances
-- **Type Safety**: Knows which `WeightUpdateRequest` and `WeightSyncInfo` types to use
+- **Type Safety**: Knows which `WeightUpdateRequest` and `WeightSyncInitInfo` types to use
 - **Encapsulation**: Strategy-specific logic (process groups, IPC handles, etc.) is hidden in implementations
 
 ## End-to-End Execution Flow
@@ -688,18 +686,18 @@ async def initialize_weight_sync(
     strategy: WeightTransferStrategy,
     cfg: DictConfig,
     inference_client: InferenceEngineClient
-) -> WeightSyncInfo:
+) -> WeightSyncInitInfo:
     """Initialize weight sync on training side, return sync info."""
-    # Strategy creates sync info (strategy-specific - may be empty for CUDA IPC)
-    sync_info = await strategy.create_sync_info(cfg, inference_client)
+    # Strategy creates init info (strategy-specific - may be empty for CUDA IPC)
+    init_info = await strategy.create_init_info(cfg, inference_client)
 
     # Create sender (initialization happens here - strategy-specific setup)
-    transfer_sender = await strategy.create_sender(cfg, inference_client, sync_info)
+    transfer_sender = await strategy.create_sender(cfg, inference_client, init_info)
 
     # Store sender for later use
     self._transfer_sender = transfer_sender
 
-    return sync_info
+    return init_info
 
 # Later, when syncing weights:
 async def sync_weights():
@@ -712,25 +710,25 @@ async def sync_weights():
     await self._transfer_sender.send_chunks(weight_chunks_iterator, inference_client)
 ```
 
-**Note:** In practice the extractor should be constructed once during worker initialization (e.g., stored as `self._extractor`) and reused across sync invocations to avoid repeatedly traversing model metadata.
+**Note:** Construct the extractor once during actor initialization (store as `self._extractor`). During syncing, **all training actors** should call `extract_weights()` so backend collectives engage every rank; training actor rank 0 drives orchestration and streams the yielded `WeightChunk`s to the sender.
 
 ### Inference Side (Ray Actor)
 
 ```python
 # On inference Ray actor
-# Called via Ray RPC from controller: initialize_weight_sync(strategy, cfg, sync_info, rank_offset)
+# Called via Ray RPC from controller: initialize_weight_sync(strategy, cfg, init_info, rank_offset)
 
 async def initialize_weight_sync(
     strategy: WeightTransferStrategy,
     cfg: DictConfig,
-    sync_info: WeightSyncInfo,
+    init_info: WeightSyncInitInfo,
     rank_offset: int
 ) -> None:
     """Initialize weight sync on inference side."""
     loader = VLLMWeightLoader(engine)
 
     # Create receiver (initialization happens here - strategy-specific setup)
-    transfer_receiver = await strategy.create_receiver(cfg, sync_info, rank_offset)
+    transfer_receiver = await strategy.create_receiver(cfg, init_info, rank_offset)
 
     # Store receiver for later use
     self._transfer_receiver = transfer_receiver
@@ -814,21 +812,22 @@ async def handle_weight_update(request_dict: Dict[str, Any]):
 **Controller:**
 - `WeightTransferStrategy` (factory) runs on **controller** (trainer.py)
 - Lightweight, just creates sender/receiver instances
-- Workers create strategy based on config (no serialization needed)
-- Orchestrates initialization: calls training actors to initialize, gets `WeightSyncInfo`, distributes to inference actors
+- Actors create the strategy based on config (no serialization needed)
+- Orchestrates initialization: calls training actors to initialize, gets `WeightSyncInitInfo`, distributes to inference actors
 
 **Training Side:**
 - `WeightExtractor` runs on **training Ray actor** (one per GPU/rank)
 - `initialize_weight_sync()` runs on **training Ray actor** (rank 0):
   - Determines master_addr/master_port
-  - Creates `WeightSyncInfo`
+  - Creates `WeightSyncInitInfo`
   - Calls `strategy.create_sender()` which sets up process groups internally
-  - Returns `WeightSyncInfo` to controller
+  - Returns `WeightSyncInitInfo` to controller
 - `sender.send_chunks()` runs on **training Ray actor** (rank 0)
+- During each sync all training actors call `extract_weights()` so backend collectives engage every rank; actor rank 0 streams the yielded `WeightChunk`s to the sender.
 
 **Inference Side:**
 - `initialize_weight_sync()` runs on **inference Ray actor**:
-  - Receives `WeightSyncInfo` from controller
+  - Receives `WeightSyncInitInfo` from controller
   - Calls `strategy.create_receiver()` which joins process group internally
 - `receiver.receive_and_load_weights()` runs on **inference Ray actor**
 - `WeightLoader` runs on **inference Ray actor**
@@ -904,41 +903,43 @@ async def handle_weight_update(request_dict: Dict[str, Any]):
 - Update all call sites to use new interfaces
 - Remove `NamedWeightsUpdateRequest` (replace with backend-specific `WeightUpdateRequest` types)
 
-## Design Decisions
+## Design Decisions (Why)
 
-1. **Packing Logic**: Packing is handled by the transfer sender (strategy-specific).
-   - **Decision**: Sender packs (generic PyTorch code, runs on training side)
-   - **Rationale**: Packing is a transfer optimization, not extraction logic
+- **Separate extractor / sender / receiver / loader**
+  - *Alternative:* Monolithic manager on controller or training actors.
+  - *Reason:* Each phase has different lifecycles and dependencies (backend internals vs. transfer mechanics vs. engine APIs). Splitting components lets us test and mix them independently.
 
-2. **Process Group Management**: Process groups are owned by the transfer sender/receiver.
-   - **Decision**: Transfer sender/receiver own process groups (strategy-specific)
-   - **Rationale**: Process groups are transfer-specific, encapsulated in sender/receiver implementations
+- **`WeightChunk` aggregates multiple parameters**
+  - *Alternative:* One tensor per request.
+  - *Reason:* FlashRL/qkv fusion plus packed CUDA IPC require grouped tensors. It matches current request semantics (lists of names/shapes) and enables module-aware batching.
 
-3. **Batching/Thresholding**: Batching and grouping logic lives in the extractor base class.
-   - **Decision**: Base `WeightExtractor` has internal flags `_group_by_module` and `_batch_by_threshold` (default False). Subclasses can set these flags in `__init__` or override `_should_group_by_module()` / `_should_batch_by_threshold()`, and must rely on (or override) the helper methods `_group_by_module()` / `_batch_by_threshold()` when the flags are enabled.
-   - **Rationale**: 
-     - Grouping/batching logic is reusable across backends
-     - Flags are internal (not in public API) but configurable by subclasses
-     - Subclasses can set flags based on config or override methods for custom logic
-     - Subclasses can override `extract_weights()` for completely custom behavior
-     - Extractor yields chunks progressively for memory efficiency
-     - Sender sends chunks immediately (no accumulation needed - already batched)
+- **Strategy-specific `WeightUpdateRequest` dataclasses**
+  - *Alternative:* Generic dict with optional fields/extras.
+  - *Reason:* Typed classes capture exactly what each strategy needs (broadcast metadata vs. IPC handles vs. packed sizes), improving validation and IDE support while keeping serialization (lists/dicts) simple.
 
-4. **Receiver Initialization**: Handled via `WeightTransferStrategy.create_receiver()`.
-   - **Decision**: Encapsulated in strategy factory method
-   - **Rationale**: Already discussed above - initialization happens in `create_receiver()`
+- **`WeightTransferStrategy` factory on controller**
+  - *Alternative:* Controller (or a global manager) initializes send/receive resources directly.
+  - *Reason:* Process groups/CUDA contexts must be created on the actors that use them. The controller should only describe how to build the instances; each actor invokes `create_sender/receiver` locally.
 
-5. **Error Handling**: Fail fast (current behavior).
-   - **Decision**: Fail fast
-   - **Rationale**: Keep current behavior, can add retry mechanism later if needed
+- **Grouping & batching handled in extractor**
+  - *Alternative:* Let senders re-batch chunks before transfer.
+  - *Reason:* Extractors know the model structure and dtype conversions, so they can group intelligently (FlashRL requirements). Senders stay focused on transfer primitives and treat each yielded `WeightChunk` as ready-to-send.
 
-6. **WeightUpdateRequest Migration**: Eventually remove `NamedWeightsUpdateRequest`.
-   - **Decision**: Remove `NamedWeightsUpdateRequest` after migration
-   - **Rationale**: Replace with strategy-specific `WeightUpdateRequest` types
+- **Internal flags for grouping/batching**
+  - *Alternative:* Public API flags on `extract_weights(model, dtype, ...)`.
+  - *Reason:* Keeps the public signature stable while allowing subclasses to react to config. Flags (`_group_by_module`, `_batch_by_threshold`) live in the base class; subclasses flip/override them without cluttering the call sites.
 
-7. **Strategy Passing**: Workers create strategy based on config.
-   - **Decision**: Workers read config and create strategy
-   - **Rationale**: Simplest approach, no serialization needed, config already available on workers
+- **Strings/lists for `dtypes`/`shapes`**
+  - *Alternative:* Use `torch.dtype` objects or tuple shapes.
+  - *Reason:* Plain strings/lists serialize over Ray RPC without custom hooks; receivers convert back to `torch.dtype` when needed.
+
+- **Packing handled by sender**
+  - *Alternative:* Extractors pack tensors.
+  - *Reason:* Packing is a transfer optimization (e.g., Megatron CUDA IPC). Keeping it in the sender isolates transfer-specific memory layouts from backend extraction logic.
+
+- **Process group ownership sits with sender/receiver**
+  - *Alternative:* Global PG manager in extractor/controller.
+  - *Reason:* Different strategies need different PG lifecycles (broadcast vs. IPC). Encapsulating PG creation/teardown inside senders/receivers avoids leaking transport details into backends.
 
 ## Next Steps
 
