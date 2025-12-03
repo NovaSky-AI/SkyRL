@@ -910,10 +910,11 @@ async def get_weights_info(request: WeightsInfoRequest, session: AsyncSession = 
         raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
+    is_lora = lora_config.rank > 0
 
     return WeightsInfoResponse(
         base_model=model.base_model,
-        is_lora=True,  # SkyRL tx currently only supports LoRA training
+        is_lora=is_lora,
         lora_rank=lora_config.rank,
     )
 
