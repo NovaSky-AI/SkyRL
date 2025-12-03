@@ -66,27 +66,22 @@
 ```python
 class WeightExtractor(ABC):
     """Extracts weights from sharded training models for sync."""
-    
+
     @abstractmethod
     async def extract_weights(
-        self, 
+        self,
         model: Any,
         generator_dtype: torch.dtype
     ) -> Iterator[WeightChunk]:
         """
         Extract weights from the model, yielding chunks ready for transfer.
         Each chunk represents a batch/group of related parameters.
-        
+
         Args:
-            model: The training model (FSDP/Megatron/DeepSpeed wrapped)
-            generator_dtype: Target dtype for inference engine (e.g., float16, bfloat16).
+            model: The training model (backend-specific wrapper)
+            generator_dtype: Target dtype for inference engine.
                            Weights are converted to this dtype during extraction.
-                           Determined by:
-                           1. User config: `cfg.generator.model_dtype` (string, e.g., "bfloat16")
-                           2. Converted via `str_to_torch_dtype()` to `torch.dtype`
-                           3. Default: "bfloat16" (from ppo_base_config.yaml)
-                           4. Must match the dtype the inference engine expects
-        
+
         Returns:
             Iterator of WeightChunk objects containing weight data and metadata.
             Weights in chunks are already converted to generator_dtype.
@@ -94,10 +89,6 @@ class WeightExtractor(ABC):
         pass
 ```
 
-**Implementations:**
-- `FSDPWeightExtractor` - Uses `state_dict()` + `full_tensor()`, groups by module
-- `MegatronWeightExtractor` - Uses `bridge.export_hf_weights()`, groups into buckets
-- `DeepSpeedWeightExtractor` - Uses `named_parameters()` + `GatheredParameters`, groups by module
 
 ### 2. WeightTransferSender (Training Side Transfer)
 
@@ -109,7 +100,7 @@ class WeightExtractor(ABC):
 ```python
 class WeightTransferSender(ABC):
     """Handles sending weights from training to inference processes."""
-    
+
     @abstractmethod
     async def send_chunk(
         self,
@@ -119,15 +110,14 @@ class WeightTransferSender(ABC):
         """
         Send a single weight chunk.
         Runs on training Ray actor (rank 0).
-        Handles batching internally (e.g., threshold-based batching for CUDA IPC).
-        May accumulate chunks and send when threshold reached.
-        
+        May accumulate chunks and send when batching threshold is reached.
+
         Args:
             chunk: Weight chunk to send (contains multiple params)
             inference_client: Client for inference engine communication
         """
         pass
-    
+
     @abstractmethod
     async def flush(
         self,
@@ -136,28 +126,27 @@ class WeightTransferSender(ABC):
         """
         Flush any accumulated chunks that haven't been sent yet.
         Should be called after all chunks have been sent via send_chunk().
-        
+
         Args:
             inference_client: Client for inference engine communication
         """
         pass
-    
+
     @abstractmethod
     def create_request(self, chunk: WeightChunk) -> WeightUpdateRequest:
         """
         Create a WeightUpdateRequest from a WeightChunk.
-        Backend-specific implementation.
-        
+
         Args:
             chunk: Weight chunk to convert
-            
+
         Returns:
-            WeightUpdateRequest appropriate for this sender
+            WeightUpdateRequest appropriate for this transfer strategy
         """
         pass
 ```
 
-**Note:** Initialization happens in `TransferStrategy.create_sender()`, which sets up process groups, IPC handles, etc. The sender is ready to use immediately after creation.
+**Note:** Initialization happens in `TransferStrategy.create_sender()`. The sender is ready to use immediately after creation.
 
 **Implementations:**
 - `BroadcastTransferSender` - Broadcasts via process group, creates `BroadcastWeightUpdateRequest`
@@ -174,7 +163,7 @@ class WeightTransferSender(ABC):
 ```python
 class WeightTransferReceiver(ABC):
     """Handles receiving weights on inference processes."""
-    
+
     @abstractmethod
     async def receive_and_load_weights(
         self,
@@ -184,29 +173,28 @@ class WeightTransferReceiver(ABC):
         """
         Receive weights and load into inference model.
         Runs on inference Ray actor.
-        
+
         Args:
-            request: Weight update request (backend-specific type)
+            request: Weight update request (strategy-specific type)
             loader: Weight loader to use for loading weights
         """
         pass
-    
+
     @abstractmethod
     def parse_request(self, request_dict: Dict[str, Any]) -> WeightUpdateRequest:
         """
         Parse a request dict (from Ray RPC) into a WeightUpdateRequest.
-        Backend-specific implementation.
-        
+
         Args:
             request_dict: Dictionary from Ray RPC
-            
+
         Returns:
-            WeightUpdateRequest appropriate for this receiver
+            WeightUpdateRequest appropriate for this transfer strategy
         """
         pass
 ```
 
-**Note:** Initialization happens in `TransferStrategy.create_receiver()`, which joins process groups, sets up IPC receiving, etc. The receiver is ready to use immediately after creation.
+**Note:** Initialization happens in `TransferStrategy.create_receiver()`. The receiver is ready to use immediately after creation.
 
 **Implementations:**
 - `BroadcastTransferReceiver` - Receives via broadcast, parses `BroadcastWeightUpdateRequest`
@@ -223,7 +211,7 @@ class WeightTransferReceiver(ABC):
 ```python
 class WeightLoader(ABC):
     """Loads weights into inference engines."""
-    
+
     @abstractmethod
     async def load_weights(
         self,
@@ -231,19 +219,19 @@ class WeightLoader(ABC):
     ) -> None:
         """
         Load weights from named tensors into the inference model.
-        
+
         Args:
             named_tensors: Dictionary mapping parameter names to tensors
         """
         pass
 ```
 
+**Note:** The receiver extracts tensors from the request and passes them to the loader as a simple dict. This keeps the loader engine-specific but transfer-agnostic.
+
 **Implementations:**
 - `VLLMWeightLoader` - Direct `model.load_weights(named_tensors)` API
 - `SGLangWeightLoader` - Custom loader function + SGLang APIs
 - `RemoteWeightLoader` - HTTP endpoints
-
-**Note:** The receiver extracts tensors from the request and passes them to the loader as a simple dict. This keeps the loader engine-specific but transfer-agnostic.
 
 ### 5. WeightChunk (Data Structure)
 
@@ -260,7 +248,7 @@ class WeightChunk:
     tensors: List[torch.Tensor]  # One tensor per parameter
     dtypes: List[torch.dtype]
     shapes: List[Tuple[int, ...]]
-    
+
     # Optional metadata for the entire chunk
     module_name: Optional[str] = None  # For grouping (e.g., "layers.0.attention")
     total_size_bytes: Optional[int] = None  # Total size of all tensors in chunk
@@ -286,19 +274,19 @@ class WeightChunk:
 ```python
 class WeightUpdateRequest(ABC):
     """Base interface for weight update requests."""
-    
+
     @property
     @abstractmethod
     def names(self) -> List[str]:
         """Parameter names."""
         pass
-    
+
     @property
     @abstractmethod
     def dtypes(self) -> List[str]:
         """Parameter dtypes (string representation)."""
         pass
-    
+
     @property
     @abstractmethod
     def shapes(self) -> List[List[int]]:
@@ -324,12 +312,11 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
     shapes: List[List[int]]
     ipc_handles: List[Dict[int, Any]]
     # ipc_handles[i] maps GPU ID to IPC handle for parameter names[i]
-    # Example: ipc_handles[0] = {0: handle_gpu0, 1: handle_gpu1, ...}
-    # where keys are physical GPU IDs and values are IPC handle objects
+    # Keys are physical GPU IDs, values are IPC handle objects
 
 @dataclass
 class PackedCudaIpcWeightUpdateRequest(WeightUpdateRequest):
-    """Request for packed CUDA IPC (Megatron)."""
+    """Request for packed CUDA IPC weight transfer."""
     names: List[str]
     dtypes: List[str]
     shapes: List[List[int]]
@@ -338,13 +325,12 @@ class PackedCudaIpcWeightUpdateRequest(WeightUpdateRequest):
     # ipc_handles maps GPU ID to IPC handle for the entire packed bucket
     # The bucket contains all parameters in names concatenated together
     # sizes[i] indicates the size (in bytes) of parameter names[i] within the packed bucket
-    # Example: ipc_handles = {0: handle_gpu0, 1: handle_gpu1, ...}
 ```
 
 **Rationale:**
-- **Type Safety**: Each backend has explicit structure
+- **Type Safety**: Each transfer strategy has explicit request structure
 - **Clear Contracts**: Sender/receiver know what to expect
-- **Extensibility**: Easy to add new request types for new backends
+- **Extensibility**: Easy to add new request types for new transfer strategies
 
 ### 7. WeightSyncInfo (Data Structure)
 
@@ -360,7 +346,6 @@ class WeightSyncInfo(ABC):
     """Base interface for weight sync information."""
     pass
 
-# Broadcast strategy - uses process group for actual weight transfer
 @dataclass
 class TorchDistributedWeightSyncInfo(WeightSyncInfo):
     """Information needed for weight sync using torch.distributed process groups."""
@@ -368,12 +353,11 @@ class TorchDistributedWeightSyncInfo(WeightSyncInfo):
     master_port: int  # Master port for process group (from training rank 0)
     world_size: int  # Total world size (training rank 0 + all inference ranks)
     group_name: str  # Name for the process group
-    backend: str  # Backend for process group (nccl/gloo) - strategy-specific
+    backend: str  # Backend for process group (nccl/gloo)
 
-# CUDA IPC strategy - doesn't need process group for transfer (uses IPC handles via Ray RPC)
 @dataclass
 class EmptyWeightSyncInfo(WeightSyncInfo):
-    """No sync info needed - CUDA IPC uses default training process group and Ray RPC."""
+    """No sync info needed - strategy uses existing process groups or other mechanisms."""
     pass
 ```
 
@@ -394,61 +378,56 @@ class EmptyWeightSyncInfo(WeightSyncInfo):
 ```python
 class WeightTransferStrategy(ABC):
     """Factory for creating weight transfer senders and receivers."""
-    
+
     @abstractmethod
     async def create_sender(
-        self, 
+        self,
         cfg: DictConfig,
         inference_client: InferenceEngineClient,
-        sync_info: WeightSyncInfo  # Strategy-specific sync info type
+        sync_info: WeightSyncInfo
     ) -> WeightTransferSender:
         """
         Create and initialize a sender instance for training side.
         Called on training Ray actor (rank 0).
-        Sets up process groups, IPC handles, etc. internally.
-        
+        Performs strategy-specific initialization internally.
+
         Args:
             cfg: Configuration for the sender
             inference_client: Client for communicating with inference engines
-            sync_info: Weight sync information (master_addr, master_port, etc.)
-            
+            sync_info: Weight sync information (strategy-specific type)
+
         Returns:
             WeightTransferSender instance, fully initialized and ready to use
         """
         pass
-    
+
     @abstractmethod
     async def create_receiver(
-        self, 
+        self,
         cfg: DictConfig,
-        sync_info: WeightSyncInfo,  # Strategy-specific sync info type
+        sync_info: WeightSyncInfo,
         rank_offset: int
     ) -> WeightTransferReceiver:
         """
         Create and initialize a receiver instance for inference side.
         Called on inference Ray actor.
-        Joins process group, sets up IPC receiving, etc. internally.
-        
+        Performs strategy-specific initialization internally.
+
         Args:
             cfg: Configuration for the receiver
-            sync_info: Weight sync information (from training rank 0)
+            sync_info: Weight sync information (strategy-specific type, from training rank 0)
             rank_offset: Rank offset for this inference engine
-            
+
         Returns:
             WeightTransferReceiver instance, fully initialized and ready to use
         """
         pass
-    
+
     @abstractmethod
     def get_request_type(self) -> Type[WeightUpdateRequest]:
         """Return the WeightUpdateRequest type for this strategy."""
         pass
-    
-    @abstractmethod
-    def get_sync_info_type(self) -> Type[WeightSyncInfo]:
-        """Return the WeightSyncInfo type for this strategy."""
-        pass
-    
+
     @abstractmethod
     async def create_sync_info(
         self,
@@ -458,12 +437,11 @@ class WeightTransferStrategy(ABC):
         """
         Create WeightSyncInfo for this strategy.
         Called on training Ray actor (rank 0).
-        Determines master_addr/master_port and calculates world_size.
-        
+
         Args:
             cfg: Configuration
             inference_client: Client for communicating with inference engines
-            
+
         Returns:
             WeightSyncInfo instance appropriate for this strategy
         """
@@ -471,7 +449,7 @@ class WeightTransferStrategy(ABC):
 ```
 
 **Implementations:**
-- `BroadcastTransferStrategy` 
+- `BroadcastTransferStrategy`
   - Creates `BroadcastTransferSender` and `BroadcastTransferReceiver`
   - Uses `TorchDistributedWeightSyncInfo` with `backend="nccl"` or `backend="gloo"`
   - Requires `_model_update_group` (training rank 0 + all inference ranks) for broadcast
@@ -489,7 +467,8 @@ class WeightTransferStrategy(ABC):
 - **Lightweight**: Just a factory, no heavy initialization
 - **Controller**: Lives on controller, passed to workers via Ray RPC or config
 - **Factory Pattern**: Each side creates their own sender/receiver instances
-- **Type Safety**: Knows which `WeightUpdateRequest` type to use
+- **Type Safety**: Knows which `WeightUpdateRequest` and `WeightSyncInfo` types to use
+- **Encapsulation**: Strategy-specific logic (process groups, IPC handles, etc.) is hidden in implementations
 
 ## End-to-End Execution Flow
 
@@ -607,23 +586,23 @@ async def initialize_weight_sync(
     """Initialize weight sync on training side, return sync info."""
     # Strategy creates sync info (encapsulates master_addr/master_port determination, world_size calculation)
     sync_info = await strategy.create_sync_info(cfg, inference_client)
-    
+
     # Create sender (initialization happens here - sets up process groups, etc.)
     transfer_sender = await strategy.create_sender(cfg, inference_client, sync_info)
-    
+
     # Store sender for later use
     self._transfer_sender = transfer_sender
-    
+
     return sync_info
 
 # Later, when syncing weights:
 async def sync_weights():
     extractor = FSDPWeightExtractor(model, cfg)
-    
+
     # Extract weights and send (sender handles batching internally)
     async for chunk in extractor.extract_weights(model, generator_dtype):
         await self._transfer_sender.send_chunk(chunk, inference_client)
-    
+
     # Flush any remaining chunks
     await self._transfer_sender.flush(inference_client)
 ```
@@ -642,10 +621,10 @@ async def initialize_weight_sync(
 ) -> None:
     """Initialize weight sync on inference side."""
     loader = VLLMWeightLoader(engine)
-    
+
     # Create receiver (initialization happens here - joins process group, etc.)
     transfer_receiver = await strategy.create_receiver(cfg, sync_info, rank_offset)
-    
+
     # Store receiver for later use
     self._transfer_receiver = transfer_receiver
     self._loader = loader
@@ -654,7 +633,7 @@ async def initialize_weight_sync(
 async def handle_weight_update(request_dict: Dict[str, Any]):
     # Parse request dict into backend-specific WeightUpdateRequest
     request = self._transfer_receiver.parse_request(request_dict)
-    
+
     # Receive weights and load
     await self._transfer_receiver.receive_and_load_weights(request, self._loader)
 ```
@@ -685,7 +664,7 @@ async def handle_weight_update(request_dict: Dict[str, Any]):
 
 **Critical for Distributed Architecture:**
 - **Different Processes**: Sender runs on training Ray actors, receiver on inference Ray actors
-- **Different Responsibilities**: 
+- **Different Responsibilities**:
   - Sender: Creates IPC handles, initiates broadcast
   - Receiver: Receives via process group/IPC, loads weights
 - **Clean Separation**: Each class has a single responsibility
@@ -838,7 +817,7 @@ async def handle_weight_update(request_dict: Dict[str, Any]):
    - **Option A**: Keep as alias, migrate gradually
    - **Option B**: Replace immediately
    - **Recommendation**: Keep as alias initially, migrate in Phase 7
-   
+
 7. **Strategy Passing**: How should strategy be passed from controller to workers?
    - **Option A**: Via config (serialized)
    - **Option B**: Via Ray RPC (pass strategy object)
