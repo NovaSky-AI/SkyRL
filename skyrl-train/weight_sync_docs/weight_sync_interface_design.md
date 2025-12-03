@@ -70,22 +70,28 @@ class WeightExtractor(ABC):
     def __init__(self, cfg: DictConfig):
         """Initialize extractor with config."""
         self.cfg = cfg
-        # Internal flags - subclasses can override in __init__ or via methods
+        # Internal flags - subclasses can override in __init__ or via hook methods
         self._group_by_module = False
         self._batch_by_threshold = False
 
+    def _should_group_by_module(self) -> bool:
+        """Return whether weights should be grouped by module."""
+        return self._group_by_module
+
+    def _should_batch_by_threshold(self) -> bool:
+        """Return whether chunks should be batched by threshold."""
+        return self._batch_by_threshold
+
     def _group_by_module(self, params: Dict[str, torch.Tensor]) -> Dict[str, List[str]]:
         """
-        Group parameter names by module (for FlashRL compatibility).
-        Helper method for subclasses to use.
-
-        Args:
-            params: Dictionary mapping parameter names to tensors
-
-        Returns:
-            Dictionary mapping module names to lists of parameter names
+        Default grouping helper: groups parameters by removing the last two path components.
+        Subclasses can override for custom grouping logic.
         """
-        pass
+        module_to_params: Dict[str, List[str]] = {}
+        for param_name in params.keys():
+            module_name = ".".join(param_name.split(".")[:-2])
+            module_to_params.setdefault(module_name, []).append(param_name)
+        return module_to_params
 
     def _batch_by_threshold(
         self,
@@ -93,17 +99,28 @@ class WeightExtractor(ABC):
         threshold_gb: float
     ) -> Iterator[List[WeightChunk]]:
         """
-        Batch chunks until total size exceeds threshold.
-        Helper method for subclasses to use.
-
-        Args:
-            chunks: Iterator of WeightChunk objects
-            threshold_gb: Threshold in GB
-
-        Yields:
-            Lists of WeightChunk objects batched by threshold
+        Default batching helper: accumulates chunks until size >= threshold.
+        Subclasses can override for custom batching strategies.
         """
-        pass
+        if threshold_gb is None or threshold_gb <= 0:
+            for chunk in chunks:
+                yield [chunk]
+            return
+
+        batch: List[WeightChunk] = []
+        batch_size = 0
+        threshold_bytes = threshold_gb * (1024 ** 3)
+
+        for chunk in chunks:
+            batch.append(chunk)
+            batch_size += chunk.total_size_bytes or 0
+            if batch_size >= threshold_bytes:
+                yield batch
+                batch = []
+                batch_size = 0
+
+        if batch:
+            yield batch
 
     @abstractmethod
     async def _extract_raw_weights(
@@ -175,6 +192,8 @@ class FSDPWeightExtractor(WeightExtractor):
         )
 ```
 
+**Note:** Subclasses that enable `_group_by_module` or `_batch_by_threshold` should implement the corresponding helper methods (or override `extract_weights()`) to provide the desired behavior.
+
 
 ### 2. WeightTransferSender (Training Side Transfer)
 
@@ -194,12 +213,12 @@ class WeightTransferSender(ABC):
         inference_client: InferenceEngineClient
     ) -> None:
         """
-        Send weight chunks to inference engines.
+        Send weight chunks (one WeightChunk per iterator step) to inference engines.
         Runs on training Ray actor (rank 0).
-        Chunks are already batched/grouped by the extractor.
+        Extractor already handled grouping/batching; sender must not introduce additional batching semantics.
 
         Args:
-            chunks: Iterator of weight chunks to send (each chunk contains multiple params)
+            chunks: Iterator yielding individual WeightChunk objects (each chunk may contain multiple params)
             inference_client: Client for inference engine communication
         """
         pass
@@ -403,6 +422,7 @@ class PackedCudaIpcWeightUpdateRequest(WeightUpdateRequest):
 - **Type Safety**: Each transfer strategy has explicit request structure
 - **Clear Contracts**: Sender/receiver know what to expect
 - **Extensibility**: Easy to add new request types for new transfer strategies
+- **Serialization Friendly**: `dtypes` and `shapes` are stored as strings / lists-of-int so the dataclasses can be serialized directly over Ray RPC without needing custom tensor codecs
 
 ### 7. WeightSyncInfo (Data Structure)
 
@@ -571,12 +591,13 @@ class WeightTransferStrategy(ABC):
 │     │   ├─ Broadcast Path:                                                 │
 │     │   │   ├─ For each chunk: Create WeightUpdateRequest                 │
 │     │   │   ├─ inference_client.update_named_weights() [Ray RPC]          │
-│     │   │   └─ torch.distributed.broadcast() [Process Group]               │
+│     │   │   └─ torch.distributed.broadcast() [Model update process group]  │
 │     │   │                                                                   │
 │     │   └─ CUDA IPC Path:                                                  │
 │     │       ├─ For each chunk:                                             │
 │     │       │   ├─ Create IPC handles (reduce_tensor)                     │
-│     │       │   ├─ Gather handles via all_gather_object                   │
+│     │       │   ├─ Gather handles via all_gather_object                    │
+│     │       │   │     (uses default training process group only)          │
 │     │       │   ├─ Create WeightUpdateRequest with IPC handles            │
 │     │       │   └─ inference_client.update_named_weights() [Ray RPC]       │
 │                                                                             │
@@ -626,7 +647,7 @@ class WeightTransferStrategy(ABC):
 ### 3. Batching and Grouping
 - Base `WeightExtractor` has internal flags `_group_by_module` and `_batch_by_threshold` (default False)
 - Subclasses can set flags in `__init__` or override `_should_group_by_module()` / `_should_batch_by_threshold()`
-- Provides helper methods `_group_by_module()` and `_batch_by_threshold()` for subclasses
+- Provides helper methods `_group_by_module()` and `_batch_by_threshold()` for subclasses—if a subclass enables a flag it must either rely on the default helper implementation or override it with backend-specific logic
 - Subclasses can override `extract_weights()` for completely custom behavior (e.g., Megatron threshold buckets)
 - Yielding enables memory-efficient progressive processing
 - Sender sends chunks immediately (already batched by extractor)
@@ -682,7 +703,7 @@ async def initialize_weight_sync(
 
 # Later, when syncing weights:
 async def sync_weights():
-    extractor = FSDPWeightExtractor(cfg)
+    extractor = self._extractor  # instantiate once and reuse to avoid repeated setup
 
     # Extract weights (grouping/batching determined automatically from config)
     weight_chunks_iterator = extractor.extract_weights(model, generator_dtype)
@@ -690,6 +711,8 @@ async def sync_weights():
     # Send chunks (sender iterates and sends immediately - chunks already batched)
     await self._transfer_sender.send_chunks(weight_chunks_iterator, inference_client)
 ```
+
+**Note:** In practice the extractor should be constructed once during worker initialization (e.g., stored as `self._extractor`) and reused across sync invocations to avoid repeatedly traversing model metadata.
 
 ### Inference Side (Ray Actor)
 
@@ -892,7 +915,7 @@ async def handle_weight_update(request_dict: Dict[str, Any]):
    - **Rationale**: Process groups are transfer-specific, encapsulated in sender/receiver implementations
 
 3. **Batching/Thresholding**: Batching and grouping logic lives in the extractor base class.
-   - **Decision**: Base `WeightExtractor` has internal flags `_group_by_module` and `_batch_by_threshold` (default False). Subclasses can set these flags in `__init__` or override `_should_group_by_module()` / `_should_batch_by_threshold()`. Provides helper methods `_group_by_module()` and `_batch_by_threshold()` for subclasses to use.
+   - **Decision**: Base `WeightExtractor` has internal flags `_group_by_module` and `_batch_by_threshold` (default False). Subclasses can set these flags in `__init__` or override `_should_group_by_module()` / `_should_batch_by_threshold()`, and must rely on (or override) the helper methods `_group_by_module()` / `_batch_by_threshold()` when the flags are enabled.
    - **Rationale**: 
      - Grouping/batching logic is reusable across backends
      - Flags are internal (not in public API) but configurable by subclasses
