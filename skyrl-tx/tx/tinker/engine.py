@@ -89,7 +89,7 @@ class AccumulatedGradients:
         new_grad_sum = jax.tree.map(sum_grads_by_adapter, self.grad_sum, lora_grads)
         return AccumulatedGradients(grad_sum=new_grad_sum, counts=new_counts)
 
-    def get_mean(self, adapter_index: int) -> nnx.State:
+    def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter."""
         count = self.counts[adapter_index]
 
@@ -98,7 +98,7 @@ class AccumulatedGradients:
 
         return jax.tree.map(get_adapter_grad, self.grad_sum)
 
-    def reset_adapter(self, adapter_index: int) -> "AccumulatedGradients":
+    def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
         new_counts = self.counts.at[adapter_index].set(0)
 
@@ -322,6 +322,33 @@ class TinkerEngine:
                 in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
                 out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
             )
+
+        # JIT-compiled function to compute full gradients from accumulated grads
+        def compute_full_grads(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            adapter_index: jax.Array,
+        ) -> tuple[AccumulatedGradients, nnx.State]:
+            """Compute full gradient structure and reset accumulated grads."""
+            # Get mean gradients for this adapter
+            adapter_grads = accumulated_grads.get_mean(adapter_index)
+
+            # Expand to full gradient structure
+            def expand_single(lora_param, adapter_grad):
+                full_grads = jnp.zeros_like(lora_param)
+                return full_grads.at[adapter_index].set(adapter_grad)
+
+            full_lora_grads = jax.tree.map(expand_single, lora_params, adapter_grads)
+
+            # Reset accumulated gradients for this adapter
+            new_accumulated_grads = accumulated_grads.reset_adapter(adapter_index)
+
+            return new_accumulated_grads, full_lora_grads
+
+        if self.config.enforce_eager:
+            self._compute_full_grads = compute_full_grads
+        else:
+            self._compute_full_grads = jax.jit(compute_full_grads)
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -729,26 +756,17 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
+        adapter_index = jnp.int32(self.models[model_id].adapter_index)
 
-        # Get accumulated gradients for this adapter
         # Check if we have any gradients accumulated (count > 0)
-        count = self.accumulated_grads.counts[adapter_index]
-        if count == 0:
+        if self.accumulated_grads.counts[adapter_index] == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
-        # Average over all examples for this adapter
-        adapter_grads = self.accumulated_grads.get_mean(adapter_index)
-
-        # Create full gradient structure with zeros for all adapters except this one
-        def expand_adapter_grads(lora_param, adapter_grad):
-            # Create zeros for all adapters with the same shape as lora_param
-            full_grads = jnp.zeros_like(lora_param)
-            # Set gradients for this specific adapter
-            return full_grads.at[adapter_index].set(adapter_grad)
-
-        full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
+        # JIT-compiled: compute full gradients and reset accumulated grads
+        self.accumulated_grads, full_lora_grads = self._compute_full_grads(
+            self.accumulated_grads, self.lora_params, adapter_index
+        )
 
         # Apply optimizer update with hyperparameters from the request
         hp = self.optimizers[model_id].opt_state.hyperparams
@@ -757,9 +775,6 @@ class TinkerEngine:
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
         self.optimizers[model_id].update(self.lora_params, full_lora_grads)
-
-        # Clear accumulated gradients for this adapter
-        self.accumulated_grads = self.accumulated_grads.reset_adapter(adapter_index)
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
