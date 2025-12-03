@@ -421,8 +421,7 @@ class WeightsInfoRequest(BaseModel):
 
 class WeightsInfoResponse(BaseModel):
     """Minimal information for loading public checkpoints."""
-
-# from: https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/weights_info_response.py
+    # from: https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/weights_info_response.py
     base_model: str
     is_lora: bool
     lora_rank: int | None = None
