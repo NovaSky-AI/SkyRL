@@ -374,6 +374,7 @@ def init_inference_engines(
     gpu_memory_utilization=0.6,
     num_inference_engines=1,
     sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights
+    engine_init_kwargs={},
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -404,6 +405,7 @@ def init_inference_engines(
         tokenizer=tokenizer,
         backend=backend,
         sleep_level=sleep_level,
+        engine_init_kwargs=engine_init_kwargs,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:

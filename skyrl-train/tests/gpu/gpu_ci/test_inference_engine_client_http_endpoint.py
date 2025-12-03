@@ -12,6 +12,7 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_infere
 
 import json
 import pytest
+from pathlib import Path
 import time
 import asyncio
 from http import HTTPStatus
@@ -761,3 +762,99 @@ def test_http_endpoint_error_handling():
 
     finally:
         ray.shutdown()
+
+
+@pytest.mark.vllm
+def test_http_endpoint_custom_chat_template():
+    """
+    Test custom chat template for chat completion, especially for Qwen3 accumulating thinking.
+    """
+    qwen3_model = "Qwen/Qwen3-0.6B"
+    tokenizer = AutoTokenizer.from_pretrained(qwen3_model)
+    for acc_thinking in [True, False]:
+        try:
+            # Ensure no leftover Ray context from earlier fixtures or tests.
+            if ray.is_initialized():
+                ray.shutdown()
+                time.sleep(5)
+            cfg = get_test_actor_config(num_inference_engines=1)
+            cfg.trainer.policy.model.path = qwen3_model
+            cfg.trainer.placement.colocate_all = True
+            cfg.generator.weight_sync_backend = "nccl"
+            cfg.trainer.strategy = "fsdp2"
+
+            template_path = Path(__file__).parent / "qwen3_acc_thinking.jinja2"
+            assert template_path.exists(), f"Template path does not exist: {template_path}"
+
+            if acc_thinking:
+                engine_init_kwargs = {"custom_chat_template_chat_completion_path": template_path}
+            else:
+                engine_init_kwargs = {}
+
+            client, _ = init_inference_engines(
+                cfg=cfg,
+                use_local=True,
+                async_engine=cfg.generator.async_engine,
+                tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+                colocate_all=cfg.trainer.placement.colocate_all,
+                backend="vllm",
+                model=qwen3_model,
+                num_inference_engines=cfg.generator.num_inference_engines,
+                sleep_level=1,  # since we do not explicitly sync weights
+                engine_init_kwargs=engine_init_kwargs,
+            )
+
+            from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+                serve,
+                wait_for_server_ready,
+            )
+
+            # Start server in background thread
+            def run_server():
+                serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+            server_thread = threading.Thread(target=run_server, daemon=True)
+            server_thread.start()
+
+            # Wait for server to be ready
+            wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+
+            base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": "Hello",
+                },
+                {
+                    "role": "assistant",
+                    "content": "<think>Thinking...</think>Hello",
+                },
+                {
+                    "role": "user",
+                    "content": "Hello",
+                },
+            ]
+            response = requests.post(
+                f"{base_url}/v1/chat/completions",
+                json={"model": qwen3_model, "messages": messages, "prompt_logprobs": 1},
+            )
+            print(f"response: {response.json()}")
+
+            prompt_logprobs = response.json()["prompt_logprobs"]  # List of dicts, one per prompt token
+            prompt_token_ids = []
+            for logprob in prompt_logprobs:
+                if logprob is not None:
+                    prompt_token_ids.append(int(list(logprob.keys())[0]))
+            
+            prompt_decoded = tokenizer.decode(prompt_token_ids)
+            print(f"prompt decoded: {prompt_decoded}")
+
+            # This will fail if custom_chat_template_chat_completion_path is None
+            if acc_thinking:
+                assert "<think>" in prompt_decoded
+            else:
+                assert "<think>" not in prompt_decoded
+
+        finally:
+            ray.shutdown()

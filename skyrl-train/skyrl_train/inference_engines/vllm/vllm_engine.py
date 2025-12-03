@@ -370,6 +370,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         # TODO (erictang000): potentially enable log requests for a debugging mode
+        custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
         stat_loggers = [V1LoggingStatLoggerFixed]
         engine_args = vllm.AsyncEngineArgs(**kwargs)
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
@@ -382,6 +383,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
         models = OpenAIServingModels(engine, model_config, base_model_paths)
+
+        # TODO(Charlie): adding custom chat template for chat completion. Hacky!
+        if custom_chat_template_path:
+            with open(custom_chat_template_path, "r") as f:
+                custom_chat_template_content = f.read()
+            logger.info(f"Initializing OpenAIServingChat with custom_chat_template read from: {custom_chat_template_path}")
+        else:
+            custom_chat_template_content = None
+
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
         self.openai_serving_chat = OpenAIServingChat(
@@ -390,7 +400,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             models=models,
             response_role="assistant",
             request_logger=None,
-            chat_template=None,
+            chat_template=custom_chat_template_content,
             chat_template_content_format="auto",
         )
 
@@ -520,6 +530,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+
+        # TODO(Charlie): Hacky! We are hijacking to update the sampling params.
+        # Can we allow Harbor to use customized sampling params?
+        body.update({
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+            "min_p": 0.0,
+        })
 
         # TODO(Charlie): remove this logging
         # all_stuff = {{k}: {v} for k, v in body.items() if k != 'messages'}
