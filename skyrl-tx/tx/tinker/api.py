@@ -415,6 +415,19 @@ class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
 
 
+class WeightsInfoRequest(BaseModel):
+    tinker_path: str
+
+
+class WeightsInfoResponse(BaseModel):
+    """Minimal information for loading public checkpoints."""
+
+    """ from: https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/weights_info_response.py"""
+    base_model: str
+    is_lora: bool
+    lora_rank: int | None = None
+
+
 @app.get("/api/v1/healthz", response_model=HealthResponse)
 async def healthz():
     """Checks if the API server is ready."""
@@ -865,6 +878,44 @@ async def list_checkpoints_models(
 ):
     """Just to be compatible with tinker SDK"""
     return await list_checkpoints(unique_id=unique_id, session=session)
+
+
+@app.post("/api/v1/weights_info", response_model=WeightsInfoResponse)
+async def get_weights_info(request: WeightsInfoRequest, session: AsyncSession = Depends(get_session)):
+    """Get information about weights/checkpoint from a tinker path."""
+    path = types.TinkerPath.parse(request.tinker_path)
+
+    if not path or path.kind != "weights":
+        raise HTTPException(
+            status_code=400, detail="Invalid tinker path format. Expected: tinker://model_id/weights/checkpoint_id"
+        )
+
+    model_id = path.primary_id
+    checkpoint_id = path.secondary_id
+
+    # Get model info (this will raise 404 if model doesn't exist)
+    model = await get_model(session, model_id)
+
+    # Validate checkpoint exists and is completed
+    checkpoint_db = await session.get(CheckpointDB, (model_id, checkpoint_id, types.CheckpointType.TRAINING))
+    if not checkpoint_db:
+        raise HTTPException(
+            status_code=404, detail=f"Training checkpoint not found: {model_id}/weights/{checkpoint_id}"
+        )
+
+    if checkpoint_db.status == CheckpointStatus.PENDING:
+        raise HTTPException(status_code=425, detail="Checkpoint is still being created")
+
+    if checkpoint_db.status == CheckpointStatus.FAILED:
+        raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
+
+    lora_config = types.LoraConfig.model_validate(model.lora_config)
+
+    return WeightsInfoResponse(
+        base_model=model.base_model,
+        is_lora=True,  # SkyRL tx currently only supports LoRA training
+        lora_rank=lora_config.rank,
+    )
 
 
 @app.get("/")
