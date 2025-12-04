@@ -87,13 +87,10 @@ class AccumulatedGradients:
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
-        new_counts = self.counts.at[adapter_index].set(0)
-
-        def reset_grad(g):
-            return g.at[adapter_index].set(0.0)
-
-        new_grad_sum = jax.tree.map(reset_grad, self.grad_sum)
-        return AccumulatedGradients(grad_sum=new_grad_sum, counts=new_counts)
+        return AccumulatedGradients(
+            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            counts=self.counts.at[adapter_index].set(0),
+        )
 
 
 class TinkerEngine:
