@@ -65,10 +65,10 @@ class AccumulatedGradients:
     @classmethod
     def create(cls, lora_params: nnx.State, max_adapters: int) -> "AccumulatedGradients":
         """Initialize with zeros."""
-        # Create zeros with same structure as lora_params
-        grad_sum = jax.tree.map(lambda x: jnp.zeros_like(x), lora_params)
-        counts = jnp.zeros((max_adapters,), dtype=jnp.int32)
-        return cls(grad_sum=grad_sum, counts=counts)
+        return cls(
+            grad_sum=jax.tree.map(jnp.zeros_like, lora_params),
+            counts=jnp.zeros((max_adapters,), dtype=jnp.int32),
+        )
 
     def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
         """Accumulate gradients and increment counts."""
