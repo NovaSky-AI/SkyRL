@@ -279,6 +279,42 @@ class WeightTransferStrategy(ABC):
 - `CudaIpcTransferStrategy` – builds CUDA IPC sender/receiver, emits `EmptyWeightSyncInitInfo`.
 - `PackedCudaIpcTransferStrategy` – CUDA IPC variant that packs tensors before transfer.
 
+## 5. File Structure
+
+After the migration is complete, the file structure will be:
+
+```
+skyrl_train/
+├── weight_sync/                         # Minimal abstraction module (4 files)
+│   ├── __init__.py                     # Public API exports
+│   ├── base.py                         # All interfaces + data structures
+│   ├── broadcast_strategy.py           # Strategy + sender + receiver
+│   ├── cuda_ipc_strategy.py           # Strategy + sender + receiver
+│   └── packed_cuda_ipc_strategy.py    # Strategy + sender + receiver
+│
+├── workers/
+│   ├── worker.py                       # Base Worker (modified)
+│   │   └── initialize_weight_sync()   # New method
+│   ├── fsdp/
+│   │   └── fsdp_worker.py             # FSDPWeightExtractor lives here
+│   ├── megatron/
+│   │   └── megatron_worker.py         # MegatronWeightExtractor lives here
+│   └── deepspeed/
+│       └── deepspeed_worker.py        # DeepSpeedWeightExtractor lives here
+│
+├── inference_engines/
+│   ├── inference_engine_client.py      # Modified for new coordination
+│   ├── vllm/
+│   │   └── vllm_engine.py             # VLLMWeightLoader lives here
+│   ├── sglang/
+│   │   └── sglang_engine.py           # SGLangWeightLoader lives here
+│   └── remote_inference_engine.py      # RemoteWeightLoader lives here
+│
+└── trainer.py                          # Modified controller
+    ├── _create_strategy()              # Strategy factory
+    └── init_weight_sync_state()        # Updated coordination
+```
+
 ## 6. Key Decisions
 - **Strategy factory on controller**
   - *Alternative:* Controller initializes send/receive resources directly or a global manager runs on training actors.
@@ -297,10 +333,35 @@ class WeightTransferStrategy(ABC):
   - *Reason:* Some engines (e.g., vLLM) perform the actual weight loading inside worker subprocesses (`WorkerWrap`). Those subprocesses need to pull tensors on demand. Exposing a pull-based `receive_weights()` on the receiver and letting `WeightLoader.load_weights(receiver, request)` drive the process keeps that flow aligned with existing engine threading models.
 
 ## 7. Migration Plan
-1. **Introduce interfaces** – land abstract classes and data structures; keep adapters for old code paths.
-2. **Implement extractors** – backend-specific `_extract_raw_weights()` plus flag settings for grouping/batching.
-3. **Implement senders** – broadcast and CUDA IPC senders that consume `WeightChunk`s.
-4. **Implement receivers** – inference engines parse new `WeightUpdateRequest` types.
-5. **Implement loaders** – engine-specific load logic extracted into `WeightLoader`s.
-6. **Wire strategy** – controller instantiates `WeightTransferStrategy`; actors call factory methods.
-7. **Cleanup** – remove legacy paths and `NamedWeightsUpdateRequest` once all backends use the new pipeline.
+
+The migration refactors each component layer (extraction → loading → sending → integration) horizontally across all backends. Interfaces are introduced on-demand, and optimizations (grouping/batching/packing) are preserved throughout.
+
+### Overview
+
+**Phase 1: Refactor Weight Extraction**
+- Introduce `WeightExtractor` interface and `WeightChunk` dataclass
+- Add extractor implementations in each worker backend (FSDP, Megatron, DeepSpeed)
+- Preserve module grouping (FlashRL) and batching (Megatron packing)
+- External APIs unchanged; still produce `NamedWeightsUpdateRequest`
+
+**Phase 2: Refactor Weight Loading and Receiving**
+- Introduce `WeightLoader` interface
+- Add loader implementations in each inference engine (vLLM, SGLang, Remote)
+- Standardize `receive_weights()` async iterator pattern locally
+- Preserve multi-param chunk handling for QKV fusion
+- External APIs unchanged; still accept legacy parameters
+
+**Phase 3: Refactor Weight Sending**
+- Introduce `WeightTransferSender` interface
+- Create strategy files with sender implementations (broadcast, CUDA IPC, packed CUDA IPC)
+- Preserve Megatron packing optimization
+- Workers use senders internally but still produce legacy requests
+
+**Phase 4: Integrate Strategy Interface**
+- Introduce `WeightTransferStrategy`, `WeightTransferReceiver`, typed `WeightUpdateRequest`, `WeightSyncInitInfo`
+- Complete strategy implementations (add receivers, factories)
+- Update controller orchestration (`trainer.py`)
+- Replace legacy `NamedWeightsUpdateRequest` with typed requests
+- Remove legacy helper methods and coordination code
+
+See [migration_plan_detailed.md](./migration_plan_detailed.md) for complete implementation guide with code examples and testing requirements.
