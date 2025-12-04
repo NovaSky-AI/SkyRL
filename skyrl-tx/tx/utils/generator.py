@@ -50,6 +50,7 @@ class DecodeState:
     temperatures: jax.Array
     stop_tokens: jax.Array
     adapter_indices: jax.Array
+    top_k_values: jax.Array
 
     # Updated each iteration:
     kv_cache: KVCache
@@ -78,13 +79,17 @@ class GenerateOutput:
     prompt_logprobs: list[list[float]] | None = None
 
 
-def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
+def batched_sample_token(
+    logits: jax.Array, *, temperatures: jax.Array, top_k_values: jax.Array, sample_keys: jax.Array
+) -> jax.Array:
     """Sample next token per-example using a per-example PRNGKey."""
     temperatures = temperatures[:, None]
     zero_temp_mask = temperatures == 0.0
     scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
+    filtered_logits = jax.vmap(apply_top_k)(scaled_logits, top_k_values)
+
     # Draw one sample per example
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, filtered_logits)
     greedy = jnp.argmax(logits, axis=-1)
     next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
     return next_token
@@ -104,7 +109,9 @@ def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.A
     """Sample next token and compute logprobs, updating the logprobs array."""
     split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(s.logits, temperatures=s.temperatures, sample_keys=sample_keys)
+    next_token = batched_sample_token(
+        s.logits, temperatures=s.temperatures, top_k_values=s.top_k_values, sample_keys=sample_keys
+    )
 
     logprobs = jax.nn.log_softmax(s.logits, axis=-1)
     sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
@@ -149,6 +156,7 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     next_state = DecodeState(
         model=s.model,
         temperatures=s.temperatures,
+        top_k_values=s.top_k_values,
         stop_tokens=s.stop_tokens,
         adapter_indices=s.adapter_indices,
         kv_cache=outputs.kv_cache,
@@ -195,6 +203,7 @@ class GeneratorMixin:
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+        top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
 
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
         # per-request streams will be identical.
@@ -228,6 +237,7 @@ class GeneratorMixin:
         initial_state = DecodeState(
             model=self,
             temperatures=temperatures,
+            top_k_values=top_k_values,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
@@ -283,3 +293,31 @@ class GeneratorMixin:
                 else None
             ),
         )
+
+
+def apply_top_k(logits: jax.Array, k: int) -> jax.Array:
+    """Keep only top-k logits, set rest to -inf.
+
+    Args:
+        logits: Logits tensor of shape [vocab_size]
+        k: Number of top logits to keep. If k <= 0, no filtering is applied.
+
+    Returns:
+        Filtered logits with the same shape.
+    """
+
+    vocab_size = logits.shape[0]
+
+    # Sort logits in descending order
+    sorted_logits = jnp.sort(logits)[::-1]
+
+    # Get the k-th largest value (or smallest if k > vocab_size)
+    # Use maximum(k-1, 0) to handle k=0 case, and minimum to handle k > vocab_size
+    k_index = jnp.clip(k - 1, 0, vocab_size - 1)
+    threshold = sorted_logits[k_index]
+
+    # When k <= 0, we want to keep everything, so set threshold to -inf
+    threshold = jnp.where(k <= 0, -jnp.inf, threshold)
+
+    # Mask out everything below threshold
+    return jnp.where(logits < threshold, -jnp.inf, logits)
