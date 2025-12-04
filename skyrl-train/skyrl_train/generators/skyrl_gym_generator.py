@@ -29,7 +29,7 @@ from skyrl_train.generators.utils import (
 
 
 @dataclass
-class AgentLoopOutput:
+class TrajectoryOutput:
     """Output from a single agent_loop execution."""
 
     response_ids: List[int]
@@ -39,6 +39,13 @@ class AgentLoopOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
+
+
+@dataclass
+class StepWiseOutput:
+    """Output from a single agent_loop execution for step-wise training."""
+
+    step_outputs: List[TrajectoryOutput]
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -108,6 +115,18 @@ class SkyRLGymGenerator(GeneratorInterface):
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
             )
 
+        if self.generator_cfg.step_wise_training:
+            if self.batched:
+                raise ValueError("`step_wise_training` doesn't support `batched=True`")
+
+            if self.custom_chat_template is not None:
+                raise ValueError(
+                    f"`step_wise_training` doesn't support custom chat template, got {generator_cfg.chat_template}"
+                )
+
+            if not self.use_conversation_multi_turn:
+                raise ValueError("`step_wise_training` doesn't support `use_conversation_multi_turn=False`")
+
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
             loop = asyncio.get_running_loop()
@@ -115,7 +134,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
-    async def agent_loop(
+    async def agent_loop_trajectory_wise(
         self,
         prompt: ConversationType,
         env_class: str,
@@ -124,7 +143,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-    ) -> AgentLoopOutput:
+    ) -> TrajectoryOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
 
@@ -316,7 +335,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
 
-        return AgentLoopOutput(
+        return TrajectoryOutput(
             response_ids=response_ids,
             reward=reward_out,
             stop_reason=stop_reason,
@@ -325,6 +344,162 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs=rollout_logprobs,
             env_metrics=env_metrics,
         )
+
+    async def agent_loop_step_wise(
+        self,
+        prompt: ConversationType,
+        env_class: str,
+        env_extras: Dict[str, Any],
+        max_tokens: int,
+        max_input_length: int,
+        sampling_params: Optional[Dict[str, Any]] = None,
+        trajectory_id: Optional[TrajectoryID] = None,
+    ) -> StepWiseOutput:
+        """
+        Multi-turn generation loop that executes a single trajectory.
+        Provides outputs per step in the trajectory.
+
+        Args:
+            prompt: ConversationType
+            env_extras: Dict[str, Any]
+            max_tokens: int
+            max_input_length: int
+            sampling_params: Optional[Dict[str, Any]]
+        Returns:
+            response_ids: List[int]
+            reward: Union[float, List[float]]
+            stop_reason: str
+            loss_mask: List[int]
+            prompt_token_ids: List[int]
+            rollout_logprobs: Optional[List[float]]
+        """
+
+        retokenize_chat_history = self.generator_cfg.get("retokenize_chat_history", False)
+        env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
+        env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+
+        # Create a new environment instance
+        env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
+
+        session_id = (
+            f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
+        )
+        done = False
+
+        # Need copy here since the prompt is a list of messages and we are going to modify it.
+        chat_history = copy.deepcopy(prompt)
+
+        # init() returns the first prompt to be given to the model, and optional metadata dict
+        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+
+        input_ids = self.tokenizer.apply_chat_template(
+            chat_history,
+            add_generation_prompt=True,
+            tokenize=True,
+            **self.generator_cfg.chat_template_kwargs,
+        )
+
+        # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
+        per_step_rewards: List[Tuple[float, int]] = []
+        step_id = 0
+        agent_loop_output = StepWiseOutput(step_outputs=[])
+        while not done:
+
+            if retokenize_chat_history:
+                input_ids = self.tokenizer.apply_chat_template(
+                    chat_history,
+                    add_generation_prompt=True,
+                    # chat_template=None,
+                    tokenize=True,
+                    **self.generator_cfg.chat_template_kwargs,
+                )
+
+            current_prompt_length = len(input_ids)
+            engine_input = InferenceEngineInput(
+                prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
+            )
+            engine_output = await self.inference_engine_client.generate(engine_input)
+            output = engine_output["responses"][0]
+            output_ids = engine_output["response_ids"][0]
+            stop_reason = engine_output["stop_reasons"][0]
+            response_logprobs = engine_output.get("response_logprobs", None)
+            if response_logprobs is not None:
+                response_logprobs = response_logprobs[0]
+
+            # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
+            # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
+            current_sampling_params = (
+                sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+            )
+            stop_strs = current_sampling_params.get("stop", None)
+            added_eos = False
+            if (
+                stop_strs is not None
+                and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
+                and self.use_conversation_multi_turn
+            ):
+                if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                    added_eos = True
+                    output_ids.append(self.tokenizer.eos_token_id)
+
+            # 2. Environment step
+            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            new_obs = env_step_output["observations"]
+            step_reward: float = env_step_output["reward"]
+            done = env_step_output["done"]
+
+            response_end_idx = len(output_ids) - 1
+
+            # Follow multi-turn chat history format.
+            input_ids, loss_mask, _ = self._get_next_input_ids_with_multiturn_chat_template(
+                input_ids, [], output_ids, new_obs, done, added_eos
+            )
+            if response_logprobs is not None:
+                response_logprobs += [0] * (len(loss_mask) - len(response_logprobs))
+
+            if retokenize_chat_history:
+                # update the chat history
+                chat_history = self._update_chat_history(chat_history, output, new_obs)
+
+            per_step_rewards.append((step_reward, response_end_idx))
+            response_ids = copy.deepcopy(input_ids[current_prompt_length:])
+            per_step_output = TrajectoryOutput(
+                response_ids=response_ids,
+                reward=step_reward,
+                loss_mask=copy.deepcopy(loss_mask),
+                prompt_ids=copy.deepcopy(input_ids[:current_prompt_length]),
+                rollout_logprobs=response_logprobs,
+                stop_reason=stop_reason,
+                env_metrics=env.get_metrics() if done else {},
+            )
+
+            assert len(per_step_output.loss_mask) == len(
+                per_step_output.response_ids
+            ), f"loss_mask and response_ids should have the same length, got {len(per_step_output.loss_mask)=} and {len(per_step_output.response_ids)=}"
+            if per_step_output.rollout_logprobs is not None:
+                assert len(per_step_output.rollout_logprobs) == len(
+                    per_step_output.response_ids
+                ), f"rollout_logprobs and response_ids should have the same length, got {len(per_step_output.rollout_logprobs)=} and {len(per_step_output.response_ids)=}"
+
+            if len(input_ids) > max_input_length:
+                stop_reason = "length"
+                step_id += 1
+                per_step_output.stop_reason = stop_reason
+                agent_loop_output.step_outputs.append(per_step_output)
+                break
+
+            step_id += 1
+            agent_loop_output.step_outputs.append(per_step_output)
+
+        for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
+            per_token_reward = [0.0] * len(per_step_output.response_ids)
+            per_token_reward[resp_end_idx] = float(reward)
+            # in-place update to per-token reward
+            per_step_output.reward = per_token_reward
+
+        await self._run_in_executor_if_available(env.close)
+
+        return agent_loop_output
 
     async def generate_batched(
         self,
@@ -442,8 +617,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Async agent loop to generate trajectories in parallel.
         tasks = []
         for i in range(len(prompts)):
+            agent_loop_func = (
+                self.agent_loop_step_wise if self.generator_cfg.step_wise_training else self.agent_loop_trajectory_wise
+            )
             tasks.append(
-                self.agent_loop(
+                agent_loop_func(
                     prompts[i],
                     env_classes[i],
                     env_extras[i],
@@ -462,13 +640,42 @@ class SkyRLGymGenerator(GeneratorInterface):
             disable=disable_tqdm,
         )
 
-        responses = [output.response_ids for output in all_outputs]
-        rewards = [output.reward for output in all_outputs]
-        stop_reasons = [output.stop_reason for output in all_outputs]
-        loss_masks = [output.loss_mask for output in all_outputs]
-        prompt_token_ids = [output.prompt_ids for output in all_outputs]
-        env_metrics = [output.env_metrics for output in all_outputs]
+        if self.generator_cfg.step_wise_training:
+            responses = sum(
+                [[step_output.response_ids for step_output in output.step_outputs] for output in all_outputs], []
+            )
+            rewards = sum([[step_output.reward for step_output in output.step_outputs] for output in all_outputs], [])
+            stop_reasons = sum(
+                [[step_output.stop_reason for step_output in output.step_outputs] for output in all_outputs], []
+            )
+            loss_masks = sum(
+                [[step_output.loss_mask for step_output in output.step_outputs] for output in all_outputs], []
+            )
+            prompt_token_ids = sum(
+                [[step_output.prompt_ids for step_output in output.step_outputs] for output in all_outputs], []
+            )
+            env_metrics = sum(
+                [[step_output.env_metrics for step_output in output.step_outputs] for output in all_outputs], []
+            )
+            is_last_step = sum([[False] * (len(output.step_outputs) - 1) + [True] for output in all_outputs], [])
+            out_trajectory_ids = sum(
+                [
+                    [trajectory_id] * len(output.step_outputs)
+                    for output, trajectory_id in zip(all_outputs, trajectory_ids)
+                ],
+                [],
+            )
+        else:
+            responses = [output.response_ids for output in all_outputs]
+            rewards = [output.reward for output in all_outputs]
+            stop_reasons = [output.stop_reason for output in all_outputs]
+            loss_masks = [output.loss_mask for output in all_outputs]
+            prompt_token_ids = [output.prompt_ids for output in all_outputs]
+            env_metrics = [output.env_metrics for output in all_outputs]
+            is_last_step = None
+            out_trajectory_ids = None
 
+        breakpoint()
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
             # TODO: this might have to change when we support logprobs for sglang
@@ -477,7 +684,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
 
         if get_logprobs:
-            rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
+            if self.generator_cfg.step_wise_training:
+                rollout_logprobs = sum(
+                    [[step_output.rollout_logprobs for step_output in output.step_outputs] for output in all_outputs],
+                    [],
+                )
+            else:
+                rollout_logprobs = [output.rollout_logprobs for output in all_outputs]
         else:
             rollout_logprobs = None
 
@@ -498,6 +711,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs,
+            "trajectory_ids": out_trajectory_ids,
+            "is_last_step": is_last_step,
         }
 
         return generator_output

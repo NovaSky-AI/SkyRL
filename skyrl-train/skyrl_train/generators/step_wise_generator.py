@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from tqdm.asyncio import tqdm
 
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, AgentLoopOutput
+from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, TrajectoryOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -60,7 +60,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-    ) -> List[AgentLoopOutput]:
+    ) -> List[TrajectoryOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
         Provides outputs per step in the trajectory.
@@ -107,7 +107,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
         step_id = 0
-        per_step_outputs: List[AgentLoopOutput] = []
+        per_step_outputs: List[TrajectoryOutput] = []
         while not done:
 
             if retokenize_chat_history:
@@ -168,7 +168,7 @@ class StepWiseGenerator(SkyRLGymGenerator):
 
             per_step_rewards.append((step_reward, response_end_idx))
             response_ids = copy.deepcopy(input_ids[current_prompt_length:])
-            per_step_output = AgentLoopOutput(
+            per_step_output = TrajectoryOutput(
                 response_ids=response_ids,
                 reward=step_reward,
                 loss_mask=copy.deepcopy(loss_mask),
