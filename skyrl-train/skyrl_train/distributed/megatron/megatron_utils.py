@@ -108,6 +108,43 @@ def freeze_moe_router(model):
 
 
 @torch.no_grad()
+def offload_megatron_grads_to_cpu(models):
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            for buffers in model_chunk_all_buffers:
+                for buffer in buffers:
+                    if buffer.grad_data.storage().size() > 0:
+                        buffer.grad_data_size = buffer.grad_data.storage().size()
+                        buffer.grad_data.storage().resize_(0)
+        else:
+            # we need this for ref module
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None:
+                    param.grad = param.grad.to("cpu", non_blocking=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+@torch.no_grad()
+def load_megatron_grads_to_gpu(models):
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            for buffers in model_chunk_all_buffers:
+                for buffer in buffers:
+                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                    buffer.grad_data.zero_()
+        else:
+            # we need this for ref module
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None:
+                    param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+@torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
     In megatron, the model and optimizer storage are:
@@ -128,33 +165,21 @@ def offload_megatron_model_to_cpu(models):
                         buffer.param_data.storage().resize_(0)
 
                     assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
-
-                    if buffer.grad_data.storage().size() > 0:
-                        # if the grad_data size is already zero, we assume that it is already offloaded
-                        buffer.grad_data_size = buffer.grad_data.storage().size()
-                        buffer.grad_data.storage().resize_(0)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
-                if param.grad is not None:
-                    param.grad = param.grad.to("cpu", non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True):
+def load_megatron_model_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
-                    # sometimes, we don't want to load grad for pure inference
-                    if load_grad:
-                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                        buffer.grad_data.zero_()
-
                     if buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
@@ -164,8 +189,6 @@ def load_megatron_model_to_gpu(models, load_grad=True):
             device_id = torch.cuda.current_device()
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to(device_id, non_blocking=True)
-                if param.grad is not None:
-                    param.grad = param.grad.to(device_id, non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -440,7 +463,6 @@ def remove_left_padding(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     position_ids: torch.Tensor,
-    sequence_parallel: bool = False,
     pre_process: bool = True,
 ):
     """
@@ -455,7 +477,7 @@ def remove_left_padding(
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
     seq_len = seq_lens.max().item()
-    if sequence_parallel:
+    if mpu.get_tensor_model_parallel_world_size() > 1:
         sp_world_size = mpu.get_tensor_model_parallel_world_size()
         pad_size = (sp_world_size - seq_len % sp_world_size) % sp_world_size
         seq_len = seq_len + pad_size
@@ -501,3 +523,58 @@ def recover_left_padding(
 
 def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
+
+
+def broadcast_object_across_pp_ranks(obj):
+    """Broadcast an object across pipeline parallel ranks.
+
+    From Nemo-RL: https://github.com/NVIDIA-NeMo/RL/blob/0a769cc3553a265dd1ca4648de0a7d0b1ad5ece6/nemo_rl/models/policy/megatron_policy_worker.py#L136
+
+    This utility function handles broadcasting an object from the rank that owns it
+    to all other pipeline parallel ranks. If only one rank has the object (non-None),
+    it will be broadcast to all other ranks.
+
+    Args:
+        obj: The object to broadcast. Can be None on ranks that don't own it.
+
+    Returns:
+        The object on all ranks (either the original or the broadcast copy).
+
+    Raises:
+        ValueError: If the object doesn't exist on any pipeline parallel rank.
+    """
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    pp_group = mpu.get_pipeline_model_parallel_group()
+
+    if pp_size == 1:
+        return obj
+
+    # ------------------------------------------------------------------
+    # 1. Gather presence flags from all PP ranks to find the source rank
+    # ------------------------------------------------------------------
+    has_obj = obj is not None
+    obj_flags = [None] * pp_size
+    torch.distributed.all_gather_object(obj_flags, has_obj, group=pp_group)
+
+    # ------------------------------------------------------------------
+    # 2. Identify the owning rank (the only rank with True flag)
+    # ------------------------------------------------------------------
+    src_rank = None  # Rank *inside* the PP group
+    for rank, flag in enumerate(obj_flags):
+        if flag:
+            src_rank = rank
+            break
+
+    if src_rank is None:
+        raise ValueError("Object must exist on at least one PP rank")
+
+    # ------------------------------------------------------------------
+    # 3. Broadcast the object from the source rank to all ranks
+    # ------------------------------------------------------------------
+    # Use broadcast_object_list which is more robust than all_gather_object
+    obj_list = [obj]
+    pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
+    global_src = pp_ranks[src_rank]
+    torch.distributed.broadcast_object_list(obj_list, src=global_src, group=pp_group)
+
+    return obj_list[0]

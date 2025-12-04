@@ -393,8 +393,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
-        responses = truncated_responses
+        prompt_token_ids = self.tokenizer.apply_chat_template(
+            init_prompts,
+            add_generation_prompt=True,
+            tokenize=True,
+        )
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.apply_overlong_filtering:
@@ -402,7 +405,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
+            "response_ids": truncated_responses,
             "rewards": rewards,
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
@@ -412,13 +415,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
         Returns outputs in the same order as the input batch.
         Args:
             input_batch: GeneratorInput
+            disable_tqdm: bool
         Returns:
             GeneratorOutput
         """
@@ -455,6 +459,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             desc="Generating Trajectories",
             miniters=max(1, len(tasks) // 10),
             mininterval=5,
+            disable=disable_tqdm,
         )
 
         responses = [output.response_ids for output in all_outputs]
@@ -624,7 +629,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
-                add_generation_prompt=True,
+                add_generation_prompt=not done,
                 tokenize=True,
                 **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]

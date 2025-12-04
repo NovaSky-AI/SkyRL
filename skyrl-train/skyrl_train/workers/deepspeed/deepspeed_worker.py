@@ -58,7 +58,8 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             model_id_or_path,
             use_flash_attention_2=self.cfg.trainer.flash_attn,
             bf16=self.cfg.trainer.bf16,
-            target_modules=self.cfg.trainer.target_modules,
+            target_modules=self.cfg.trainer.policy.model.lora.target_modules,
+            exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
             ds_config=ds_config,
             sequence_parallel_size=self.sequence_parallel_size,
             use_sample_packing=self.cfg.trainer.use_sample_packing,
@@ -158,7 +159,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         else:
             from torch.multiprocessing.reductions import reduce_tensor
 
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
             current_size = 0
 
             module_to_params: Dict[str, List[str]] = {}
@@ -213,7 +214,13 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                             ):
                                 await inference_engine_client.update_named_weights(weights_update_request)
                                 current_size = 0
-                                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
+                                weights_update_request = {
+                                    "names": [],
+                                    "dtypes": [],
+                                    "shapes": [],
+                                    "extras": [],
+                                    "packed": False,
+                                }
                                 # force collect any sent tensors if possible to be memory efficient
                                 torch.cuda.ipc_collect()
 
@@ -282,7 +289,8 @@ class DeepSpeedCriticWorkerBase(CriticWorkerBase):
             "critic",
             use_flash_attention_2=self.cfg.trainer.flash_attn,
             bf16=self.cfg.trainer.bf16,
-            target_modules=self.cfg.trainer.target_modules,
+            target_modules=self.cfg.trainer.critic.model.lora.target_modules,
+            exclude_modules=self.cfg.trainer.critic.model.lora.exclude_modules,
             ds_config=ds_config,
             value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
             init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,

@@ -498,7 +498,7 @@ class WebBrowser(BaseTool):
                 if content:
                     try:
                         json.loads(content)
-                    except Exception:
+                    except:
                         # extract json from string
                         left = content.find("{")
                         right = content.rfind("}")

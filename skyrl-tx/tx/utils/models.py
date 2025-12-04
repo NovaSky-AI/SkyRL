@@ -38,11 +38,11 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
-    import tx.models
+    import tx.models.qwen3
 
     for architecture in config.architectures or []:
-        if hasattr(tx.models, architecture):
-            return getattr(tx.models, architecture)
+        if hasattr(tx.models.qwen3, architecture):
+            return getattr(tx.models.qwen3, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
@@ -68,6 +68,7 @@ def load_safetensors(
     model: nnx.Module,
     skip_lora: bool = True,
     prefix: str = "",
+    filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
@@ -77,6 +78,8 @@ def load_safetensors(
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
     for path, param in model_params:
+        if filter_fn is not None and not filter_fn(path):
+            continue
         key = get_param_key(path)
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
@@ -93,11 +96,19 @@ def load_safetensors(
     nnx.update(model, nnx.from_flat_state(updates))
 
 
-def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path, prefix: str = "") -> None:
+def save_safetensors(
+    config: PretrainedConfig,
+    model: nnx.Module,
+    filename: Path,
+    prefix: str = "",
+    filter_fn: Callable[[tuple], bool] | None = None,
+) -> None:
     model_params = nnx.to_flat_state(nnx.state(model))
     tensors = {}
     for path, param in model_params:
         if "rngs" in path:
+            continue
+        if filter_fn is not None and not filter_fn(path):
             continue
         key = get_param_key(path, prefix=prefix)
         if "experts" in path:
@@ -112,25 +123,49 @@ def save_safetensors(config: PretrainedConfig, model: nnx.Module, filename: Path
     safetensors.numpy.save_file(tensors, filename)
 
 
-def load_lora_checkpoint(model: nnx.Module, adapter_index: int, checkpoint_path: Path | CloudPath):
+def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
+    if not adapter_config.train_attn and "self_attn" in path:
+        return False
+    if not adapter_config.train_mlp and ("mlp" in path or "experts" in path):
+        return False
+    if not adapter_config.train_unembed and ("embed_tokens" in path or "lm_head" in path):
+        return False
+    return True
+
+
+def load_lora_checkpoint(
+    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, checkpoint_path: Path | CloudPath
+) -> None:
     """Load LoRA adapter weights from a sampling checkpoint into the model.
 
     Args:
         model: The Qwen3ForCausalLM model to load the adapter into
+        adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """
-    _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
+    _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
 
     with download_and_unpack(checkpoint_path) as temp_dir:
-        load_safetensors(temp_dir, model.config, adapter_lora_params, skip_lora=False, prefix="base_model.model.")
-    insert_adapter_state(adapter_index, lora_params, non_lora_params, nnx.to_pure_dict(adapter_lora_params))
+        load_safetensors(
+            temp_dir,
+            model.config,
+            adapter_lora_params,
+            skip_lora=False,
+            prefix="base_model.model.",
+            filter_fn=lambda path: filter_lora(adapter_config, path),
+        )
+    insert_adapter_state(adapter_index, lora_params, adapter_lora_params, adapter_config.rank)
 
 
 def save_lora_checkpoint(
-    model: nnx.Module, adapter_config: LoraConfig, adapter_index: int, output_path: Path | CloudPath
+    model: nnx.Module,
+    base_model_name: str,
+    adapter_config: LoraConfig,
+    adapter_index: int,
+    output_path: Path | CloudPath,
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
@@ -140,17 +175,21 @@ def save_lora_checkpoint(
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
     """
-    _, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
+    _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, non_lora_params)
+    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
 
-    peft_config = peft.LoraConfig(r=adapter_config.rank, lora_alpha=adapter_config.alpha)
+    peft_config = peft.LoraConfig(
+        base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
+    )
+
     with pack_and_upload(output_path) as temp_dir:
         save_safetensors(
             model.config,
             adapter_lora_params,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
+            filter_fn=lambda path: filter_lora(adapter_config, path),
         )
         peft_config.save_pretrained(temp_dir)
 
@@ -169,24 +208,13 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
-def get_rank_path(path: tuple, lora_name: str) -> tuple:
-    "For a given lora_A or lora_B weight in the model or optimizer, return the path to lora_ranks."
-    path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-    model_idx = path.index("model")
-    lora_idx = path.index(lora_name)
-    return (*path[model_idx:lora_idx], "lora_ranks")
-
-
-def extract_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState
-) -> nnx.GraphState:
+@nnx.jit(static_argnames=("adapter_index", "rank"))
+def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank: int) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
 
     def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return p
-        rank = flat_params[get_rank_path(path, path[-2].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
         if path[-2].key == "lora_A":
             return p[adapter_index, ..., :, :rank]
@@ -196,25 +224,23 @@ def extract_adapter_state(
     return jax.tree.map_with_path(extract_state, lora_params)
 
 
+# We need to use nnx.jit here instead of jax.jit so the nnx.update will be handled correctly
+@nnx.jit(static_argnames=("adapter_index", "rank"))
 def insert_adapter_state(
-    adapter_index: int, lora_params: nnx.GraphState, non_lora_params: nnx.GraphState, new_params: dict
-):
-    "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_params)."
-    flat_params = dict(nnx.to_flat_state(non_lora_params))
-    # Convert numeric keys from str to int, see https://github.com/google/flax/pull/4317 (only needed if we load from orbax)
-    new_params = nnx.statelib.restore_int_paths(new_params)
+    adapter_index: int, lora_params: nnx.GraphState, new_params: nnx.GraphState, rank: int
+) -> None:
+    "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_state)."
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
-        if path[-1].key not in {"lora_A", "lora_B"}:
+        if path[-2].key not in {"lora_A", "lora_B"}:
             return new
-        rank = flat_params[get_rank_path(path, path[-1].key)][adapter_index]
         assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        if path[-1].key == "lora_A":
+        if path[-2].key == "lora_A":
             return p.at[adapter_index, ..., :, :rank].set(new)
-        elif path[-1].key == "lora_B":
+        elif path[-2].key == "lora_B":
             return p.at[adapter_index, ..., :rank, :].set(new)
 
-    updated = jax.tree.map_with_path(insert_state, nnx.to_pure_dict(lora_params), new_params)
+    updated = jax.tree.map_with_path(insert_state, lora_params, new_params)
     nnx.update(lora_params, updated)
 
 

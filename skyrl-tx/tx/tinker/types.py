@@ -23,6 +23,9 @@ class RequestType(str, Enum):
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
 
+    # External request that should not be processed by the engine
+    EXTERNAL = "external"
+
 
 class CheckpointType(str, Enum):
     """Type of checkpoint."""
@@ -60,6 +63,9 @@ class AdamParams(BaseModel):
 class LoraConfig(BaseModel):
     rank: int
     alpha: float
+    train_attn: bool = True
+    train_mlp: bool = True
+    train_unembed: bool = False
 
 
 class CreateModelInput(BaseModel):
@@ -166,6 +172,7 @@ class SampleInput(BaseModel):
     sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
+    prompt_logprobs: bool
 
 
 class GeneratedSequence(BaseModel):
@@ -176,7 +183,7 @@ class GeneratedSequence(BaseModel):
 
 class SampleOutput(BaseModel):
     sequences: list[GeneratedSequence]
-    prompt_logprobs: list[float]
+    prompt_logprobs: list[float] | None = None
 
 
 # Metrics tracked in the engine

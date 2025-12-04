@@ -31,6 +31,8 @@ trainer:
           alpha: 16
           dropout: 0
           lora_sync_path: "/tmp/skyrl_lora_sync"
+          target_modules: "all-linear"
+          exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
@@ -65,6 +67,8 @@ trainer:
         rank: 0
         alpha: 16
         dropout: 0
+        target_modules: "all-linear"
+        exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
@@ -92,6 +96,9 @@ trainer:
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
     kl_loss_coef: 0.001
+    # entropy loss
+    use_entropy_loss: false
+    entropy_loss_coef: 0.01
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
@@ -132,7 +139,21 @@ trainer:
     cispo: 
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+  
+  # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
+  fully_async:
+    # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
+    # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
+    # The larger the max_staleness_steps, the more off-policy the training is, and the more throughput we get.
+    max_staleness_steps: 4
 
+    # The number of generation workers to spawn, where each worker works on a group of trajcetories,
+    # being the same prompt repeated `generator.n_samples_per_prompt` times.
+    # It should be >= policy_mini_batch_size to avoid wasted throughput, and <= policy_mini_batch_size * (max_staleness_steps + 1)
+    # since it would be wasted due to capacity control.
+    # The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+    # Default value is: policy_mini_batch_size * (max_staleness_steps / 2 + 1) = 256 * (4 / 2 + 1) = 768
+    num_parallel_generation_workers: 768
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -161,8 +182,8 @@ trainer:
   max_prompt_length: 512
   flash_attn: true
   disable_fast_tokenizer: false
-  target_modules: "all-linear"
-  exclude_modules: null
+  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
+  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -177,6 +198,7 @@ trainer:
   #   factor: 1.0
   #   original_max_position_embeddings: 32768
 
+  step_wise_training: false
 
 generator:
   model_name: ${trainer.policy.model.path}
@@ -202,6 +224,7 @@ generator:
   max_num_batched_tokens: 8192
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
+  fully_sharded_loras: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
@@ -221,7 +244,7 @@ generator:
   # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}
-
+  
   override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:

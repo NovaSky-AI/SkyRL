@@ -2,14 +2,14 @@
 
 import argparse
 import time
-from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from pydantic import BaseModel
-from sqlmodel import create_engine, Session, select, func
+from sqlmodel import create_engine, Session, select, update, func
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -45,40 +45,54 @@ def pad(xs, pad_to: int, *, fill):
     return xs + ([fill] * (pad_to - len(xs)))
 
 
+def pad_batch(sequences: list[list], max_length: int, dtype) -> jax.Array:
+    """Pad a batch of sequences to max_length."""
+    batch_size = len(sequences)
+    padded = np.zeros((batch_size, max_length), dtype=dtype)
+    for i, seq in enumerate(sequences):
+        padded[i, : len(seq)] = seq
+    return jnp.asarray(padded)
+
+
+@jax.tree_util.register_dataclass
 @dataclass
 class AccumulatedGradients:
-    """Stores accumulated gradients for a LoRA adapter."""
+    """Stores accumulated gradients for all LoRA adapters."""
 
-    grad_sum: nnx.State | None = None
-    denominator: int = 0
+    grad_sum: nnx.State
+    counts: jax.Array
 
-    @staticmethod
-    @jax.jit
-    def _accumulate(grad_sum: nnx.State, lora_grads: nnx.State, adapter_index: jax.Array) -> nnx.State:
-        """Extracts gradients and adds them to the sum."""
-        return jax.tree.map(lambda accum, g: accum + g[adapter_index], grad_sum, lora_grads)
+    @classmethod
+    def create(cls, lora_params: nnx.State, max_adapters: int) -> "AccumulatedGradients":
+        """Initialize with zeros."""
+        return cls(
+            grad_sum=jax.tree.map(jnp.zeros_like, lora_params),
+            counts=jnp.zeros((max_adapters,), dtype=jnp.int32),
+        )
 
-    def add(self, lora_grads: nnx.State, adapter_index: jax.Array, count: int) -> None:
-        """Accumulate gradients and increment denominator."""
-        if self.grad_sum is None:
-            self.grad_sum = jax.tree.map(lambda g: g[adapter_index], lora_grads)
-        else:
-            self.grad_sum = self._accumulate(self.grad_sum, lora_grads, adapter_index)
-        self.denominator += count
+    def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
+        """Accumulate gradients and increment counts."""
+        # Count occurrences of each adapter index in the batch
+        batch_counts = jnp.bincount(adapter_indices, length=self.counts.shape[0])
+        return AccumulatedGradients(
+            grad_sum=jax.tree.map(lambda a, b: a + b, self.grad_sum, lora_grads),
+            counts=self.counts + batch_counts,
+        )
 
-    def get_mean(self) -> nnx.State:
-        """Compute mean gradients."""
-        if self.grad_sum is None or self.denominator == 0:
-            raise ValueError("Cannot compute mean: no gradients accumulated")
+    def get_mean(self, adapter_index: jax.Array) -> nnx.State:
+        """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
+        count = self.counts[adapter_index]
         return jax.tree.map(
-            lambda g: g / jnp.asarray(self.denominator, dtype=g.dtype),
+            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
             self.grad_sum,
         )
 
-    def reset(self) -> None:
-        """Clear accumulated gradients."""
-        self.grad_sum = None
-        self.denominator = 0
+    def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
+        """Reset gradients and count for a specific adapter."""
+        return AccumulatedGradients(
+            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            counts=self.counts.at[adapter_index].set(0),
+        )
 
 
 class TinkerEngine:
@@ -94,8 +108,6 @@ class TinkerEngine:
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
-        # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
-        self.accumulated_grads: dict[str, AccumulatedGradients] = {}
         # Store optimizer instances per LoRA adapter (model_id -> optimizer)
         self.optimizers: dict[str, nnx.Optimizer] = {}
         # Metrics recorded in the engine
@@ -123,13 +135,28 @@ class TinkerEngine:
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
-            update_adapter_config(self.model, adapter_index=0, lora_rank=1, lora_alpha=1.0)
+            update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
+
+            # Initialize global accumulated gradients
+            self.accumulated_grads = AccumulatedGradients.create(self.lora_params, self.config.max_lora_adapters)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
         )
 
         self._create_loss_and_grad_fn()
+
+    def _extract_checkpoint_data(self, model_id: str) -> dict:
+        """Extract adapter state and optimizer state for checkpointing."""
+        adapter_index = self.models[model_id].adapter_index
+        rank = self.models[model_id].lora_config.rank
+        lora_weights = extract_adapter_state(adapter_index, self.lora_params, rank)
+        optimizer_state = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), rank)
+        return {
+            "lora_weights": lora_weights,
+            "optimizer_state": optimizer_state,
+            "lora_config": self.models[model_id].lora_config.model_dump(),
+        }
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
@@ -163,14 +190,20 @@ class TinkerEngine:
 
         # Wrap the model forward call to use nnx.remat for gradient checkpointing
         def _model_forward(
-            model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+            graphdef: nnx.GraphDef,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
         ) -> jax.Array:
+            model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
             return output.logits
 
         if self.config.gradient_checkpointing:
-            # policy=None corresponds full activation recomputation
-            _model_forward = nnx.remat(_model_forward, policy=None)
+            # policy=None corresponds to full activation recomputation
+            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -184,8 +217,9 @@ class TinkerEngine:
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+            logits = _model_forward(
+                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
+            )  # [B, T, V]
 
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
@@ -210,14 +244,46 @@ class TinkerEngine:
 
             per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
-            return per_seq_loss.sum(), (logits, per_token_losses)
+            return per_seq_loss.sum(), (target_logprobs, per_token_losses)
 
         # Only differentiate with respect to lora_params (argnums=0)
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
+        def forward_backward_and_accumulate(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array, jax.Array]:
+            """Fused forward-backward-accumulate operation."""
+            # Forward-backward
+            (loss, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
+            )
+            # Accumulate gradients
+            new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
+            return new_accumulated_grads, per_token_losses, target_logprobs, loss
+
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
-            self._loss_and_grad_fn = loss_and_grad_fn
+            self._forward_backward_and_accumulate = forward_backward_and_accumulate
+
         else:
             # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
             lora_shardings = jax.tree.map(
@@ -226,15 +292,37 @@ class TinkerEngine:
             non_lora_shardings = jax.tree.map(
                 lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
             )
+            # Get sharding for AccumulatedGradients
+            accumulated_grads_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.accumulated_grads)
+            )
+
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
-            self._loss_and_grad_fn = jax.jit(
-                loss_and_grad_fn,
-                # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
+
+            # JIT the fused function
+            self._forward_backward_and_accumulate = jax.jit(
+                forward_backward_and_accumulate,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
+                out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                donate_argnames=("accumulated_grads",),
             )
+
+        # JIT-compiled function to compute full gradients and apply optimizer update
+        def compute_grads_and_update(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            optimizer: nnx.Optimizer,
+            adapter_index: jax.Array,
+        ) -> AccumulatedGradients:
+            """Compute full gradients, apply optimizer update, and reset accumulated grads."""
+            optimizer.update(lora_params, accumulated_grads.get_mean(adapter_index))
+            return accumulated_grads.reset_adapter(adapter_index)
+
+        if self.config.enforce_eager:
+            self._compute_grads_and_update = compute_grads_and_update
+        else:
+            self._compute_grads_and_update = nnx.jit(compute_grads_and_update)
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -259,45 +347,6 @@ class TinkerEngine:
             logger.info(f"JIT compilation for {mode} seq_len={seq_len} took {elapsed:.2f}s")
         else:
             yield
-
-    def _forward_backward(
-        self,
-        input_ids: jax.Array,
-        attention_mask: jax.Array,
-        adapter_indices: jax.Array,
-        target_ids: jax.Array,
-        loss_mask: jax.Array,
-        loss_fn_types: jax.Array,
-        sampling_logprobs: jax.Array,
-        advantages: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, nnx.State]:
-        """Run forward+backward on a batch of inputs."""
-        seq_len = input_ids.shape[1]
-        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
-            (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                self.lora_params,
-                self.non_lora_params,
-                input_ids,
-                attention_mask,
-                adapter_indices,
-                target_ids,
-                loss_mask,
-                loss_fn_types,
-                sampling_logprobs,
-                advantages,
-            )
-        logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
-        target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
-        return per_token_losses, target_logprobs, lora_grads
-
-    def _accumulate_grads(self, lora_grads: nnx.State, example_model_ids: list[str]) -> None:
-        """
-        Accumulate adapter-wise gradient sums and example counts.
-        """
-        for model_id, count in Counter(example_model_ids).items():
-            adapter_index = jnp.array(self.models[model_id].adapter_index, dtype=jnp.int32)
-            accumulator = self.accumulated_grads[model_id]
-            accumulator.add(lora_grads, adapter_index, count)
 
     def _filter_valid_requests(
         self,
@@ -407,6 +456,7 @@ class TinkerEngine:
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
+            .where(FutureDB.request_type != types.RequestType.EXTERNAL)
             .order_by(FutureDB.request_id)
         )
         other_futures = session.exec(statement).all()
@@ -421,19 +471,17 @@ class TinkerEngine:
         if adapter_index >= self.config.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
 
-        # Extract LoRA rank and alpha from config
-        lora_rank = request_data.lora_config.rank
-        lora_alpha = request_data.lora_config.alpha
+        # Extract LoRA configuration
+        lora_config = request_data.lora_config
 
         # Validate rank doesn't exceed max
-        if not (0 < lora_rank <= self.config.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.config.max_lora_rank}")
+        if not (0 < lora_config.rank <= self.config.max_lora_rank):
+            raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
 
         self.models[model_id] = types.ModelMetadata(
             adapter_index=adapter_index,
-            lora_config=request_data.lora_config,
+            lora_config=lora_config,
         )
-        self.accumulated_grads[model_id] = AccumulatedGradients()
 
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
@@ -441,11 +489,9 @@ class TinkerEngine:
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Update the adapter's rank and scaling in all LoRA layers
-        update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
+        update_adapter_config(self.model, adapter_index, lora_config)
 
-        logger.info(
-            f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}"
-        )
+        logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, config {lora_config}")
 
         return types.CreateModelOutput(
             model_id=model_id,
@@ -502,19 +548,16 @@ class TinkerEngine:
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
-        input_ids = jnp.array([pad(seq, max_len, fill=0) for seq in all_input_ids], dtype=jnp.int32)
-        target_ids = jnp.array([pad(seq, max_len, fill=0) for seq in all_targets], dtype=jnp.int32)
+        input_ids = pad_batch(all_input_ids, max_len, np.int32)
+        target_ids = pad_batch(all_targets, max_len, np.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
         loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = jnp.array([pad([1] * len(seq), max_len, fill=0) for seq in all_input_ids], dtype=jnp.int32)
-        loss_mask = jnp.array(
-            [pad(all_token_weights[i], max_len, fill=0) for i in range(len(all_token_weights))],
-            dtype=jnp.float32,
-        )
-        sampling_logprobs = jnp.array([pad(seq, max_len, fill=0.0) for seq in all_sampling_logprobs], dtype=jnp.float32)
-        advantages = jnp.array([pad(seq, max_len, fill=0.0) for seq in all_advantages], dtype=jnp.float32)
+        attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
+        loss_mask = pad_batch(all_token_weights, max_len, np.float32)
+        sampling_logprobs = pad_batch(all_sampling_logprobs, max_len, np.float32)
+        advantages = pad_batch(all_advantages, max_len, np.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
@@ -523,22 +566,26 @@ class TinkerEngine:
         # Collect full padded arrays on device, slice after transfer
         token_losses_device = []
         logprobs_device = []
+        seq_len = input_ids.shape[1]
 
-        for mb_start in range(0, total_bs, micro_bs):
-            mb_end = min(mb_start + micro_bs, total_bs)
-            per_token_losses, target_logprobs, lora_grads_mb = self._forward_backward(
-                input_ids[mb_start:mb_end],
-                attention_mask[mb_start:mb_end],
-                adapter_indices[mb_start:mb_end],
-                target_ids[mb_start:mb_end],
-                loss_mask[mb_start:mb_end],
-                loss_fn_types[mb_start:mb_end],
-                sampling_logprobs[mb_start:mb_end],
-                advantages[mb_start:mb_end],
-            )
-            token_losses_device.append(per_token_losses)
-            logprobs_device.append(target_logprobs)
-            self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
+            for mb_start in range(0, total_bs, micro_bs):
+                mb_end = min(mb_start + micro_bs, total_bs)
+                self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
+                    self.accumulated_grads,
+                    self.lora_params,
+                    self.non_lora_params,
+                    input_ids[mb_start:mb_end],
+                    attention_mask[mb_start:mb_end],
+                    adapter_indices[mb_start:mb_end],
+                    target_ids[mb_start:mb_end],
+                    loss_mask[mb_start:mb_end],
+                    loss_fn_types[mb_start:mb_end],
+                    sampling_logprobs[mb_start:mb_end],
+                    advantages[mb_start:mb_end],
+                )
+                token_losses_device.append(per_token_losses)
+                logprobs_device.append(target_logprobs)
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
@@ -600,6 +647,9 @@ class TinkerEngine:
         if not valid_requests:
             return results
 
+        # Computes prompt_logprobs for the whole batch if any request asked for them
+        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in valid_requests.values())
+
         all_prompts = []
         all_sampling_params = []
         all_adapter_indices = []
@@ -618,47 +668,39 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
 
         total_batch_size = len(all_prompts)
         max_batch_size = (
             self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
-
-        # Collect generated sequences across batches
+        # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
+        all_prompt_logprobs: list[list[float]] = []
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
+                adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
+                sampling_params = pad(
+                    all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
+                )
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = jnp.array(
-                    [pad(seq, max_len, fill=0) for seq in batch_prompts],
-                    dtype=jnp.int32,
-                )
-                attention_mask = jnp.array(
-                    [pad([1] * len(seq), max_len, fill=0) for seq in batch_prompts],
-                    dtype=jnp.int32,
-                )
-                adapter_indices = jnp.array(
-                    pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0),
-                    dtype=jnp.int32,
-                )
-                sampling_params = pad(
-                    all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
-                )
+                input_ids = pad_batch(batch_prompts, max_len, np.int32)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
                         input_ids,
                         attention_mask,
                         sampling_params=sampling_params,
-                        adapter_indices=adapter_indices,
+                        adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
+                        prompt_logprobs=needs_prompt_logprobs,
                     )
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
@@ -670,10 +712,16 @@ class TinkerEngine:
                         result.logprobs[:batch_size],
                     )
                 )
+                if needs_prompt_logprobs and result.prompt_logprobs:
+                    all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx in request_batch_slices:
+        for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+            # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
+            prompt_logprobs = (
+                all_prompt_logprobs[start_idx] if request_data.prompt_logprobs and all_prompt_logprobs else None
+            )
+            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
         return results
 
@@ -682,36 +730,28 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
+        adapter_index = jnp.int32(self.models[model_id].adapter_index)
 
-        # Get accumulated gradients for this adapter
-        accumulator = self.accumulated_grads[model_id]
-        if accumulator.grad_sum is None or accumulator.denominator == 0:
+        # Check if we have any gradients accumulated (count > 0)
+        if self.accumulated_grads.counts[adapter_index] == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
-        # Average over all examples for this adapter
-        adapter_grads = accumulator.get_mean()
-
-        # Create full gradient structure with zeros for all adapters except this one
-        def expand_adapter_grads(lora_param, adapter_grad):
-            # Create zeros for all adapters with the same shape as lora_param
-            full_grads = jnp.zeros_like(lora_param)
-            # Set gradients for this specific adapter
-            return full_grads.at[adapter_index].set(adapter_grad)
-
-        full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
-
-        # Apply optimizer update with hyperparameters from the request
+        # Update hyperparameters from the request
         hp = self.optimizers[model_id].opt_state.hyperparams
         hp["learning_rate"][...] = request_data.adam_params.learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
-        self.optimizers[model_id].update(self.lora_params, full_lora_grads)
 
-        # Clear accumulated gradients
-        self.accumulated_grads[model_id].reset()
+        # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
+        with jax.set_mesh(self.mesh):
+            self.accumulated_grads = self._compute_grads_and_update(
+                self.accumulated_grads,
+                self.lora_params,
+                self.optimizers[model_id],
+                adapter_index,
+            )
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
@@ -727,23 +767,23 @@ class TinkerEngine:
         )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
-            restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
+            checkpoint = checkpoints.restore_checkpoint(
+                ckpt_dir=temp_dir, target=self._extract_checkpoint_data(model_id), prefix="checkpoint_"
+            )
 
-        if restored_data is None:
+        if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
         # Validate rank
-        rank = restored_data["lora_config"]["rank"]
+        rank = checkpoint["lora_config"]["rank"]
         if self.models[model_id].lora_config.rank != rank:
             raise ValueError(
                 f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
-        insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"]
-        )
+        insert_adapter_state(adapter_index, self.lora_params, checkpoint["lora_weights"], rank)
+        insert_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), checkpoint["optimizer_state"], rank)
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
@@ -756,23 +796,13 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
-            optimizer_params = extract_adapter_state(
-                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
-            )
-
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
-                    target={
-                        "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                        "optimizer_state": nnx.to_pure_dict(optimizer_params),
-                        "lora_config": self.models[model_id].lora_config.model_dump(),
-                    },
+                    target=self._extract_checkpoint_data(model_id),
                     ckpt_dir=temp_dir,
                     step=0,
                     prefix="checkpoint_",
@@ -797,11 +827,13 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             # Save the LoRA adapter weights and LoRA config as tar.gz
-            save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
+            save_lora_checkpoint(
+                self.model, self.config.base_model, lora_model.lora_config, lora_model.adapter_index, output_path
+            )
 
             logger.info(
                 f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}"
@@ -812,7 +844,7 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> jax.Array:
+    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> list[int]:
         """Load sampler weights for all requests and return full adapter indices array.
 
         Args:
@@ -822,38 +854,43 @@ class TinkerEngine:
             The adapter_indices array for LoRA sampling [batch_size]
             Uses adapter index 0 for base model sampling (no LoRA)
         """
-        adapter_indices_list = []
+        adapter_indices = []
 
         for _, (model_id, request_data) in requests.items():
-            if request_data.base_model is None:
+            base_model = request_data.base_model
+            checkpoint_id = request_data.checkpoint_id
+            if base_model is None:
                 # This code path is for sampling from a LoRA adapter
-                assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
+                assert checkpoint_id != "", "checkpoint_id must be not empty"
 
                 adapter_index = self.models[model_id].adapter_index
-                if self.models[model_id].loaded_checkpoint_id == request_data.checkpoint_id:
+                if self.models[model_id].loaded_checkpoint_id == checkpoint_id:
                     # Load model from RAM
-                    adapter_indices_list.append(adapter_index)
+                    adapter_indices.append(adapter_index)
                 else:
                     # Load model from disk
-                    assert adapter_index not in adapter_indices_list, "Cannot override already used adapter"
+                    assert adapter_index not in adapter_indices, "Cannot override already used adapter"
 
-                    checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+                    checkpoint_path = (
+                        self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+                    )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+                    adapter_config = self.models[model_id].lora_config
+                    load_lora_checkpoint(self.model, adapter_config, adapter_index, checkpoint_path)
 
-                    self.models[model_id].loaded_checkpoint_id = request_data.checkpoint_id
+                    self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
-                    adapter_indices_list.append(adapter_index)
+                    adapter_indices.append(adapter_index)
             else:
                 # This code path is for sampling from the base model
-                if request_data.base_model != self.config.base_model:
+                if base_model != self.config.base_model:
                     raise ValueError(
-                        f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                        f"Requested base_model '{base_model}' does not match engine's base_model '{self.config.base_model}'"
                     )
-                assert model_id == "" and request_data.checkpoint_id == ""
-                adapter_indices_list.append(0)
+                assert model_id == "" and checkpoint_id == ""
+                adapter_indices.append(0)
 
-        return jnp.array(adapter_indices_list, dtype=jnp.int32)
+        return adapter_indices
 
     def _complete_futures(self, results: dict[str, BaseModel]):
         """Helper method to complete multiple futures in the database.
@@ -861,20 +898,19 @@ class TinkerEngine:
         Args:
             results: Dict mapping request_id to result (Pydantic BaseModel)
         """
-        with Session(self.db_engine) as session:
-            for request_id, result in results.items():
-                future = session.get(FutureDB, request_id)
-                assert future is not None, f"Future with request_id {request_id} not found in database"
+        completed_at = datetime.now(timezone.utc)
+        params = [
+            {
+                "request_id": int(request_id),
+                "result_data": result.model_dump(),
+                "status": RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED,
+                "completed_at": completed_at,
+            }
+            for request_id, result in results.items()
+        ]
 
-                result_data = result.model_dump()
-                future.result_data = result_data
-                future.status = (
-                    RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED
-                )
-                future.completed_at = datetime.now(timezone.utc)
-                session.add(future)
-                if future.status == RequestStatus.COMPLETED:
-                    logger.info(f"Completed {future.request_type} request {request_id}")
+        with Session(self.db_engine) as session:
+            session.execute(update(FutureDB), params)
             session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
