@@ -1,11 +1,16 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 from flax import nnx
 import jax
 from jax import numpy as jnp
 
 from tx.utils.models import filter_lora
 from tx.layers.util import Param, prepare_routing
-from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
+
+if TYPE_CHECKING:
+    from tx.models.types import ModelForCausalLM
 
 
 class LoRAMixin:
