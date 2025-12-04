@@ -90,7 +90,7 @@ class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "compute_prompt_logprobs"))
+    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "prompt_logprobs"))
     def _prefill_and_decode(
         model,
         input_ids: jax.Array,
@@ -101,7 +101,7 @@ class GeneratorMixin:
         temperatures: jax.Array,
         rngs: jax.Array,
         stop_tokens: jax.Array,
-        compute_prompt_logprobs: bool = False,
+        prompt_logprobs: bool = False,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
         # Compute positions from attention mask
@@ -112,7 +112,7 @@ class GeneratorMixin:
 
         # Compute prompt logprobs if requested
         prompt_logprobs_array = (
-            compute_prompt_logprobs(outputs.logits, input_ids) if compute_prompt_logprobs else None
+            compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
         )
 
         # Pad KV cache and attention mask
@@ -221,7 +221,7 @@ class GeneratorMixin:
             temperatures,
             rngs,
             stop_tokens,
-            compute_prompt_logprobs=prompt_logprobs,
+            prompt_logprobs=prompt_logprobs,
         )
 
         # Compute stop position: argmax gives first True, returns 0 if none found
