@@ -72,21 +72,12 @@ class AccumulatedGradients:
 
     def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
         """Accumulate gradients and increment counts."""
-        # Update counts
-        # adapter_indices has shape [batch_size]
-        # We want to count occurrences of each adapter index
-        # bincount works for 1D integer arrays
+        # Count occurrences of each adapter index in the batch
         batch_counts = jnp.bincount(adapter_indices, length=self.counts.shape[0])
-        new_counts = self.counts + batch_counts
-
-        # Update grad_sum
-        # lora_grads has shape [max_adapters, ...] and contains the sum of gradients for the batch.
-        # We just need to add it to our accumulator.
-        def sum_grads_by_adapter(current_sum, batch_grads):
-            return current_sum + batch_grads
-
-        new_grad_sum = jax.tree.map(sum_grads_by_adapter, self.grad_sum, lora_grads)
-        return AccumulatedGradients(grad_sum=new_grad_sum, counts=new_counts)
+        return AccumulatedGradients(
+            grad_sum=jax.tree.map(lambda a, b: a + b, self.grad_sum, lora_grads),
+            counts=self.counts + batch_counts,
+        )
 
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter."""
