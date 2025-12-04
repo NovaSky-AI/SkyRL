@@ -111,9 +111,7 @@ class GeneratorMixin:
         outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
 
         # Compute prompt logprobs if requested
-        prompt_logprobs_array = (
-            compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
-        )
+        prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
 
         # Pad KV cache and attention mask
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
@@ -234,9 +232,14 @@ class GeneratorMixin:
         )
 
         # Single device-to-host transfer
-        new_tokens_host, has_stop_host, new_logprobs_host, end_positions_host, prompt_logprobs_host, prompt_lengths_host = jax.device_get(
-            (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths)
-        )
+        (
+            new_tokens_host,
+            has_stop_host,
+            new_logprobs_host,
+            end_positions_host,
+            prompt_logprobs_host,
+            prompt_lengths_host,
+        ) = jax.device_get((new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths))
 
         return GenerateOutput(
             generated_ids=[new_tokens_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
