@@ -765,12 +765,13 @@ class TinkerEngine:
         hp["eps"][...] = request_data.adam_params.eps
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
-        self.accumulated_grads = self._compute_grads_and_update(
-            self.accumulated_grads,
-            self.lora_params,
-            self.optimizers[model_id],
-            adapter_index,
-        )
+        with jax.set_mesh(self.mesh):
+            self.accumulated_grads = self._compute_grads_and_update(
+                self.accumulated_grads,
+                self.lora_params,
+                self.optimizers[model_id],
+                adapter_index,
+            )
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
