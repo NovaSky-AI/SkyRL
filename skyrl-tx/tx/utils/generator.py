@@ -63,6 +63,7 @@ class GenerateOutput:
     generated_ids: list[list[int]]
     stop_reasons: list[str]
     logprobs: list[list[float]]
+    prompt_logprobs: list[list[float]] | None = None
 
 
 def compute_positions(attention_mask: jax.Array) -> jax.Array:
@@ -75,11 +76,21 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
+def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
+    """Compute log probabilities of prompt tokens from prefill logits"""
+    # TODO: Optimize memory usage by avoiding allocation of full vocab dimension.
+    logits_for_prompt = prefill_logits[:, :-1, :]
+    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
+    prompt_tokens = input_ids[:, 1:]
+    prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
+    return prompt_logprobs
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens"))
+    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "compute_prompt_logprobs"))
     def _prefill_and_decode(
         model,
         input_ids: jax.Array,
@@ -90,6 +101,7 @@ class GeneratorMixin:
         temperatures: jax.Array,
         rngs: jax.Array,
         stop_tokens: jax.Array,
+        compute_prompt_logprobs: bool = False,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
         # Compute positions from attention mask
@@ -97,6 +109,11 @@ class GeneratorMixin:
 
         # Prefill: process full prompt
         outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+
+        # Compute prompt logprobs if requested
+        prompt_logprobs_array = (
+            compute_prompt_logprobs(outputs.logits, input_ids) if compute_prompt_logprobs else None
+        )
 
         # Pad KV cache and attention mask
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
@@ -157,7 +174,7 @@ class GeneratorMixin:
         new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)
         is_stop = jnp.swapaxes(is_stop_stacked, 0, 1).squeeze(-1)
 
-        return new_tokens, new_logprobs, is_stop
+        return new_tokens, new_logprobs, is_stop, prompt_logprobs_array
 
     def generate(
         self,
@@ -166,6 +183,7 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
+        prompt_logprobs: bool = False,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
@@ -190,7 +208,10 @@ class GeneratorMixin:
             stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
         stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
-        new_tokens, new_logprobs, is_stop = self._prefill_and_decode(
+        # Capture prompt lengths for prompt_logprobs if requested
+        prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
+
+        new_tokens, new_logprobs, is_stop, prompt_logprobs_array = self._prefill_and_decode(
             self,
             input_ids,
             attention_mask,
@@ -200,6 +221,7 @@ class GeneratorMixin:
             temperatures,
             rngs,
             stop_tokens,
+            compute_prompt_logprobs=prompt_logprobs,
         )
 
         # Compute stop position: argmax gives first True, returns 0 if none found
@@ -212,12 +234,17 @@ class GeneratorMixin:
         )
 
         # Single device-to-host transfer
-        new_tokens_host, has_stop_host, new_logprobs_host, end_positions_host = jax.device_get(
-            (new_tokens, has_stop, new_logprobs, end_positions)
+        new_tokens_host, has_stop_host, new_logprobs_host, end_positions_host, prompt_logprobs_host, prompt_lengths_host = jax.device_get(
+            (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths)
         )
 
         return GenerateOutput(
             generated_ids=[new_tokens_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
             stop_reasons=["stop" if has_stop_host[i] else "length" for i in range(batch_size)],
             logprobs=[new_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            prompt_logprobs=(
+                [prompt_logprobs_host[i, : prompt_lengths_host[i] - 1].tolist() for i in range(batch_size)]
+                if prompt_logprobs
+                else None
+            ),
         )
