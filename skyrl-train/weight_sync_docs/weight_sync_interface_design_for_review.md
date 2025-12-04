@@ -285,12 +285,15 @@ After the migration is complete, the file structure will be:
 
 ```
 skyrl_train/
-├── weight_sync/                         # Minimal abstraction module (4 files)
+├── weight_sync/                         # Minimal abstraction module
 │   ├── __init__.py                     # Public API exports
-│   ├── base.py                         # All interfaces + data structures
-│   ├── broadcast_strategy.py           # Strategy + sender + receiver
-│   ├── cuda_ipc_strategy.py           # Strategy + sender + receiver
-│   └── packed_cuda_ipc_strategy.py    # Strategy + sender + receiver
+│   ├── base.py                         # Data structures (WeightChunk, WeightUpdateRequest, WeightSyncInitInfo)
+│   ├── weight_extractor.py             # WeightExtractor interface
+│   ├── weight_loader.py                # WeightLoader interface
+│   ├── weight_transfer_strategy.py     # WeightTransferStrategy, WeightTransferSender, WeightTransferReceiver interfaces
+│   ├── broadcast_strategy.py           # BroadcastTransferStrategy + sender + receiver
+│   ├── cuda_ipc_strategy.py           # CudaIpcTransferStrategy + sender + receiver
+│   └── packed_cuda_ipc_strategy.py    # PackedCudaIpcTransferStrategy + sender + receiver
 │
 ├── workers/
 │   ├── worker.py                       # Base Worker (modified)
