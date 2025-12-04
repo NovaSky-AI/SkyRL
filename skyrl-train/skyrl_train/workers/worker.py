@@ -33,7 +33,7 @@ from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, TokenBasedBatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -326,16 +326,29 @@ class Worker(DistributedTorchRayActor):
     ) -> TrainingOutputBatch:
         """Run forward pass on the input batch in inference mode.
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
+        This is a wrapper around `_forward_micro_batch` that runs in micro batches.
+        Uses token-based chunking if `max_tokens_per_microbatch` is configured, otherwise
+        falls back to sample-based chunking with `micro_forward_batch_size_per_gpu`.
         """
-        # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
-        # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        # Check if token-based chunking is enabled
+        if self.cfg.trainer.max_tokens_per_microbatch > 0:
+            # Use token-based chunking
+            micro_batch_iterator = TokenBasedBatchIterator(
+                data=data,
+                max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
+            )
+        else:
+            micro_batch_iterator = BatchIterator(
+                data=data,
+                sample_batch_size=self.cfg.trainer.micro_forward_batch_size_per_gpu,
+                drop_last=False,
+            )
 
         outputs = []
-        for micro_batch in micro_batches:
+        for micro_batch in micro_batch_iterator:
             outputs.append(self._forward_micro_batch(micro_batch))
-        output = TrainingOutputBatch.cat(outputs)
+
+        output = micro_batch_iterator.reorder_microbatches(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
         return output
@@ -644,15 +657,22 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
+        if self.cfg.trainer.max_tokens_per_microbatch is not None:
+            dataloader = TokenBasedBatchIterator(
+                train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
+            )
+            accumulation_steps = dataloader.num_microbatches
+        else:
+            dataloader = BatchIterator(
+                train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+            )
+
+            micro_batches_per_mini_batch = (
+                self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+            )
+            # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
+            accumulation_steps = micro_batches_per_mini_batch
 
         status_list = []
         all_metrics = defaultdict(list)
@@ -664,7 +684,9 @@ class PolicyWorkerBase(Worker):
                 desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
+            for local_step, batch in enumerate(pbar):
+                experience = BatchIterator.batch_to_experience(batch)
+                print(f"{experience.sequences=}")
                 status = self.training_step(
                     experience,
                     global_step,
@@ -721,6 +743,7 @@ class PolicyWorkerBase(Worker):
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
+        # NOTE: No need to reorder anything here beacuse we average across the entire batch.
         output.metadata = {"train_status": status_mean}
         return output
 
@@ -943,18 +966,28 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
+
+        # TODO: Move this to the base class since it's common to both policy and critic workers.
+        if self.cfg.trainer.max_tokens_per_microbatch is not None:
+            dataloader = TokenBasedBatchIterator(
+                train_data, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
+            )
+            accumulation_steps = dataloader.num_microbatches
+        else:
+            dataloader = BatchIterator(
+                train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+            )
+
+            # TODO: Make `num_microbatches` a property of the dataloader instead of computing it here.
+            # Ex: see the TokenBasedBatchIterator class.
+            micro_batches_per_mini_batch = (
+                self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+            )
+            # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
+            accumulation_steps = micro_batches_per_mini_batch
 
         torch.cuda.empty_cache()
         self.model.train()
-
-        micro_batches_per_mini_batch = (
-            self.critic_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
 
         all_metrics = defaultdict(list)
         critic_update_steps = 0
@@ -964,7 +997,8 @@ class CriticWorkerBase(Worker):
                 desc=f"Critic Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
+            for local_step, batch in enumerate(pbar):
+                experience = BatchIterator.batch_to_experience(batch)
                 status = self.training_step(experience, global_step, local_step, accumulation_steps)
                 critic_update_steps += 1
 
