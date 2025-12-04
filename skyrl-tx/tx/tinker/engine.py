@@ -81,12 +81,9 @@ class AccumulatedGradients:
 
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter."""
-        count = self.counts[adapter_index]
-
-        def get_adapter_grad(g):
-            return g[adapter_index] / jnp.maximum(1.0, count.astype(g.dtype))
-
-        return jax.tree.map(get_adapter_grad, self.grad_sum)
+        return jax.tree.map(
+            lambda g: g[adapter_index] / self.counts[adapter_index].astype(g.dtype), self.grad_sum
+        )
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
