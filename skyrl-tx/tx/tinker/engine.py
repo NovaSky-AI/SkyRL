@@ -276,10 +276,8 @@ class TinkerEngine:
                 sampling_logprobs,
                 advantages,
             )
-
-            # Accumulate gradients (this inlines the JIT from AccumulatedGradients.add)
+            # Accumulate gradients
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
-
             return new_accumulated_grads, per_token_losses, target_logprobs, loss
 
         if self.config.enforce_eager:
@@ -739,7 +737,7 @@ class TinkerEngine:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
-        # Update hyperparameters from the request (mutates in-place before JIT call)
+        # Update hyperparameters from the request
         hp = self.optimizers[model_id].opt_state.hyperparams
         hp["learning_rate"][...] = request_data.adam_params.learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
