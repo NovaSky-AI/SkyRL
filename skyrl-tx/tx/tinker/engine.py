@@ -80,9 +80,11 @@ class AccumulatedGradients:
         )
 
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
-        """Compute mean gradients for a specific adapter."""
+        """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
+        count = self.counts[adapter_index]
         return jax.tree.map(
-            lambda g: g[adapter_index] / self.counts[adapter_index].astype(g.dtype), self.grad_sum
+            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
+            self.grad_sum,
         )
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
@@ -315,23 +317,8 @@ class TinkerEngine:
             adapter_index: jax.Array,
         ) -> AccumulatedGradients:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
-            # Get mean gradients for this adapter
-            adapter_grads = accumulated_grads.get_mean(adapter_index)
-
-            # Expand to full gradient structure
-            def expand_single(lora_param, adapter_grad):
-                full_grads = jnp.zeros_like(lora_param)
-                return full_grads.at[adapter_index].set(adapter_grad)
-
-            full_lora_grads = jax.tree.map(expand_single, lora_params, adapter_grads)
-
-            # Apply optimizer update (mutates lora_params and optimizer in place)
-            optimizer.update(lora_params, full_lora_grads)
-
-            # Reset accumulated gradients for this adapter
-            new_accumulated_grads = accumulated_grads.reset_adapter(adapter_index)
-
-            return new_accumulated_grads
+            optimizer.update(lora_params, accumulated_grads.get_mean(adapter_index))
+            return accumulated_grads.reset_adapter(adapter_index)
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
