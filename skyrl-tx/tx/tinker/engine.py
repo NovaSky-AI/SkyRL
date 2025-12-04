@@ -307,6 +307,7 @@ class TinkerEngine:
                 forward_backward_and_accumulate,
                 in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
                 out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                donate_argnames=("accumulated_grads",),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
