@@ -322,13 +322,14 @@ class TinkerEngine:
                 out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
             )
 
-        # JIT-compiled function to compute full gradients from accumulated grads
-        def compute_full_grads(
+        # JIT-compiled function to compute full gradients and apply optimizer update
+        def compute_grads_and_update(
             accumulated_grads: AccumulatedGradients,
             lora_params: nnx.State,
+            optimizer: nnx.Optimizer,
             adapter_index: jax.Array,
-        ) -> tuple[AccumulatedGradients, nnx.State]:
-            """Compute full gradient structure and reset accumulated grads."""
+        ) -> AccumulatedGradients:
+            """Compute full gradients, apply optimizer update, and reset accumulated grads."""
             # Get mean gradients for this adapter
             adapter_grads = accumulated_grads.get_mean(adapter_index)
 
@@ -339,15 +340,18 @@ class TinkerEngine:
 
             full_lora_grads = jax.tree.map(expand_single, lora_params, adapter_grads)
 
+            # Apply optimizer update (mutates lora_params and optimizer in place)
+            optimizer.update(lora_params, full_lora_grads)
+
             # Reset accumulated gradients for this adapter
             new_accumulated_grads = accumulated_grads.reset_adapter(adapter_index)
 
-            return new_accumulated_grads, full_lora_grads
+            return new_accumulated_grads
 
         if self.config.enforce_eager:
-            self._compute_full_grads = compute_full_grads
+            self._compute_grads_and_update = compute_grads_and_update
         else:
-            self._compute_full_grads = jax.jit(compute_full_grads)
+            self._compute_grads_and_update = nnx.jit(compute_grads_and_update)
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -762,18 +766,20 @@ class TinkerEngine:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
-        # JIT-compiled: compute full gradients and reset accumulated grads
-        self.accumulated_grads, full_lora_grads = self._compute_full_grads(
-            self.accumulated_grads, self.lora_params, adapter_index
-        )
-
-        # Apply optimizer update with hyperparameters from the request
+        # Update hyperparameters from the request (mutates in-place before JIT call)
         hp = self.optimizers[model_id].opt_state.hyperparams
         hp["learning_rate"][...] = request_data.adam_params.learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
-        self.optimizers[model_id].update(self.lora_params, full_lora_grads)
+
+        # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
+        self.accumulated_grads = self._compute_grads_and_update(
+            self.accumulated_grads,
+            self.lora_params,
+            self.optimizers[model_id],
+            adapter_index,
+        )
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
