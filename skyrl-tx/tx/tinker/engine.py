@@ -114,7 +114,9 @@ class TinkerEngine:
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
-        base_config = PretrainedConfig.from_pretrained(self.config.base_model)
+        base_model_path = Path(self.config.base_model).expanduser()
+        base_model_source = str(base_model_path) if base_model_path.exists() else self.config.base_model
+        base_config = PretrainedConfig.from_pretrained(base_model_source)
         self.model_config = Qwen3Config(
             base_config,
             max_lora_adapters=self.config.max_lora_adapters,
@@ -124,8 +126,12 @@ class TinkerEngine:
 
         model_class = get_model_class(self.model_config)
 
-        # Download model weights from HuggingFace
-        checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
+        # Resolve model weights: use local path if it exists, otherwise download from HuggingFace
+        if base_model_path.exists():
+            checkpoint_path = str(base_model_path.resolve())
+            logger.info(f"Using local base model at {checkpoint_path}")
+        else:
+            checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
