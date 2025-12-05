@@ -17,7 +17,6 @@ from flax.training import checkpoints
 
 
 import optax
-from huggingface_hub import snapshot_download
 from transformers import PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -35,6 +34,7 @@ from tx.utils.models import (
     extract_adapter_state,
     insert_adapter_state,
     round_up_seq_len,
+    resolve_model_path,
 )
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
@@ -114,9 +114,8 @@ class TinkerEngine:
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
-        base_model_path = Path(self.config.base_model).expanduser()
-        base_model_source = str(base_model_path) if base_model_path.exists() else self.config.base_model
-        base_config = PretrainedConfig.from_pretrained(base_model_source)
+        checkpoint_path = resolve_model_path(self.config.base_model)
+        base_config = PretrainedConfig.from_pretrained(checkpoint_path)
         self.model_config = Qwen3Config(
             base_config,
             max_lora_adapters=self.config.max_lora_adapters,
@@ -125,13 +124,6 @@ class TinkerEngine:
         )
 
         model_class = get_model_class(self.model_config)
-
-        # Resolve model weights: use local path if it exists, otherwise download from HuggingFace
-        if base_model_path.exists():
-            checkpoint_path = str(base_model_path.resolve())
-            logger.info(f"Using local base model at {checkpoint_path}")
-        else:
-            checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
