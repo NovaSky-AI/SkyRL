@@ -223,13 +223,12 @@ class GeneratorMixin:
         )
 
         # Compute stop position: argmax gives first True, returns 0 if none found
-        has_stop = jnp.any(is_stop, axis=1)
+        max_tokens = jnp.array([sp.max_tokens for sp in sampling_params])
         first_stop_idx = jnp.argmax(is_stop, axis=1)
-        end_positions = jnp.where(
-            has_stop,
-            first_stop_idx + 1,  # Include the stop token
-            jnp.array([sp.max_tokens for sp in sampling_params]),
-        )
+        stop_pos = first_stop_idx + 1  # Include the stop token
+        # Only count as stopped if stop token found within max_tokens limit
+        has_stop = jnp.any(is_stop, axis=1) & (stop_pos <= max_tokens)
+        end_positions = jnp.where(has_stop, stop_pos, max_tokens)
 
         # Single device-to-host transfer
         (
