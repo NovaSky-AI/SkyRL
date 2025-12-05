@@ -222,10 +222,9 @@ class GeneratorMixin:
             prompt_logprobs=prompt_logprobs,
         )
 
-        # Compute stop position: argmax gives first True, returns 0 if none found
         max_tokens = jnp.array([sp.max_tokens for sp in sampling_params])
-        first_stop_idx = jnp.argmax(is_stop, axis=1)
-        stop_pos = first_stop_idx + 1  # Include the stop token
+        # Compute stop position, include the stop token
+        stop_pos = jnp.argmax(is_stop, axis=1) + 1
         # Only count as stopped if stop token found within max_tokens limit
         has_stop = jnp.any(is_stop, axis=1) & (stop_pos <= max_tokens)
         end_positions = jnp.where(has_stop, stop_pos, max_tokens)
