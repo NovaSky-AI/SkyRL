@@ -219,6 +219,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # we need to pass the weights for all of these together.
             # Overall, this doesn't hurt perf even in the general case
 
+            batch_packed_tensors = []
+
             for i, (module_name, param_names) in enumerate(module_to_params.items()):
                 module_done = i == len(module_to_params) - 1
                 device = torch.cuda.current_device()
@@ -227,7 +229,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         params[name].to(device, non_blocking=True).full_tensor()
                         if isinstance(params[name], DTensor)
                         else params[name]
-                    )
+                    ).to(generator_dtype)
                     for name in param_names
                 }
                 all_sizes = [tensor.numel() for tensor in param_tensors.values()]
@@ -251,40 +253,41 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
                 packed_tensor = packed_tensor.contiguous()
                 current_size += packed_tensor.nbytes
+                batch_packed_tensors.append(packed_tensor)
 
-                from torch.multiprocessing.reductions import reduce_tensor
+                if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB or module_done:
+                    concatenated_packed_tensor = torch.cat(batch_packed_tensors)
 
-                ipc_handle = reduce_tensor(packed_tensor)
-                ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                ipc_handle_list = [None] * torch.distributed.get_world_size()
-                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+                    from torch.multiprocessing.reductions import reduce_tensor
 
-                if torch.distributed.get_rank() == 0:
+                    ipc_handle = reduce_tensor(concatenated_packed_tensor)
+                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                    ipc_handle_list = [None] * torch.distributed.get_world_size()
+                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+
                     ipc_handles = {}
                     for d in ipc_handle_list:
                         ipc_handles.update(d)
 
                     weights_update_request["extras"].append({"ipc_handles": ipc_handles})
                     weights_update_request["packed"] = True
-                    if (
-                        module_done
-                        and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
-                    ):
+
+                    if torch.distributed.get_rank() == 0:
                         await inference_engine_client.update_named_weights(weights_update_request)
 
-                        current_size = 0
-                        weights_update_request = {
-                            "names": [],
-                            "dtypes": [],
-                            "shapes": [],
-                            "extras": [],
-                            "sizes": [],
-                            "packed": False,
-                        }
-                        # force collect any sent tensors if possible to be memory efficient
-                        torch.cuda.ipc_collect()
-                torch.distributed.barrier()
-                torch.cuda.synchronize()
+                    current_size = 0
+                    batch_packed_tensors = []
+                    weights_update_request = {
+                        "names": [],
+                        "dtypes": [],
+                        "shapes": [],
+                        "extras": [],
+                        "sizes": [],
+                        "packed": False,
+                    }
+                    torch.cuda.ipc_collect()
+                    torch.distributed.barrier()
+                    torch.cuda.synchronize()
 
                 # for i, name in enumerate(param_names):
                 #     param = params[name]
