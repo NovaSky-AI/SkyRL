@@ -158,6 +158,7 @@ class SamplingParams(BaseModel):
     max_tokens: int
     seed: int
     stop: list[int] | None = None
+    top_p: float = 1
 
 
 class ModelMetadata(BaseModel):

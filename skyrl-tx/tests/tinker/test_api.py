@@ -202,3 +202,54 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
+
+def test_sample_top_p(service_client):
+   """Test the sample endpoint with top_p parameter."""
+   tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+   sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+
+   prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
+
+   # Use consistent temperature=1.0 to isolate top_p behavior
+
+   # Test 1: Basic top_p sampling works
+   result_with_top_p = sampling_client.sample(
+       prompt=prompt,
+       sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, seed=42, top_p=0.9),
+       num_samples=1,
+   ).result()
+
+   assert result_with_top_p is not None
+   assert len(result_with_top_p.sequences) == 1
+   assert len(result_with_top_p.sequences[0].tokens) == 10
+
+   # Test 2: top_p=1.0 should behave like no filtering
+   result_no_filter = sampling_client.sample(
+       prompt=prompt,
+       sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, seed=123, top_p=1.0),
+       num_samples=1,
+   ).result()
+
+   result_default = sampling_client.sample(
+       prompt=prompt,
+       sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, seed=123),
+       num_samples=1,
+   ).result()
+
+   # Same seed with top_p=1.0 and default should produce identical results
+   assert result_no_filter.sequences[0].tokens == result_default.sequences[0].tokens
+
+   # Test 3: Determinism - same seed with top_p should produce same results
+   result1 = sampling_client.sample(
+       prompt=prompt,
+       sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, seed=999, top_p=0.8),
+       num_samples=1,
+   ).result()
+
+   result2 = sampling_client.sample(
+       prompt=prompt,
+       sampling_params=types.SamplingParams(temperature=1.0, max_tokens=10, seed=999, top_p=0.8),
+       num_samples=1,
+   ).result()
+
+   assert result1.sequences[0].tokens == result2.sequences[0].tokens

@@ -50,6 +50,7 @@ class DecodeState:
     temperatures: jax.Array
     stop_tokens: jax.Array
     adapter_indices: jax.Array
+    top_p_values: jax.Array
 
     # Updated each iteration:
     kv_cache: KVCache
@@ -77,13 +78,39 @@ class GenerateOutput:
     logprobs: list[list[float]]
 
 
-def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
+def apply_top_p(logits: jax.Array, p: float) -> jax.Array:
+    """ Keep only tokens whose cumulative probability is top_p. Set rest to -inf.
+
+    Args:
+        logits: Logits tensor of shape [vocab_size]
+        p: Cumulative probability threshold.
+
+    Returns:
+        Filtered logits
+    """
+
+    sorted_logits = jnp.sort(logits, axis=-1)[::-1]
+    sorted_indices = jnp.argsort(logits, axis=-1)[::-1]
+    sorted_probs = jax.nn.softmax(sorted_logits, axis=-1)
+    cumulative_probs = jnp.cumsum(sorted_probs, axis=-1)
+
+    cutoff_mask = (cumulative_probs <= p)
+    cutoff_mask = jnp.concatenate([jnp.array([True]), cutoff_mask[:-1]], axis=-1)
+
+    mask = jnp.zeros_like(logits, dtype=bool)
+    mask = mask.at[sorted_indices].set(cutoff_mask)
+
+    return jnp.where(mask, logits, -jnp.inf)
+
+def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array, top_p: jax.Array) -> jax.Array:
     """Sample next token per-example using a per-example PRNGKey."""
     temperatures = temperatures[:, None]
     zero_temp_mask = temperatures == 0.0
     scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
+    # Apply top_p filtering
+    filtered_logits = jax.vmap(apply_top_p)(scaled_logits, top_p)
     # Draw one sample per example
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
+    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, filtered_logits)
     greedy = jnp.argmax(logits, axis=-1)
     next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
     return next_token
@@ -103,7 +130,7 @@ def next_token_and_logprobs(s: DecodeState) -> tuple[jax.Array, jax.Array, jax.A
     """Sample next token and compute logprobs, updating the logprobs array."""
     split_keys = jax.vmap(jax.random.split)(s.rngs)
     next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(s.logits, temperatures=s.temperatures, sample_keys=sample_keys)
+    next_token = batched_sample_token(s.logits, temperatures=s.temperatures, sample_keys=sample_keys, top_p=s.top_p_values)
 
     logprobs = jax.nn.log_softmax(s.logits, axis=-1)
     sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
@@ -138,6 +165,7 @@ def decode_fn(s: DecodeState, _) -> tuple[DecodeState, None]:
     next_state = DecodeState(
         model=s.model,
         temperatures=s.temperatures,
+        top_p_values=s.top_p_values,
         stop_tokens=s.stop_tokens,
         adapter_indices=s.adapter_indices,
         kv_cache=outputs.kv_cache,
@@ -183,6 +211,7 @@ class GeneratorMixin:
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+        top_p_values = jnp.array([sampling_param.top_p for sampling_param in sampling_params], dtype=jnp.float32)
 
         # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
         # per-request streams will be identical.
@@ -214,6 +243,7 @@ class GeneratorMixin:
             temperatures=temperatures,
             stop_tokens=stop_tokens,
             adapter_indices=adapter_indices,
+            top_p_values=top_p_values,
             kv_cache=kv_cache,
             rngs=rngs,
             generated_ids=generated_ids,

@@ -87,3 +87,34 @@ def test_greedy_vs_sampled():
 
     assert generator_outputs_equal(batch_result, 0, single_greedy, 0)
     assert generator_outputs_equal(batch_result, 1, single_sample, 0)
+
+def test_top_p_sampling():
+    """Top_p sampling should produce identical result with identical seeds and set filtered out probs to -inf"""
+    from tx.utils.generator import apply_top_p
+    import jax.numpy as jnp
+
+    test_logits = jnp.array([10.0, 9.0, 1.0, 0.5, 0.1])
+    filtered = apply_top_p(test_logits, p=0.9)
+    print(filtered)
+    assert jnp.isfinite(filtered[0]), "Highest scoring token should not be filtered"
+    assert jnp.isfinite(filtered[1]), "Second highest token should not be filtered"
+    assert jnp.isinf(filtered[2]), "Third highest token should be -inf"
+    assert jnp.isinf(filtered[3]), "Fourth highest token should be -inf"
+    assert jnp.isinf(filtered[4]), "Fifth highest token should be -inf"
+
+    unfiltered = apply_top_p(test_logits, p=1.0)
+    assert jnp.array_equal(unfiltered, test_logits), "top_p=1.0 should leave logits unfiltered"
+
+    model = DummyModel(vocab_size=10)
+    input_ids, attention_mask = make_inputs(batch_size=1, prompt_length=2)
+
+    sp_top_p = SamplingParams(max_tokens=5, temperature=1.0, seed=42, top_p=0.5)
+    result = model.generate(input_ids, attention_mask, sampling_params=[sp_top_p])
+    assert len(result.generated_ids[0]) == 5
+    assert result.stop_reasons[0] == "length"
+
+    # Repeat sampling with same seed twice.
+    sp = SamplingParams(max_tokens=4, temperature=1.0, seed=999, top_p=0.9)
+    res1 = model.generate(input_ids, attention_mask, sampling_params=[sp])
+    res2 = model.generate(input_ids, attention_mask, sampling_params=[sp])
+    assert generator_outputs_equal(res1, 0, res2, 0)
