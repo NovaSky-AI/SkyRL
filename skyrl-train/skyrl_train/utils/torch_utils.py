@@ -120,7 +120,7 @@ def logprobs_from_logits(
     """
     Compute per-token log-probabilities for the given labels.
 
-    Uses a Flash-Attention–based cross-entropy (if available) for efficient backward,
+    Uses a Flash-Attention-based cross-entropy (if available) for efficient backward,
     otherwise falls back to a standard log-softmax+gather approach.
 
     See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
