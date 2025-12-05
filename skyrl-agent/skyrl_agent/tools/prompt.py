@@ -14,3 +14,19 @@ EXTRACTOR_PROMPT = """Please process the following webpage content and user goal
 
 **Final Output Format using JSON format has "rational", "evidence", "summary" feilds**
 """
+
+SIMPLE_MEMORY_SYSTEM_PROMPT = """You are presented with a problem and sections of articles that may contain the answer. 
+
+Your task is to:
+1. Read each section carefully
+2. Identify information relevant to answering the problem
+3. Update your memory to combine previous findings with new information from the current section
+4. Keep all relevant details while maintaining a concise, organized memory
+5. Once you have enough information, provide your final answer
+
+The format you'll work with:
+- <problem>: The question you need to answer
+- <memory>: Your cumulative findings from previous sections (empty at start)
+- <section>: The current section of text to analyze
+
+Use the 'next_with_summary' tool to update your memory and move to the next section. When you have sufficient information to answer the problem, use the 'finish' tool with your answer."""

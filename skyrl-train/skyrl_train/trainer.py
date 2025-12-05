@@ -82,8 +82,10 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
-        self.train_dataloader = build_dataloader(self.cfg, train_dataset, is_train=True)
-        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        self.train_dataloader = None
+        self.total_training_steps = None
+        self._build_train_dataloader_and_compute_training_steps()
+
         self.eval_dataloader = (
             build_dataloader(self.cfg, eval_dataset, is_train=False) if eval_dataset is not None else None
         )
@@ -106,6 +108,16 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
+
+    def _build_train_dataloader_and_compute_training_steps(self):
+        """
+        Hook for constructing the training dataloader. Subclasses can override
+        this to customize dataloader behavior. For instance, fully async training
+        needs a batch size of 1, among other features.
+        Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
+        """
+        self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
+        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
 
     @torch.no_grad()
     async def eval(self) -> Dict[str, float]:
@@ -151,7 +163,7 @@ class RayPPOTrainer:
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.global_step = self.load_checkpoints()
+                self.global_step, _ = self.load_checkpoints()
 
         if self.colocate_all:
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
@@ -568,15 +580,25 @@ class RayPPOTrainer:
                 ),
             },
         )
-        training_input.metadata = {
-            "uids": uids,
-            "trajectory_ids": [trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]],
-        }
+        training_input.metadata = {"uids": uids}
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        training_input.metadata["avg_response_length"] = sum(
-            len(sample_response_ids) for sample_response_ids in response_ids
-        ) / len(response_ids)
+        if self.cfg.trainer.step_wise_training:
+            assert (
+                "trajectory_ids" in generator_output
+            ), "Expected `trajectory_ids` in generator output for step wise training"
+            training_input.metadata["trajectory_ids"] = [
+                trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
+            ]
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids)
+                for sample_response_ids, is_last_step in zip(response_ids, generator_output["is_last_step"])
+                if is_last_step
+            ) / len(response_ids)
+        else:
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids) for sample_response_ids in response_ids
+            ) / len(response_ids)
 
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)
@@ -813,9 +835,10 @@ class RayPPOTrainer:
         new_training_input = TrainingInputBatch(new_tensors)
         new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
-        new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
-            f"pad{i}" for i in range(pad_size)
-        ]
+        if "trajectory_ids" in training_input.metadata:
+            new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
+                f"pad{i}" for i in range(pad_size)
+            ]
         for key, value in training_input.metadata.items():
             if key not in ["uids", "trajectory_ids"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
@@ -1204,24 +1227,28 @@ class RayPPOTrainer:
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
         cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
 
-    def load_checkpoints(self) -> int:
+    def load_checkpoints(self) -> Tuple[int, str]:
         """
         Load complete checkpoint state and return the global_step to resume from.
         Returns 0 if no checkpoint is loaded.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
+
+        Returns:
+            global_step: The global step to resume from.
+            checkpoint_path: The path to the checkpoint.
         """
         checkpoint_path = None
         # Check if resumption is enabled
         if self.resume_mode == ResumeMode.NONE:
             logger.info("Checkpoint resumption disabled, starting training from scratch")
-            return 0
+            return 0, None
         # first, let's get resume_path
         elif self.resume_mode == ResumeMode.LATEST:
             latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
             if not io.exists(latest_checkpoint_file):
                 logger.info("No checkpoint found, starting training from scratch")
-                return 0
+                return 0, None
             with io.open_file(latest_checkpoint_file, "r") as f:
                 ckpt_iteration = int(f.read().strip())
             checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_iteration}")
@@ -1317,7 +1344,7 @@ class RayPPOTrainer:
             logger.info("Successfully loaded critic checkpoint")
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
-        return global_step
+        return global_step, str(checkpoint_path)
 
     def save_models(self):
         """

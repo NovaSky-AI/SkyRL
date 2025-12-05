@@ -415,13 +415,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
         Returns outputs in the same order as the input batch.
         Args:
             input_batch: GeneratorInput
+            disable_tqdm: bool
         Returns:
             GeneratorOutput
         """
@@ -458,6 +459,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             desc="Generating Trajectories",
             miniters=max(1, len(tasks) // 10),
             mininterval=5,
+            disable=disable_tqdm,
         )
 
         responses = [output.response_ids for output in all_outputs]

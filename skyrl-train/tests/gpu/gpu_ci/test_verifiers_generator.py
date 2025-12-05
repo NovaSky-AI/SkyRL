@@ -13,7 +13,9 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 # Mark all tests in this file as "integrations"
-pytestmark = pytest.mark.integrations
+# NOTE (sumanthrh): Skipping these tests until we make the verifiers integration compatible with verifiers repo `main` again.
+# Error: cannot import name 'GenerateInputs' from 'verifiers.types'
+pytestmark = [pytest.mark.integrations, pytest.mark.skip]
 
 
 def _get_free_port() -> int:
