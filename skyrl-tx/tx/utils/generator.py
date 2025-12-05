@@ -48,6 +48,7 @@ class DecodeState:
     attention_mask: jax.Array
     last_positions: jax.Array
     logits: jax.Array
+    stop_pos: jax.Array  # Position where stop token was found
 
 
 @dataclass
@@ -117,8 +118,8 @@ class GeneratorMixin:
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
-        def decode_fn(s: DecodeState, _) -> tuple[DecodeState, tuple[jax.Array, jax.Array, jax.Array]]:
-            """Decode one token step. Returns (state, (token, logprob, is_stop)) for scan accumulation."""
+        def decode_fn(s: DecodeState, step: jax.Array) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
+            """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
             # Sample next token
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
@@ -133,8 +134,9 @@ class GeneratorMixin:
             log_probs = jax.nn.log_softmax(s.logits, axis=-1)
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
 
-            # Check if we hit a stop token
-            is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
+            # Track first stop token position (-1 means not stopped yet)
+            is_stop = jnp.any(next_token == stop_tokens, axis=1)
+            stop_pos = jnp.where((s.stop_pos == -1) & is_stop, step + 1, s.stop_pos)
 
             # Update attention mask: set next position to 1
             next_attention_mask = s.attention_mask.at[:, s.kv_cache.cache_position].set(1)
@@ -152,8 +154,9 @@ class GeneratorMixin:
                 attention_mask=next_attention_mask,
                 last_positions=s.last_positions + 1,
                 logits=outputs.logits[:, -1, :],
+                stop_pos=stop_pos,
             )
-            return next_state, (next_token, sampled_logprob, is_stop)
+            return next_state, (next_token, sampled_logprob)
 
         initial_state = DecodeState(
             kv_cache=kv_cache,
@@ -161,18 +164,18 @@ class GeneratorMixin:
             attention_mask=decode_attention_mask,
             last_positions=positions[:, -1:],
             logits=outputs.logits[:, -1, :],
+            stop_pos=jnp.full((input_ids.shape[0],), -1),
         )
 
-        _, (tokens_stacked, logprobs_stacked, is_stop_stacked) = jax.lax.scan(
-            decode_fn, initial_state, xs=None, length=max_new_tokens
+        final_state, (tokens_stacked, logprobs_stacked) = jax.lax.scan(
+            decode_fn, initial_state, xs=jnp.arange(max_new_tokens)
         )
 
         # Post-process: transpose scan outputs from [Steps, Batch, 1] to [Batch, Steps]
         new_tokens = jnp.swapaxes(tokens_stacked, 0, 1).squeeze(-1)
         new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)
-        is_stop = jnp.swapaxes(is_stop_stacked, 0, 1).squeeze(-1)
 
-        return new_tokens, new_logprobs, is_stop, prompt_logprobs_array
+        return new_tokens, new_logprobs, final_state.stop_pos, prompt_logprobs_array
 
     def generate(
         self,
@@ -209,7 +212,7 @@ class GeneratorMixin:
         # Capture prompt lengths for prompt_logprobs if requested
         prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
 
-        new_tokens, new_logprobs, is_stop, prompt_logprobs_array = self._prefill_and_decode(
+        new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = self._prefill_and_decode(
             self,
             input_ids,
             attention_mask,
@@ -223,10 +226,8 @@ class GeneratorMixin:
         )
 
         max_tokens = jnp.array([sp.max_tokens for sp in sampling_params])
-        # Compute stop position, include the stop token
-        stop_pos = jnp.argmax(is_stop, axis=1) + 1
-        # Only count as stopped if stop token found within max_tokens limit
-        has_stop = jnp.any(is_stop, axis=1) & (stop_pos <= max_tokens)
+        # stop_pos is -1 if no stop token found; has_stop is true only if found within limit
+        has_stop = (stop_pos != -1) & (stop_pos <= max_tokens)
         end_positions = jnp.where(has_stop, stop_pos, max_tokens)
 
         # Single device-to-host transfer
