@@ -78,6 +78,8 @@ def test_qwen3_generate():
                 f"Ours: {our_tokens}, HF: {hf_tokens_truncated}"
             )
 
+        # Verify request 2: stop token should be hit
+        assert result.stop_reasons[2] == "stop"
         # Verify request 3: max_tokens=2 should cap output before stop token at position 3
         assert len(result.generated_ids[3]) == 2
         assert result.stop_reasons[3] == "length"
