@@ -10,7 +10,9 @@ from skyrl_train.utils import validate_cfg
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+from skyrl_train.inference_engines.colocated_remote_engine import create_colocated_remote_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
@@ -111,6 +113,7 @@ class BasePPOExp:
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
+        self.inference_engines: list[InferenceEngineInterface] | None = None
 
     @staticmethod
     def get_cfg_as_str(dict_cfg: DictConfig) -> str:
@@ -288,12 +291,17 @@ class BasePPOExp:
         if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
         else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
-
+            # When colocating with HTTP engines, spin servers inside Ray and point clients to them
+            if self.cfg.trainer.placement.colocate_all:
+                assert (
+                    self.cfg.generator.backend == "vllm"
+                ), "colocated training with remote engines only supported for vllm for now"
+                inference_engines = create_colocated_remote_engines(self.cfg, tokenizer, self.colocate_pg)
+            else:
+                inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+        self.inference_engines = inference_engines
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
-
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
-
         trainer = self.get_trainer(
             cfg=self.cfg,
             tracker=tracker,
@@ -319,16 +327,42 @@ class BasePPOExp:
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
-    exp.run()
+    try:
+        exp.run()
+    except BaseException:
+        # TODO(benji): sometimes logging from here is not displayed
+        logger.info("Main base entry point received exception. Performing clean-up")
+        try:
+
+            if (
+                exp.inference_engines is not None
+                and cfg.trainer.placement.colocate_all
+                and not cfg.generator.run_engines_locally
+            ):
+                # clean-up colocated HTTP inference servers
+                kill_tasks = [engine.server_actor.kill.remote() for engine in exp.inference_engines]
+                if kill_tasks:
+                    ray.get(kill_tasks, timeout=10)
+                logger.info(f"Terminated {len(kill_tasks)} colocated inference server actor(s)")
+        finally:
+            # Re-raise to propagate the error to the driver
+            raise
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
-
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+    entry_ref = skyrl_entrypoint.remote(cfg)
+    try:
+        ray.get(entry_ref)
+    except BaseException as e:
+        logger.info(f"Driver process errored. Forwarding this to entry point. \n{e}")
+        ray.cancel(entry_ref, force=False)
+        ray.wait([entry_ref], timeout=10)  # wait for clean-up to finish
+    finally:
+        ray.shutdown()
 
 
 if __name__ == "__main__":
