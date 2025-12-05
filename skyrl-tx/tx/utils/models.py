@@ -38,7 +38,7 @@ def resolve_model_path(model_name_or_path: str) -> str:
         Path to the local directory containing model config and weights.
     """
     local_path = Path(model_name_or_path).expanduser()
-    if local_path.exists():
+    if local_path.is_dir():
         logger.info(f"Using local model at {local_path}")
         return str(local_path)
     return snapshot_download(model_name_or_path, allow_patterns=["*.safetensors", "*.json"])
