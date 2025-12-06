@@ -29,6 +29,19 @@ class WeightChunk:
     tensors: List[torch.Tensor]
     module_name: Optional[str] = None
 
+    def __post_init__(self):
+        """Validate that all input lists have the same length."""
+        lengths = [len(self.names), len(self.dtypes), len(self.shapes), len(self.tensors)]
+        if len(set(lengths)) != 1:
+            raise ValueError(
+                f"All lists must have the same length. Got names={len(self.names)}, "
+                f"dtypes={len(self.dtypes)}, shapes={len(self.shapes)}, tensors={len(self.tensors)}"
+            )
+
+    def __len__(self) -> int:
+        """Return the number of parameters in this chunk."""
+        return len(self.names)
+
     @cached_property
     def total_size_bytes(self) -> int:
         """Calculate total memory footprint in bytes."""

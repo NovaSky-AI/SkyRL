@@ -26,6 +26,94 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RefWorkerBase,
 )
+from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+class FSDPWeightExtractor(WeightExtractor):
+    """Extracts weights from FSDP-sharded models.
+
+    Args:
+        group_by_module: If True, group parameters by module (for FlashRL QKV fusion)
+    """
+
+    def __init__(self, group_by_module: bool = False):
+        self.group_by_module = group_by_module
+
+    def extract_weights(self, model: torch.nn.Module, dtype: torch.dtype):
+        """Extract weights from FSDP model.
+
+        Args:
+            model: FSDP model to extract weights from
+            dtype: Target dtype for inference
+
+        Yields:
+            WeightChunk objects (one per parameter, or grouped by module)
+        """
+        # Configure state_dict type for FSDP v1
+        if fsdp_version(model) == 1:
+            FSDP.set_state_dict_type(
+                model,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
+
+        # Get state dict (handles FSDP sharding)
+        params = model.state_dict()
+
+        if not self.group_by_module:
+            # Simple path: yield one chunk per parameter
+            for name, param in params.items():
+                tensor = self._prepare_tensor(param, dtype)
+                yield WeightChunk(
+                    names=[name],
+                    dtypes=[str(dtype)],
+                    shapes=[list(tensor.shape)],
+                    tensors=[tensor],
+                )
+        else:
+            # Group parameters by module for FlashRL
+            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
+            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
+            # we need to pass the weights for all of these together.
+            # Overall, this doesn't hurt perf even in the general case
+            module_to_params: Dict[str, List[str]] = {}
+            for param_name in params.keys():
+                # Extract module name (e.g., "model.layers.0.self_attn" from "model.layers.0.self_attn.q_proj.weight")
+                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
+                module_name = ".".join(param_name.split(".")[:-2])
+                if module_name not in module_to_params:
+                    module_to_params[module_name] = []
+                module_to_params[module_name].append(param_name)
+
+            # Yield chunks grouped by module
+            for module_name, param_names in module_to_params.items():
+                tensors = []
+                names = []
+                shapes = []
+                dtypes_list = []
+
+                for param_name in param_names:
+                    param = params[param_name]
+                    tensor = self._prepare_tensor(param, dtype)
+                    tensors.append(tensor)
+                    names.append(param_name)
+                    shapes.append(list(tensor.shape))
+                    dtypes_list.append(str(dtype))
+
+                yield WeightChunk(
+                    names=names,
+                    dtypes=dtypes_list,
+                    shapes=shapes,
+                    tensors=tensors,
+                    module_name=module_name,
+                )
+
+    def _prepare_tensor(self, param: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        """Gather, convert dtype, and make tensor contiguous."""
+        device = torch.cuda.current_device()
+        param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+        param = param.to(dtype)
+        return param.detach().contiguous()
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
@@ -143,12 +231,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        if fsdp_version(self.model.model) == 1:
-            FSDP.set_state_dict_type(
-                self.model.model,
-                state_dict_type=StateDictType.SHARDED_STATE_DICT,
-                state_dict_config=ShardedStateDictConfig(),
-            )
 
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
@@ -160,71 +242,55 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_sync_path = self.cfg.trainer.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
             return
-        else:
-            # Regular model without LoRA
-            params = self.model.model.state_dict()
 
         if not self.use_cuda_ipc:
-            for name, param in params.items():
-                if torch.distributed.get_rank() == 0:
-                    shape = param.shape
+            # Broadcast path: use extractor to get weight chunks
+            extractor = FSDPWeightExtractor()
 
+            for chunk in extractor.extract_weights(self.model.model, generator_dtype):
+                # Each chunk contains one parameter
+                name = chunk.names[0]
+                tensor = chunk.tensors[0]
+
+                if torch.distributed.get_rank() == 0:
+                    # Create legacy update request
                     update_weight_task = asyncio.create_task(
                         inference_engine_client.update_named_weights(
                             {
                                 "names": [name],
                                 "dtypes": [self.cfg.generator.model_dtype],
-                                "shapes": [shape],
+                                "shapes": [list(tensor.shape)],
                             }
                         )
                     )
 
-                # broadcast
-                def gather_and_broadcast(param):
-                    # For FSDP, gather parameter and broadcast to all InferenceEngines by rank 0
-                    device = torch.cuda.current_device()
-                    param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                    # cast to generator dtype
-                    param = param.to(generator_dtype)
+                # Broadcast tensor
+                def broadcast_tensor(tensor):
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
 
-                await asyncio.to_thread(gather_and_broadcast, param)
+                await asyncio.to_thread(broadcast_tensor, tensor)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
-        # CUDA IPC
         else:
+            # CUDA IPC path: use extractor with module grouping
+            from torch.multiprocessing.reductions import reduce_tensor
+
+            # Use extractor with module grouping for FlashRL
+            extractor = FSDPWeightExtractor(group_by_module=True)
+
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
             current_size = 0
 
-            module_to_params: Dict[str, List[str]] = {}
-            for param_name, param in params.items():
-                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
-                module_name = ".".join(param_name.split(".")[:-2])
-                if module_name not in module_to_params:
-                    module_to_params[module_name] = [param_name]
-                else:
-                    module_to_params[module_name].append(param_name)
+            # Iterate over module-grouped chunks
+            for chunk in extractor.extract_weights(self.model.model, generator_dtype):
+                # chunk contains all parameters for one module (e.g., self_attn)
+                for i, (name, tensor) in enumerate(zip(chunk.names, chunk.tensors)):
+                    module_done = i == len(chunk) - 1
 
-            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
-            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
-            # we need to pass the weights for all of these together.
-            # Overall, this doesn't hurt perf even in the general case
-
-            for module_name, param_names in module_to_params.items():
-                for i, name in enumerate(param_names):
-                    param = params[name]
-                    module_done = i == len(param_names) - 1
-
-                    from torch.multiprocessing.reductions import reduce_tensor
-
-                    device = torch.cuda.current_device()
-                    param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                    param = param.to(generator_dtype)
-                    weight = param.detach().contiguous()
-                    ipc_handle = reduce_tensor(weight)
-
+                    # Create IPC handle for tensor
+                    ipc_handle = reduce_tensor(tensor)
                     ipc_handle = {get_physical_gpu_id(): ipc_handle}
                     ipc_handle_list = [None] * torch.distributed.get_world_size()
                     torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
@@ -234,11 +300,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         for d in ipc_handle_list:
                             ipc_handles.update(d)
 
-                        current_size += weight.nbytes
+                        current_size += tensor.nbytes
                         weights_update_request["names"].append(name)
                         weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                        weights_update_request["shapes"].append(param.shape)
+                        weights_update_request["shapes"].append(list(tensor.shape))
                         weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+
                         # We send in batches as an optimization
                         # sync if threshold is reached
                         if (
@@ -257,10 +324,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                             }
                             # force collect any sent tensors if possible to be memory efficient
                             torch.cuda.ipc_collect()
+
                     torch.distributed.barrier()
                     torch.cuda.synchronize()
 
-            # sync any remaining weights
+            # Send any remaining weights
             if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
                 await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
                 torch.cuda.ipc_collect()
