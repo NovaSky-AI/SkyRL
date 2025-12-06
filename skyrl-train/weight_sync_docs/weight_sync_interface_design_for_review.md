@@ -80,55 +80,43 @@ Inference actors
 ### 4.1 WeightExtractor
 ```python
 class WeightExtractor(ABC):
-    """Backend-specific extractor that produces WeightChunk objects."""
-    def __init__(self, cfg: DictConfig):
-        self.cfg = cfg
-        self._group_by_module = False
-        self._batch_by_threshold = False
+    """Extracts weights from training backend models.
 
-    def _should_group_by_module(self) -> bool:
-        """Return True if this extractor should group parameters by module."""
-        ...
-
-    def _should_batch_by_threshold(self) -> bool:
-        """Return True if this extractor should batch chunks by size threshold."""
-        ...
-
-    def _group_by_module(self, params: Dict[str, torch.Tensor]) -> Dict[str, List[str]]:
-        """Group parameter names by module prefix (subclasses may override)."""
-        ...
-
-    def _batch_by_threshold(
-        self,
-        chunks: Iterator[WeightChunk],
-        threshold_gb: float,
-    ) -> Iterator[List[WeightChunk]]:
-        """Batch chunks until their total size reaches the configured threshold."""
-        ...
+    Subclasses implement backend-specific logic to extract model weights,
+    handle sharding, and prepare them for transfer to inference engines.
+    """
 
     @abstractmethod
-    async def _extract_raw_weights(
-        self, model: Any, generator_dtype: torch.dtype
-    ) -> Dict[str, torch.Tensor]:
-        """Backend-specific hook that returns raw tensors already converted to generator_dtype."""
-        ...
+    def extract_weights(self, model: Any, dtype: torch.dtype) -> Iterator[WeightChunk]:
+        """Extract weights from the model as WeightChunk objects.
 
-    async def extract_weights(
-        self, model: Any, generator_dtype: torch.dtype
-    ) -> Iterator[WeightChunk]:
-        """Default implementation that applies grouping/batching to raw tensors."""
+        Implementations should:
+        - Gather sharded weights into full tensors
+        - Convert tensors to the specified dtype for inference
+        - Ensure tensors are contiguous in memory
+        - Optionally group related parameters (e.g., QKV for efficiency)
+
+        Args:
+            model: The model to extract weights from
+            dtype: Target dtype for inference (e.g., torch.bfloat16, torch.float16)
+
+        Yields:
+            WeightChunk objects containing model parameters ready for transfer
+        """
         ...
 ```
 **Responsibilities**
-1. Gather backend weights, undo sharding, convert to inference dtype/device, ensure contiguous layout.
-2. Use internal flags to perform module grouping or size-based batching (defaults to `False`; subclasses set them in `__init__`).
-3. Yield `WeightChunk` instances ready for transfer (one per iterator step). Senders must not re-batch.
-4. Hide backend specifics from the rest of the pipeline.
+- Gather backend weights, undo sharding, convert to inference dtype/device
+- Ensure contiguous tensor layout
+- Optionally perform module grouping or size-based batching
+- Yield WeightChunk instances ready for transfer
 
-**Typical subclasses**
-- `FSDPWeightExtractor` – unwraps FSDP state dicts, gathers shards via `full_tensor()`, handles FlashRL grouping when CUDA IPC is enabled.
-- `MegatronWeightExtractor` – uses Megatron HF export tasks, supports packed CUDA IPC buffers.
-- `DeepSpeedWeightExtractor` – leverages `GatheredParameters` for ZeRO-3, groups/batches based on config.
+**Implementation Note:** Common functionality (grouping, batching) can be shared via a helper base class if needed.
+
+**Implementations**
+- `FSDPWeightExtractor` – FSDP-sharded models
+- `MegatronWeightExtractor` – Megatron model-parallel models
+- `DeepSpeedWeightExtractor` – DeepSpeed ZeRO-sharded models
 
 ### 4.2 WeightTransferSender
 ```python
@@ -199,16 +187,20 @@ class WeightLoader(ABC):
 @dataclass
 class WeightChunk:
     names: List[str]
+    dtypes: List[str]  # String representation (e.g., "torch.bfloat16")
+    shapes: List[List[int]]
     tensors: List[torch.Tensor]
-    dtypes: List[torch.dtype]
-    shapes: List[Tuple[int, ...]]
     module_name: Optional[str] = None
-    total_size_bytes: Optional[int] = None
     packed: bool = False
+
+    @cached_property
+    def total_size_bytes(self) -> int:
+        """Calculate total memory footprint in bytes."""
+        return sum(t.numel() * t.element_size() for t in self.tensors)
 ```
 **Responsibilities**
 - Compact representation of grouped parameters and associated metadata.
-- Track total byte size for batching heuristics.
+- Track total byte size for batching heuristics (cached property, auto-calculated from tensors).
 - Flag whether tensors are already packed contiguously.
 
 ### 4.6 WeightUpdateRequest
