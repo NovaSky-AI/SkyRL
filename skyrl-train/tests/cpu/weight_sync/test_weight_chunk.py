@@ -12,15 +12,13 @@ class TestWeightChunk:
         dtypes = ["torch.float32", "torch.float32"]
         shapes = [[4, 3], [4]]
         tensors = [torch.randn(4, 3), torch.randn(4)]
-        module_name = "model.layers.0.self_attn"
 
-        chunk = WeightChunk(names=names, dtypes=dtypes, shapes=shapes, tensors=tensors, module_name=module_name)
+        chunk = WeightChunk(names=names, dtypes=dtypes, shapes=shapes, tensors=tensors)
 
         assert chunk.names == names
         assert chunk.dtypes == dtypes
         assert chunk.shapes == shapes
         assert len(chunk.tensors) == 2
-        assert chunk.module_name == module_name
 
     def test_validation_length_mismatch(self):
         """Test that validation catches length mismatches."""

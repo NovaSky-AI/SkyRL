@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import List, Optional
+from typing import List
 
 import torch
 
@@ -19,7 +19,7 @@ class WeightChunk:
         dtypes: List of dtype strings (e.g., ["torch.bfloat16"])
         shapes: List of tensor shapes (e.g., [[4096, 4096]])
         tensors: List of actual tensor data (populated during extraction)
-        module_name: Optional module identifier for grouped parameters
+        total_numel: Total number of elements (cached property, auto-calculated)
         total_size_bytes: Total memory footprint (cached property, auto-calculated)
     """
 
@@ -27,7 +27,6 @@ class WeightChunk:
     dtypes: List[str]
     shapes: List[List[int]]
     tensors: List[torch.Tensor]
-    module_name: Optional[str] = None
 
     def __post_init__(self):
         """Validate that all input lists have the same length."""
