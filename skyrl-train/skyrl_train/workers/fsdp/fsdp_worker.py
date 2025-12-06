@@ -1,5 +1,4 @@
 import asyncio
-from typing import Dict, List
 
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray
@@ -27,6 +26,7 @@ from skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -72,42 +72,13 @@ class FSDPWeightExtractor(WeightExtractor):
                     tensors=[tensor],
                 )
         else:
-            # Group parameters by module for FlashRL
-            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
-            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
-            # we need to pass the weights for all of these together.
-            # Overall, this doesn't hurt perf even in the general case
-            module_to_params: Dict[str, List[str]] = {}
-            for param_name in params.keys():
-                # Extract module name (e.g., "model.layers.0.self_attn" from "model.layers.0.self_attn.q_proj.weight")
-                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
-                module_name = ".".join(param_name.split(".")[:-2])
-                if module_name not in module_to_params:
-                    module_to_params[module_name] = []
-                module_to_params[module_name].append(param_name)
-
-            # Yield chunks grouped by module
-            for module_name, param_names in module_to_params.items():
-                tensors = []
-                names = []
-                shapes = []
-                dtypes_list = []
-
-                for param_name in param_names:
-                    param = params[param_name]
-                    tensor = self._prepare_tensor(param, dtype)
-                    tensors.append(tensor)
-                    names.append(param_name)
-                    shapes.append(list(tensor.shape))
-                    dtypes_list.append(str(dtype))
-
-                yield WeightChunk(
-                    names=names,
-                    dtypes=dtypes_list,
-                    shapes=shapes,
-                    tensors=tensors,
-                    module_name=module_name,
-                )
+            for chunk in yield_module_grouped_chunks(
+                params=params,
+                dtype=dtype,
+                prepare_tensor_fn=self._prepare_tensor,
+                get_shape_fn=lambda name, param, tensor: list(tensor.shape),
+            ):
+                yield chunk
 
     def _prepare_tensor(self, param: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         """Gather, convert dtype, and make tensor contiguous."""
