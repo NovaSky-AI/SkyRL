@@ -11,6 +11,7 @@ def yield_module_grouped_chunks(
     dtype: torch.dtype,
     prepare_tensor_fn: Callable[[Any, torch.dtype], torch.Tensor],
     get_shape_fn: Callable[[str, Any, torch.Tensor], List[int]],
+    batch_size_threshold_gb: float = 0.0,
 ) -> Iterator[WeightChunk]:
     """Yield WeightChunk objects grouped by module.
 
@@ -26,9 +27,10 @@ def yield_module_grouped_chunks(
         dtype: Target dtype for inference
         prepare_tensor_fn: Function to prepare tensor (gather, convert dtype, make contiguous)
         get_shape_fn: Function to extract shape from param_name, param, and prepared tensor
+        batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
 
     Yields:
-        WeightChunk objects containing all parameters for each module
+        WeightChunk objects containing all parameters for each module (or batched modules if threshold set)
     """
     # Group parameters by module for FlashRL
     # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
@@ -44,26 +46,60 @@ def yield_module_grouped_chunks(
             module_to_params[module_name] = []
         module_to_params[module_name].append(param_name)
 
-    # Yield chunks grouped by module
-    for module_name, param_names in module_to_params.items():
-        tensors = []
-        names = []
-        shapes = []
-        dtypes_list = []
+    # Accumulate complete modules until threshold reached
+    batch_tensors = []
+    batch_names = []
+    batch_shapes = []
+    batch_dtypes = []
+    current_size = 0
+    threshold_bytes = batch_size_threshold_gb * 1024**3
 
+    for module_name, param_names in module_to_params.items():
+        module_tensors = []
+        module_names = []
+        module_shapes = []
+        module_dtypes = []
+        module_size = 0
+
+        # Prepare all tensors for this module
         for param_name in param_names:
             param = params[param_name]
             tensor = prepare_tensor_fn(param, dtype)
             shape = get_shape_fn(param_name, param, tensor)
-            tensors.append(tensor)
-            names.append(param_name)
-            shapes.append(shape)
-            dtypes_list.append(str(dtype))
+            module_tensors.append(tensor)
+            module_names.append(param_name)
+            module_shapes.append(shape)
+            module_dtypes.append(str(dtype))
+            module_size += tensor.nbytes
 
+        # Check if adding this module would exceed threshold
+        if current_size > 0 and current_size + module_size > threshold_bytes:
+            # Yield current batch before adding this module
+            yield WeightChunk(
+                names=batch_names,
+                dtypes=batch_dtypes,
+                shapes=batch_shapes,
+                tensors=batch_tensors,
+            )
+            # Start new batch
+            batch_tensors = []
+            batch_names = []
+            batch_shapes = []
+            batch_dtypes = []
+            current_size = 0
+
+        # Add module to current batch
+        batch_tensors.extend(module_tensors)
+        batch_names.extend(module_names)
+        batch_shapes.extend(module_shapes)
+        batch_dtypes.extend(module_dtypes)
+        current_size += module_size
+
+    # Yield final batch if non-empty
+    if batch_tensors:
         yield WeightChunk(
-            names=names,
-            dtypes=dtypes_list,
-            shapes=shapes,
-            tensors=tensors,
-            module_name=module_name,
+            names=batch_names,
+            dtypes=batch_dtypes,
+            shapes=batch_shapes,
+            tensors=batch_tensors,
         )

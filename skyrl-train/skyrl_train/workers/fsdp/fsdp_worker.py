@@ -35,11 +35,13 @@ class FSDPWeightExtractor(WeightExtractor):
     Args:
         model: FSDP model to extract weights from
         group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
+        batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
     """
 
-    def __init__(self, model: torch.nn.Module, group_by_module: bool = False):
+    def __init__(self, model: torch.nn.Module, group_by_module: bool = False, batch_size_threshold_gb: float = 0.0):
         self.model = model
         self.group_by_module = group_by_module
+        self.batch_size_threshold_gb = batch_size_threshold_gb
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from FSDP model.
@@ -77,6 +79,7 @@ class FSDPWeightExtractor(WeightExtractor):
                 dtype=dtype,
                 prepare_tensor_fn=self._prepare_tensor,
                 get_shape_fn=lambda name, param, tensor: list(tensor.shape),
+                batch_size_threshold_gb=self.batch_size_threshold_gb,
             ):
                 yield chunk
 
@@ -161,7 +164,13 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
-        self.weight_extractor = FSDPWeightExtractor(self.model.model, group_by_module=self.use_cuda_ipc)
+        self.weight_extractor = FSDPWeightExtractor(
+            self.model.model,
+            group_by_module=self.use_cuda_ipc,
+            batch_size_threshold_gb=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
+            if self.use_cuda_ipc
+            else 0.0,
+        )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
@@ -248,18 +257,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     await update_weight_task
                 torch.distributed.barrier()
         else:
-            # CUDA IPC path: module-grouped chunks for FlashRL
+            # CUDA IPC path: batched chunks (batching handled by extractor)
             from torch.multiprocessing.reductions import reduce_tensor
 
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
-            current_size = 0
-
-            # Iterate over module-grouped chunks
+            # Iterate over batched chunks
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # chunk contains all parameters for one module (e.g., self_attn)
-                for i, (name, tensor) in enumerate(zip(chunk.names, chunk.tensors)):
-                    module_done = i == len(chunk) - 1
+                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
 
+                # Process all parameters in this batch
+                # TODO(haochen): Pack tensors into contiguous buffer before creating IPC handle
+                # (like Megatron does) to reduce number of IPC handles and file descriptors
+                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
                     # Create IPC handle for tensor
                     ipc_handle = reduce_tensor(tensor)
                     ipc_handle = {get_physical_gpu_id(): ipc_handle}
@@ -271,40 +279,20 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         for d in ipc_handle_list:
                             ipc_handles.update(d)
 
-                        current_size += tensor.nbytes
                         weights_update_request["names"].append(name)
                         weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                        weights_update_request["shapes"].append(list(tensor.shape))
+                        weights_update_request["shapes"].append(shape)
                         weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-
-                        # We send in batches as an optimization
-                        # sync if threshold is reached
-                        if (
-                            module_done
-                            and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
-                        ):
-                            await inference_engine_client.update_named_weights(weights_update_request)
-
-                            current_size = 0
-                            weights_update_request = {
-                                "names": [],
-                                "dtypes": [],
-                                "shapes": [],
-                                "extras": [],
-                                "packed": False,
-                            }
-                            # force collect any sent tensors if possible to be memory efficient
-                            torch.cuda.ipc_collect()
 
                     torch.distributed.barrier()
                     torch.cuda.synchronize()
 
-            # Send any remaining weights
-            if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
-                await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
-                torch.cuda.ipc_collect()
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
+                # Send batch
+                if torch.distributed.get_rank() == 0:
+                    await inference_engine_client.update_named_weights(weights_update_request)
+                    torch.cuda.ipc_collect()
+                torch.distributed.barrier()
+                torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
