@@ -110,16 +110,19 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp"),
-    [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None)],
-    ids=["colocate_all", "non_colocated"],
+    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
+    [(True, 4, 2, 2, 1, None, False), (False, 2, 2, 1, 1, None, False), (True, 4, 2, 2, 1, None, True)],
+    ids=["colocate_all", "non_colocated", "colocate_all_lora"],
 )
-def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp):
+def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
         cfg = get_test_actor_config(model_name=MODEL_NAME)
+        if lora:
+            cfg.trainer.policy.model.lora.rank = 16
+            cfg.trainer.policy.model.lora.alpha = 16
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"

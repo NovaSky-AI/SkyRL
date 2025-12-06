@@ -43,6 +43,8 @@ dependencies = [
     "s3fs",
     "fastapi",
     "uvicorn",
+    "pybind11",
+    "setuptools",
 ]
 
 [tool.uv]
@@ -71,12 +73,17 @@ conflicts = [
 no-build-isolation-package = [
     "transformer-engine-torch",
     "transformer-engine",
+    "nv-grouped-gemm",
 ]
-
+override-dependencies = [
+    "nvidia-resiliency-ext; sys_platform == 'never'",
+    "mamba-ssm; sys_platform == 'never'",
+    "causal-conv1d; sys_platform == 'never'",
+]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools"]
-transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools"]
+transformer-engine = ["torch", "build_tools"]
+transformer-engine-torch = ["torch", "build_tools"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -133,14 +140,14 @@ sglang = [
     "torchvision",
 ]
 mcore = [
-  "transformer-engine[pytorch]==2.7.0",
+  "transformer-engine[pytorch]==2.9.0",
   "flash-attn==2.7.4.post1",
   "vllm==0.10.1.1",
   "torch==2.7.1",
   "flashinfer-python",
   "torchvision",
-  "megatron-bridge==0.1.0rc4",
-  "megatron-core==0.14.0",
+  "megatron-bridge @ git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.0",
+  "megatron-core==0.16.0rc0",
 ]
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.

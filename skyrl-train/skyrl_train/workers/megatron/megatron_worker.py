@@ -14,6 +14,7 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
+from megatron.bridge.peft.lora import LoRA
 import megatron.core.parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
@@ -41,7 +42,7 @@ from skyrl_train.utils.profiler import Profiler
 
 class MegatronWorker:
     def init_configs(
-        self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False
+        self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False, lora_config=None
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -89,10 +90,21 @@ class MegatronWorker:
         self.strategy.hf_config = hf_config
         self.tokenizer = tokenizer
 
+    def configure_lora(self, lora_config):
+        self.lora_cls = LoRA(
+            target_modules=["linear_qkv", "linear_proj", "linearx_fc1", "linear_fc2"] if lora_config.target_modules == "all-linear" else lora_config.target_modules,
+            dim=lora_config.rank,
+            alpha=lora_config.alpha,
+            dropout=lora_config.dropout,
+            exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+            lora_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
+        )
+
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
         ddp_config: Optional[Dict[str, Any]] = None,
+        lora_config: Optional[Dict[str, Any]] = None,
         bf16: bool = True,
     ) -> List[nn.Module]:
         """
@@ -100,6 +112,15 @@ class MegatronWorker:
         """
         from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 
+        if lora_config is not None:
+            self.configure_lora(lora_config)
+            def lora_pre_wrap_hook(model):
+                lora_model = self.lora_cls(model, training=True)
+                self.lora_cls.set_params_to_save(lora_model)
+
+                return lora_model
+            self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+        
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
             default_ddp_config.use_distributed_optimizer = True
@@ -229,6 +250,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
+        self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
+
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
@@ -243,6 +266,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=True,
             ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
+            lora_config=self.cfg.trainer.policy.model.lora if self._is_lora else None,
             bf16=self.cfg.trainer.bf16,
         )
 
@@ -281,6 +305,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
         )
+        
 
         self.use_cuda_ipc = False
         if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
