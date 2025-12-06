@@ -33,32 +33,33 @@ class FSDPWeightExtractor(WeightExtractor):
     """Extracts weights from FSDP-sharded models.
 
     Args:
-        group_by_module: If True, group parameters by module (for FlashRL QKV fusion)
+        model: FSDP model to extract weights from
+        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
     """
 
-    def __init__(self, group_by_module: bool = False):
+    def __init__(self, model: torch.nn.Module, group_by_module: bool = False):
+        self.model = model
         self.group_by_module = group_by_module
 
-    def extract_weights(self, model: torch.nn.Module, dtype: torch.dtype):
+    def extract_weights(self, dtype: torch.dtype):
         """Extract weights from FSDP model.
 
         Args:
-            model: FSDP model to extract weights from
             dtype: Target dtype for inference
 
         Yields:
             WeightChunk objects (one per parameter, or grouped by module)
         """
         # Configure state_dict type for FSDP v1
-        if fsdp_version(model) == 1:
+        if fsdp_version(self.model) == 1:
             FSDP.set_state_dict_type(
-                model,
+                self.model,
                 state_dict_type=StateDictType.SHARDED_STATE_DICT,
                 state_dict_config=ShardedStateDictConfig(),
             )
 
         # Get state dict (handles FSDP sharding)
-        params = model.state_dict()
+        params = self.model.state_dict()
 
         if not self.group_by_module:
             # Simple path: yield one chunk per parameter
@@ -185,9 +186,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
 
-        self.use_cuda_ipc = False
-        if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
-            self.use_cuda_ipc = True
+        # Initialize weight extractor
+        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
+        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        self.weight_extractor = FSDPWeightExtractor(self.model.model, group_by_module=self.use_cuda_ipc)
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
@@ -243,12 +246,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
             return
 
+        # Extract weights using the initialized extractor
         if not self.use_cuda_ipc:
-            # Broadcast path: use extractor to get weight chunks
-            extractor = FSDPWeightExtractor()
-
-            for chunk in extractor.extract_weights(self.model.model, generator_dtype):
+            # Broadcast path: one chunk per parameter
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
                 # Each chunk contains one parameter
+                assert len(chunk) == 1
                 name = chunk.names[0]
                 tensor = chunk.tensors[0]
 
@@ -274,17 +277,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     await update_weight_task
                 torch.distributed.barrier()
         else:
-            # CUDA IPC path: use extractor with module grouping
+            # CUDA IPC path: module-grouped chunks for FlashRL
             from torch.multiprocessing.reductions import reduce_tensor
-
-            # Use extractor with module grouping for FlashRL
-            extractor = FSDPWeightExtractor(group_by_module=True)
 
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
             current_size = 0
 
             # Iterate over module-grouped chunks
-            for chunk in extractor.extract_weights(self.model.model, generator_dtype):
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
                 # chunk contains all parameters for one module (e.g., self_attn)
                 for i, (name, tensor) in enumerate(zip(chunk.names, chunk.tensors)):
                     module_done = i == len(chunk) - 1

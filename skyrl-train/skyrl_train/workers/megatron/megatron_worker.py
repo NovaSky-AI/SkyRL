@@ -37,6 +37,149 @@ from skyrl_train.workers.worker import (
 )
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
+from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+class MegatronWeightExtractor(WeightExtractor):
+    """Extracts weights from Megatron model-parallel models.
+
+    Uses Megatron's bridge to export weights in HuggingFace format.
+
+    Args:
+        bridge: Megatron AutoBridge instance for weight conversion
+        actor_module: The actor module to extract weights from
+        enable_bucketing: If True, group parameters into size-based buckets for packing
+        bucket_size_threshold_GB: Size threshold in GB for bucketing (only used if enable_bucketing=True)
+        training_dtype: Training dtype for size calculation (only used if enable_bucketing=True)
+    """
+
+    def __init__(
+        self,
+        bridge,
+        actor_module,
+        enable_bucketing: bool = False,
+        bucket_size_threshold_GB: float = 1.0,
+        training_dtype: torch.dtype = torch.bfloat16,
+    ):
+        self.bridge = bridge
+        self.actor_module = actor_module
+        self.enable_bucketing = enable_bucketing
+        self.bucket_size_threshold_GB = bucket_size_threshold_GB
+        self.training_dtype = training_dtype
+
+        # Initialize bucketing if enabled
+        if enable_bucketing:
+            self._init_param_buckets()
+        else:
+            self.param_buckets = None
+
+    def _init_param_buckets(self):
+        """Initialize parameter buckets for packing."""
+        # Get conversion tasks from bridge
+        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+
+        # Calculate size for each parameter
+        param_info = []
+
+        def calculate_size_in_bytes(param, tp_size, ep_size):
+            if param is None:
+                # need to broadcast for other pp ranks
+                size_in_bytes = None
+            else:
+                # Calculate size for this parameter
+                prec_to_bytes = {
+                    torch.bfloat16: 2,
+                    torch.float32: 4,
+                }
+                scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
+                size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
+
+            # Broadcast size_in_bytes across pipeline parallel ranks
+            return broadcast_object_across_pp_ranks(size_in_bytes)
+
+        for task in weight_conversion_tasks:
+            param_info.append(
+                (
+                    task,
+                    calculate_size_in_bytes(
+                        task.param_weight,
+                        task.mapping.tp_size,
+                        task.mapping.ep_size if task.mapping.is_expert else 1,
+                    ),
+                )
+            )
+
+        # Group parameters into buckets based on size threshold
+        self.param_buckets = [[]]
+        curr_size = 0
+        for task, size in param_info:
+            if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+                self.param_buckets.append([])
+                curr_size = 0
+            self.param_buckets[-1].append(task)
+            curr_size += size
+
+    def extract_weights(self, dtype: torch.dtype):
+        """Extract weights from Megatron model.
+
+        Args:
+            dtype: Target dtype for inference
+
+        Yields:
+            WeightChunk objects (one per parameter, or one per bucket if bucketing enabled)
+        """
+        device = torch.cuda.current_device()
+
+        if not self.enable_bucketing:
+            # No bucketing: yield one chunk per parameter
+            hf_params_generator = self.bridge.export_hf_weights(
+                self.actor_module,
+                show_progress=False,
+                conversion_tasks=None,
+            )
+
+            for name, tensor in hf_params_generator:
+                # Move to device and convert dtype
+                tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+
+                yield WeightChunk(
+                    names=[name],
+                    dtypes=[str(dtype)],
+                    shapes=[list(tensor.shape)],
+                    tensors=[tensor],
+                )
+        else:
+            # Bucketing mode: iterate over buckets, yield one chunk per bucket
+            for bucket in self.param_buckets:
+                hf_params_generator = self.bridge.export_hf_weights(
+                    self.actor_module,
+                    show_progress=False,
+                    conversion_tasks=bucket,
+                )
+
+                # Collect all parameters in this bucket into one chunk
+                names = []
+                dtypes_list = []
+                shapes = []
+                tensors = []
+
+                for name, tensor in hf_params_generator:
+                    # Move to device and convert dtype
+                    tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+
+                    names.append(name)
+                    dtypes_list.append(str(dtype))
+                    shapes.append(list(tensor.shape))
+                    tensors.append(tensor)
+
+                # Yield one chunk containing all parameters in this bucket
+                if tensors:
+                    yield WeightChunk(
+                        names=names,
+                        dtypes=dtypes_list,
+                        shapes=shapes,
+                        tensors=tensors,
+                    )
 
 
 class MegatronWorker:
@@ -278,55 +421,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             policy_loss_fn=self.policy_loss_fn,
         )
 
-        self.use_cuda_ipc = False
-        if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
-            self.use_cuda_ipc = True
-            # init weight syncing state
-            self.weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
-
-            # map the params that go in each bucket
-            param_info = []
-
-            def calculate_size_in_bytes(param, tp_size, ep_size):
-                if param is None:
-                    # need to broadcast for other pp ranks
-                    size_in_bytes = None
-                else:
-                    # Calculate size for this parameter
-                    prec_to_bytes = {
-                        torch.bfloat16: 2,
-                        torch.float32: 4,
-                    }
-                    scale = (
-                        prec_to_bytes[torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32]
-                        / prec_to_bytes[param.dtype]
-                    )
-                    size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
-
-                # Broadcast size_in_bytes across pipeline parallel ranks
-                return broadcast_object_across_pp_ranks(size_in_bytes)
-
-            for task in self.weight_conversion_tasks:
-                param_info.append(
-                    (
-                        task,
-                        calculate_size_in_bytes(
-                            task.param_weight,
-                            task.mapping.tp_size,
-                            task.mapping.ep_size if task.mapping.is_expert else 1,
-                        ),
-                    )
-                )
-
-            self.param_buckets = [[]]
-            curr_size = 0
-            for p in param_info:
-                task, size = p
-                if curr_size + size > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB * 1024**3:
-                    self.param_buckets.append([])
-                    curr_size = 0
-                self.param_buckets[-1].append(task)
-                curr_size += size
+        # Initialize weight extractor
+        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
+        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        self.weight_extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=self.use_cuda_ipc,
+            bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
+            training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
+        )
 
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
@@ -465,54 +570,48 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
-        device = torch.cuda.current_device()
 
-        # Non CUDA IPC wt sync
+        # Extract weights using the initialized extractor
         if not self.use_cuda_ipc:
+            # Broadcast path: one chunk per parameter
             # NOTE: need to optimize this to use buckets for non-colocated weight sync as well
-            per_tensor_param = self.bridge.export_hf_weights(self.actor_module, show_progress=False)
-            for name, param in per_tensor_param:
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # Each chunk contains one parameter
+                assert len(chunk) == 1
+                name = chunk.names[0]
+                tensor = chunk.tensors[0]
+
                 if torch.distributed.get_rank() == 0:
                     update_weight_task = asyncio.create_task(
                         inference_engine_client.update_named_weights(
                             {
                                 "names": [name],
                                 "dtypes": [self.cfg.generator.model_dtype],
-                                "shapes": [param.shape],
+                                "shapes": [list(tensor.shape)],
                             }
                         )
                     )
 
-                def broadcast_param(param):
-                    device = torch.cuda.current_device()
-                    param = param.to(device, non_blocking=True)
-                    param = param.to(generator_dtype)
-
-                    # Broadcast weights from training rank 0 to inference engine ranks via the update group
+                # Broadcast weights from training rank 0 to inference engine ranks via the update group
+                def broadcast_tensor(tensor):
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
 
-                await asyncio.to_thread(broadcast_param, param)
+                await asyncio.to_thread(broadcast_tensor, tensor)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
-        # CUDA IPC wt sync
         else:
-            for bucket in self.param_buckets:
-                hf_params_generator = self.bridge.export_hf_weights(
-                    self.actor_module,
-                    show_progress=False,
-                    conversion_tasks=bucket,
-                )
-                gathered_hf_params = {name: tensor for name, tensor in hf_params_generator}
-                gathered_hf_params = {
-                    name: tensor.to(device=device, dtype=generator_dtype) for name, tensor in gathered_hf_params.items()
-                }
+            # CUDA IPC path: one chunk per bucket (for packing)
+            device = torch.cuda.current_device()
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
 
-                total_size = sum(tensor.numel() for tensor in gathered_hf_params.values())
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # Each chunk contains all parameters in one bucket
+                # Calculate total size for packing (in number of elements)
+                total_numel = sum(t.numel() for t in chunk.tensors)
                 packed_tensor = torch.empty(
-                    total_size,
+                    total_numel,
                     device=device,
                     dtype=generator_dtype,
                     requires_grad=False,
@@ -520,13 +619,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
                 offset = 0
                 # Copy tensors into consolidated buffers
-                for key, tensor in gathered_hf_params.items():
+                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
                     size = tensor.numel()
                     packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
                     offset += size
-                    weights_update_request["names"].append(key)
+                    weights_update_request["names"].append(name)
                     weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                    weights_update_request["shapes"].append(tensor.shape)
+                    weights_update_request["shapes"].append(shape)
                     weights_update_request["sizes"].append(size)
 
                 ipc_handle = reduce_tensor(packed_tensor)

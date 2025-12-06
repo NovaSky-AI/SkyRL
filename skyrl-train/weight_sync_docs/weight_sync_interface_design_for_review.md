@@ -87,7 +87,7 @@ class WeightExtractor(ABC):
     """
 
     @abstractmethod
-    def extract_weights(self, model: Any, dtype: torch.dtype) -> Iterator[WeightChunk]:
+    def extract_weights(self, dtype: torch.dtype) -> Iterator[WeightChunk]:
         """Extract weights from the model as WeightChunk objects.
 
         Implementations should:
@@ -97,7 +97,6 @@ class WeightExtractor(ABC):
         - Optionally group related parameters (e.g., QKV for efficiency)
 
         Args:
-            model: The model to extract weights from
             dtype: Target dtype for inference (e.g., torch.bfloat16, torch.float16)
 
         Yields:
@@ -191,7 +190,11 @@ class WeightChunk:
     shapes: List[List[int]]
     tensors: List[torch.Tensor]
     module_name: Optional[str] = None
-    packed: bool = False
+
+    @cached_property
+    def total_numel(self) -> int:
+        """Calculate total number of elements across all tensors."""
+        return sum(t.numel() for t in self.tensors)
 
     @cached_property
     def total_size_bytes(self) -> int:
@@ -200,8 +203,7 @@ class WeightChunk:
 ```
 **Responsibilities**
 - Compact representation of grouped parameters and associated metadata.
-- Track total byte size for batching heuristics (cached property, auto-calculated from tensors).
-- Flag whether tensors are already packed contiguously.
+- Track total element count and byte size for batching heuristics (cached properties, auto-calculated from tensors).
 
 ### 4.6 WeightUpdateRequest
 ```python

@@ -43,6 +43,11 @@ class WeightChunk:
         return len(self.names)
 
     @cached_property
+    def total_numel(self) -> int:
+        """Calculate total number of elements across all tensors."""
+        return sum(t.numel() for t in self.tensors)
+
+    @cached_property
     def total_size_bytes(self) -> int:
         """Calculate total memory footprint in bytes."""
         return sum(t.numel() * t.element_size() for t in self.tensors)

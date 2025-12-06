@@ -16,7 +16,7 @@ class WeightExtractor(ABC):
     """
 
     @abstractmethod
-    def extract_weights(self, model: Any, dtype: torch.dtype) -> Iterator[WeightChunk]:
+    def extract_weights(self, dtype: torch.dtype) -> Iterator[WeightChunk]:
         """Extract weights from the model as WeightChunk objects.
 
         Implementations should:
@@ -26,7 +26,6 @@ class WeightExtractor(ABC):
         - Optionally group related parameters (e.g., QKV for efficiency)
 
         Args:
-            model: The model to extract weights from
             dtype: Target dtype for inference (e.g., torch.bfloat16, torch.float16)
 
         Yields:
