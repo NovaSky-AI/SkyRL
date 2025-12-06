@@ -110,12 +110,10 @@ class WeightExtractor(ABC):
 - Optionally perform module grouping or size-based batching
 - Yield WeightChunk instances ready for transfer
 
-**Implementation Note:** Common functionality (grouping, batching) can be shared via a helper base class if needed.
-
 **Implementations**
-- `FSDPWeightExtractor` – FSDP-sharded models
-- `MegatronWeightExtractor` – Megatron model-parallel models
-- `DeepSpeedWeightExtractor` – DeepSpeed ZeRO-sharded models
+- `FSDPWeightExtractor` – FSDP-sharded models with optional module grouping
+- `MegatronWeightExtractor` – Megatron model-parallel models with optional bucketing
+- `DeepSpeedWeightExtractor` – DeepSpeed ZeRO-sharded models with ZeRO-3 gathering support
 
 ### 4.2 WeightTransferSender
 ```python

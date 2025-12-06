@@ -19,6 +19,93 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RefWorkerBase,
 )
+from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+class DeepSpeedWeightExtractor(WeightExtractor):
+    """Extracts weights from DeepSpeed ZeRO-sharded models.
+
+    Args:
+        model: DeepSpeed model to extract weights from
+        zero_stage: ZeRO optimization stage (0, 1, 2, or 3)
+        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
+    """
+
+    def __init__(self, model: torch.nn.Module, zero_stage: int, group_by_module: bool = False):
+        self.model = model
+        self.zero_stage = zero_stage
+        self.group_by_module = group_by_module
+
+    def extract_weights(self, dtype: torch.dtype):
+        """Extract weights from DeepSpeed model.
+
+        Args:
+            dtype: Target dtype for inference
+
+        Yields:
+            WeightChunk objects (one per parameter, or grouped by module)
+        """
+        params = dict(self.model.named_parameters())
+
+        if not self.group_by_module:
+            # Simple path: yield one chunk per parameter
+            for name, param in params.items():
+                tensor = self._prepare_tensor(param, dtype)
+                # Get correct shape based on ZeRO stage
+                shape = list(param.shape if self.zero_stage != 3 else param.ds_shape)
+                yield WeightChunk(
+                    names=[name],
+                    dtypes=[str(dtype)],
+                    shapes=[shape],
+                    tensors=[tensor],
+                )
+        else:
+            # Group parameters by module for FlashRL
+            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
+            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
+            # we need to pass the weights for all of these together.
+            # Overall, this doesn't hurt perf even in the general case
+            module_to_params: Dict[str, List[str]] = {}
+            for param_name in params.keys():
+                # Extract module name (e.g., "model.layers.0.self_attn" from "model.layers.0.self_attn.q_proj.weight")
+                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
+                module_name = ".".join(param_name.split(".")[:-2])
+                if module_name not in module_to_params:
+                    module_to_params[module_name] = []
+                module_to_params[module_name].append(param_name)
+
+            # Yield chunks grouped by module
+            for module_name, param_names in module_to_params.items():
+                tensors = []
+                names = []
+                shapes = []
+                dtypes_list = []
+
+                for param_name in param_names:
+                    param = params[param_name]
+                    tensor = self._prepare_tensor(param, dtype)
+                    # Get correct shape based on ZeRO stage
+                    shape = list(param.shape if self.zero_stage != 3 else param.ds_shape)
+                    tensors.append(tensor)
+                    names.append(param_name)
+                    shapes.append(shape)
+                    dtypes_list.append(str(dtype))
+
+                yield WeightChunk(
+                    names=names,
+                    dtypes=dtypes_list,
+                    shapes=shapes,
+                    tensors=tensors,
+                    module_name=module_name,
+                )
+
+    def _prepare_tensor(self, param: torch.nn.Parameter, dtype: torch.dtype) -> torch.Tensor:
+        """Gather (if ZeRO-3), convert dtype, and make tensor contiguous."""
+        # For ZeRO-3, gather sharded parameter
+        with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
+            tensor = param.data.clone()
+            tensor = tensor.to(dtype)
+            return tensor.detach().contiguous()
 
 
 class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
@@ -95,9 +182,15 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             (wrapped_model, optimizer, lr_scheduler),
         )
 
-        self.use_cuda_ipc = False
-        if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
-            self.use_cuda_ipc = True
+        # Initialize weight extractor
+        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
+        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        self.weight_extractor = DeepSpeedWeightExtractor(
+            model=self.model.model.module,
+            zero_stage=self.zero_stage,
+            group_by_module=self.use_cuda_ipc,
+        )
 
         self._model_update_group_name = None
 
@@ -126,12 +219,17 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        model = self.model.model.module
-        if not self.use_cuda_ipc:
-            for name, param in model.named_parameters():
-                if torch.distributed.get_rank() == 0:
-                    shape = param.shape if self.zero_stage != 3 else param.ds_shape
 
+        if not self.use_cuda_ipc:
+            # Broadcast path: one chunk per parameter
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # Each chunk contains one parameter
+                assert len(chunk) == 1
+                name = chunk.names[0]
+                shape = chunk.shapes[0]
+                tensor = chunk.tensors[0]
+
+                if torch.distributed.get_rank() == 0:
                     update_weight_task = asyncio.create_task(
                         inference_engine_client.update_named_weights(
                             {
@@ -142,95 +240,72 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
                         )
                     )
 
-                # broadcast
-                def gather_and_broadcast(param):
-                    # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
-                    with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
-                        if torch.distributed.get_rank() == 0:
-                            param = param.to(generator_dtype)
-                            torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                # Broadcast tensor
+                def broadcast_tensor(tensor):
+                    if torch.distributed.get_rank() == 0:
+                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
 
-                await asyncio.to_thread(gather_and_broadcast, param)
+                await asyncio.to_thread(broadcast_tensor, tensor)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
             torch.distributed.barrier()
-        # CUDA IPC
         else:
+            # CUDA IPC path: module-grouped chunks for FlashRL
             from torch.multiprocessing.reductions import reduce_tensor
 
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
             current_size = 0
 
-            module_to_params: Dict[str, List[str]] = {}
-            params = dict(model.named_parameters())
-            for param_name, param in model.named_parameters():
-                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
-                module_name = ".".join(param_name.split(".")[:-2])
-                if module_name not in module_to_params:
-                    module_to_params[module_name] = [param_name]
-                else:
-                    module_to_params[module_name].append(param_name)
+            # Iterate over module-grouped chunks
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # chunk contains all parameters for one module (e.g., self_attn)
+                for i, (name, tensor, shape) in enumerate(zip(chunk.names, chunk.tensors, chunk.shapes)):
+                    module_done = i == len(chunk) - 1
 
-            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
-            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
-            # we need to pass the weights for all of these together.
-            # Overall, this doesn't hurt perf even in the general case
-            for module_name, param_names in module_to_params.items():
-                for i, name in enumerate(param_names):
-                    param = params[name]
-                    module_done = i == len(param_names) - 1
-                    # For ZeRO-3, allgather sharded parameter and broadcast to all InferenceEngines by rank 0
-                    with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
-                        weight = param.data.clone()
-                        weight = weight.to(generator_dtype)
-                        ipc_handle = reduce_tensor(weight)
+                    # Create IPC handle for tensor
+                    ipc_handle = reduce_tensor(tensor)
+                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                    ipc_handle_list = [None] * torch.distributed.get_world_size()
+                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
-                        ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                        ipc_handle_list = [None] * torch.distributed.get_world_size()
-                        torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+                    if torch.distributed.get_rank() == 0:
+                        ipc_handles = {}
+                        for d in ipc_handle_list:
+                            ipc_handles.update(d)
 
-                        if torch.distributed.get_rank() == 0:
-                            ipc_handles = {}
-                            for d in ipc_handle_list:
-                                ipc_handles.update(d)
+                        current_size += tensor.nbytes
+                        weights_update_request["names"].append(name)
+                        weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                        weights_update_request["shapes"].append(shape)
+                        weights_update_request["extras"].append({"ipc_handles": ipc_handles})
 
-                            shape = param.shape if self.zero_stage != 3 else param.ds_shape
+                        # We send in batches as an optimization
+                        # sync if threshold is reached
+                        if (
+                            module_done
+                            and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
+                        ):
+                            await inference_engine_client.update_named_weights(weights_update_request)
+                            current_size = 0
+                            weights_update_request = {
+                                "names": [],
+                                "dtypes": [],
+                                "shapes": [],
+                                "extras": [],
+                                "packed": False,
+                            }
+                            # force collect any sent tensors if possible to be memory efficient
+                            torch.cuda.ipc_collect()
 
-                            weights_update_request["names"].append(name)
-                            weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                            weights_update_request["shapes"].append(shape)
-                            weights_update_request["extras"].append(
-                                {
-                                    "ipc_handles": ipc_handles,
-                                }
-                            )
-                            current_size += weight.nbytes
-                            # We send in batches as an optimization
-                            # sync if threshold is reached
-                            if (
-                                module_done
-                                and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
-                            ):
-                                await inference_engine_client.update_named_weights(weights_update_request)
-                                current_size = 0
-                                weights_update_request = {
-                                    "names": [],
-                                    "dtypes": [],
-                                    "shapes": [],
-                                    "extras": [],
-                                    "packed": False,
-                                }
-                                # force collect any sent tensors if possible to be memory efficient
-                                torch.cuda.ipc_collect()
+                    torch.distributed.barrier()
+                    torch.cuda.synchronize()
 
-                        torch.distributed.barrier()
-                        torch.cuda.synchronize()
-
-            # sync any remaining weights
-            if torch.distributed.get_rank() == 0 and len(weights_update_request["names"]) > 0:
+            # Send any remaining weights
+            if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
                 await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
                 torch.cuda.ipc_collect()
             torch.distributed.barrier()
+            torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
