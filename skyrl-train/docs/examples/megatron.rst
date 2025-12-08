@@ -121,7 +121,9 @@ for advanced users to fully take advantage of all of Megatron-Core's feature fla
     transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
       # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
       ...
-
+    # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+    # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+    empty_cuda_cache: true
 
 These default values can be overridden by passing in the corresponding arguments to ``trainer.policy.megatron_config`` in the launch script.
 
