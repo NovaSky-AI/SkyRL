@@ -72,21 +72,14 @@ class ExternalInferenceClient:
                 # In that case the other process won the race and created target_dir.
                 pass
 
-        stop_token_ids = request.sampling_params.stop or []
-
         payload = {
             "model": model_name,
             "prompt": prompt_tokens,
             "max_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
-            "seed": request.sampling_params.seed,
-            "n": request.num_samples,
             "logprobs": True,
             "stream": False,
-            "echo": False,
             "return_token_ids": True,
-            "stop_token_ids": stop_token_ids,
-            "include_stop_str_in_output": True,
         }
 
         response = await http_client.post("/completions", json=payload)
@@ -95,13 +88,11 @@ class ExternalInferenceClient:
 
         sequences = []
         for choice in result["choices"]:
-            token_ids = choice["token_ids"]
             lp = choice["logprobs"]
-            logprobs = lp["token_logprobs"]
             sequences.append(
                 types.GeneratedSequence(
-                    tokens=token_ids,
-                    logprobs=logprobs,
+                    tokens=choice["token_ids"],
+                    logprobs=lp["token_logprobs"],
                     stop_reason=choice["finish_reason"],
                 )
             )
