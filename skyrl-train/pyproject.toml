@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skyrl-train"
-version = "0.2.0"
+version = "0.3.0"
 description = "skyrl-train"
 authors = [
     {name = "NovaSkyAI", email = "novasky.berkeley@gmail.com"}
@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "loguru",
     "tqdm",
+    "ninja",
     "tensorboard",
     "func_timeout",
     "transformers>=4.51.0",
@@ -28,7 +29,7 @@ dependencies = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.48.0",
+    "ray==2.51.1",
     "peft",
     "debugpy==1.8.0",
     "hf_transfer",
@@ -67,9 +68,15 @@ conflicts = [
         { extra = "flashrl" },
     ]
 ]
+no-build-isolation-package = [
+    "transformer-engine-torch",
+    "transformer-engine",
+]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
+transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools"]
+transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -126,23 +133,14 @@ sglang = [
     "torchvision",
 ]
 mcore = [
-  # Make sure to change the flash attention source (under tool.uv.sources) above to a compatible version (<= 2.7.4.post1) for TransformerEngine==2.5.0
-  # https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
-  # For single node: build transformer-engine separately first, and uncomment the transformer-engine library import below
-  # uv pip install "torch==2.7.1"
-  # uv pip install "nvidia-cudnn-cu12>=9.3"
-  # export CUDNN_PATH="$(python -c 'import inspect, nvidia.cudnn as c, os; print(os.path.dirname(inspect.getfile(c)))')"
-  # export CPATH="$CUDNN_PATH/include:${CPATH:-}"
-  # export LD_LIBRARY_PATH="$CUDNN_PATH/lib:${LD_LIBRARY_PATH:-}"
-  # uv pip install --no-build-isolation "transformer_engine[pytorch]==2.5.0" --verbose
-  # "transformer-engine[pytorch]==2.5.0",
+  "transformer-engine[pytorch]==2.7.0",
   "flash-attn==2.7.4.post1",
   "vllm==0.10.1.1",
   "torch==2.7.1",
   "flashinfer-python",
   "torchvision",
-  "mbridge==0.15.1",
-  "megatron-core==0.13.0",
+  "megatron-bridge==0.1.0rc4",
+  "megatron-core==0.14.0",
 ]
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
@@ -246,4 +244,12 @@ extend-ignore = [
 [tool.ruff.lint]
 ignore = [
     "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
+]
+
+[pytest]
+markers = [
+    "vllm",
+    "sglang",
+    "integrations",
+    "megatron",
 ]

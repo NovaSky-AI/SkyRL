@@ -27,6 +27,9 @@ torch_profiler_config:
 optimizer_config_kwargs:
   # set these all to true (and optimizer_offload_fraction=1.0) for optimizer cpu offloading
   overlap_cpu_optimizer_d2h_h2d: false
+  # NOTE: `use_precision_aware_optimizer=true` can cause checkpointing to fail. 
+  # See: https://github.com/nvidia/megatron-lm/issues/1820.
+  # We recommend leaving this as `false`
   use_precision_aware_optimizer: false
   optimizer_cpu_offload: false
   optimizer_offload_fraction: 0.0
@@ -37,7 +40,11 @@ transformer_config_kwargs:
   # Recompute config - used for gradient/activation checkpointing
   # for details see: https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
   # for the most aggresive memory savings, set recompute_granularity to "full", recompute_method to "uniform", and recompute_num_layers to 1
-  recompute_granularity: null
+  recompute_granularity: full
   recompute_modules: ["core_attn"]
-  recompute_method: null
-  recompute_num_layers: null
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+# flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+# this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+empty_cuda_cache: true

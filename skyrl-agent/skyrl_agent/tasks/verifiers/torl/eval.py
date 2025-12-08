@@ -1,4 +1,3 @@
-# flake8: noqa: E402
 import re
 import copy
 
@@ -233,14 +232,14 @@ def parse_digits(num):
     num = regex.sub(",", "", str(num))
     try:
         return float(num)
-    except Exception:
+    except:
         if num.endswith("%"):
             num = num[:-1]
             if num.endswith("\\"):
                 num = num[:-1]
             try:
                 return float(num) / 100
-            except Exception:
+            except:
                 pass
     return None
 
@@ -303,7 +302,7 @@ def math_equal(
                 except Exception:
                     continue
             return False
-    except Exception:
+    except:
         pass
 
     if not prediction and prediction not in [0, False]:
@@ -412,13 +411,13 @@ def math_equal(
         prediction = float(N(parse_latex(prediction)))
         if abs(prediction - float(reference)) <= 1e-8:
             True
-    except Exception:
+    except:
         pass
     try:
         reference = float(N(parse_latex(reference)))
         if abs(prediction - reference) <= 1e-8:
             return True
-    except Exception:
+    except:
         pass
     return False
 
@@ -437,10 +436,10 @@ def symbolic_equal(a, b):
         for f in [parse_latex, parse_expr]:
             try:
                 return f(s.replace("\\\\", "\\"))
-            except Exception:
+            except:
                 try:
                     return f(s)
-                except Exception:
+                except:
                     pass
         return s
 
@@ -450,27 +449,27 @@ def symbolic_equal(a, b):
     try:
         if str(a) == str(b) or a == b:
             return True
-    except Exception:
+    except:
         pass
 
     # simplify equal
     try:
         if a.equals(b) or simplify(a - b) == 0:
             return True
-    except Exception:
+    except:
         pass
 
     # equation equal
     try:
         if (abs(a.lhs - a.rhs)).equals(abs(b.lhs - b.rhs)):
             return True
-    except Exception:
+    except:
         pass
 
     try:
         if numeric_equal(float(N(a)), float(N(b))):
             return True
-    except Exception:
+    except:
         pass
 
     # matrix
@@ -481,7 +480,7 @@ def symbolic_equal(a, b):
             _b = b.applyfunc(lambda x: round(x, 3))
             if _a.equals(_b):
                 return True
-    except Exception:
+    except:
         pass
 
     return False

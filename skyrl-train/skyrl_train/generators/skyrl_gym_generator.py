@@ -271,7 +271,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                chat_history[initial_chat_history_length:],
+                chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
@@ -282,7 +282,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
         else:
-            response_ids = input_ids[initial_prompt_length:]
+            assert not any(
+                loss_mask[response_end_idx - initial_prompt_length + 1 :]
+            ), "loss_mask at index after response end should be all 0"
+            loss_mask = loss_mask[: response_end_idx - initial_prompt_length + 1]
+            response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
@@ -415,13 +419,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
         Returns outputs in the same order as the input batch.
         Args:
             input_batch: GeneratorInput
+            disable_tqdm: bool
         Returns:
             GeneratorOutput
         """
@@ -458,6 +463,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             desc="Generating Trajectories",
             miniters=max(1, len(tasks) // 10),
             mininterval=5,
+            disable=disable_tqdm,
         )
 
         responses = [output.response_ids for output in all_outputs]
@@ -627,7 +633,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
-                add_generation_prompt=True,
+                add_generation_prompt=not done,
                 tokenize=True,
                 **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]
