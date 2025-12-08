@@ -75,16 +75,6 @@ General Training Configuration
 .. tip::
   If you're facing issues with tuning the right values for ``micro_train_batch_size_per_gpu``, ``policy_mini_batch_size`` and ``micro_forward_batch_size_per_gpu``, see ``utils/utils.py::validate_batch_sizes`` for details on constraints.
 
-Global LoRA Configuration
--------------------------
-
-.. code-block:: yaml
-
-    target_modules: "all-linear"
-    exclude_modules: null
-
-- ``target_modules``: Specifies which modules to apply LoRA to. Set to ``"all-linear"`` to apply LoRA to all linear layers, or provide a list of specific module names.
-- ``exclude_modules``: List of modules to exclude from LoRA application. Set to ``null`` to exclude none.
 
 RoPE Configuration
 ------------------
