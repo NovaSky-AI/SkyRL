@@ -91,7 +91,12 @@ class ExternalInferenceClient:
         result = response.json()
 
         sequences = []
-        for choice in result["choices"]:
+        for i, choice in enumerate(result["choices"]):
+            logger.info(
+                f"vLLM response[{i}]: prompt_len={len(prompt_tokens)}, "
+                f"returned_token_ids_len={len(choice['token_ids'])}, "
+                f"finish_reason={choice['finish_reason']}"
+            )
             lp = choice["logprobs"]
             sequences.append(
                 types.GeneratedSequence(
