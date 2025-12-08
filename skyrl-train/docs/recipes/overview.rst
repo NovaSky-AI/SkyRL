@@ -15,11 +15,7 @@ We provide reproduction runs for the following recipes:
 Simple training on GSM8K
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The scripts for training on GSM8K recipe is available at :code_link:`examples/gsm8k/`.
-
-
-# https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes/runs/ygmzy5fd?nw=nwusersumanthrh99
-
+The scripts for training on GSM8K are available at :code_link:`examples/gsm8k/`.
 
 
 .. raw:: html
