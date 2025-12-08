@@ -703,13 +703,18 @@ class TinkerEngine:
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
                 for i in range(batch_size):
-                    prompt_len = len(batch_prompts[i])
+                    prompt = batch_prompts[i]
+                    prompt_len = len(prompt)
+                    prompt_first = prompt[:5] if len(prompt) >= 5 else prompt
+                    prompt_last = prompt[-5:] if len(prompt) >= 5 else prompt
                     gen_ids = result.generated_ids[i]
                     gen_len = len(gen_ids)
                     first_tokens = gen_ids[:5] if len(gen_ids) >= 5 else gen_ids
                     last_tokens = gen_ids[-5:] if len(gen_ids) >= 5 else gen_ids
                     logger.info(
                         f"TX response[{i}]: prompt_len={prompt_len}, "
+                        f"prompt_first_5={prompt_first}, "
+                        f"prompt_last_5={prompt_last}, "
                         f"generated_token_ids_len={gen_len}, "
                         f"finish_reason={result.stop_reasons[i]}, "
                         f"first_5_tokens={first_tokens}, "

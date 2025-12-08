@@ -73,7 +73,12 @@ class ExternalInferenceClient:
                 pass
 
         stop_token_ids = request.sampling_params.stop or []
-        logger.info(f"vLLM request: stop_token_ids={stop_token_ids}, max_tokens={request.sampling_params.max_tokens}, n={request.num_samples}")
+        prompt_first = prompt_tokens[:5] if len(prompt_tokens) >= 5 else prompt_tokens
+        prompt_last = prompt_tokens[-5:] if len(prompt_tokens) >= 5 else prompt_tokens
+        logger.info(
+            f"vLLM request: stop_token_ids={stop_token_ids}, max_tokens={request.sampling_params.max_tokens}, "
+            f"n={request.num_samples}, prompt_first_5={prompt_first}, prompt_last_5={prompt_last}"
+        )
 
         payload = {
             "model": model_name,
