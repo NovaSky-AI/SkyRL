@@ -73,12 +73,6 @@ class ExternalInferenceClient:
                 pass
 
         stop_token_ids = request.sampling_params.stop or []
-        prompt_first = prompt_tokens[:5] if len(prompt_tokens) >= 5 else prompt_tokens
-        prompt_last = prompt_tokens[-5:] if len(prompt_tokens) >= 5 else prompt_tokens
-        logger.info(
-            f"vLLM request: stop_token_ids={stop_token_ids}, max_tokens={request.sampling_params.max_tokens}, "
-            f"n={request.num_samples}, prompt_first_5={prompt_first}, prompt_last_5={prompt_last}"
-        )
 
         payload = {
             "model": model_name,
@@ -100,26 +94,10 @@ class ExternalInferenceClient:
         result = response.json()
 
         sequences = []
-        for i, choice in enumerate(result["choices"]):
+        for choice in result["choices"]:
             token_ids = choice["token_ids"]
-            first_tokens = token_ids[:5] if len(token_ids) >= 5 else token_ids
-            last_tokens = token_ids[-5:] if len(token_ids) >= 5 else token_ids
-            # Check if vLLM is echoing the prompt (first tokens match prompt)
-            prompt_echoed = token_ids[:len(prompt_tokens)] == prompt_tokens
-            logger.info(
-                f"vLLM response[{i}]: prompt_len={len(prompt_tokens)}, "
-                f"returned_token_ids_len={len(token_ids)}, "
-                f"finish_reason={choice['finish_reason']}, "
-                f"first_5_tokens={first_tokens}, "
-                f"last_5_tokens={last_tokens}, "
-                f"prompt_echoed={prompt_echoed}"
-            )
             lp = choice["logprobs"]
             logprobs = lp["token_logprobs"]
-            if len(logprobs) != len(token_ids):
-                logger.warning(
-                    f"vLLM logprobs length mismatch: token_ids={len(token_ids)}, logprobs={len(logprobs)}"
-                )
             sequences.append(
                 types.GeneratedSequence(
                     tokens=token_ids,
