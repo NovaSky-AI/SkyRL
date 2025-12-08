@@ -1,5 +1,6 @@
 """Utility functions for weight extraction."""
 
+from collections import defaultdict
 from typing import Dict, List, Callable, Iterator, Any
 import torch
 
@@ -37,13 +38,11 @@ def yield_module_grouped_chunks(
     # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
     # we need to pass the weights for all of these together.
     # Overall, this doesn't hurt perf even in the general case
-    module_to_params: Dict[str, List[str]] = {}
+    module_to_params: Dict[str, List[str]] = defaultdict(list)
     for param_name in params.keys():
         # Extract module name (e.g., "model.layers.0.self_attn" from "model.layers.0.self_attn.q_proj.weight")
         # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
         module_name = ".".join(param_name.split(".")[:-2])
-        if module_name not in module_to_params:
-            module_to_params[module_name] = []
         module_to_params[module_name].append(param_name)
 
     # Accumulate complete modules until threshold reached
