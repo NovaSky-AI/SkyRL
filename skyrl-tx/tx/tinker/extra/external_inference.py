@@ -77,6 +77,7 @@ class ExternalInferenceClient:
             "prompt": prompt_tokens,
             "max_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
+            "seed": request.sampling_params.seed,
             "logprobs": True,
             "stream": False,
             "return_token_ids": True,
