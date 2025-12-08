@@ -55,6 +55,9 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
         left: If True, use left-padding (tokens at end). Required for autoregressive
             generation so the last position corresponds to the last real token.
             If False (default), use right-padding (tokens at start).
+
+    Returns:
+        A JAX array of shape (batch_size, max_length) with the padded sequences.
     """
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
