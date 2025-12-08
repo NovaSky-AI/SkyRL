@@ -52,9 +52,9 @@ def register_tool(name, allow_overwrite=False):
                 logger.warning(f"Tool `{name}` already exists! Overwriting with class {cls}.")
             else:
                 raise ValueError(f"Tool `{name}` already exists! Please ensure that the tool name is unique.")
-        if cls.name and (cls.name != name):
-            raise ValueError(f'{cls.__name__}.name="{cls.name}" conflicts with @register_tool(name="{name}").')
-        cls.name = name
+        # if cls.name and (cls.name != name):
+        #     raise ValueError(f'{cls.__name__}.name="{cls.name}" conflicts with @register_tool(name="{name}").')
+        # cls.name = name
         TOOL_REGISTRY[name] = cls
 
         return cls
@@ -198,3 +198,14 @@ class BaseTool(ABC):
         if fmt is None:
             fmt = "Format the arguments as a JSON object."
         return fmt
+
+    def get_system_prompt_prefix(self) -> Optional[str]:
+        """Return an optional system prompt prefix that should be prepended to the system message.
+
+        Tools can override this method to provide tool-specific system prompt instructions.
+        The returned prefix will be automatically prepended to the system message when the agent initializes.
+
+        Returns:
+            Optional[str]: System prompt prefix string, or None if no prefix is needed.
+        """
+        return None

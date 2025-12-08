@@ -229,11 +229,11 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         await asyncio.sleep(1)
         # Pause then resume while requests are in-flight
         await client.pause_generation()
-        client.resume_generation()
+        await client.resume_generation()
         # Run for another two seconds, then pause and resume again
         await asyncio.sleep(2)
         await client.pause_generation()
-        client.resume_generation()
+        await client.resume_generation()
         return await asyncio.gather(*tasks)
 
     outputs = asyncio.run(run_requests_then_pause())

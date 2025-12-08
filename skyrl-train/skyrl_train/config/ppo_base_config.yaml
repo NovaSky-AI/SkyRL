@@ -31,6 +31,8 @@ trainer:
           alpha: 16
           dropout: 0
           lora_sync_path: "/tmp/skyrl_lora_sync"
+          target_modules: "all-linear"
+          exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
@@ -65,6 +67,8 @@ trainer:
         rank: 0
         alpha: 16
         dropout: 0
+        target_modules: "all-linear"
+        exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
@@ -178,8 +182,8 @@ trainer:
   max_prompt_length: 512
   flash_attn: true
   disable_fast_tokenizer: false
-  target_modules: "all-linear"
-  exclude_modules: null
+  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
+  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"

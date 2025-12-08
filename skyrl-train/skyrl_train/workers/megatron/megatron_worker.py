@@ -61,6 +61,10 @@ class MegatronWorker:
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
+        if not self.cfg.trainer.gradient_checkpointing:
+            for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
+                transformer_config_kwargs[key] = None
+
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
@@ -328,6 +332,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.param_buckets[-1].append(task)
                 curr_size += size
 
+        self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
+
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
@@ -395,6 +401,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         micro_batch_size=micro_bsz,
                         temperature=self.cfg.generator.sampling_params.temperature,
                     )
+
+                    if self.empty_cuda_cache:
+                        torch.cuda.empty_cache()
 
                     grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 

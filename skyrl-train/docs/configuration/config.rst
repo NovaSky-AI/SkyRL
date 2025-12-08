@@ -227,6 +227,9 @@ Megatron Configuration
       transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
         ...
+      # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+      # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+      empty_cuda_cache: true
 
 
 - ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.
@@ -298,6 +301,9 @@ This section configures the policy model used for training, including optimizer,
          alpha: 16                  # LoRA scaling parameter
          dropout: 0                 # LoRA dropout rate
          lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for LoRA adapter sync
+         target_modules: "all-linear"  # Apply to all linear layers OR
+         # specify specific modules as a list
+         exclude_modules: null  # Modules to exclude from LoRA
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
      optimizer_config:
@@ -349,6 +355,8 @@ We support similar configuration options as the policy model, including LoRA.
           rank: 0                    # LoRA rank (0 = disabled)
           alpha: 16                  # LoRA scaling parameter
           dropout: 0                 # LoRA dropout rate
+          target_modules: "all-linear"
+          exclude_modules: null  # Modules to exclude from LoRA
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6
@@ -675,3 +683,4 @@ Misc Configuration
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
+- ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

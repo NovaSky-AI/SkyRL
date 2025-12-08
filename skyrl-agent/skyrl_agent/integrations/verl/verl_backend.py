@@ -4,7 +4,7 @@ from loguru import logger
 
 
 class VeRLBackend(AsyncInferBackend):
-    def __init__(self, infer_engine, cfg: Dict[str, Any] = None):
+    def __init__(self, infer_engine, tokenizer: Any = None, cfg: Dict[str, Any] = None):
         self.infer_engine = infer_engine
 
     async def async_generate_ids(
@@ -14,12 +14,12 @@ class VeRLBackend(AsyncInferBackend):
         request_id: str,
         **kwargs,
     ):
-        response_str, finish_reason = await self.infer_engine.generate(
+        response_str, meta_info = await self.infer_engine.generate(
             request_id=request_id,
             prompt_ids=input_ids,
             sampling_params=sampling_params,
         )
-        return response_str, finish_reason
+        return response_str, meta_info
 
     async def async_generate_prompts(self, prompts: Any, sampling_params: Any) -> List[str]:
         raise NotImplementedError
