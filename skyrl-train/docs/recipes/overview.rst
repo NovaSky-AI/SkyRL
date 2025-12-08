@@ -57,7 +57,7 @@ The scripts for training on GSM8K are available at :code_link:`examples/gsm8k/`.
          <td>4xH100</td>
          <td>140</td>
          <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes/runs/ygmzy5fd">Link</a></td>
+         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
        </tr>
        <tr>
          <td>DeepSpeed</td>
@@ -66,7 +66,7 @@ The scripts for training on GSM8K are available at :code_link:`examples/gsm8k/`.
          <td>4xH100</td>
          <td>140</td>
          <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes/runs/w85iamg1">Link</a></td>
+         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
        </tr>
      </tbody>
    </table>
