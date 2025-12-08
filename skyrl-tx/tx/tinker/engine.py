@@ -704,11 +704,16 @@ class TinkerEngine:
                 batch_size = batch_end - batch_start
                 for i in range(batch_size):
                     prompt_len = len(batch_prompts[i])
-                    gen_len = len(result.generated_ids[i])
+                    gen_ids = result.generated_ids[i]
+                    gen_len = len(gen_ids)
+                    first_tokens = gen_ids[:5] if len(gen_ids) >= 5 else gen_ids
+                    last_tokens = gen_ids[-5:] if len(gen_ids) >= 5 else gen_ids
                     logger.info(
                         f"TX response[{i}]: prompt_len={prompt_len}, "
                         f"generated_token_ids_len={gen_len}, "
-                        f"finish_reason={result.stop_reasons[i]}"
+                        f"finish_reason={result.stop_reasons[i]}, "
+                        f"first_5_tokens={first_tokens}, "
+                        f"last_5_tokens={last_tokens}"
                     )
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
