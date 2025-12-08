@@ -702,6 +702,14 @@ class TinkerEngine:
                     )
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
+                for i in range(batch_size):
+                    prompt_len = len(batch_prompts[i])
+                    gen_len = len(result.generated_ids[i])
+                    logger.info(
+                        f"TX response[{i}]: prompt_len={prompt_len}, "
+                        f"generated_token_ids_len={gen_len}, "
+                        f"finish_reason={result.stop_reasons[i]}"
+                    )
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
                     for stop_reason, tokens, logprobs in zip(
