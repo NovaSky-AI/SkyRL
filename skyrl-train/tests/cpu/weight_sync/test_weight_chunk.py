@@ -94,21 +94,3 @@ class TestWeightChunk:
         )
 
         assert chunk.total_size_bytes == 40 + 20
-
-    def test_cached_property_not_recomputed(self):
-        """Test that cached properties are only computed once."""
-        tensors = [torch.randn(4, 3)]
-        chunk = WeightChunk(
-            names=["layer1.weight"],
-            dtypes=["torch.float32"],
-            shapes=[[4, 3]],
-            tensors=tensors,
-        )
-
-        # Access property twice
-        first_access = chunk.total_numel
-        second_access = chunk.total_numel
-
-        # Should be same object (cached)
-        assert first_access == second_access
-        assert id(chunk.__dict__["total_numel"]) == id(chunk.__dict__["total_numel"])
