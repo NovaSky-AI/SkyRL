@@ -15,6 +15,7 @@ In `main_on_policy_distill.py` we provide a simple example for modifying SkyRL t
 To get started, first set up the dataset from the DAPO example:
 
 ```bash
+# Run from the `skyrl-train` directory
 bash examples/algorithms/dapo/prepare_dapo_data.sh
 ```
 
