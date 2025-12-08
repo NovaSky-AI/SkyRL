@@ -73,7 +73,7 @@ class ExternalInferenceClient:
                 pass
 
         stop_token_ids = request.sampling_params.stop or []
-        logger.info(f"vLLM request: stop_token_ids={stop_token_ids}, max_tokens={request.sampling_params.max_tokens}")
+        logger.info(f"vLLM request: stop_token_ids={stop_token_ids}, max_tokens={request.sampling_params.max_tokens}, n={request.num_samples}")
 
         payload = {
             "model": model_name,
@@ -81,6 +81,7 @@ class ExternalInferenceClient:
             "max_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
             "seed": request.sampling_params.seed,
+            "n": request.num_samples,
             "logprobs": True,
             "stream": False,
             "echo": False,
