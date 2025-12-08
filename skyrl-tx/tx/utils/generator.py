@@ -195,7 +195,9 @@ class GeneratorMixin:
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
-        temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+        # DEBUG: Override temperature to 0.0 to test if sampling is the issue
+        temperatures = jnp.array([0.0 for sampling_param in sampling_params])
+        # temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
         # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]

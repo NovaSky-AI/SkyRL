@@ -128,9 +128,7 @@ class TinkerEngine:
         # Create model and load weights
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
         with jax.set_mesh(self.mesh):
-            # DEBUG: Force float32 to test if bfloat16 is causing issues
-            import jax.numpy as jnp
-            self.model = model_class(self.model_config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
