@@ -59,6 +59,7 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
     for i, seq in enumerate(sequences):
+        assert len(seq) <= max_length, f"Sequence length {len(seq)} exceeds max_length {max_length}"
         if left:
             padded[i, max_length - len(seq) :] = seq
         else:
