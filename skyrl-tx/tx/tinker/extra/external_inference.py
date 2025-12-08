@@ -95,10 +95,13 @@ class ExternalInferenceClient:
 
         sequences = []
         for i, choice in enumerate(result["choices"]):
+            token_ids = choice["token_ids"]
+            last_tokens = token_ids[-5:] if len(token_ids) >= 5 else token_ids
             logger.info(
                 f"vLLM response[{i}]: prompt_len={len(prompt_tokens)}, "
-                f"returned_token_ids_len={len(choice['token_ids'])}, "
-                f"finish_reason={choice['finish_reason']}"
+                f"returned_token_ids_len={len(token_ids)}, "
+                f"finish_reason={choice['finish_reason']}, "
+                f"last_5_tokens={last_tokens}"
             )
             lp = choice["logprobs"]
             sequences.append(
