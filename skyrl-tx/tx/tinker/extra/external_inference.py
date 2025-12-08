@@ -110,10 +110,15 @@ class ExternalInferenceClient:
                 f"prompt_echoed={prompt_echoed}"
             )
             lp = choice["logprobs"]
+            logprobs = lp["token_logprobs"]
+            if len(logprobs) != len(token_ids):
+                logger.warning(
+                    f"vLLM logprobs length mismatch: token_ids={len(token_ids)}, logprobs={len(logprobs)}"
+                )
             sequences.append(
                 types.GeneratedSequence(
-                    tokens=choice["token_ids"],
-                    logprobs=lp["token_logprobs"],
+                    tokens=token_ids,
+                    logprobs=logprobs,
                     stop_reason=choice["finish_reason"],
                 )
             )
