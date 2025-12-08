@@ -45,12 +45,28 @@ def pad(xs, pad_to: int, *, fill):
     return xs + ([fill] * (pad_to - len(xs)))
 
 
-def pad_batch(sequences: list[list], max_length: int, dtype) -> jax.Array:
-    """Pad a batch of sequences to max_length."""
+def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False) -> jax.Array:
+    """Pad a batch of sequences to max_length.
+
+    Args:
+        sequences: List of sequences to pad.
+        max_length: Target length for all sequences.
+        dtype: NumPy dtype for the output array.
+        left: If True, use left-padding (tokens at end). Required for autoregressive
+            generation so the last position corresponds to the last real token.
+            If False (default), use right-padding (tokens at start).
+
+    Returns:
+        A JAX array of shape (batch_size, max_length) with the padded sequences.
+    """
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
     for i, seq in enumerate(sequences):
-        padded[i, : len(seq)] = seq
+        assert len(seq) <= max_length, f"Sequence length {len(seq)} exceeds max_length {max_length}"
+        if left:
+            padded[i, max_length - len(seq) :] = seq
+        else:
+            padded[i, : len(seq)] = seq
     return jnp.asarray(padded)
 
 
@@ -688,9 +704,10 @@ class TinkerEngine:
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
+                # Use left-padding for sampling so the last position is always the last real token.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = pad_batch(batch_prompts, max_len, np.int32)
-                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
+                input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
