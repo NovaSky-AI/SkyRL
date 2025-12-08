@@ -72,6 +72,9 @@ class ExternalInferenceClient:
                 # In that case the other process won the race and created target_dir.
                 pass
 
+        stop_token_ids = request.sampling_params.stop or []
+        logger.info(f"vLLM request: stop_token_ids={stop_token_ids}, max_tokens={request.sampling_params.max_tokens}")
+
         payload = {
             "model": model_name,
             "prompt": prompt_tokens,
@@ -82,7 +85,7 @@ class ExternalInferenceClient:
             "stream": False,
             "echo": False,
             "return_token_ids": True,
-            "stop_token_ids": request.sampling_params.stop or [],
+            "stop_token_ids": stop_token_ids,
             "include_stop_str_in_output": True,
         }
 
