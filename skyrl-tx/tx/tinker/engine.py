@@ -693,13 +693,11 @@ class TinkerEngine:
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
 
                 with self._jit_timing_context(max_len, mode="sample"):
-                    # DEBUG: Disable LoRA by passing None for adapter_indices
-                    debug_adapter_indices = None  # jnp.array(adapter_indices, dtype=jnp.int32)
                     result = model.generate(
                         input_ids,
                         attention_mask,
                         sampling_params=sampling_params,
-                        adapter_indices=debug_adapter_indices,
+                        adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
                         prompt_logprobs=needs_prompt_logprobs,
                     )
                 # Only take the actual results, not the padded ones

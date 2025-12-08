@@ -124,12 +124,31 @@ class GeneratorMixin:
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
 
+            # DEBUG: Check for NaN/Inf in logits on first step
+            def debug_logits(logits, step):
+                has_nan = jnp.any(jnp.isnan(logits))
+                has_inf = jnp.any(jnp.isinf(logits))
+                max_logit = jnp.max(logits)
+                min_logit = jnp.min(logits)
+                jax.debug.print(
+                    "step={step}: has_nan={has_nan}, has_inf={has_inf}, max={max_logit}, min={min_logit}",
+                    step=step, has_nan=has_nan, has_inf=has_inf, max_logit=max_logit, min_logit=min_logit
+                )
+                return logits
+
+            # Only debug first 3 steps
+            debugged_logits = jax.lax.cond(
+                step < 3,
+                lambda: debug_logits(s.logits, step),
+                lambda: s.logits
+            )
+
             zero_temp_mask = temperatures == 0.0
-            scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
+            scaled_logits = debugged_logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
             sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
                 sample_keys, scaled_logits
             )
-            greedy = jnp.argmax(s.logits, axis=-1)
+            greedy = jnp.argmax(debugged_logits, axis=-1)
             next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
             log_probs = jax.nn.log_softmax(s.logits, axis=-1)
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
