@@ -46,8 +46,6 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
 
-# Projects Built on SkyRL
-- https://github.com/az1326/advisor-models
 
 # Acknowledgement
 
