@@ -124,30 +124,12 @@ class GeneratorMixin:
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
 
-            # DEBUG: Check logits on first step only, print top-5 tokens per sample
-            def debug_logits(logits, step):
-                # Print top token for each sample in batch
-                top_tokens = jnp.argmax(logits, axis=-1)
-                top_logits = jnp.max(logits, axis=-1)
-                jax.debug.print(
-                    "step={step}: top_tokens={top_tokens}, top_logits={top_logits}",
-                    step=step, top_tokens=top_tokens, top_logits=top_logits
-                )
-                return logits
-
-            # Only debug first step
-            debugged_logits = jax.lax.cond(
-                step == 0,
-                lambda: debug_logits(s.logits, step),
-                lambda: s.logits
-            )
-
             zero_temp_mask = temperatures == 0.0
-            scaled_logits = debugged_logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
+            scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
             sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
                 sample_keys, scaled_logits
             )
-            greedy = jnp.argmax(debugged_logits, axis=-1)
+            greedy = jnp.argmax(s.logits, axis=-1)
             next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
             log_probs = jax.nn.log_softmax(s.logits, axis=-1)
             sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
