@@ -68,15 +68,6 @@ The scripts for training on GSM8K are available at :code_link:`examples/gsm8k/`.
          <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
          <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes/runs/w85iamg1">Link</a></td>
        </tr>
-       <tr>
-         <td>Megatron (TP 2, PP 2)</td>
-         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
-         <td>0.799</td>
-         <td>4xH100</td>
-         <td>140</td>
-         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
-         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes/runs/kan1uemg">Link</a></td>
-       </tr>
      </tbody>
    </table>
   
