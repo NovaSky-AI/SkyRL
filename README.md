@@ -31,6 +31,7 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 
 
 # News
+- **[2025/11/26]** 🎉 We released SkyRL-Agent: An agent layer for efficient, multi-turn, long-horizon agent training and evaluation. [[Paper](https://arxiv.org/pdf/2511.16108)]
 - **[2025/10/06]** 🎉 We released SkyRL tx: An open implementation of a backend for the Tinker API to run a Tinker-like service on their own hardware. [[Blog](https://novasky-ai.notion.site/skyrl-tx)]
 - **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
 - **[2025/06/26]** 🎉 We released SkyRL-Gym: A library of RL environments for LLMs implemented with the Gymnasium API. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
@@ -38,9 +39,15 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [SkyRL-Agent Paper](https://arxiv.org/pdf/2511.16108)
+- 📜 [On-Policy Distillation on SkyRL Blog Post](https://novasky-ai.notion.site/on-policy-distillation)
+- 📜 [Search-R1 on SkyRL Blog Post](https://novasky-ai.notion.site/skyrl-searchr1)
 - 📜 [SkyRL-v0.1 Blog Post](https://novasky-ai.notion.site/skyrl-v01)
 - 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
+
+# Projects Built on SkyRL
+- https://github.com/az1326/advisor-models
 
 # Acknowledgement
 
