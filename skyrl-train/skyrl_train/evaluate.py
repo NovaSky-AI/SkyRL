@@ -22,6 +22,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_generator_output,
 )
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.utils.logging_utils import log_example
 
 from omegaconf import DictConfig
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -78,7 +79,12 @@ async def evaluate(
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
     vis = tokenizer.decode(generator_output["response_ids"][0])
-    logger.info(f"Eval output example: {vis}")
+    log_example(
+        logger,
+        prompt=generator_input["prompts"][0],
+        response=vis,
+        reward=generator_output["rewards"][0],
+    )
 
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(
