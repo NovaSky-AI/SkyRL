@@ -46,6 +46,11 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - 📜 [SkyRL-SQL Blog Post](https://novasky-ai.notion.site/skyrl-sql)
 - 📜 [SkyRL-v0 Blog Post](https://novasky-ai.notion.site/skyrl-v0)
 
+# Projects using SkyRL
+- [BioOmni](https://biomni.stanford.edu/blog/biomni-r0-technical-report/): Using RL to Hill-Climb Biomedical Reasoning Agents to Expert-Level ![GitHub Repo stars](https://img.shields.io/github/stars/snap-stanford/Biomni)
+- [How to Train Your Advisor](https://github.com/az1326/advisor-models): Steering Black-Box LLMs with Advisor Models ![GitHub Repo stars](https://img.shields.io/github/stars/az1326/advisor-models)
+- [OpenThoughts-Agent](https://github.com/open-thoughts/OpenThoughts-Agent): Data recipes and robust infrastructure for training AI agents ![GitHub Repo stars](https://img.shields.io/github/stars/open-thoughts/OpenThoughts-Agent)
+
 # Acknowledgement
 
 This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), [**AMD**](https://www.amd.com/en.html), [**AWS**](https://aws.amazon.com/), and [**Modal**](https://modal.com/).
