@@ -124,21 +124,20 @@ class GeneratorMixin:
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
 
-            # DEBUG: Check for NaN/Inf in logits on first step
+            # DEBUG: Check logits on first step only, print top-5 tokens per sample
             def debug_logits(logits, step):
-                has_nan = jnp.any(jnp.isnan(logits))
-                has_inf = jnp.any(jnp.isinf(logits))
-                max_logit = jnp.max(logits)
-                min_logit = jnp.min(logits)
+                # Print top token for each sample in batch
+                top_tokens = jnp.argmax(logits, axis=-1)
+                top_logits = jnp.max(logits, axis=-1)
                 jax.debug.print(
-                    "step={step}: has_nan={has_nan}, has_inf={has_inf}, max={max_logit}, min={min_logit}",
-                    step=step, has_nan=has_nan, has_inf=has_inf, max_logit=max_logit, min_logit=min_logit
+                    "step={step}: top_tokens={top_tokens}, top_logits={top_logits}",
+                    step=step, top_tokens=top_tokens, top_logits=top_logits
                 )
                 return logits
 
-            # Only debug first 3 steps
+            # Only debug first step
             debugged_logits = jax.lax.cond(
-                step < 3,
+                step == 0,
                 lambda: debug_logits(s.logits, step),
                 lambda: s.logits
             )
