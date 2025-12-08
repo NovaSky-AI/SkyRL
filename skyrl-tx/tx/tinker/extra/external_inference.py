@@ -80,6 +80,7 @@ class ExternalInferenceClient:
             "seed": request.sampling_params.seed,
             "logprobs": True,
             "stream": False,
+            "echo": False,
             "return_token_ids": True,
             "stop_token_ids": request.sampling_params.stop or [],
             "include_stop_str_in_output": True,
