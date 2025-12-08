@@ -213,9 +213,7 @@ class Qwen3Experts(nnx.Module):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                nnx.initializers.lecun_normal(), (None, column_parallel_shard, None)
-            ),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, column_parallel_shard, None)),
             rngs=rngs,
         )
 
