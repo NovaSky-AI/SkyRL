@@ -1,7 +1,7 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen2.5-32B-Instruct on DAPO training data and validate on AIME 2024.
-# uv run examples/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/algorithms/dapo/run_dapo_qwen2.5_32b_aime.sh
 
 MODEL_NAME="Qwen/Qwen2.5-32B"
