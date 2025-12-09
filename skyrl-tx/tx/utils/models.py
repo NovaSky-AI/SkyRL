@@ -128,9 +128,7 @@ def save_safetensors(
     model_params = nnx.to_flat_state(nnx.state(model))
     # Filter params first, then batch device-to-host transfer
     to_save = [
-        (path, param)
-        for path, param in model_params
-        if "rngs" not in path and (filter_fn is None or filter_fn(path))
+        (path, param) for path, param in model_params if "rngs" not in path and (filter_fn is None or filter_fn(path))
     ]
     params_on_host = jax.device_get([p for _, p in to_save])
 
