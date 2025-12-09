@@ -126,14 +126,11 @@ def save_safetensors(
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
     model_params = nnx.to_flat_state(nnx.state(model))
-    # Filter params first, then batch device-to-host transfer
-    to_save = [
-        (path, param) for path, param in model_params if "rngs" not in path and (filter_fn is None or filter_fn(path))
-    ]
-    params_on_host = jax.device_get([p for _, p in to_save])
+    paths, params = zip(*((p, v) for p, v in model_params if "rngs" not in p and (filter_fn is None or filter_fn(p))))
+    params = jax.device_get(params)  # Batch device-to-host transfer
 
     tensors = {}
-    for (path, _), param in zip(to_save, params_on_host):
+    for path, param in zip(paths, params):
         key = get_param_key(path, prefix=prefix)
         if "experts" in path:
             for i in range(config.num_experts):
