@@ -166,6 +166,7 @@ def load_lora_checkpoint(
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """
+    start_time = time.time()
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
     adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
@@ -180,6 +181,7 @@ def load_lora_checkpoint(
             filter_fn=lambda path: filter_lora(adapter_config, path),
         )
     insert_adapter_state(adapter_index, lora_params, adapter_lora_params, adapter_config.rank)
+    logger.info(f"load_lora_checkpoint took {time.time() - start_time:.2f}s")
 
 
 def save_lora_checkpoint(
@@ -197,6 +199,7 @@ def save_lora_checkpoint(
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
     """
+    start_time = time.time()
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
     adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
@@ -214,6 +217,7 @@ def save_lora_checkpoint(
             filter_fn=lambda path: filter_lora(adapter_config, path),
         )
         peft_config.save_pretrained(temp_dir)
+    logger.info(f"save_lora_checkpoint took {time.time() - start_time:.2f}s")
 
 
 class OptimizerName(str, Enum):
