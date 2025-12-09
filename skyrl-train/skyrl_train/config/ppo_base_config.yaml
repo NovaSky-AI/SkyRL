@@ -116,6 +116,10 @@ trainer:
     # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # SAPO parameters for the smoothing function (https://arxiv.org/pdf/2511.20347)
+    # default values used in the paper with Qwen3-30B-A3B-Base
+    tau_pos: 1.0
+    tau_neg: 1.05
     
     # value loss parameters
     value_clip: 0.2
