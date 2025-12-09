@@ -22,7 +22,7 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         with dest.open("wb") as f:
-            with tarfile.open(fileobj=f, mode="w|gz", compresslevel=1) as tar:
+            with tarfile.open(fileobj=f, mode="w|gz", compresslevel=0) as tar:
                 tar.add(tmp_path, arcname="")
 
 
