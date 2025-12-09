@@ -34,6 +34,8 @@ def mesh_configs():
 @pytest.mark.parametrize("mesh_config_idx", [0, 1, 2])
 def test_qwen3_generate(mesh_config_idx, mesh_configs):
     """Test batched text generation with KV caching matches HuggingFace."""
+    if mesh_config_idx >= len(mesh_configs):
+        pytest.skip(f"Mesh config index {mesh_config_idx} not available (only {len(mesh_configs)} configs)")
     mesh_config = mesh_configs[mesh_config_idx]
     print(
         f"\nTesting with mesh configuration: {mesh_config['name']} (fsdp={mesh_config['fsdp']}, tp={mesh_config['tp']})"
@@ -128,6 +130,9 @@ def test_qwen3_generate_speed(mesh_config_idx, mesh_configs):
         BATCH_SIZE: Number of inputs to generate in a single pass (default: 8)
         RUNS: Number of benchmark runs (default: 10)
     """
+    if mesh_config_idx >= len(mesh_configs):
+        pytest.skip(f"Mesh config index {mesh_config_idx} not available (only {len(mesh_configs)} configs)")
+
     batch_size = int(os.environ.get("BATCH_SIZE", "8"))
     runs = int(os.environ.get("RUNS", "1"))
 
