@@ -179,6 +179,7 @@ class TinkerEngine:
         Fetches the checkpoint entry, yields it, and updates its status to COMPLETED
         or FAILED based on whether an exception occurred.
         """
+        start_time = time.time()
         with Session(self.db_engine) as session:
             checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
             if checkpoint_db is None:
@@ -189,6 +190,7 @@ class TinkerEngine:
             try:
                 yield checkpoint_db
                 checkpoint_db.status = CheckpointStatus.COMPLETED
+                logger.info(f"Checkpoint save took {time.time() - start_time:.2f}s")
             except Exception as e:
                 logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
                 checkpoint_db.status = CheckpointStatus.FAILED
