@@ -40,6 +40,17 @@ from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+@contextmanager
+def log_timing(operation: str):
+    """Context manager to log execution time for an operation."""
+    start_time = time.time()
+    try:
+        yield
+    finally:
+        elapsed = time.time() - start_time
+        logger.info(f"{operation} took {elapsed:.3f}s")
+
+
 def pad(xs, pad_to: int, *, fill):
     """Pad a list to a specified length with a fill value."""
     return xs + ([fill] * (pad_to - len(xs)))
@@ -929,21 +940,22 @@ class TinkerEngine:
             session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
-        match request_type:
-            case types.RequestType.CREATE_MODEL:
-                return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
-            case types.RequestType.OPTIM_STEP:
-                return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
-            case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
-                return self.process_save_weights_for_sampler(
-                    model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
-                )
-            case types.RequestType.SAVE_WEIGHTS:
-                return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
-            case types.RequestType.LOAD_WEIGHTS:
-                return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
-            case _:
-                raise ValueError(f"Unknown request type: {request_type}")
+        with log_timing(f"process_single_request({request_type.value})"):
+            match request_type:
+                case types.RequestType.CREATE_MODEL:
+                    return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+                case types.RequestType.OPTIM_STEP:
+                    return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+                case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
+                    return self.process_save_weights_for_sampler(
+                        model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
+                    )
+                case types.RequestType.SAVE_WEIGHTS:
+                    return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
+                case types.RequestType.LOAD_WEIGHTS:
+                    return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+                case _:
+                    raise ValueError(f"Unknown request type: {request_type}")
 
     def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
@@ -955,7 +967,8 @@ class TinkerEngine:
         if not requests:
             return
         try:
-            results = batch_processor(requests)
+            with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+                results = batch_processor(requests)
             self._complete_futures(results)
         except Exception as e:
             logger.exception(f"Error processing batch: {e}")
