@@ -437,25 +437,14 @@ class TinkerEngine:
             f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
         }
 
-    def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
-        """Find all sample ops that can be safely batched together.
-
-        Returns sample operations ensuring that each model_id has only one checkpoint_id
-        to avoid loading different checkpoints for the same model in a single batch.
-
-        Args:
-            session: Database session
-
-        Returns:
-            Dict mapping request_id to (model_id, request_data) tuples
-        """
-        sample_query = (
+    def _query_batchable_sample(self, session: Session) -> list:
+        """Query pending sample ops that can be batched (same checkpoint per model)."""
+        sample_ops = session.exec(
             select(FutureDB)
             .where(FutureDB.request_type == types.RequestType.SAMPLE)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
-        )
-        sample_ops = session.exec(sample_query).all()
+        ).all()
 
         batchable = []
         model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
@@ -465,8 +454,37 @@ class TinkerEngine:
             # take only requests with one checkpoint_id for a given model_id
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
+        return batchable
 
-        return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
+    def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
+        """Find sample ops that can be safely batched together.
+
+        Returns sample operations ensuring that each model_id has only one checkpoint_id
+        to avoid loading different checkpoints for the same model in a single batch.
+
+        If sample_max_num_sequences is configured, limits to that many requests and waits
+        briefly for more requests to accumulate to fill the batch. If num_samples > 1 for
+        some requests, this may not be perfect, but it's simple and effective.
+
+        Args:
+            session: Database session
+
+        Returns:
+            Dict mapping request_id to (model_id, request_data) tuples
+        """
+        max_seqs = self.config.sample_max_num_sequences
+        batchable = self._query_batchable_sample(session)
+
+        # Wait for more requests if batch is not full
+        while max_seqs > 0 and 0 < len(batchable) < max_seqs:
+            time.sleep(0.5)
+            new_batchable = self._query_batchable_sample(session)
+            if len(new_batchable) == len(batchable):
+                break
+            batchable = new_batchable
+
+        result = {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
+        return dict(itertools.islice(result.items(), max_seqs)) if max_seqs > 0 else result
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
@@ -1000,14 +1018,8 @@ class TinkerEngine:
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
                 forward_backward_requests = self.find_batchable_forward_backward(session)
-                # Find pending sample requests that can be batched.
-                # Limit to sample_max_num_sequences requests so we don't produce partial batches in process_sample_batch.
-                # If num_samples > 1 for some requests, this may not be perfect, but it's simple and effective.
+                # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
-                if self.config.sample_max_num_sequences > 0:
-                    sample_requests = dict(
-                        itertools.islice(sample_requests.items(), self.config.sample_max_num_sequences)
-                    )
                 # Get other pending requests (non forward_backward and non sampling)
                 other_requests = self.find_single_requests(session)
 
