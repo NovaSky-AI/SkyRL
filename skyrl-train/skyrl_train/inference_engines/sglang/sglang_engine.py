@@ -34,6 +34,10 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.utils import torch_dtype_to_str
+from skyrl_train.inference_engines.sglang.ipc_utils import (
+    serialize_ipc_request,
+    deserialize_ipc_request,
+)
 
 
 # Patch SGLang's _set_envs_and_config to avoid signal handler issues in Ray actors
@@ -178,18 +182,8 @@ def sglang_custom_weight_loader(model, named_tensors):
     if name != "ipc_request":
         raise ValueError(f"Expected tensor name 'ipc_request', got: {name}")
 
-    # Convert tensor to bytes, then decode and deserialize
-    tensor_bytes = tensor.cpu().numpy().tobytes()
-    end_marker = b"__END_OF_REQUEST__"
-    end_index = tensor_bytes.find(end_marker)
-    if end_index == -1:
-        raise ValueError("End marker not found in tensor data")
-    request_data = tensor_bytes[:end_index]
-    try:
-        request_data_decoded = base64.b64decode(request_data)
-        request: NamedWeightsUpdateRequest = pickle.loads(request_data_decoded)
-    except Exception as e:
-        raise ValueError(f"Failed to deserialize request data: {e}")
+    # Deserialize request from tensor
+    request = deserialize_ipc_request(tensor)
 
     # Get model info and create receiver
     model_dtype = torch_dtype_to_str(next(model.parameters()).dtype)
@@ -281,18 +275,7 @@ class SGLangWeightLoader(WeightLoader):
         Uses SGLangWeightTransferReceiver internally to receive weights
         from IPC handles.
         """
-        # Serialize the request data
-        request_data = pickle.dumps(request)
-        request_data_encoded = base64.b64encode(request_data)
-        end_marker = b"__END_OF_REQUEST__"
-        data_with_marker = request_data_encoded + end_marker
-
-        # Create a tensor large enough to hold the serialized data; round up for alignment
-        data_size = len(data_with_marker)
-        padded_size = ((data_size + 3) // 4) * 4
-        tensor_data = bytearray(data_with_marker)
-        tensor_data.extend(b"\x00" * (padded_size - data_size))
-        tensor_array = torch.frombuffer(tensor_data, dtype=torch.uint8)
+        tensor_array = serialize_ipc_request(request)
 
         # Use SGLang's API to update weights with our custom loader
         request_tensor = [("ipc_request", tensor_array)]
