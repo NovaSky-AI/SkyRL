@@ -17,8 +17,8 @@ class TestModuleGrouping:
             "model.layers.0.mlp.fc2.weight": torch.randn(768, 3072),
         }
 
-        def prepare_tensor(param, dtype):
-            return param.to(dtype).contiguous()
+        def gather_tensor(param):
+            return param
 
         def get_shape(name, param, tensor):
             return list(tensor.shape)
@@ -27,7 +27,7 @@ class TestModuleGrouping:
             yield_module_grouped_chunks(
                 params=params,
                 dtype=torch.float32,
-                prepare_tensor_fn=prepare_tensor,
+                gather_tensor_fn=gather_tensor,
                 get_shape_fn=get_shape,
                 batch_size_threshold_gb=0.0,
             )
@@ -127,7 +127,7 @@ class TestModuleGrouping:
             yield_module_grouped_chunks(
                 params=params,
                 dtype=torch.float32,
-                prepare_tensor_fn=lambda p, d: p.to(d),
+                gather_tensor_fn=lambda p: p,
                 get_shape_fn=lambda n, p, t: list(t.shape),
                 batch_size_threshold_gb=threshold_gb,
             )
@@ -137,26 +137,26 @@ class TestModuleGrouping:
         for i, expected_params in enumerate(expected_params_per_chunk):
             assert len(chunks[i]) == expected_params
 
-    def test_prepare_tensor_callback(self):
-        """Test that prepare_tensor_fn callback is called correctly."""
+    def test_gather_tensor_callback(self):
+        """Test that gather_tensor_fn callback is called correctly."""
         params = {"model.layer.weight": torch.randn(10, 10, dtype=torch.float32)}
 
-        def prepare_tensor(param, dtype):
-            # Convert to dtype and add 1.0
-            return param.to(dtype) + 1.0
+        def gather_tensor(param):
+            # Simulate gathering by adding 1.0
+            return param + 1.0
 
         chunks = list(
             yield_module_grouped_chunks(
                 params=params,
                 dtype=torch.bfloat16,
-                prepare_tensor_fn=prepare_tensor,
+                gather_tensor_fn=gather_tensor,
                 get_shape_fn=lambda n, p, t: list(t.shape),
             )
         )
 
         assert len(chunks) == 1
         tensor = chunks[0].tensors[0]
-        # Should be bfloat16 and have +1.0 applied
+        # Should be bfloat16 (dtype cast in utils) and have +1.0 applied (from gather)
         assert tensor.dtype == torch.bfloat16
 
     def test_get_shape_callback(self):
@@ -171,7 +171,7 @@ class TestModuleGrouping:
             yield_module_grouped_chunks(
                 params=params,
                 dtype=torch.float32,
-                prepare_tensor_fn=lambda p, d: p.to(d),
+                gather_tensor_fn=lambda p: p,
                 get_shape_fn=get_shape,
             )
         )
@@ -187,7 +187,7 @@ class TestModuleGrouping:
             yield_module_grouped_chunks(
                 params=params,
                 dtype=torch.float32,
-                prepare_tensor_fn=lambda p, d: p.to(d),
+                gather_tensor_fn=lambda p: p,
                 get_shape_fn=lambda n, p, t: list(t.shape),
             )
         )
@@ -205,7 +205,7 @@ class TestModuleGrouping:
             yield_module_grouped_chunks(
                 params=params,
                 dtype=torch.float32,
-                prepare_tensor_fn=lambda p, d: p.to(d),
+                gather_tensor_fn=lambda p: p,
                 get_shape_fn=lambda n, p, t: list(t.shape),
             )
         )

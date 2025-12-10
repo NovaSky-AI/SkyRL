@@ -10,7 +10,7 @@ from skyrl_train.weight_sync import WeightChunk
 def yield_module_grouped_chunks(
     params: Dict[str, Any],
     dtype: torch.dtype,
-    prepare_tensor_fn: Callable[[Any, torch.dtype], torch.Tensor],
+    gather_tensor_fn: Callable[[Any], torch.Tensor],
     get_shape_fn: Callable[[str, Any, torch.Tensor], List[int]],
     batch_size_threshold_gb: float = 0.0,
 ) -> Iterator[WeightChunk]:
@@ -26,7 +26,7 @@ def yield_module_grouped_chunks(
     Args:
         params: Dictionary mapping parameter names to parameter objects
         dtype: Target dtype for inference
-        prepare_tensor_fn: Function to prepare tensor (gather, convert dtype, make contiguous)
+        gather_tensor_fn: Backend-specific function to gather sharded tensors into full tensors
         get_shape_fn: Function to extract shape from param_name, param, and prepared tensor
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
 
@@ -63,7 +63,8 @@ def yield_module_grouped_chunks(
         # Prepare all tensors for this module
         for param_name in param_names:
             param = params[param_name]
-            tensor = prepare_tensor_fn(param, dtype)
+            # Gather sharded tensor (backend-specific), then cast dtype (common)
+            tensor = gather_tensor_fn(param).to(dtype).detach().contiguous()
             shape = get_shape_fn(param_name, param, tensor)
             module_tensors.append(tensor)
             module_names.append(param_name)

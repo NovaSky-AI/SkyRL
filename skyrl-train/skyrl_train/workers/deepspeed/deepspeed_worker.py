@@ -65,19 +65,16 @@ class DeepSpeedWeightExtractor(WeightExtractor):
             for chunk in yield_module_grouped_chunks(
                 params=params,
                 dtype=dtype,
-                prepare_tensor_fn=self._prepare_tensor,
+                gather_tensor_fn=self._gather_tensor,
                 get_shape_fn=lambda name, param, tensor: list(param.shape if self.zero_stage != 3 else param.ds_shape),
                 batch_size_threshold_gb=self.batch_size_threshold_gb,
             ):
                 yield chunk
 
-    def _prepare_tensor(self, param: torch.nn.Parameter, dtype: torch.dtype) -> torch.Tensor:
-        """Gather (if ZeRO-3), convert dtype, and make tensor contiguous."""
-        # For ZeRO-3, gather sharded parameter
+    def _gather_tensor(self, param: torch.nn.Parameter) -> torch.Tensor:
+        """Gather sharded parameter (if ZeRO-3)."""
         with deepspeed.zero.GatheredParameters([param], enabled=self.zero_stage == 3):
-            tensor = param.data.clone()
-            tensor = tensor.to(dtype)
-            return tensor.detach().contiguous()
+            return param.data.clone()
 
 
 class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):

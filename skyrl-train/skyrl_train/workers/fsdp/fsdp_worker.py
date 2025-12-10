@@ -77,18 +77,16 @@ class FSDPWeightExtractor(WeightExtractor):
             for chunk in yield_module_grouped_chunks(
                 params=params,
                 dtype=dtype,
-                prepare_tensor_fn=self._prepare_tensor,
+                gather_tensor_fn=self._gather_tensor,
                 get_shape_fn=lambda name, param, tensor: list(tensor.shape),
                 batch_size_threshold_gb=self.batch_size_threshold_gb,
             ):
                 yield chunk
 
-    def _prepare_tensor(self, param: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-        """Gather, convert dtype, and make tensor contiguous."""
+    def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
+        """Gather sharded tensor into full tensor."""
         device = torch.cuda.current_device()
-        param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-        param = param.to(dtype)
-        return param.detach().contiguous()
+        return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
