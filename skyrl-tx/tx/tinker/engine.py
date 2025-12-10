@@ -48,7 +48,7 @@ def log_timing(request: str):
         yield
     finally:
         elapsed = time.perf_counter() - start_time
-        logger.info(f"(request timing) {request} took {elapsed:.3f}s")
+        logger.info(f"(timing) {request} took {elapsed:.3f}s")
 
 
 def pad(xs, pad_to: int, *, fill):
