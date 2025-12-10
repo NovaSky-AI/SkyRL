@@ -195,7 +195,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     await update_weight_task
                 torch.distributed.barrier()
             
-            # await inference_engine_client.finalize_weight_update()
+            await inference_engine_client.finalize_weight_update()
         # CUDA IPC
         else:
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}

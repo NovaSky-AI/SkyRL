@@ -47,6 +47,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
         )
 
+    async def finalize_weight_update(self):
+        return await self.inference_engine_actor.finalize_weight_update.remote()
+
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
