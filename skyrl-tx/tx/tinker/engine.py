@@ -43,11 +43,11 @@ from tx.utils.log import logger
 @contextmanager
 def log_timing(operation: str):
     """Context manager to log execution time for an operation."""
-    start_time = time.time()
+    start_time = time.perf_counter()
     try:
         yield
     finally:
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
         logger.info(f"{operation} took {elapsed:.3f}s")
 
 
