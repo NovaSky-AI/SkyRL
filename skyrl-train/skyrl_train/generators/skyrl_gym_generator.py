@@ -365,8 +365,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
-        responses = engine_output["responses"]
-        all_response_ids = engine_output["response_ids"]
+        outputs = engine_output["responses"]
+        responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
         logprobs = engine_output.get("response_logprobs", None)
 
@@ -376,20 +376,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
-        for i, (response, response_ids, env, env_class) in enumerate(
-            zip(responses, all_response_ids, envs, env_classes)
-        ):
+        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, response)
+            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
+            if len(response) > max_tokens:
+                response = response[:max_tokens]
+            loss_masks.append([1] * len(response))
+            truncated_responses.append(response)
             if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
+                sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
 
             # Get environment-specific metrics
