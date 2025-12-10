@@ -469,9 +469,13 @@ class TinkerEngine:
                 batchable.append(op)
 
         if (max_seqs := self.config.sample_max_num_sequences) > 0:
-            # If batch is not full and newest request is < 0.5s old, return empty to let the
+            # If batch is not full and newest request is recent, return empty to let the
             # outer polling loop wait for more requests to accumulate before processing.
-            if 0 < len(batchable) < max_seqs and (datetime.now() - batchable[-1].created_at).total_seconds() < 0.5:
+            if (
+                0 < len(batchable) < max_seqs
+                and (datetime.now() - batchable[-1].created_at).total_seconds()
+                < self.config.sample_batch_linger_seconds
+            ):
                 return {}
             batchable = batchable[:max_seqs]
 

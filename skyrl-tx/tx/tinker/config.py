@@ -32,6 +32,10 @@ class EngineConfig(BaseModel):
         default=0,
         description="Maximum batch size (measured in number of sequences) for sampling/generation; 0 means disabled (use full batch)",
     )
+    sample_batch_linger_seconds: float = Field(
+        default=0.5,
+        description="Time to wait for more sample requests to accumulate before processing a partial batch",
+    )
     enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
     shard_attention_heads: bool = Field(
         default=True,
