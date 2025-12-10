@@ -195,6 +195,8 @@ def create_ray_wrapped_inference_engines(
                     else {}
                 )
 
+                from vllm.config import WeightTransferConfig
+                
                 engine = actor_class.options(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
@@ -202,7 +204,8 @@ def create_ray_wrapped_inference_engines(
                 ).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
-                    worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                    # worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                    weight_transfer_config=WeightTransferConfig(backend="nccl"),
                     tensor_parallel_size=tensor_parallel_size,
                     pipeline_parallel_size=pipeline_parallel_size,
                     enable_expert_parallel=expert_parallel_size > 1,

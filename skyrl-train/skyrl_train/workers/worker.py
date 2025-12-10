@@ -298,13 +298,20 @@ class Worker(DistributedTorchRayActor):
             )
 
             tasks.append(
+                # asyncio.to_thread(
+                #     init_custom_process_group,
+                #     backend=backend,
+                #     init_method=get_tcp_url(master_addr, master_port),
+                #     world_size=world_size,
+                #     rank=0,
+                #     group_name=group_name,
+                # )
                 asyncio.to_thread(
                     init_custom_process_group,
-                    backend=backend,
-                    init_method=get_tcp_url(master_addr, master_port),
-                    world_size=world_size,
+                    master_address=master_addr,
+                    master_port=master_port,
                     rank=0,
-                    group_name=group_name,
+                    world_size=world_size,
                 )
             )
             results = await asyncio.gather(*tasks)

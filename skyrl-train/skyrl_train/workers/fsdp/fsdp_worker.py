@@ -187,14 +187,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     # cast to generator dtype
                     param = param.to(generator_dtype)
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        self._model_update_group.broadcast(param.data, 0, stream=torch.cuda.current_stream())
 
                 await asyncio.to_thread(gather_and_broadcast, param)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
             
-            ray.get(asyncio.create_task(inference_engine_client.finalize_weight_update()))
+            # await inference_engine_client.finalize_weight_update()
         # CUDA IPC
         else:
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
