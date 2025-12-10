@@ -1,7 +1,5 @@
 """SGLang inference engine implementation."""
 
-import pickle
-import base64
 import torch
 import os
 from typing import List, Optional, Tuple, Dict, Any, Iterator
@@ -219,7 +217,7 @@ class SGLangWeightLoader(WeightLoader):
 
     async def init_communicator(
         self,
-        master_addr: str,
+        master_address: str,
         master_port: int,
         rank_offset: int,
         world_size: int,
@@ -232,7 +230,7 @@ class SGLangWeightLoader(WeightLoader):
         a process group since it uses CUDA IPC handles directly.
 
         Args:
-            master_addr: Master address for the process group.
+            master_address: Master address for the process group.
             master_port: Master port for the process group.
             rank_offset: Rank offset for this process.
             world_size: Total world size.
@@ -243,7 +241,7 @@ class SGLangWeightLoader(WeightLoader):
             Tuple of (success, message).
         """
         obj = InitWeightsUpdateGroupReqInput(
-            master_address=master_addr,
+            master_address=master_address,
             master_port=master_port,
             rank_offset=rank_offset,
             world_size=world_size,
