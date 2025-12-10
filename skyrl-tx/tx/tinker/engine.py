@@ -940,22 +940,40 @@ class TinkerEngine:
             session.commit()
 
     def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
-        with log_timing(f"process_single_request({request_type.value})"):
-            match request_type:
-                case types.RequestType.CREATE_MODEL:
-                    return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
-                case types.RequestType.OPTIM_STEP:
-                    return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
-                case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
-                    return self.process_save_weights_for_sampler(
-                        model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
-                    )
-                case types.RequestType.SAVE_WEIGHTS:
-                    return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
-                case types.RequestType.LOAD_WEIGHTS:
-                    return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
-                case _:
-                    raise ValueError(f"Unknown request type: {request_type}")
+        match request_type:
+            case types.RequestType.CREATE_MODEL:
+                return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+            case types.RequestType.OPTIM_STEP:
+                return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+            case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
+                return self.process_save_weights_for_sampler(
+                    model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
+                )
+            case types.RequestType.SAVE_WEIGHTS:
+                return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
+            case types.RequestType.LOAD_WEIGHTS:
+                return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+            case _:
+                raise ValueError(f"Unknown request type: {request_type}")
+
+    def process_single_requests(self, requests: dict[str, tuple[str, types.RequestType, dict]]):
+        """Process a collection of single (non-batchable) requests.
+
+        Args:
+            requests: Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        if not requests:
+            return
+        results = {}
+        with log_timing(f"process_single_requests(n={len(requests)})"):
+            for request_id, (model_id, request_type, request_data) in requests.items():
+                try:
+                    result = self.process_single_request(request_type, model_id, request_data)
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result = types.ErrorResponse(error=str(e), status="failed")
+                results[request_id] = result
+        self._complete_futures(results)
 
     def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
@@ -993,16 +1011,7 @@ class TinkerEngine:
             self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
-            other_results = {}
-            for request_id, (model_id, request_type, request_data) in other_requests.items():
-                try:
-                    result = self.process_single_request(request_type, model_id, request_data)
-                except Exception as e:
-                    logger.exception(f"Error processing request {request_id}: {e}")
-                    result = types.ErrorResponse(error=str(e), status="failed")
-                other_results[request_id] = result
-
-            self._complete_futures(other_results)
+            self.process_single_requests(other_requests)
 
             # Poll every 100ms
             time.sleep(0.1)
