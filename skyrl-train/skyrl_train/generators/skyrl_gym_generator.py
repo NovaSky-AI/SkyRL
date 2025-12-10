@@ -153,7 +153,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             return func(*args, **kwargs)
 
-    async def agent_loop_unified(
+    async def agent_loop(
         self,
         prompt: ConversationType,
         env_class: str,
@@ -443,7 +443,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     token_level_rewards[-1] = step_reward
                 else:
                     token_level_rewards[idx] += step_reward
-        reward_out = token_level_rewards
+            reward_out = token_level_rewards
         return reward_out
 
     def _update_chat_history(
@@ -574,15 +574,13 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length = self.generator_cfg.max_input_length
 
         if self.batched:
-            return await self.generate_batched(
-                prompts, env_classes, env_extras, max_tokens, max_input_length, sampling_params
-            )
+            return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []
         for i in range(len(prompts)):
             tasks.append(
-                self.agent_loop_unified(
+                self.agent_loop(
                     prompts[i],
                     env_classes[i],
                     env_extras[i],
@@ -620,8 +618,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_token_ids.append(step_output.prompt_ids)
                     env_metrics.append(step_output.env_metrics)
                     is_last_step.append(True if j == len(output.step_outputs) - 1 else False)
-                    out_trajectory_ids.append(trajectory_ids[j])
-                    out_env_classes.append(env_classes[j])
+                    out_trajectory_ids.append(trajectory_ids[i])
+                    out_env_classes.append(env_classes[i])
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
