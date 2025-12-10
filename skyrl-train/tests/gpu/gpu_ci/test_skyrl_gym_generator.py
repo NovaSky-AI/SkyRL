@@ -449,34 +449,6 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_gsm8k():
-    """
-    Test the generator with multiple turns of search
-    """
-    initialize_ray(get_default_config())
-    try:
-        await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=5,
-            num_inference_engines=2,
-            tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-1.5B-Instruct",
-            max_prompt_length=2048,
-            max_input_length=4096,
-            max_generate_length=1000,
-            data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
-            env_class="gsm8k_multi_turn",
-            num_prompts=2,
-            max_turns=2,
-            use_conversation_multi_turn=False,
-            max_env_workers=0,
-        )
-    finally:
-        ray.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_generator_multi_turn_gsm8k_step_wise():
     """
     Test the generator with multiple turns of search
