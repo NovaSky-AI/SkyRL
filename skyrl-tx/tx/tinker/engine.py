@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import itertools
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -483,8 +482,8 @@ class TinkerEngine:
                 break
             batchable = new_batchable
 
-        result = {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
-        return dict(itertools.islice(result.items(), max_seqs)) if max_seqs > 0 else result
+        batchable = batchable[:max_seqs] if max_seqs > 0 else batchable
+        return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
