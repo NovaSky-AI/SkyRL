@@ -444,7 +444,7 @@ class TinkerEngine:
 
         If sample_max_num_sequences is configured, limits to that many requests so we don't
         produce partial batches in process_sample_batch. If num_samples > 1 for some requests,
-        this may not be perfect, but it's simple and effective.
+        this may not be perfect, but it's good until we implement continuous batching.
 
         Args:
             session: Database session
