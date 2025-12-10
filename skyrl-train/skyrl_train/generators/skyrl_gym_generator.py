@@ -224,7 +224,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
                     added_eos = True
-                    if get_logprobs and rollout_logprobs is not None:
+                    if get_logprobs:
                         rollout_logprobs.append(0.0)
 
             # 2. Environment step

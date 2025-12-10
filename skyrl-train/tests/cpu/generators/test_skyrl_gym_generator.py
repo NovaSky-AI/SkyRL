@@ -264,7 +264,7 @@ async def test_agent_loop_single_turn(
     def mock_generate(_):
         result = {
             "responses": ["4"],
-            "response_ids": [[1, 2, 3, 4]],
+            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()],
             "stop_reasons": ["stop"],
         }
         if logprobs_setting is not None:
