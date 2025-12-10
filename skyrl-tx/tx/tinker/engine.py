@@ -436,27 +436,8 @@ class TinkerEngine:
             f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
         }
 
-    def _query_batchable_sample(self, session: Session) -> list:
-        """Query pending sample ops that can be batched (same checkpoint per model)."""
-        sample_ops = session.exec(
-            select(FutureDB)
-            .where(FutureDB.request_type == types.RequestType.SAMPLE)
-            .where(FutureDB.status == RequestStatus.PENDING)
-            .order_by(FutureDB.request_id)
-        ).all()
-
-        batchable = []
-        model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
-        for op in sample_ops:
-            checkpoint_id = op.request_data["checkpoint_id"]
-            # Base model requests (empty checkpoint_id) are always compatible, otherwise only
-            # take only requests with one checkpoint_id for a given model_id
-            if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
-                batchable.append(op)
-        return batchable
-
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
-        """Find sample ops that can be safely batched together.
+        """Find all sample ops that can be safely batched together.
 
         Returns sample operations ensuring that each model_id has only one checkpoint_id
         to avoid loading different checkpoints for the same model in a single batch.
@@ -471,11 +452,26 @@ class TinkerEngine:
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
         """
-        max_seqs = self.config.sample_max_num_sequences
-        batchable = self._query_batchable_sample(session)
+        sample_query = (
+            select(FutureDB)
+            .where(FutureDB.request_type == types.RequestType.SAMPLE)
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .order_by(FutureDB.request_id)
+        )
+        sample_ops = session.exec(sample_query).all()
+
+        batchable = []
+        model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
+        for op in sample_ops:
+            checkpoint_id = op.request_data["checkpoint_id"]
+            # Base model requests (empty checkpoint_id) are always compatible, otherwise only
+            # take only requests with one checkpoint_id for a given model_id
+            if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
+                batchable.append(op)
 
         # If batch is not full and newest request is < 0.5s old, return empty to let the
         # outer polling loop wait for more requests to accumulate before processing.
+        max_seqs = self.config.sample_max_num_sequences
         if max_seqs > 0 and 0 < len(batchable) < max_seqs and (datetime.now() - batchable[-1].created_at).total_seconds() < 0.5:
             return {}
 
