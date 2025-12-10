@@ -1,6 +1,7 @@
 """Background engine for processing training requests."""
 
 import argparse
+import itertools
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -999,10 +1000,12 @@ class TinkerEngine:
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
                 forward_backward_requests = self.find_batchable_forward_backward(session)
-                # Find pending sample requests that can be batched
+                # Find pending sample requests that can be batched.
+                # Limit to sample_max_num_sequences requests so we don't produce partial batches in process_sample_batch.
+                # If num_samples > 1 for some requests, this may not be perfect, but it's simple and effective.
                 sample_requests = self.find_batchable_sample(session)
                 if self.config.sample_max_num_sequences > 0:
-                    sample_requests = dict(list(sample_requests.items())[: self.config.sample_max_num_sequences])
+                    sample_requests = dict(itertools.islice(sample_requests.items(), self.config.sample_max_num_sequences))
                 # Get other pending requests (non forward_backward and non sampling)
                 other_requests = self.find_single_requests(session)
 
