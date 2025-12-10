@@ -376,9 +376,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
-        for i, (output, response, env, env_class) in enumerate(
-            zip(outputs, responses, envs, env_classes)
-        ):
+        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]

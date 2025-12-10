@@ -210,7 +210,7 @@ async def run_generator_end_to_end(
         # make sure that the max number of tokens is less than the max generate length for single turn generation
         assert "generate/max_num_tokens" in generator_output["rollout_metrics"]
         assert generator_output["rollout_metrics"]["generate/max_num_tokens"] <= max_generate_length
-    
+
     assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
     assert isinstance(prompts_out[0], list), "Prompts output should be a list"
     assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
