@@ -66,7 +66,7 @@ class FSDPWeightExtractor(WeightExtractor):
         if not self.group_by_module:
             # Simple path: yield one chunk per parameter
             for name, param in params.items():
-                tensor = self._prepare_tensor(param, dtype)
+                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
                 yield WeightChunk(
                     names=[name],
                     dtypes=[str(dtype)],

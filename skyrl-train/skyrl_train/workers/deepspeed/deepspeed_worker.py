@@ -52,7 +52,7 @@ class DeepSpeedWeightExtractor(WeightExtractor):
         if not self.group_by_module:
             # Simple path: yield one chunk per parameter
             for name, param in params.items():
-                tensor = self._prepare_tensor(param, dtype)
+                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
                 # Get correct shape based on ZeRO stage
                 shape = list(param.shape if self.zero_stage != 3 else param.ds_shape)
                 yield WeightChunk(
