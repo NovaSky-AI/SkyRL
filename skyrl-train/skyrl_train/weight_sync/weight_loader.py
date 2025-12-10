@@ -1,7 +1,8 @@
 """Weight loader interface for inference engines."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+
+from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 
 
 class WeightLoader(ABC):
@@ -13,7 +14,7 @@ class WeightLoader(ABC):
     """
 
     @abstractmethod
-    async def load_weights(self, request: Dict[str, Any]) -> None:
+    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights into the inference engine.
 
         Coordinates with the receiver to fetch weights and applies them

@@ -742,7 +742,7 @@ class VLLMWeightLoader(WeightLoader):
         self._engine = engine.engine if hasattr(engine, "engine") else engine
         self._is_async = is_async
 
-    async def load_weights(self, request: Dict[str, Any]) -> None:
+    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights by coordinating RPC to workers.
 
         Sends the request to workers via collective_rpc. Workers create

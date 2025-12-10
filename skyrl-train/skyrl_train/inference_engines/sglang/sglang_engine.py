@@ -252,7 +252,7 @@ class SGLangWeightLoader(WeightLoader):
         # conflicts. Same underlying implementation: https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/model_executor/model_runner.py#L689
         return await self._engine.tokenizer_manager.init_weights_update_group(obj, None)
 
-    async def load_weights(self, request: Dict[str, Any]) -> None:
+    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights by coordinating with SGLang's weight update APIs.
 
         Args:

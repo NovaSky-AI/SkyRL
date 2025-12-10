@@ -68,7 +68,7 @@ class RemoteWeightLoader(WeightLoader):
             ) as response:
                 return await response.json()
 
-    async def load_weights(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    async def load_weights(self, request: NamedWeightsUpdateRequest) -> Dict[str, Any]:
         """Load weights via HTTP to the remote inference server.
 
         Remote engines only support broadcast weight updates (no IPC).
