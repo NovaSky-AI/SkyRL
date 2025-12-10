@@ -184,6 +184,9 @@ Megatron Configuration
       transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
         ...
+      # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+      # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+      empty_cuda_cache: true
 
 
 - ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.

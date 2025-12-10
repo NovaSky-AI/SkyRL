@@ -19,17 +19,12 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
 
         yield tmp_path
 
-        # Create tar archive of temp directory contents
-        tar_buffer = io.BytesIO()
-        with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
-            for p in tmp_path.iterdir():
-                tar.add(p, arcname=p.name)
-        tar_buffer.seek(0)
-
-        # Write the tar file (handles both local and cloud storage)
         dest.parent.mkdir(parents=True, exist_ok=True)
+
         with dest.open("wb") as f:
-            f.write(tar_buffer.read())
+            # Use compresslevel=0 to prioritize speed, as checkpoint files don't compress well.
+            with tarfile.open(fileobj=f, mode="w|gz", compresslevel=0) as tar:
+                tar.add(tmp_path, arcname="")
 
 
 @contextmanager
