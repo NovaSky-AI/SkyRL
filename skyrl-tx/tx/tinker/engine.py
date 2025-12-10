@@ -469,8 +469,8 @@ class TinkerEngine:
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
 
-        if (max_seqs := self.config.sample_max_num_sequences) > 0:
-            batchable = batchable[:max_seqs]
+        if self.config.sample_max_num_sequences > 0:
+            batchable = batchable[: self.config.sample_max_num_sequences]
 
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
