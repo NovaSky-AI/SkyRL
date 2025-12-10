@@ -451,7 +451,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
 @pytest.mark.asyncio
 async def test_generator_multi_turn_gsm8k_step_wise():
     """
-    Test the generator with multiple turns of search
+    Test the generator with the multi-turn GSM8K environment for step-wise training
     """
     initialize_ray(get_default_config())
     try:
