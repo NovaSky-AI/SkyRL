@@ -41,14 +41,14 @@ from tx.utils.log import logger
 
 
 @contextmanager
-def log_timing(operation: str):
-    """Context manager to log execution time for an operation."""
+def log_timing(request: str):
+    """Context manager to log execution time for a request."""
     start_time = time.perf_counter()
     try:
         yield
     finally:
         elapsed = time.perf_counter() - start_time
-        logger.info(f"{operation} took {elapsed:.3f}s")
+        logger.info(f"[timing] {request} took {elapsed:.3f}s")
 
 
 def pad(xs, pad_to: int, *, fill):
@@ -966,12 +966,12 @@ class TinkerEngine:
             return
         results = {}
         for request_id, (model_id, request_type, request_data) in requests.items():
-            try:
-                with log_timing(f"process_single_request({request_type.value})"):
+            with log_timing(f"process_single_request({request_type.value})"):
+                try:
                     result = self.process_single_request(request_type, model_id, request_data)
-            except Exception as e:
-                logger.exception(f"Error processing request {request_id}: {e}")
-                result = types.ErrorResponse(error=str(e), status="failed")
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result = types.ErrorResponse(error=str(e), status="failed")
             results[request_id] = result
         self._complete_futures(results)
 
