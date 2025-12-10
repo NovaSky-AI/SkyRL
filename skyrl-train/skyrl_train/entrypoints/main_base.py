@@ -142,9 +142,11 @@ class BasePPOExp:
             num_workers=8,
         )
         # make sure the dataset is large enough to train on
-        assert (
-            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        n_got_size = len(prompts_dataset)
+        n_expected_size = self.cfg.trainer.train_batch_size
+        assert n_got_size >= n_expected_size, (
+            f"dataset should be at least as large as `train_batch_size` {n_expected_size}, got {n_got_size}"
+        )
         return prompts_dataset
 
     def get_eval_dataset(self):
