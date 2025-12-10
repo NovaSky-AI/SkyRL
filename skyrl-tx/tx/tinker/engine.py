@@ -442,8 +442,9 @@ class TinkerEngine:
         Returns sample operations ensuring that each model_id has only one checkpoint_id
         to avoid loading different checkpoints for the same model in a single batch.
 
-        If sample_max_num_sequences is configured, limits to that many requests to produce full batches.
-        If num_samples > 1 for some requests, this may not be perfect, but it's simple and effective.
+        If sample_max_num_sequences is configured, limits to that many requests so we don't
+        produce partial batches in process_sample_batch. If num_samples > 1 for some requests,
+        this may not be perfect, but it's simple and effective.
 
         Args:
             session: Database session
