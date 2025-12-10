@@ -965,14 +965,14 @@ class TinkerEngine:
         if not requests:
             return
         results = {}
-        with log_timing(f"process_single_requests(n={len(requests)})"):
-            for request_id, (model_id, request_type, request_data) in requests.items():
-                try:
+        for request_id, (model_id, request_type, request_data) in requests.items():
+            try:
+                with log_timing(f"process_single_request({request_type.value})"):
                     result = self.process_single_request(request_type, model_id, request_data)
-                except Exception as e:
-                    logger.exception(f"Error processing request {request_id}: {e}")
-                    result = types.ErrorResponse(error=str(e), status="failed")
-                results[request_id] = result
+            except Exception as e:
+                logger.exception(f"Error processing request {request_id}: {e}")
+                result = types.ErrorResponse(error=str(e), status="failed")
+            results[request_id] = result
         self._complete_futures(results)
 
     def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
