@@ -984,15 +984,13 @@ class TinkerEngine:
         """
         if not requests:
             return
-        try:
-            with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+            try:
                 results = batch_processor(requests)
-            self._complete_futures(results)
-        except Exception as e:
-            logger.exception(f"Error processing batch: {e}")
-            self._complete_futures(
-                {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
-            )
+            except Exception as e:
+                logger.exception(f"Error processing batch: {e}")
+                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+        self._complete_futures(results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
