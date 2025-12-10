@@ -499,6 +499,9 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
+    
+    async def finalize_weight_update(self):
+        return await self._run_on_all_engines("finalize_weight_update")
 
     async def reset_prefix_cache(self):
         return await self._run_on_all_engines("reset_prefix_cache")

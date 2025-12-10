@@ -193,6 +193,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
+            
+            ray.get(asyncio.create_task(inference_engine_client.finalize_weight_update()))
         # CUDA IPC
         else:
             weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}

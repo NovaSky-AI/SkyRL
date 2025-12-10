@@ -587,6 +587,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request["shapes"],
                 ),
             )
+    
+    async def finalize_weight_update(self):
+        engine = self._get_engine()
+        return await engine.collective_rpc("finalize_weight_update")
 
     async def teardown(self):
         await self._destroy_weights_update_group()
