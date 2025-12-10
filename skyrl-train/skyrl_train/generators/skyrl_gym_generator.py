@@ -100,8 +100,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
     def _validate_cfg(self, generator_cfg: DictConfig):
-        if getattr(generator_cfg.sampling_params, "logprobs", None) is not None and not generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
 
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
@@ -182,7 +180,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         initial_prompt_length = len(input_ids)
         loss_mask = []  # this excludes the prompt
-        rollout_logprobs = None
+        get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
+        rollout_logprobs = [] if get_logprobs else None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
@@ -207,6 +206,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
 
+            if get_logprobs and engine_output.get("response_logprobs"):
+                rollout_logprobs.extend(engine_output["response_logprobs"][0])
+
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
             current_sampling_params = (
@@ -222,6 +224,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
                     added_eos = True
+                    if get_logprobs and rollout_logprobs is not None:
+                        rollout_logprobs.append(0.0)
 
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
@@ -703,8 +707,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
                 loss_mask += [0] * len(obs_tokens)
                 # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-                if logprobs:
-                    logprobs += [1] * len(obs_tokens)
+                if logprobs is not None:
+                    logprobs.extend([0.0] * len(obs_tokens))
                 input_ids += obs_tokens
 
         return loss_mask, input_ids, logprobs, response_end_idx
