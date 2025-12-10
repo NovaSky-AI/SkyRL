@@ -248,9 +248,6 @@ def get_rollout_metrics(
     Returns:
         Dictionary of aggregated metrics
     """
-    assert (
-        isinstance(responses, list) and isinstance(responses[0], list) and isinstance(responses[0][0], int)
-    ), "responses must be a list of list of token ids"
     num_tokens_arr = np.array([len(response) for response in responses])
     # Support both response-level and token-level rewards
     flat_rewards = []
