@@ -474,13 +474,10 @@ class TinkerEngine:
         max_seqs = self.config.sample_max_num_sequences
         batchable = self._query_batchable_sample(session)
 
-        # Wait for more requests if batch is not full
-        while max_seqs > 0 and 0 < len(batchable) < max_seqs:
+        # Wait up to 0.5s from the newest request to allow batch to fill
+        if max_seqs > 0 and 0 < len(batchable) < max_seqs and (datetime.now(timezone.utc) - batchable[-1].created_at).total_seconds() < 0.5:
             time.sleep(0.5)
-            new_batchable = self._query_batchable_sample(session)
-            if len(new_batchable) == len(batchable):
-                break
-            batchable = new_batchable
+            batchable = self._query_batchable_sample(session)
 
         batchable = batchable[:max_seqs] if max_seqs > 0 else batchable
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
