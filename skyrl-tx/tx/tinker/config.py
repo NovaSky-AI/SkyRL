@@ -34,7 +34,7 @@ class EngineConfig(BaseModel):
     )
     sample_batch_linger_seconds: float = Field(
         default=0.5,
-        description="Time to wait for more sample requests to accumulate before processing a partial batch",
+        description="Time to wait for more sample requests to accumulate before processing a partial batch (only used if sample_max_num_sequences > 0)",
     )
     enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
     shard_attention_heads: bool = Field(
