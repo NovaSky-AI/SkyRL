@@ -139,7 +139,8 @@ class TestModuleGrouping:
 
     def test_gather_tensor_callback(self):
         """Test that gather_tensor_fn callback is called correctly."""
-        params = {"model.layer.weight": torch.randn(10, 10, dtype=torch.float32)}
+        original = torch.randn(10, 10, dtype=torch.float32)
+        params = {"model.layer.weight": original}
 
         def gather_tensor(param):
             # Simulate gathering by adding 1.0
@@ -158,6 +159,8 @@ class TestModuleGrouping:
         tensor = chunks[0].tensors[0]
         # Should be bfloat16 (dtype cast in utils) and have +1.0 applied (from gather)
         assert tensor.dtype == torch.bfloat16
+        expected = (original + 1.0).to(torch.bfloat16)
+        assert torch.allclose(tensor, expected)
 
     def test_get_shape_callback(self):
         """Test that get_shape_fn callback is called correctly."""
