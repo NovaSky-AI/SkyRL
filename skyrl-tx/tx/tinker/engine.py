@@ -1005,7 +1005,9 @@ class TinkerEngine:
                 # If num_samples > 1 for some requests, this may not be perfect, but it's simple and effective.
                 sample_requests = self.find_batchable_sample(session)
                 if self.config.sample_max_num_sequences > 0:
-                    sample_requests = dict(itertools.islice(sample_requests.items(), self.config.sample_max_num_sequences))
+                    sample_requests = dict(
+                        itertools.islice(sample_requests.items(), self.config.sample_max_num_sequences)
+                    )
                 # Get other pending requests (non forward_backward and non sampling)
                 other_requests = self.find_single_requests(session)
 
