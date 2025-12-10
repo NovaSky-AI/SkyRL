@@ -10,7 +10,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl_train.generators.base import GeneratorInput
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from tests.gpu.utils import Timer, get_test_generator_input
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.utils.utils import initialize_ray
@@ -23,11 +23,58 @@ from skyrl_train.config.utils import get_default_config
 OBSERVATION_PROMPT = "give me another solution"
 
 
-def get_test_actor_config() -> DictConfig:
-    """Get base config with test-specific overrides."""
-    default_cfg = get_default_config()
-    default_cfg.generator.backend = "vllm"
-    return default_cfg
+def get_test_config(
+    max_generate_length,
+    max_input_length,
+    batched,
+    max_turns,
+    use_conversation_multi_turn,
+    max_env_workers,
+    model,
+    is_step_wise,
+    temperature,
+):
+    # Create a mock generator config
+    cfg = get_default_config()
+    OmegaConf.update(
+        cfg,
+        "generator",
+        {
+            "sampling_params": {
+                "max_generate_length": max_generate_length,
+                "logprobs": None,
+                "temperature": temperature,
+            },
+            "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
+            "max_input_length": max_input_length,
+            "batched": batched,
+            "max_turns": max_turns,
+            "zero_reward_on_non_stop": False,
+            "use_conversation_multi_turn": use_conversation_multi_turn,
+            "apply_overlong_filtering": False,
+            "backend": "vllm",
+            "enable_http_endpoint": False,
+            "http_endpoint_host": "127.0.0.1",
+            "http_endpoint_port": 8000,
+            "step_wise_training": is_step_wise,
+        },
+    )
+
+    OmegaConf.update(
+        cfg,
+        "environment.skyrl_gym",
+        {
+            "search": {
+                "log_requests": True,
+                "search_url": "http://127.0.0.1:8000/retrieve",
+            },
+            "max_env_workers": max_env_workers,
+        },
+    )
+
+    cfg.trainer.policy.model.path = model
+    cfg.generator = cfg.generator
+    return cfg
 
 
 # Setup for formatting tests
@@ -78,6 +125,8 @@ async def run_generator_end_to_end(
     max_turns=1,
     use_conversation_multi_turn=True,
     max_env_workers=10,
+    is_step_wise: bool = False,
+    temperature=1.0,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -103,47 +152,21 @@ async def run_generator_end_to_end(
         sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
     )
 
-    # Create a mock generator config
-    default_cfg = get_default_config()
-    OmegaConf.update(
-        default_cfg,
-        "generator",
-        {
-            "sampling_params": {
-                "max_generate_length": max_generate_length,
-                "logprobs": None,
-            },
-            "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
-            "max_input_length": max_input_length,
-            "batched": batched,
-            "max_turns": max_turns,
-            "zero_reward_on_non_stop": False,
-            "use_conversation_multi_turn": use_conversation_multi_turn,
-            "apply_overlong_filtering": False,
-            "backend": "vllm",
-            "enable_http_endpoint": False,
-            "http_endpoint_host": "127.0.0.1",
-            "http_endpoint_port": 8000,
-        },
+    cfg = get_test_config(
+        max_generate_length,
+        max_input_length,
+        batched,
+        max_turns,
+        use_conversation_multi_turn,
+        max_env_workers,
+        model,
+        is_step_wise,
+        temperature,
     )
 
-    generator_cfg = default_cfg.generator
-    OmegaConf.update(
-        default_cfg,
-        "environment.skyrl_gym",
-        {
-            "search": {
-                "log_requests": True,
-                "search_url": "http://127.0.0.1:8000/retrieve",
-            },
-            "max_env_workers": max_env_workers,
-        },
-    )
-    env_cfg = default_cfg.environment.skyrl_gym
+    env_cfg = cfg.environment.skyrl_gym
+    generator_cfg = cfg.generator
 
-    cfg = get_test_actor_config()
-    cfg.trainer.policy.model.path = model
-    cfg.generator = generator_cfg
     inference_engine_client = InferenceEngineClient(
         inference_engines,
         tokenizer,
@@ -206,11 +229,15 @@ async def run_generator_end_to_end(
     ]
     for key in output_keys:
         assert key in generator_output, f"Key {key} not found in generator output"
+
     assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
     assert isinstance(prompts_out[0], list), "Prompts output should be a list"
     assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
     assert isinstance(outputs[0]["response"][0], int), "Prompts output should be a list of list of token ids"
-    assert len(outputs) == num_prompts * n_samples_per_prompt, "Mismatch between number of outputs and expected outputs"
+    if not is_step_wise:
+        assert (
+            len(outputs) == num_prompts * n_samples_per_prompt
+        ), "Mismatch between number of outputs and expected outputs"
     for i in range(len(outputs)):
         response_length = len(outputs[i]["response"])
         # TODO (erictang000): make this more precise for multi-turn
@@ -236,7 +263,7 @@ async def test_generator_single_turn_gsm8k(
     """
     Test the generator with a single turn of GSM8K
     """
-    initialize_ray(get_test_actor_config())
+    initialize_ray(get_default_config())
     try:
         await run_generator_end_to_end(
             use_async_engine=use_async_engine,
@@ -254,7 +281,7 @@ async def test_generator_multi_turn_search():
     """
     Test the generator with multiple turns of search
     """
-    initialize_ray(get_test_actor_config())
+    initialize_ray(get_default_config())
     try:
         await run_generator_end_to_end(
             use_async_engine=True,
@@ -285,7 +312,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when using conversation formatting for multi-turn
     """
-    initialize_ray(get_test_actor_config())
+    initialize_ray(get_default_config())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         generator_output = await run_generator_end_to_end(
@@ -361,7 +388,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when not using conversation formatting for multi-turn
     """
-    initialize_ray(get_test_actor_config())
+    initialize_ray(get_default_config())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         generator_output = await run_generator_end_to_end(
@@ -417,5 +444,69 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
                 )  # 1 user eos (no system for Qwen3)
             else:
                 assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_gsm8k():
+    """
+    Test the generator with multiple turns of search
+    """
+    initialize_ray(get_default_config())
+    try:
+        await run_generator_end_to_end(
+            use_async_engine=True,
+            batched=False,
+            n_samples_per_prompt=5,
+            num_inference_engines=2,
+            tensor_parallel_size=2,
+            model="Qwen/Qwen2.5-1.5B-Instruct",
+            max_prompt_length=2048,
+            max_input_length=4096,
+            max_generate_length=1000,
+            data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+            env_class="gsm8k_multi_turn",
+            num_prompts=2,
+            max_turns=2,
+            use_conversation_multi_turn=False,
+            max_env_workers=0,
+        )
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_gsm8k_step_wise():
+    """
+    Test the generator with multiple turns of search
+    """
+    initialize_ray(get_default_config())
+    try:
+        generator_output: GeneratorOutput = await run_generator_end_to_end(
+            use_async_engine=True,
+            batched=False,
+            n_samples_per_prompt=5,
+            num_inference_engines=2,
+            tensor_parallel_size=2,
+            model="Qwen/Qwen2.5-1.5B-Instruct",
+            max_prompt_length=2048,
+            max_input_length=4096,
+            max_generate_length=1000,
+            data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+            env_class="gsm8k_multi_turn",
+            num_prompts=2,
+            max_turns=2,
+            use_conversation_multi_turn=True,
+            max_env_workers=0,
+            is_step_wise=True,
+            temperature=0,
+        )
+
+        assert isinstance(generator_output["is_last_step"], list) and isinstance(
+            generator_output["is_last_step"][0], bool
+        )
+        # Expect atleast one response with more than one turn
+        assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
     finally:
         ray.shutdown()
