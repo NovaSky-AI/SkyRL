@@ -469,13 +469,13 @@ class TinkerEngine:
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
 
-        # If batch is not full and newest request is < 0.5s old, return empty to let the
-        # outer polling loop wait for more requests to accumulate before processing.
-        max_seqs = self.config.sample_max_num_sequences
-        if max_seqs > 0 and 0 < len(batchable) < max_seqs and (datetime.now() - batchable[-1].created_at).total_seconds() < 0.5:
-            return {}
+        if (max_seqs := self.config.sample_max_num_sequences) > 0:
+            # If batch is not full and newest request is < 0.5s old, return empty to let the
+            # outer polling loop wait for more requests to accumulate before processing.
+            if 0 < len(batchable) < max_seqs and (datetime.now() - batchable[-1].created_at).total_seconds() < 0.5:
+                return {}
+            batchable = batchable[:max_seqs]
 
-        batchable = batchable[:max_seqs] if max_seqs > 0 else batchable
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
