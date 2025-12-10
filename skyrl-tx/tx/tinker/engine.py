@@ -39,9 +39,6 @@ from tx.utils.models import (
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
-# Polling interval for the main engine loop (in seconds)
-POLLING_INTERVAL_SECONDS = 0.1
-
 
 @contextmanager
 def log_timing(request: str):
@@ -472,13 +469,6 @@ class TinkerEngine:
                 batchable.append(op)
 
         if (max_seqs := self.config.sample_max_num_sequences) > 0:
-            # If batch is not full and newest request is recent, return empty to let the
-            # outer polling loop wait for more requests to accumulate before processing.
-            if (
-                0 < len(batchable) < max_seqs
-                and (datetime.now() - batchable[-1].created_at).total_seconds() < POLLING_INTERVAL_SECONDS
-            ):
-                return {}
             batchable = batchable[:max_seqs]
 
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
@@ -1027,7 +1017,8 @@ class TinkerEngine:
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
 
-            time.sleep(POLLING_INTERVAL_SECONDS)
+            # Poll every 100ms
+            time.sleep(0.1)
 
     def run(self):
         """Entry point to start the engine."""
