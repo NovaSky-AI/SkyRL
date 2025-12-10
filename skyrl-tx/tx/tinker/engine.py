@@ -476,7 +476,7 @@ class TinkerEngine:
 
         # If batch is not full and newest request is < 0.5s old, return empty to let the
         # outer polling loop wait for more requests to accumulate before processing.
-        if max_seqs > 0 and 0 < len(batchable) < max_seqs and (datetime.now(timezone.utc) - batchable[-1].created_at).total_seconds() < 0.5:
+        if max_seqs > 0 and 0 < len(batchable) < max_seqs and (datetime.now() - batchable[-1].created_at).total_seconds() < 0.5:
             return {}
 
         batchable = batchable[:max_seqs] if max_seqs > 0 else batchable
