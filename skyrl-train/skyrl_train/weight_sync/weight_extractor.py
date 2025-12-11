@@ -1,7 +1,7 @@
 """Weight extractor interface for extracting weights from training backends."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Iterator
+from typing import Iterator
 
 import torch
 

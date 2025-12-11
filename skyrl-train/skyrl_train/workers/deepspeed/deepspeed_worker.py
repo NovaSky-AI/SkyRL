@@ -32,7 +32,13 @@ class DeepSpeedWeightExtractor(WeightExtractor):
         batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
     """
 
-    def __init__(self, model: torch.nn.Module, zero_stage: int, group_by_module: bool = False, batch_size_threshold_gb: float = 0.0):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        zero_stage: int,
+        group_by_module: bool = False,
+        batch_size_threshold_gb: float = 0.0,
+    ):
         self.model = model
         self.zero_stage = zero_stage
         self.group_by_module = group_by_module
@@ -159,7 +165,9 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             model=self.model.model.module,
             zero_stage=self.zero_stage,
             group_by_module=self.use_cuda_ipc,
-            batch_size_threshold_gb=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0,
+            batch_size_threshold_gb=(
+                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
+            ),
         )
 
         self._model_update_group_name = None

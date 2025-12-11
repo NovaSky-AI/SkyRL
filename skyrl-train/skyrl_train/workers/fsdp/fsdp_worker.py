@@ -165,9 +165,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
             group_by_module=self.use_cuda_ipc,
-            batch_size_threshold_gb=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
-            if self.use_cuda_ipc
-            else 0.0,
+            batch_size_threshold_gb=(
+                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
+            ),
         )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
