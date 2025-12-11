@@ -332,13 +332,12 @@ class TinkerEngine:
             # JIT the fused function
             # Input order: input_ids, attention_mask, adapter_indices, target_ids,
             #              loss_mask, loss_fn_types, sampling_logprobs, advantages
-            # adapter_indices is replicated (used in bincount which needs full view)
-            # All other batch arrays are sharded along batch dimension
+            # All batch arrays are sharded along batch dimension
             batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
             input_shardings = (
                 batch_sharded_2d,  # input_ids
                 batch_sharded_2d,  # attention_mask
-                replicated,       # adapter_indices (replicated for bincount)
+                batch_sharded_1d,  # adapter_indices (sharded, bincount runs per-device)
                 batch_sharded_2d,  # target_ids
                 batch_sharded_2d,  # loss_mask
                 batch_sharded_1d,  # loss_fn_types (sharded, used in vmap over batch)
@@ -615,18 +614,15 @@ class TinkerEngine:
         # Sharding specs for batch inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
-        replicated = jax.NamedSharding(self.mesh, jax.P(None))
 
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
                 # Shard the micro-batch inputs appropriately
-                # 2D arrays (batch, seq) are sharded along batch dim
-                # 1D arrays (batch,) like loss_fn_types are also sharded along batch
-                # adapter_indices is replicated (used in bincount which needs full view)
+                # All batch arrays are sharded along the batch dimension
                 mb_input_ids = jax.device_put(input_ids[mb_start:mb_end], sharding_2d)
                 mb_attention_mask = jax.device_put(attention_mask[mb_start:mb_end], sharding_2d)
-                mb_adapter_indices = jax.device_put(adapter_indices[mb_start:mb_end], replicated)
+                mb_adapter_indices = jax.device_put(adapter_indices[mb_start:mb_end], sharding_1d)
                 mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], sharding_2d)
                 mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], sharding_2d)
                 mb_loss_fn_types = jax.device_put(loss_fn_types[mb_start:mb_end], sharding_1d)
