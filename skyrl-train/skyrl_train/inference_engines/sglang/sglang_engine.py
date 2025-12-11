@@ -114,7 +114,8 @@ class SGLangWeightTransferReceiver:
     This receiver is used inside the custom_weight_loader function
     which is invoked by SGLang's internal mechanisms.
 
-    Note on broadcast: Unlike vLLM where we control WorkerWrap and can store the
+    Note: this is not used for the broadcast path.
+    Because unlike vLLM where we control WorkerWrap and can store the
     process group there, SGLang's custom_weight_loader only receives (model, tensors).
     The process group (_model_update_group) is stored in model_runner, which is not
     accessible from the model object. We also cannot create the group lazily inside
