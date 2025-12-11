@@ -327,13 +327,28 @@ class TinkerEngine:
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
             # Shard batch inputs along the FSDP axis (batch, seq_len)
-            batch_sharded = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+            batch_sharded_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+            # Shard 1D batch inputs (batch,) along the FSDP axis
+            batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
 
             # JIT the fused function
+            # Input order: input_ids, attention_mask, adapter_indices, target_ids,
+            #              loss_mask, loss_fn_types, sampling_logprobs, advantages
+            # adapter_indices and loss_fn_types are 1D (batch,), others are 2D (batch, seq_len)
+            input_shardings = (
+                batch_sharded_2d,  # input_ids
+                batch_sharded_2d,  # attention_mask
+                batch_sharded_1d,  # adapter_indices (1D)
+                batch_sharded_2d,  # target_ids
+                batch_sharded_2d,  # loss_mask
+                batch_sharded_1d,  # loss_fn_types (1D)
+                batch_sharded_2d,  # sampling_logprobs
+                batch_sharded_2d,  # advantages
+            )
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (batch_sharded,) * 8,
-                out_shardings=(accumulated_grads_shardings, batch_sharded, batch_sharded, scalar),
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d, scalar),
                 donate_argnames=("accumulated_grads",),
             )
 
