@@ -759,9 +759,9 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
                 # First, only query the status to avoid deserializing JSON data
                 statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
                 result = await session.exec(statement)
-                status = result.first()
+                status = result.scalar_one_or_none()
 
-                if not status:
+                if status is None:
                     raise HTTPException(status_code=404, detail="Future not found")
 
                 # Only fetch full record if status is terminal (completed or failed)
