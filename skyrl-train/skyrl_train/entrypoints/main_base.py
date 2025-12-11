@@ -68,7 +68,8 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["max_loras"] = 1
         engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
 
-        # TODO(devpatel): Bandaid solution, replace this once we have a better solution for LoRA performance degradation on the vLLM side
+        # TODO(devpatel): Bandaid solution, replace this once we have a better 
+        # solution for LoRA performance degradation on the vLLM side
         if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
             logger.warning(
                 "LoRA is enabled but generator.enforce_eager=true. "
@@ -86,7 +87,8 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
-    # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
+    # TODO(tgriggs): We may want a separate config for the model name in case 
+    # it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
         model_name=cfg.trainer.policy.model.path,
