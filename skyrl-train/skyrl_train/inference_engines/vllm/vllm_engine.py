@@ -120,7 +120,7 @@ class WorkerWrap:
             device=self.device,
         )
 
-    def load_weights(self, request: Dict[str, Any]) -> None:
+    def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights using the receiver.
 
         This method is called via collective_rpc from VLLMWeightLoader.
@@ -651,7 +651,7 @@ class VLLMWeightTransferReceiver:
         self.model_config = model_config
         self.device = device
 
-    def receive_weights(self, request: Dict[str, Any]) -> Iterator[Tuple[str, torch.Tensor]]:
+    def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights and yield (name, tensor) tuples.
 
         Args:
@@ -665,7 +665,7 @@ class VLLMWeightTransferReceiver:
         else:
             yield from self._receive_broadcast(request)
 
-    def _receive_broadcast(self, request: Dict[str, Any]) -> Iterator[Tuple[str, torch.Tensor]]:
+    def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via torch.distributed.broadcast."""
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
@@ -674,7 +674,7 @@ class VLLMWeightTransferReceiver:
             torch.distributed.broadcast(weight, 0, group=self.model_update_group)
             yield name, weight
 
-    def _receive_ipc(self, request: Dict[str, Any]) -> Iterator[Tuple[str, torch.Tensor]]:
+    def _receive_ipc(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via CUDA IPC handles."""
         names = request["names"]
         dtypes = request["dtypes"]

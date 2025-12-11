@@ -138,7 +138,7 @@ class SGLangWeightTransferReceiver:
 
     def receive_ipc_weights(
         self,
-        request: Dict[str, Any],
+        request: NamedWeightsUpdateRequest,
     ) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights by opening CUDA IPC handles.
 
@@ -277,7 +277,7 @@ class SGLangWeightLoader(WeightLoader):
         else:
             await self._load_via_broadcast(request)
 
-    async def _load_via_ipc(self, request: Dict[str, Any]) -> None:
+    async def _load_via_ipc(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights via CUDA IPC using custom weight loader.
 
         Uses SGLangWeightTransferReceiver internally to receive weights
@@ -299,7 +299,7 @@ class SGLangWeightLoader(WeightLoader):
         if not success:
             raise RuntimeError(f"IPC weight update failed: {message}")
 
-    async def _load_via_broadcast(self, request: Dict[str, Any]) -> None:
+    async def _load_via_broadcast(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights via torch.distributed broadcast.
 
         Uses SGLang's native update_weights_from_distributed API which internally

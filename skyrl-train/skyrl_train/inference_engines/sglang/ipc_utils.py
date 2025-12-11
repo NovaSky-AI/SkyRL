@@ -2,15 +2,16 @@
 
 import pickle
 import base64
-from typing import Dict, Any
 
 import torch
+
+from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 
 
 IPC_REQUEST_END_MARKER = b"__END_OF_REQUEST__"
 
 
-def serialize_ipc_request(request: Dict[str, Any]) -> torch.Tensor:
+def serialize_ipc_request(request: NamedWeightsUpdateRequest) -> torch.Tensor:
     """Serialize a weight update request to a tensor for IPC transfer.
 
     Args:
@@ -31,7 +32,7 @@ def serialize_ipc_request(request: Dict[str, Any]) -> torch.Tensor:
     return torch.frombuffer(tensor_data, dtype=torch.uint8)
 
 
-def deserialize_ipc_request(tensor: torch.Tensor) -> Dict[str, Any]:
+def deserialize_ipc_request(tensor: torch.Tensor) -> NamedWeightsUpdateRequest:
     """Deserialize a weight update request from a tensor.
 
     Args:
