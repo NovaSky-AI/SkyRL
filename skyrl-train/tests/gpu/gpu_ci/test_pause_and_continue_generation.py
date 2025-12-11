@@ -26,7 +26,7 @@ SERVER_HOST = "127.0.0.1"
 
 
 @pytest.mark.vllm
-def test_continue_generation_vllm_engine(ray_init_fixture):
+def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     """
     We send 6 requests via `/chat/completions` to two engines concurrently with vLLM `max_num_seqs=2`
     so that in each engine, 2 run and 1 wait. We ignore eos and let model geneate 2048 tokens.
@@ -106,11 +106,11 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
 
         # Pause then resume while requests are in-flight
         asyncio.run(client.pause_generation())
-        client.resume_generation()
+        asyncio.run(client.resume_generation())
         # Run for another two seconds, then pause and resume again
         asyncio.run(asyncio.sleep(2))
         asyncio.run(client.pause_generation())
-        client.resume_generation()
+        asyncio.run(client.resume_generation())
 
         # Wait for all requests to finish
         for t in threads:
@@ -165,6 +165,100 @@ def test_continue_generation_vllm_engine(ray_init_fixture):
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
+
+
+@pytest.mark.vllm
+def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
+    """
+    Identical to `test_continue_generation_vllm_engine_chat_completion` except we use `generate()`
+    instead of `/chat/completions`.
+
+    Launch 6 concurrent single-request generate() calls against two engines with vLLM `max_num_seqs=2`
+    so that in each engine, 2 run and 1 wait. Ignore EOS and request a long generation (2048 tokens).
+    Pause and then resume generation twice mid-flight. Expect each request to finish with reason `length`
+    and have exactly `max_tokens` completion tokens (i.e., len(response_ids[0]) == max_tokens and
+    len(response_logprobs[0]) == max_tokens).
+    """
+    num_engines = 2
+    num_requests = 6
+    max_num_seqs = 2
+
+    # 1. Build engines (no HTTP server needed for generate())
+    cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "fsdp2"
+    sampling_params = {
+        "max_tokens": 2048,
+        "stop": None,
+        "stop_token_ids": None,
+        "ignore_eos": True,
+        "temperature": 0.0,
+        # Request token logprobs (vLLM SamplingParams expects an int for how many to return)
+        "logprobs": 1,
+    }
+    client, _ = init_inference_engines(
+        cfg=cfg,
+        use_local=True,
+        async_engine=cfg.generator.async_engine,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        backend="vllm",
+        model=MODEL,
+        num_inference_engines=cfg.generator.num_inference_engines,
+        sleep_level=1,
+        max_num_seqs=max_num_seqs,
+    )
+
+    # 2. Prepare a single ConversationType prompt; each generate() call will be single-request
+    messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
+
+    # 3. Fire 6 concurrent client.generate() single-request calls, then pause/resume mid-flight
+    async def run_requests_then_pause():
+        async def one_req(i: int):
+            engine_input = {
+                "prompts": [messages],  # single request path
+                "prompt_token_ids": None,
+                "sampling_params": dict(sampling_params),
+                "session_ids": [i],
+            }
+            return await client.generate(engine_input)
+
+        tasks = [asyncio.create_task(one_req(i)) for i in range(num_requests)]
+        # Let requests start and enqueue; with max_num_seqs=2, 2 run and 1 wait per engine
+        await asyncio.sleep(1)
+        # Pause then resume while requests are in-flight
+        await client.pause_generation()
+        await client.resume_generation()
+        # Run for another two seconds, then pause and resume again
+        await asyncio.sleep(2)
+        await client.pause_generation()
+        await client.resume_generation()
+        return await asyncio.gather(*tasks)
+
+    outputs = asyncio.run(run_requests_then_pause())
+
+    # 4. Validate each output: stop_reason is "length" and tokens/logprobs == max_tokens
+    assert len(outputs) == num_requests, f"Expected {num_requests} outputs, got {len(outputs)}"
+    for i, out in enumerate(outputs):
+        # InferenceEngineOutput shape checks
+        assert "responses" in out and "response_ids" in out and "stop_reasons" in out
+        assert len(out["responses"]) == 1 and len(out["response_ids"]) == 1 and len(out["stop_reasons"]) == 1
+        assert out["stop_reasons"][0] == "length", f"Request {i} stop_reason is not 'length': {out['stop_reasons'][0]}"
+        # Check completion tokens via response_ids
+        token_ids = out["response_ids"][0]
+        assert (
+            len(token_ids) == sampling_params["max_tokens"]
+        ), f"Request {i} expected {sampling_params['max_tokens']} tokens, got {len(token_ids)}"
+        # Check response_logprobs length
+        assert "response_logprobs" in out, f"Request {i} missing response_logprobs"
+        assert (
+            len(out["response_logprobs"][0]) == sampling_params["max_tokens"]
+        ), f"Request {i} expected {sampling_params['max_tokens']} logprobs, got {len(out['response_logprobs'][0])}"
+        # Check string output is
+        assert out["responses"][0] == client.tokenizer.decode(token_ids, skip_special_tokens=True)
+        # Print a preview to aid debugging
+        print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
 
 @pytest.mark.vllm
@@ -258,4 +352,4 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
         ), f"Expected 2 requests with completion_tokens=0, got {num_completion_tokens_is_zero}."
 
         # Unpause for the next API run
-        client.resume_generation()
+        asyncio.run(client.resume_generation())

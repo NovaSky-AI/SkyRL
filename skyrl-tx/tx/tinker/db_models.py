@@ -88,3 +88,27 @@ class CheckpointDB(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
     completed_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
     error_message: str | None = None
+
+
+class SessionDB(SQLModel, table=True):
+    __tablename__ = "sessions"
+
+    session_id: str = Field(primary_key=True)
+    tags: list[str] = Field(default_factory=list, sa_type=JSON)
+    user_metadata: dict = Field(default_factory=dict, sa_type=JSON)
+    sdk_version: str
+    status: str = Field(default="active", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+    last_heartbeat_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True), index=True)
+    heartbeat_count: int = 0
+
+
+class SamplingSessionDB(SQLModel, table=True):
+    __tablename__ = "sampling_sessions"
+
+    sampling_session_id: str = Field(primary_key=True)
+    session_id: str = Field(foreign_key="sessions.session_id", index=True)
+    sampling_session_seq_id: int
+    base_model: str | None = None
+    model_path: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))

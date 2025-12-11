@@ -17,7 +17,13 @@ The `t` in `tx` stands for transformers, training, or tinker, and the `x`
 stands for "cross-platform".
 
 ## Getting Started
-See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-project-to-implement-the-Tinker-API-2848f0016b9d80fe9873eea1e38815ca?source=copy_link#2848f0016b9d80bc8a4bebeedac69f6e) for a quickstart example. 
+See the following SkyRL tx blog posts for more info and examples:
+- [Initial blog post](https://novasky-ai.notion.site/skyrl-tx) with the piglatin training example
+- [v0.0.2 release](https://novasky-ai.notion.site/skyrl-tx-v002) with a `Qwen/Qwen3-4B` training example
+- [v0.0.3 release](https://novasky-ai.notion.site/skyrl-tx-003) with a `Qwen/Qwen3-Coder-30B-A3B` training and a sampling example
+- [v0.1.0 release](https://novasky-ai.notion.site/skyrl-tx-v010) with an end-to-end RL example
+
+See also our talk [SkyRL tx: A unified training and inference engine](https://docs.google.com/presentation/d/1g-u8zxz7FsnlQXXShBVoqjUJhS48c6rxkJJJn0sj78A/view) at Ray Summit 2025.
 
 ## Features
 

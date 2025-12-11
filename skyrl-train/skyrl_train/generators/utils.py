@@ -23,6 +23,8 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
+    # chat template for qwen3 that strips non-last-turn thinking tokens (same as the official Qwen3 chat
+    # template but we add `generation` and `endgeneration` tags)
     "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
@@ -41,6 +43,23 @@ CUSTOM_CHAT_TEMPLATES = {
         "{{'\n'}}"
         "{% endif %}"
         "{% endfor %}"
+    ),
+    # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
+    "qwen2_5_with_generation_tag_simplified": (
+        "{% for message in messages %}"
+        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
+        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
+        "{% elif message.role == 'assistant' %}"
+        "{{ '<|im_start|>' + message.role + '\n'}}"
+        "{% generation %}"
+        "{{ message.content + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{ '\n' }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n' }}"
+        "{% endif %}"
     ),
 }
 
@@ -141,9 +160,10 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
     """
-    Used in eval to concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches.
 
-    `rollout_metrics` are not concatenated because they are already aggregated.
+    We only aggregate rollout metrics the can deduced by responses and rewards, but not
+    those that use `env_metrics` or `env_classes`.
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -156,14 +176,17 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
         "rewards": sum([output["rewards"] for output in generator_outputs], []),
         "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "stop_reasons": (
+            sum([output["stop_reasons"] for output in generator_outputs], [])
+            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
+            else None
+        ),
         "rollout_logprobs": (
             sum([output["rollout_logprobs"] for output in generator_outputs], [])
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
     }
-    if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
-        result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
 
     # propagate additional keys with list values as-is
     additional_keys = [
@@ -173,6 +196,17 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
         result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+
+    # Re-aggregate rollout metrics
+    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    result["rollout_metrics"] = rollout_metrics
+
+    # Validate the generator output using the number of prompts
+    # Import here to avoid circular dependency.
+    from skyrl_train.utils.trainer_utils import validate_generator_output
+
+    num_prompts = len(result["prompt_token_ids"])
+    validate_generator_output(num_prompts, result)
 
     return result
 
@@ -323,7 +357,9 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
 
     For simple chat templates without complex token splitting behavior, this produces the same
     result as directly tokenizing the messages. For templates like Qwen's ChatML format where
-    a default system prompt can be appended, this ensures correct tokenization
+    a default system prompt can be appended, this ensures correct tokenization.
+
+    In addition, for Qwen3, this function will keep all the thinking tokens from the messages.
 
     Reference: https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
 
@@ -355,3 +391,99 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
+
+
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
+    """
+    Get the response ids and loss mask from a list of messages.
+
+    We encode each message one by one, using a fixed base approach, building response token IDs, loss mask,
+    and rollout logprobs if provided. For Qwen3, this function will keep all the thinking tokens from the messages.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys. Must contain at least
+                 one message.
+        tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+        assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
+                `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
+
+    Returns:
+        Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
+    """
+    assert len(messages), "messages list cannot be empty"
+
+    # Needed to correctly mask it zero for assistant messages.
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+
+    # 1. Initalize the things to accumulate
+    response_ids = []
+    loss_mask = []
+    rollout_logprobs = None if assistant_logprobs is None else []
+    assistant_msg_idx = 0
+
+    for i in range(len(messages)):
+        # 2. Use fixed base approach to encode the message and accumulate
+        cur_message = messages[i]
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
+        response_ids.extend(cur_token_ids)
+
+        # 3. Set loss mask and rollout logprobs.
+        # Regardless of the message role, each message is responsible for adding its own generation
+        # prompt, and we apply the correct masking.
+        if cur_message["role"] == "user":
+            # 3.1. For user messages, it is simply zeros
+            loss_mask.extend([0] * len(cur_token_ids))
+            if assistant_logprobs:
+                rollout_logprobs.extend([0.0] * len(cur_token_ids))
+        elif cur_message["role"] == "assistant":
+            # 3.2. For assistant messages, we need to separate out:
+            # 1) generation prompt IDs -- mask is 0
+            # 2) tokens actually generated by the assistant (including the EOS) -- mask is 1
+            # 3) tokens after the EOS token (the `\n` in Qwen models) -- mask is 0
+            assert cur_token_ids[: len(generation_prompt_ids)] == generation_prompt_ids, (
+                f"Assistant message tokens should start with generation prompt. "
+                f"Expected {generation_prompt_ids}, got {cur_token_ids[:len(generation_prompt_ids)]}"
+            )
+            if tokenizer.eos_token_id in cur_token_ids:
+                last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
+                generated_token_ids = cur_token_ids[len(generation_prompt_ids) : last_eos_token_index + 1]
+                tokens_after_eos = cur_token_ids[last_eos_token_index + 1 :]
+            else:
+                generated_token_ids = cur_token_ids[len(generation_prompt_ids) :]
+                tokens_after_eos = []
+            assert len(generation_prompt_ids) + len(generated_token_ids) + len(tokens_after_eos) == len(
+                cur_token_ids
+            ), "The sum of the lengths of the generation prompt IDs, the generated tokens, and the tokens after the EOS token should equal the length of the current token IDs"
+
+            # 3.2.1. Add the generation prompt IDs.
+            loss_mask.extend([0] * len(generation_prompt_ids))
+            if assistant_logprobs:
+                rollout_logprobs.extend([0.0] * len(generation_prompt_ids))
+
+            # 3.2.2. Add what the assistant actually generated
+            loss_mask.extend([1] * len(generated_token_ids))
+            if assistant_logprobs:
+                if assistant_msg_idx >= len(assistant_logprobs):
+                    raise ValueError(
+                        f"Missing logprobs for assistant message #{assistant_msg_idx + 1}. Provided {len(assistant_logprobs)} logprob lists."
+                    )
+                msg_logprobs = assistant_logprobs[assistant_msg_idx]
+                if len(msg_logprobs) != len(generated_token_ids):
+                    raise ValueError(
+                        f"Logprobs count ({len(msg_logprobs)}) does not match token count ({len(generated_token_ids)}) for assistant message #{assistant_msg_idx + 1}."
+                    )
+                rollout_logprobs.extend(msg_logprobs)
+
+            # 3.2.3. Add the tokens after the EOS token.
+            loss_mask.extend([0] * len(tokens_after_eos))
+            if assistant_logprobs:
+                rollout_logprobs.extend([0.0] * len(tokens_after_eos))
+
+            assistant_msg_idx += 1
+        else:
+            raise ValueError(f"Expected message role to be 'user' or 'assistant', got {cur_message['role']}")
+
+        assert len(loss_mask) == len(response_ids)
+        assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
+
+    return response_ids, loss_mask, rollout_logprobs

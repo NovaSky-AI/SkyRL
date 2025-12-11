@@ -35,6 +35,18 @@ fi
 mkdir -p /workspace
 cp -r /testbed /workspace/$WORKSPACE_NAME
 
+export REPO_PATH="/workspace/$WORKSPACE_NAME"
 # Activate instance-specific environment
 . /opt/miniconda3/etc/profile.d/conda.sh
 conda activate testbed
+mkdir -p /root/.venv/bin
+# pip install chardet
+# for the new search tool
+# Install custom BM25 packages for Python 3.6 compatibility
+pip install chardet networkx
+pip install 'rank-bm25>=0.2.0,<1.0.0'
+echo "Custom BM25 components installed successfully"
+
+
+ln -s /opt/miniconda3/envs/testbed/bin/python /root/.venv/bin/python
+ln -s /opt/miniconda3/envs/testbed/bin/python /root/.venv/bin/python3

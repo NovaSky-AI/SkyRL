@@ -67,6 +67,7 @@ class SkyAgentRewardManager:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
+        already_print_data_sources = {}
         print(
             f"In Reward manager: data proto batch keys: {data.batch.keys()}, non tensor batch keys: {data.non_tensor_batch.keys()} meta info keys: {data.meta_info.keys()}"
         )
@@ -78,15 +79,18 @@ class SkyAgentRewardManager:
 
             prompt_length = prompt_ids.shape[-1]
 
-            # valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-            # valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
-            # response_ids = data_item.batch["responses"]
+            response_ids = data_item.batch["responses"]
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
 
             # decode
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-            reward_tensor[i, valid_response_length - 1] = int(data_item.non_tensor_batch["rewards"])
+            reward_tensor[i, valid_response_length - 1] = float(data_item.non_tensor_batch["rewards"])
 
             # data_source = data_item.non_tensor_batch["data_source"]
 
@@ -264,7 +268,7 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+        from .verl_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
         role_worker_mapping = {

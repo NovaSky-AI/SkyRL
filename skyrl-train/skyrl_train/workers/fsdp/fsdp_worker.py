@@ -1,6 +1,6 @@
 import asyncio
-from typing import Dict, List
 
+from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray
 import torch
 import torch.distributed
@@ -25,6 +25,68 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RefWorkerBase,
 )
+from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+
+
+class FSDPWeightExtractor(WeightExtractor):
+    """Extracts weights from FSDP-sharded models.
+
+    Args:
+        model: FSDP model to extract weights from
+        group_by_module: If True, group parameters by module (e.g., for FlashRL QKV fusion)
+        batch_size_threshold_gb: If > 0, batch complete modules together until threshold is reached
+    """
+
+    def __init__(self, model: torch.nn.Module, group_by_module: bool = False, batch_size_threshold_gb: float = 0.0):
+        self.model = model
+        self.group_by_module = group_by_module
+        self.batch_size_threshold_gb = batch_size_threshold_gb
+
+    def extract_weights(self, dtype: torch.dtype):
+        """Extract weights from FSDP model.
+
+        Args:
+            dtype: Target dtype for inference
+
+        Yields:
+            WeightChunk objects (one per parameter, or grouped by module)
+        """
+        # Configure state_dict type for FSDP v1
+        if fsdp_version(self.model) == 1:
+            FSDP.set_state_dict_type(
+                self.model,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
+
+        # Get state dict (handles FSDP sharding)
+        params = self.model.state_dict()
+
+        if not self.group_by_module:
+            # Simple path: yield one chunk per parameter
+            for name, param in params.items():
+                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
+                yield WeightChunk(
+                    names=[name],
+                    dtypes=[str(dtype)],
+                    shapes=[list(tensor.shape)],
+                    tensors=[tensor],
+                )
+        else:
+            for chunk in yield_module_grouped_chunks(
+                params=params,
+                dtype=dtype,
+                gather_tensor_fn=self._gather_tensor,
+                get_shape_fn=lambda name, param, tensor: list(tensor.shape),
+                batch_size_threshold_gb=self.batch_size_threshold_gb,
+            ):
+                yield chunk
+
+    def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
+        """Gather sharded tensor into full tensor."""
+        device = torch.cuda.current_device()
+        return param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
@@ -46,7 +108,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -72,11 +133,13 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
-                target_modules=self.cfg.trainer.target_modules,
-                exclude_modules=self.cfg.trainer.exclude_modules,
+                target_modules=self.cfg.trainer.policy.model.lora.target_modules,
+                exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
+                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                rope_theta=get_rope_theta_config(self.cfg.trainer),
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -95,9 +158,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
 
-        self.use_cuda_ipc = False
-        if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all:
-            self.use_cuda_ipc = True
+        # Initialize weight extractor
+        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
+        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        self.weight_extractor = FSDPWeightExtractor(
+            self.model.model,
+            group_by_module=self.use_cuda_ipc,
+            batch_size_threshold_gb=(
+                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
+            ),
+        )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
@@ -141,12 +212,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        if fsdp_version(self.model.model) == 1:
-            FSDP.set_state_dict_type(
-                self.model.model,
-                state_dict_type=StateDictType.SHARDED_STATE_DICT,
-                state_dict_config=ShardedStateDictConfig(),
-            )
 
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
@@ -158,71 +223,51 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_sync_path = self.cfg.trainer.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
             return
-        else:
-            # Regular model without LoRA
-            params = self.model.model.state_dict()
 
+        # Extract weights using the initialized extractor
         if not self.use_cuda_ipc:
-            for name, param in params.items():
-                if torch.distributed.get_rank() == 0:
-                    shape = param.shape
+            # Broadcast path: one chunk per parameter
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # Each chunk contains one parameter
+                assert len(chunk) == 1
+                name = chunk.names[0]
+                tensor = chunk.tensors[0]
 
+                if torch.distributed.get_rank() == 0:
+                    # Create legacy update request
                     update_weight_task = asyncio.create_task(
                         inference_engine_client.update_named_weights(
                             {
                                 "names": [name],
                                 "dtypes": [self.cfg.generator.model_dtype],
-                                "shapes": [shape],
+                                "shapes": [list(tensor.shape)],
                             }
                         )
                     )
 
-                # broadcast
-                def gather_and_broadcast(param):
-                    # For FSDP, gather parameter and broadcast to all InferenceEngines by rank 0
-                    device = torch.cuda.current_device()
-                    param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                    # cast to generator dtype
-                    param = param.to(generator_dtype)
+                # Broadcast tensor
+                def broadcast_tensor(tensor):
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
 
-                await asyncio.to_thread(gather_and_broadcast, param)
+                await asyncio.to_thread(broadcast_tensor, tensor)
                 if torch.distributed.get_rank() == 0:
                     await update_weight_task
                 torch.distributed.barrier()
-        # CUDA IPC
         else:
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-            current_size = 0
+            # CUDA IPC path: batched chunks (batching handled by extractor)
+            from torch.multiprocessing.reductions import reduce_tensor
 
-            module_to_params: Dict[str, List[str]] = {}
-            for param_name, param in params.items():
-                # TODO (sumanthrh): When would this fail? Works for many AutoModelForCausalLM models for now
-                module_name = ".".join(param_name.split(".")[:-2])
-                if module_name not in module_to_params:
-                    module_to_params[module_name] = [param_name]
-                else:
-                    module_to_params[module_name].append(param_name)
+            # Iterate over batched chunks
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
 
-            # NOTE (sumanthrh): We sync weights module by module. Ex: weights for self attn together, weights for mlp together
-            # For FlashRL integration, we allocate new storage for each param. Since q, k and v layer weights are fused internally by vllm,
-            # we need to pass the weights for all of these together.
-            # Overall, this doesn't hurt perf even in the general case
-
-            for module_name, param_names in module_to_params.items():
-                for i, name in enumerate(param_names):
-                    param = params[name]
-                    module_done = i == len(param_names) - 1
-
-                    from torch.multiprocessing.reductions import reduce_tensor
-
-                    device = torch.cuda.current_device()
-                    param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
-                    param = param.to(generator_dtype)
-                    weight = param.detach().contiguous()
-                    ipc_handle = reduce_tensor(weight)
-
+                # Process all parameters in this batch
+                # TODO(haochen): Pack tensors into contiguous buffer before creating IPC handle
+                # (like Megatron does) to reduce number of IPC handles and file descriptors
+                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
+                    # Create IPC handle for tensor
+                    ipc_handle = reduce_tensor(tensor)
                     ipc_handle = {get_physical_gpu_id(): ipc_handle}
                     ipc_handle_list = [None] * torch.distributed.get_world_size()
                     torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
@@ -232,32 +277,20 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                         for d in ipc_handle_list:
                             ipc_handles.update(d)
 
-                        current_size += weight.nbytes
                         weights_update_request["names"].append(name)
                         weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                        weights_update_request["shapes"].append(param.shape)
+                        weights_update_request["shapes"].append(shape)
                         weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                        # We send in batches as an optimization
-                        # sync if threshold is reached
-                        if (
-                            module_done
-                            and current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB
-                        ):
-                            await inference_engine_client.update_named_weights(weights_update_request)
 
-                            current_size = 0
-                            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-                            # force collect any sent tensors if possible to be memory efficient
-                            torch.cuda.ipc_collect()
                     torch.distributed.barrier()
                     torch.cuda.synchronize()
 
-            # sync any remaining weights
-            if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
-                await asyncio.create_task(inference_engine_client.update_named_weights(weights_update_request))
-                torch.cuda.ipc_collect()
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
+                # Send batch
+                if torch.distributed.get_rank() == 0:
+                    await inference_engine_client.update_named_weights(weights_update_request)
+                    torch.cuda.ipc_collect()
+                torch.distributed.barrier()
+                torch.cuda.synchronize()
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -305,7 +338,6 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
             num_training_steps=num_training_steps,
         )
         strategy.setup_distributed()
@@ -329,7 +361,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 lora_rank=self.cfg.trainer.critic.model.lora.rank,
                 lora_alpha=self.cfg.trainer.critic.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.critic.model.lora.dropout,
-                target_modules=self.cfg.trainer.target_modules,
+                target_modules=self.cfg.trainer.critic.model.lora.target_modules,
+                exclude_modules=self.cfg.trainer.critic.model.lora.exclude_modules,
                 value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
                 init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
                 sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
@@ -380,7 +413,6 @@ class FSDPRefWorkerBase(RefWorkerBase):
             fsdp_strategy=self.cfg.trainer.strategy,
             seed=self.cfg.trainer.seed,
             micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            train_batch_size=self.cfg.trainer.train_batch_size,
         )
         strategy.setup_distributed()
         self.strategy = strategy
@@ -397,6 +429,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 bf16=self.cfg.trainer.bf16,
                 sequence_parallel_size=self.cfg.trainer.ref.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
+                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                rope_theta=get_rope_theta_config(self.cfg.trainer),
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

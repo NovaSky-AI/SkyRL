@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 
@@ -5,10 +6,12 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
-from tx.models import Qwen3ForCausalLM
+from tx.models.configs import Qwen3Config
+from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker import types
 from tx.utils.models import load_safetensors
 
@@ -19,7 +22,7 @@ def test_qwen3_generate():
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
-    inputs = ["My name is", "The capital of France is", "Test stopping"]
+    inputs = ["My name is", "The capital of France is", "Test stopping", "Test stopping"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     # Generate with HuggingFace (reference)
@@ -36,7 +39,8 @@ def test_qwen3_generate():
     # Generate with our implementation
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        config = AutoConfig.from_pretrained(model_name)
+        base_config = PretrainedConfig.from_pretrained(model_name)
+        config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
         mesh = jax.make_mesh((1, 1), ("dp", "tp"))
         with jax.set_mesh(mesh):
@@ -47,6 +51,8 @@ def test_qwen3_generate():
             types.SamplingParams(max_tokens=10, temperature=0.0, seed=42),
             types.SamplingParams(max_tokens=20, temperature=0.0, seed=42),
             types.SamplingParams(max_tokens=50, temperature=0.0, seed=42, stop=[6149]),
+            # Stop token at position 3, but max_tokens=2 should cap output first
+            types.SamplingParams(max_tokens=2, temperature=0.0, seed=42, stop=[6149]),
         ]
         result = model.generate(
             batch.input_ids.numpy(),
@@ -61,8 +67,7 @@ def test_qwen3_generate():
             prompt_length = batch.input_ids.shape[1]
             hf_tokens_truncated = hf_tokens[prompt_length : prompt_length + sampling_param.max_tokens].tolist()
 
-            if sampling_param.stop:
-                assert result.stop_reasons[i] == "stop"
+            if sampling_param.stop and result.stop_reasons[i] == "stop":
                 assert our_tokens[-1] in sampling_param.stop
                 # We need to truncate it manually here since if we use the `eos_token_id`
                 # in huggingface generate, it will pad the sequence with padding tokens
@@ -72,6 +77,12 @@ def test_qwen3_generate():
                 f"Generated tokens for request {i} don't match HuggingFace. "
                 f"Ours: {our_tokens}, HF: {hf_tokens_truncated}"
             )
+
+        # Verify request 2: stop token should be hit
+        assert result.stop_reasons[2] == "stop"
+        # Verify request 3: max_tokens=2 should cap output before stop token at position 3
+        assert len(result.generated_ids[3]) == 2
+        assert result.stop_reasons[3] == "length"
 
         # Compare logprobs for sampled tokens
         for i, (our_tokens, our_logprobs) in enumerate(zip(result.generated_ids, result.logprobs)):
@@ -87,12 +98,14 @@ def test_qwen3_generate():
                 )
 
 
+@pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
 def test_qwen3_generate_speed():
     """Profile batched text generation with KV caching."""
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-    config = AutoConfig.from_pretrained(model_name)
+    base_config = PretrainedConfig.from_pretrained(model_name)
+    config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
 
     inputs = [
         "Why do humans need sleep and what happens when we dream",

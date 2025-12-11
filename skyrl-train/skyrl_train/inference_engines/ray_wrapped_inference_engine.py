@@ -90,7 +90,10 @@ def create_ray_wrapped_inference_engines(
     enable_lora=False,
     max_lora_rank=64,
     max_loras=1,
+    fully_sharded_loras=False,
     engine_init_kwargs: Dict[str, Any] = {},
+    rope_scaling: Dict[str, Any] = {},
+    rope_theta: float | None = None,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -148,7 +151,22 @@ def create_ray_wrapped_inference_engines(
                 "enable_lora": enable_lora,
                 "max_lora_rank": max_lora_rank,
                 "max_loras": max_loras,
+                "fully_sharded_loras": fully_sharded_loras,
             }
+
+            rope_engine_kwargs = {}
+            if rope_scaling:
+                rope_engine_kwargs["rope_scaling"] = rope_scaling
+                if "max_model_len" not in engine_init_kwargs:
+                    rope_factor = rope_scaling.get("factor", None)
+                    rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
+                    assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
+                    assert (
+                        rope_max_pos is not None
+                    ), "Please provide rope `original_max_position_embeddings` to compute model max length"
+                    rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
+            if rope_theta is not None:
+                rope_engine_kwargs["rope_theta"] = rope_theta
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
@@ -205,6 +223,7 @@ def create_ray_wrapped_inference_engines(
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
+                    **rope_engine_kwargs,
                 )
                 inference_engine_actors.append(engine)
         elif backend == "sglang":

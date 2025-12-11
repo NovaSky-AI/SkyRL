@@ -2,13 +2,14 @@
 
 import argparse
 import time
-from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlmodel import create_engine, Session, select, func
+from pydantic import BaseModel
+from sqlmodel import create_engine, Session, select, update, func
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -16,9 +17,9 @@ from flax.training import checkpoints
 
 
 import optax
-from transformers import AutoConfig
-from huggingface_hub import snapshot_download
+from transformers import PretrainedConfig
 
+from tx.models.configs import Qwen3Config
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
@@ -33,40 +34,92 @@ from tx.utils.models import (
     extract_adapter_state,
     insert_adapter_state,
     round_up_seq_len,
+    resolve_model_path,
 )
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+@contextmanager
+def log_timing(request: str):
+    """Context manager to log execution time for a request."""
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start_time
+        logger.info(f"(timing) {request} took {elapsed:.3f}s")
+
+
+def pad(xs, pad_to: int, *, fill):
+    """Pad a list to a specified length with a fill value."""
+    return xs + ([fill] * (pad_to - len(xs)))
+
+
+def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False) -> jax.Array:
+    """Pad a batch of sequences to max_length.
+
+    Args:
+        sequences: List of sequences to pad.
+        max_length: Target length for all sequences.
+        dtype: NumPy dtype for the output array.
+        left: If True, use left-padding (tokens at end). Required for autoregressive
+            generation so the last position corresponds to the last real token.
+            If False (default), use right-padding (tokens at start).
+
+    Returns:
+        A JAX array of shape (batch_size, max_length) with the padded sequences.
+    """
+    batch_size = len(sequences)
+    padded = np.zeros((batch_size, max_length), dtype=dtype)
+    for i, seq in enumerate(sequences):
+        assert len(seq) <= max_length, f"Sequence length {len(seq)} exceeds max_length {max_length}"
+        if left:
+            padded[i, max_length - len(seq) :] = seq
+        else:
+            padded[i, : len(seq)] = seq
+    return jnp.asarray(padded)
+
+
+@jax.tree_util.register_dataclass
 @dataclass
 class AccumulatedGradients:
-    """Stores accumulated gradients for a LoRA adapter."""
+    """Stores accumulated gradients for all LoRA adapters."""
 
-    grad_sum: nnx.State | None
-    denominator: int
+    grad_sum: nnx.State
+    counts: jax.Array
 
-    def add(self, grad: nnx.State, count: int) -> None:
-        """Accumulate gradients and increment denominator."""
-        if self.grad_sum is None:
-            self.grad_sum = grad
-            self.denominator = count
-        else:
-            self.grad_sum = jax.tree.map(lambda a, b: a + b, self.grad_sum, grad)
-            self.denominator += count
+    @classmethod
+    def create(cls, lora_params: nnx.State, max_adapters: int) -> "AccumulatedGradients":
+        """Initialize with zeros."""
+        return cls(
+            grad_sum=jax.tree.map(jnp.zeros_like, lora_params),
+            counts=jnp.zeros((max_adapters,), dtype=jnp.int32),
+        )
 
-    def get_mean(self) -> nnx.State:
-        """Compute mean gradients."""
-        if self.grad_sum is None or self.denominator == 0:
-            raise ValueError("Cannot compute mean: no gradients accumulated")
+    def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
+        """Accumulate gradients and increment counts."""
+        # Count occurrences of each adapter index in the batch
+        batch_counts = jnp.bincount(adapter_indices, length=self.counts.shape[0])
+        return AccumulatedGradients(
+            grad_sum=jax.tree.map(lambda a, b: a + b, self.grad_sum, lora_grads),
+            counts=self.counts + batch_counts,
+        )
+
+    def get_mean(self, adapter_index: jax.Array) -> nnx.State:
+        """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
+        count = self.counts[adapter_index]
         return jax.tree.map(
-            lambda g: g / jnp.asarray(self.denominator, dtype=g.dtype),
+            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
             self.grad_sum,
         )
 
-    def reset(self) -> None:
-        """Clear accumulated gradients."""
-        self.grad_sum = None
-        self.denominator = 0
+    def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
+        """Reset gradients and count for a specific adapter."""
+        return AccumulatedGradients(
+            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            counts=self.counts.at[adapter_index].set(0),
+        )
 
 
 class TinkerEngine:
@@ -82,25 +135,22 @@ class TinkerEngine:
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
-        # Store accumulated gradients per LoRA adapter (model_id -> accumulated gradients)
-        self.accumulated_grads: dict[str, AccumulatedGradients] = {}
         # Store optimizer instances per LoRA adapter (model_id -> optimizer)
         self.optimizers: dict[str, nnx.Optimizer] = {}
         # Metrics recorded in the engine
         self.metrics = types.EngineMetrics()
 
-        # Initialize the shared base model
-        self.model_config = AutoConfig.from_pretrained(self.config.base_model)
-
-        # Configure LoRA settings
-        self.model_config.max_lora_adapters = self.config.max_lora_adapters
-        self.model_config.max_lora_rank = self.config.max_lora_rank
-        self.model_config.shard_attention_heads = self.config.shard_attention_heads
+        # Initialize the shared base model with LoRA config
+        checkpoint_path = resolve_model_path(self.config.base_model)
+        base_config = PretrainedConfig.from_pretrained(checkpoint_path)
+        self.model_config = Qwen3Config(
+            base_config,
+            max_lora_adapters=self.config.max_lora_adapters,
+            max_lora_rank=self.config.max_lora_rank,
+            shard_attention_heads=self.config.shard_attention_heads,
+        )
 
         model_class = get_model_class(self.model_config)
-
-        # Download model weights from HuggingFace
-        checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
@@ -110,13 +160,28 @@ class TinkerEngine:
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
-            update_adapter_config(self.model, adapter_index=0, lora_rank=1, lora_alpha=1.0)
+            update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
+
+            # Initialize global accumulated gradients
+            self.accumulated_grads = AccumulatedGradients.create(self.lora_params, self.config.max_lora_adapters)
 
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
         )
 
         self._create_loss_and_grad_fn()
+
+    def _extract_checkpoint_data(self, model_id: str) -> dict:
+        """Extract adapter state and optimizer state for checkpointing."""
+        adapter_index = self.models[model_id].adapter_index
+        rank = self.models[model_id].lora_config.rank
+        lora_weights = extract_adapter_state(adapter_index, self.lora_params, rank)
+        optimizer_state = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), rank)
+        return {
+            "lora_weights": lora_weights,
+            "optimizer_state": optimizer_state,
+            "lora_config": self.models[model_id].lora_config.model_dump(),
+        }
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
@@ -150,14 +215,20 @@ class TinkerEngine:
 
         # Wrap the model forward call to use nnx.remat for gradient checkpointing
         def _model_forward(
-            model: nnx.Module, input_ids: jax.Array, attention_mask: jax.Array, adapter_indices: jax.Array
+            graphdef: nnx.GraphDef,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
         ) -> jax.Array:
+            model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
             return output.logits
 
         if self.config.gradient_checkpointing:
-            # policy=None corresponds full activation recomputation
-            _model_forward = nnx.remat(_model_forward, policy=None)
+            # policy=None corresponds to full activation recomputation
+            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -171,8 +242,9 @@ class TinkerEngine:
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            logits = _model_forward(model, input_ids, attention_mask, adapter_indices)  # [B, T, V]
+            logits = _model_forward(
+                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
+            )  # [B, T, V]
 
             logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
@@ -197,67 +269,29 @@ class TinkerEngine:
 
             per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
-            return per_seq_loss.sum(), (logits, per_token_losses)
+            return per_seq_loss.sum(), (target_logprobs, per_token_losses)
 
         # Only differentiate with respect to lora_params (argnums=0)
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
-        if self.config.enforce_eager:
-            # Disable JIT compilation for debugging
-            self._loss_and_grad_fn = loss_and_grad_fn
-        else:
-            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
-            lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
-            )
-            non_lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
-            )
-            replicated = jax.NamedSharding(self.mesh, jax.P(None))
-            scalar = jax.NamedSharding(self.mesh, jax.P())
-            self._loss_and_grad_fn = jax.jit(
-                loss_and_grad_fn,
-                # One input sharding parameter for each argument of loss_for_lora
-                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                # One output sharding parameter for each return value of loss_for_lora
-                out_shardings=((scalar, (replicated, replicated)), lora_shardings),
-            )
-
-    def _micro_batch_size(self, total: int) -> int:
-        """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
-        mb = self.config.micro_batch_size
-        return total if mb <= 0 else max(1, min(mb, total))
-
-    @contextmanager
-    def _jit_timing_context(self, seq_len: int):
-        """Context manager to track JIT compilation times for different sequence lengths."""
-        if not self.config.enforce_eager and seq_len not in self.metrics.seq_len_jit_times:
-            logger.info(f"JIT compiling for seq_len={seq_len} in progress...")
-            start_time = time.time()
-            yield
-            elapsed = time.time() - start_time
-            self.metrics.seq_len_jit_times[seq_len] = elapsed
-            logger.info(f"JIT compilation for seq_len={seq_len} took {elapsed:.2f}s")
-        else:
-            yield
-
-    def _forward_backward(
-        self,
-        input_ids: jax.Array,
-        attention_mask: jax.Array,
-        adapter_indices: jax.Array,
-        target_ids: jax.Array,
-        loss_mask: jax.Array,
-        loss_fn_types: jax.Array,
-        sampling_logprobs: jax.Array,
-        advantages: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, nnx.State]:
-        """Run forward+backward on a batch of inputs."""
-        seq_len = input_ids.shape[1]
-        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len):
-            (_, (logits, per_token_losses)), lora_grads = self._loss_and_grad_fn(
-                self.lora_params,
-                self.non_lora_params,
+        def forward_backward_and_accumulate(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array, jax.Array]:
+            """Fused forward-backward-accumulate operation."""
+            # Forward-backward
+            (loss, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
+                lora_params,
+                non_lora_params,
                 input_ids,
                 attention_mask,
                 adapter_indices,
@@ -267,50 +301,102 @@ class TinkerEngine:
                 sampling_logprobs,
                 advantages,
             )
-        logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
-        target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)  # [B, T]
-        return per_token_losses, target_logprobs, lora_grads
+            # Accumulate gradients
+            new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
+            return new_accumulated_grads, per_token_losses, target_logprobs, loss
 
-    def _accumulate_grads(self, lora_grads: nnx.State, example_model_ids: list[str]) -> None:
+        if self.config.enforce_eager:
+            # Disable JIT compilation for debugging
+            self._forward_backward_and_accumulate = forward_backward_and_accumulate
+
+        else:
+            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
+            lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
+            )
+            non_lora_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
+            )
+            # Get sharding for AccumulatedGradients
+            accumulated_grads_shardings = jax.tree.map(
+                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.accumulated_grads)
+            )
+
+            replicated = jax.NamedSharding(self.mesh, jax.P(None))
+            scalar = jax.NamedSharding(self.mesh, jax.P())
+
+            # JIT the fused function
+            self._forward_backward_and_accumulate = jax.jit(
+                forward_backward_and_accumulate,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
+                out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                donate_argnames=("accumulated_grads",),
+            )
+
+        # JIT-compiled function to compute full gradients and apply optimizer update
+        def compute_grads_and_update(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            optimizer: nnx.Optimizer,
+            adapter_index: jax.Array,
+        ) -> AccumulatedGradients:
+            """Compute full gradients, apply optimizer update, and reset accumulated grads."""
+            optimizer.update(lora_params, accumulated_grads.get_mean(adapter_index))
+            return accumulated_grads.reset_adapter(adapter_index)
+
+        if self.config.enforce_eager:
+            self._compute_grads_and_update = compute_grads_and_update
+        else:
+            self._compute_grads_and_update = nnx.jit(compute_grads_and_update)
+
+    def _micro_batch_size(self, total: int) -> int:
+        """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
+        mb = self.config.train_micro_batch_size
+        return total if mb <= 0 else max(1, min(mb, total))
+
+    @contextmanager
+    def _jit_timing_context(self, seq_len: int, mode: str):
+        """Context manager to track JIT compilation times for different sequence lengths.
+
+        Args:
+            seq_len: The sequence length being compiled
+            mode: Either 'train' or 'sample' to track separately
         """
-        Accumulate adapter-wise gradient sums and example counts.
-        """
-        for model_id, count in Counter(example_model_ids).items():
-            idx = self.models[model_id].adapter_index
-            # Extract gradient sum for this adapter
-            grad_sum = jax.tree.map(lambda g: g[idx], lora_grads)
-            accumulator = self.accumulated_grads[model_id]
-            accumulator.add(grad_sum, count)
+        jit_times = self.metrics.train_seq_len_jit_times if mode == "train" else self.metrics.sample_seq_len_jit_times
+        if not self.config.enforce_eager and seq_len not in jit_times:
+            logger.info(f"JIT compiling for {mode} seq_len={seq_len} in progress...")
+            start_time = time.time()
+            yield
+            elapsed = time.time() - start_time
+            jit_times[seq_len] = elapsed
+            logger.info(f"JIT compilation for {mode} seq_len={seq_len} took {elapsed:.2f}s")
+        else:
+            yield
 
     def _filter_valid_requests(
         self,
-        requests: list[tuple[FutureDB, str, any]],
-        error_type: type,
-    ) -> tuple[dict[str, any], list[tuple[FutureDB, str, any]]]:
+        requests: dict[str, tuple[str, any]],
+    ) -> tuple[dict[str, any], dict[str, tuple[str, any]]]:
         """Filter out requests with invalid model_ids and return error results for them.
 
         Args:
-            requests: List of (future, model_id, request_data) tuples
-            error_type: Error type class to instantiate for invalid requests
+            requests: Dict mapping request_id to (model_id, request_data) tuples
 
         Returns:
             Tuple of (error_results, valid_requests)
         """
         results = {}
-        valid_requests = []
+        valid_requests = {}
 
-        for future, model_id, request_data in requests:
+        for request_id, (model_id, request_data) in requests.items():
             if model_id and model_id not in self.models:
-                results[future.request_id] = error_type(
-                    error=f"Model {model_id} not loaded",
-                    status="failed",
-                )
+                results[request_id] = types.ErrorResponse(error=f"Model {model_id} not loaded", status="failed")
             else:
-                valid_requests.append((future, model_id, request_data))
+                valid_requests[request_id] = (model_id, request_data)
 
         return results, valid_requests
 
-    def find_batchable_forward_backward(self, session: Session) -> list[FutureDB]:
+    def find_batchable_forward_backward(self, session: Session) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
         """Find all forward_backward ops that come before any destructive update for their model.
 
         Uses look-ahead scheduling: for each model, only returns forward_backward operations
@@ -320,7 +406,7 @@ class TinkerEngine:
             session: Database session
 
         Returns:
-            List of FutureDB objects that can be safely batched together
+            Dict mapping request_id to (model_id, request_data) tuples
         """
         # Find the earliest pending optim_step or load_weights per model (these act as barriers)
         barriers_query = (
@@ -346,9 +432,11 @@ class TinkerEngine:
         # Filter: only include ops that come before their model's barrier
         batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
-        return batchable
+        return {
+            f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
+        }
 
-    def find_batchable_sample(self, session: Session) -> list[FutureDB]:
+    def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
 
         Returns sample operations ensuring that each model_id has only one checkpoint_id
@@ -358,7 +446,7 @@ class TinkerEngine:
             session: Database session
 
         Returns:
-            List of FutureDB objects that can be safely batched together
+            Dict mapping request_id to (model_id, request_data) tuples
         """
         sample_query = (
             select(FutureDB)
@@ -377,7 +465,28 @@ class TinkerEngine:
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
 
-        return batchable
+        return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
+
+    def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
+        """Find all requests that need to be processed individually (not batchable).
+
+        Args:
+            session: Database session
+
+        Returns:
+            Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        statement = (
+            select(FutureDB)
+            .where(FutureDB.status == RequestStatus.PENDING)
+            .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type != types.RequestType.SAMPLE)
+            .where(FutureDB.request_type != types.RequestType.EXTERNAL)
+            .order_by(FutureDB.request_id)
+        )
+        other_futures = session.exec(statement).all()
+
+        return {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
@@ -387,19 +496,17 @@ class TinkerEngine:
         if adapter_index >= self.config.max_lora_adapters:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
 
-        # Extract LoRA rank and alpha from config
-        lora_rank = request_data.lora_config.rank
-        lora_alpha = request_data.lora_config.alpha
+        # Extract LoRA configuration
+        lora_config = request_data.lora_config
 
         # Validate rank doesn't exceed max
-        if not (0 < lora_rank <= self.config.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_rank} must be between 1 and {self.config.max_lora_rank}")
+        if not (0 < lora_config.rank <= self.config.max_lora_rank):
+            raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
 
         self.models[model_id] = types.ModelMetadata(
             adapter_index=adapter_index,
-            lora_config=request_data.lora_config,
+            lora_config=lora_config,
         )
-        self.accumulated_grads[model_id] = AccumulatedGradients(grad_sum=None, denominator=0)
 
         with jax.set_mesh(self.mesh):
             # These values are always overridden by the hyperparams in the optim_step request.
@@ -407,11 +514,9 @@ class TinkerEngine:
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Update the adapter's rank and scaling in all LoRA layers
-        update_adapter_config(self.model, adapter_index, lora_rank, lora_alpha)
+        update_adapter_config(self.model, adapter_index, lora_config)
 
-        logger.info(
-            f"Created LoRA model {model_id} with adapter index {adapter_index}, rank {lora_rank}, alpha {lora_alpha}"
-        )
+        logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, config {lora_config}")
 
         return types.CreateModelOutput(
             model_id=model_id,
@@ -420,17 +525,17 @@ class TinkerEngine:
         )
 
     def process_forward_backward_batch(
-        self, requests: list[tuple[FutureDB, str, types.ForwardBackwardInput]]
-    ) -> dict[str, types.ForwardBackwardOutput | types.ForwardBackwardError]:
+        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Process multiple forward_backward requests in a single batch.
 
         Args:
-            requests: List of (future, model_id, request_data) tuples
+            requests: Dict mapping request_id to (model_id, request_data) tuples
 
         Returns:
             Dict mapping request_id -> result_data or error info
         """
-        results, valid_requests = self._filter_valid_requests(requests, types.ForwardBackwardError)
+        results, valid_requests = self._filter_valid_requests(requests)
 
         if not valid_requests:
             return results
@@ -446,7 +551,7 @@ class TinkerEngine:
         all_advantages = []
         all_loss_fn_types = []
 
-        for future, model_id, request_data in valid_requests:
+        for request_id, (model_id, request_data) in valid_requests.items():
             adapter_index = self.models[model_id].adapter_index
             loss_fn_type = LOSS_TYPES[request_data.loss_fn]
 
@@ -463,54 +568,62 @@ class TinkerEngine:
                 example_model_ids.append(model_id)
                 all_loss_fn_types.append(loss_fn_type)
 
-            request_batch_slices.append((future.request_id, model_id, request_start, len(all_input_ids)))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
-        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32)
-        target_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_targets], dtype=jnp.int32)
+        input_ids = pad_batch(all_input_ids, max_len, np.int32)
+        target_ids = pad_batch(all_targets, max_len, np.int32)
         adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
         loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = jnp.array(
-            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_input_ids], dtype=jnp.int32
-        )
-        loss_mask = jnp.array(
-            [all_token_weights[i] + [0] * (max_len - len(all_input_ids[i])) for i in range(len(all_token_weights))],
-            dtype=jnp.float32,
-        )
-        sampling_logprobs = jnp.array(
-            [seq + [0.0] * (max_len - len(seq)) for seq in all_sampling_logprobs], dtype=jnp.float32
-        )
-        advantages = jnp.array([seq + [0.0] * (max_len - len(seq)) for seq in all_advantages], dtype=jnp.float32)
+        attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
+        loss_mask = pad_batch(all_token_weights, max_len, np.float32)
+        sampling_logprobs = pad_batch(all_sampling_logprobs, max_len, np.float32)
+        advantages = pad_batch(all_advantages, max_len, np.float32)
 
         total_bs = int(input_ids.shape[0])
         micro_bs = self._micro_batch_size(total_bs)
         seq_lens = [len(seq) for seq in all_input_ids]
 
-        # Used to collect per-example outputs (by global row index)
-        token_losses_out = [None] * total_bs
-        logprobs_out = [None] * total_bs
+        # Collect full padded arrays on device, slice after transfer
+        token_losses_device = []
+        logprobs_device = []
+        seq_len = input_ids.shape[1]
 
-        for mb_start in range(0, total_bs, micro_bs):
-            mb_end = min(mb_start + micro_bs, total_bs)
-            per_token_losses, target_logprobs, lora_grads_mb = self._forward_backward(
-                input_ids[mb_start:mb_end],
-                attention_mask[mb_start:mb_end],
-                adapter_indices[mb_start:mb_end],
-                target_ids[mb_start:mb_end],
-                loss_mask[mb_start:mb_end],
-                loss_fn_types[mb_start:mb_end],
-                sampling_logprobs[mb_start:mb_end],
-                advantages[mb_start:mb_end],
-            )
-            for i_local, i_global in enumerate(range(mb_start, mb_end)):
-                L = seq_lens[i_global]
-                token_losses_out[i_global] = per_token_losses[i_local, :L].astype(jnp.float32)
-                logprobs_out[i_global] = target_logprobs[i_local, :L].astype(jnp.float32)
-            self._accumulate_grads(lora_grads_mb, example_model_ids[mb_start:mb_end])
+        with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
+            for mb_start in range(0, total_bs, micro_bs):
+                mb_end = min(mb_start + micro_bs, total_bs)
+                self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
+                    self.accumulated_grads,
+                    self.lora_params,
+                    self.non_lora_params,
+                    input_ids[mb_start:mb_end],
+                    attention_mask[mb_start:mb_end],
+                    adapter_indices[mb_start:mb_end],
+                    target_ids[mb_start:mb_end],
+                    loss_mask[mb_start:mb_end],
+                    loss_fn_types[mb_start:mb_end],
+                    sampling_logprobs[mb_start:mb_end],
+                    advantages[mb_start:mb_end],
+                )
+                token_losses_device.append(per_token_losses)
+                logprobs_device.append(target_logprobs)
+
+        # Single batched device-to-host transfer for all arrays
+        token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
+
+        # Flatten microbatches and slice to actual sequence lengths
+        token_losses_out = []
+        logprobs_out = []
+        idx = 0
+        for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
+            for i in range(mb_losses.shape[0]):
+                token_losses_out.append(mb_losses[i, : seq_lens[idx]].astype(jnp.float32))
+                logprobs_out.append(mb_logprobs[i, : seq_lens[idx]].astype(jnp.float32))
+                idx += 1
 
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
@@ -544,20 +657,23 @@ class TinkerEngine:
         return results
 
     def process_sample_batch(
-        self, requests: list[tuple[FutureDB, str, types.SampleInput]]
-    ) -> dict[str, types.SampleOutput | types.SampleError]:
+        self, requests: dict[str, tuple[str, types.SampleInput]]
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Process multiple sample requests in a single batch
 
         Args:
-            requests: List of (future, model_id, request_data) tuples
+            requests: Dict mapping request_id to (model_id, request_data) tuples
 
         Returns:
             Dict mapping request_id --> result_data or error info
         """
-        results, valid_requests = self._filter_valid_requests(requests, types.SampleError)
+        results, valid_requests = self._filter_valid_requests(requests)
 
         if not valid_requests:
             return results
+
+        # Computes prompt_logprobs for the whole batch if any request asked for them
+        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in valid_requests.values())
 
         all_prompts = []
         all_sampling_params = []
@@ -566,7 +682,7 @@ class TinkerEngine:
 
         adapter_indices_batch = self.load_sampler_weights(valid_requests)
 
-        for i, (future, model_id, request_data) in enumerate(valid_requests):
+        for i, (request_id, (model_id, request_data)) in enumerate(valid_requests.items()):
             request_start = len(all_prompts)
 
             # Expand requests for num_samples (TODO: Once we have continuous batching /
@@ -577,31 +693,61 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((future.request_id, model_id, request_start, len(all_prompts)))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
 
-        # Pad sequences to same length
-        max_len = max(len(seq) for seq in all_prompts)
-
-        input_ids = jnp.array([seq + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32)
-        attention_mask = jnp.array(
-            [[1] * len(seq) + [0] * (max_len - len(seq)) for seq in all_prompts], dtype=jnp.int32
+        total_batch_size = len(all_prompts)
+        max_batch_size = (
+            self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
         )
-        all_adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
+        # Collect generated sequences and prompt logprobs across batches
+        all_sequences: list[types.GeneratedSequence] = []
+        all_prompt_logprobs: list[list[float]] = []
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
-            result = model.generate(
-                input_ids, attention_mask, sampling_params=all_sampling_params, adapter_indices=all_adapter_indices
-            )
+            for batch_start in range(0, total_batch_size, max_batch_size):
+                batch_end = min(batch_start + max_batch_size, total_batch_size)
+                batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
+                adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
+                sampling_params = pad(
+                    all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
+                )
 
-        all_sequences = [
-            types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
-            for stop_reason, tokens, logprobs in zip(result.stop_reasons, result.generated_ids, result.logprobs)
-        ]
+                # Pad sequences to same length within the batch to minimize memory usage.
+                # Also bin it so the JIT has to compile fewer kernels.
+                # Use left-padding for sampling so the last position is always the last real token.
+                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
+                input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
-        for request_id, _, start_idx, end_idx in request_batch_slices:
+                with self._jit_timing_context(max_len, mode="sample"):
+                    result = model.generate(
+                        input_ids,
+                        attention_mask,
+                        sampling_params=sampling_params,
+                        adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
+                        prompt_logprobs=needs_prompt_logprobs,
+                    )
+                # Only take the actual results, not the padded ones
+                batch_size = batch_end - batch_start
+                all_sequences.extend(
+                    types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
+                    for stop_reason, tokens, logprobs in zip(
+                        result.stop_reasons[:batch_size],
+                        result.generated_ids[:batch_size],
+                        result.logprobs[:batch_size],
+                    )
+                )
+                if needs_prompt_logprobs and result.prompt_logprobs:
+                    all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
+
+        for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=[])
+            # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
+            prompt_logprobs = (
+                all_prompt_logprobs[start_idx] if request_data.prompt_logprobs and all_prompt_logprobs else None
+            )
+            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
         return results
 
@@ -610,36 +756,28 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
+        adapter_index = jnp.int32(self.models[model_id].adapter_index)
 
-        # Get accumulated gradients for this adapter
-        accumulator = self.accumulated_grads[model_id]
-        if accumulator.grad_sum is None or accumulator.denominator == 0:
+        # Check if we have any gradients accumulated (count > 0)
+        if self.accumulated_grads.counts[adapter_index] == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
-        # Average over all examples for this adapter
-        adapter_grads = accumulator.get_mean()
-
-        # Create full gradient structure with zeros for all adapters except this one
-        def expand_adapter_grads(lora_param, adapter_grad):
-            # Create zeros for all adapters with the same shape as lora_param
-            full_grads = jnp.zeros_like(lora_param)
-            # Set gradients for this specific adapter
-            return full_grads.at[adapter_index].set(adapter_grad)
-
-        full_lora_grads = jax.tree.map(expand_adapter_grads, self.lora_params, adapter_grads)
-
-        # Apply optimizer update with hyperparameters from the request
+        # Update hyperparameters from the request
         hp = self.optimizers[model_id].opt_state.hyperparams
         hp["learning_rate"][...] = request_data.adam_params.learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
-        self.optimizers[model_id].update(self.lora_params, full_lora_grads)
 
-        # Clear accumulated gradients
-        self.accumulated_grads[model_id].reset()
+        # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
+        with jax.set_mesh(self.mesh):
+            self.accumulated_grads = self._compute_grads_and_update(
+                self.accumulated_grads,
+                self.lora_params,
+                self.optimizers[model_id],
+                adapter_index,
+            )
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
@@ -655,23 +793,23 @@ class TinkerEngine:
         )
 
         with download_and_unpack(checkpoint_dir) as temp_dir:
-            restored_data = checkpoints.restore_checkpoint(ckpt_dir=temp_dir, target=None, prefix="checkpoint_")
+            checkpoint = checkpoints.restore_checkpoint(
+                ckpt_dir=temp_dir, target=self._extract_checkpoint_data(model_id), prefix="checkpoint_"
+            )
 
-        if restored_data is None:
+        if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
         # Validate rank
-        rank = restored_data["lora_config"]["rank"]
+        rank = checkpoint["lora_config"]["rank"]
         if self.models[model_id].lora_config.rank != rank:
             raise ValueError(
                 f"Rank mismatch: checkpoint has rank {rank}, model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
         # Update both LoRA weights and optimizer state
-        insert_adapter_state(adapter_index, self.lora_params, self.non_lora_params, restored_data["lora_weights"])
-        insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params, restored_data["optimizer_state"]
-        )
+        insert_adapter_state(adapter_index, self.lora_params, checkpoint["lora_weights"], rank)
+        insert_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), checkpoint["optimizer_state"], rank)
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
@@ -684,23 +822,13 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            adapter_lora_params = extract_adapter_state(adapter_index, self.lora_params, self.non_lora_params)
-            optimizer_params = extract_adapter_state(
-                adapter_index, nnx.state(self.optimizers[model_id]), self.non_lora_params
-            )
-
             with pack_and_upload(output_path) as temp_dir:
                 checkpoints.save_checkpoint(
-                    target={
-                        "lora_weights": nnx.to_pure_dict(adapter_lora_params),
-                        "optimizer_state": nnx.to_pure_dict(optimizer_params),
-                        "lora_config": self.models[model_id].lora_config.model_dump(),
-                    },
+                    target=self._extract_checkpoint_data(model_id),
                     ckpt_dir=temp_dir,
                     step=0,
                     prefix="checkpoint_",
@@ -725,11 +853,13 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
             # Save the LoRA adapter weights and LoRA config as tar.gz
-            save_lora_checkpoint(self.model, lora_model.lora_config, lora_model.adapter_index, output_path)
+            save_lora_checkpoint(
+                self.model, self.config.base_model, lora_model.lora_config, lora_model.adapter_index, output_path
+            )
 
             logger.info(
                 f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}"
@@ -740,165 +870,146 @@ class TinkerEngine:
             type="save_weights_for_sampler",
         )
 
-    def load_sampler_weights(self, requests: list[tuple[FutureDB, str, types.SampleInput]]) -> jax.Array:
+    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> list[int]:
         """Load sampler weights for all requests and return full adapter indices array.
 
         Args:
-            requests: List of (future, model_id, request_data) tuples for the batch
+            requests: Dict mapping request_id to (model_id, request_data) tuples for the batch
 
         Returns:
             The adapter_indices array for LoRA sampling [batch_size]
             Uses adapter index 0 for base model sampling (no LoRA)
         """
-        adapter_indices_list = []
+        adapter_indices = []
 
-        for _, model_id, request_data in requests:
-            if request_data.base_model is None:
+        for _, (model_id, request_data) in requests.items():
+            base_model = request_data.base_model
+            checkpoint_id = request_data.checkpoint_id
+            if base_model is None:
                 # This code path is for sampling from a LoRA adapter
-                assert request_data.checkpoint_id != "", "checkpoint_id must be not empty"
+                assert checkpoint_id != "", "checkpoint_id must be not empty"
 
                 adapter_index = self.models[model_id].adapter_index
-                if self.models[model_id].loaded_checkpoint_id == request_data.checkpoint_id:
+                if self.models[model_id].loaded_checkpoint_id == checkpoint_id:
                     # Load model from RAM
-                    adapter_indices_list.append(adapter_index)
+                    adapter_indices.append(adapter_index)
                 else:
                     # Load model from disk
-                    assert adapter_index not in adapter_indices_list, "Cannot override already used adapter"
+                    assert adapter_index not in adapter_indices, "Cannot override already used adapter"
 
-                    checkpoint_path = self.config.checkpoints_base / model_id / f"{request_data.checkpoint_id}.tar.gz"
+                    checkpoint_path = (
+                        self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+                    )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    load_lora_checkpoint(self.model, adapter_index, checkpoint_path)
+                    adapter_config = self.models[model_id].lora_config
+                    load_lora_checkpoint(self.model, adapter_config, adapter_index, checkpoint_path)
 
-                    self.models[model_id].loaded_checkpoint_id = request_data.checkpoint_id
+                    self.models[model_id].loaded_checkpoint_id = checkpoint_id
                     logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
-                    adapter_indices_list.append(adapter_index)
+                    adapter_indices.append(adapter_index)
             else:
                 # This code path is for sampling from the base model
-                if request_data.base_model != self.config.base_model:
+                if base_model != self.config.base_model:
                     raise ValueError(
-                        f"Requested base_model '{request_data.base_model}' does not match engine's base_model '{self.config.base_model}'"
+                        f"Requested base_model '{base_model}' does not match engine's base_model '{self.config.base_model}'"
                     )
-                assert model_id == "" and request_data.checkpoint_id == ""
-                adapter_indices_list.append(0)
+                assert model_id == "" and checkpoint_id == ""
+                adapter_indices.append(0)
 
-        return jnp.array(adapter_indices_list, dtype=jnp.int32)
+        return adapter_indices
 
-    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> dict:
+    def _complete_futures(self, results: dict[str, BaseModel]):
+        """Helper method to complete multiple futures in the database.
+
+        Args:
+            results: Dict mapping request_id to result (Pydantic BaseModel)
+        """
+        completed_at = datetime.now(timezone.utc)
+        params = [
+            {
+                "request_id": int(request_id),
+                "result_data": result.model_dump(),
+                "status": RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED,
+                "completed_at": completed_at,
+            }
+            for request_id, result in results.items()
+        ]
+
+        with Session(self.db_engine) as session:
+            session.execute(update(FutureDB), params)
+            session.commit()
+
+    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
         match request_type:
             case types.RequestType.CREATE_MODEL:
-                result = self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+                return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
             case types.RequestType.OPTIM_STEP:
-                result = self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+                return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
             case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
-                result = self.process_save_weights_for_sampler(
+                return self.process_save_weights_for_sampler(
                     model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
                 )
             case types.RequestType.SAVE_WEIGHTS:
-                result = self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
+                return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:
-                result = self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+                return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
-        return result.model_dump()
 
-    def process_batch_requests(
-        self, session: Session, futures: list[FutureDB], batch_processor, request_input_type, error_type
-    ):
+    def process_single_requests(self, requests: dict[str, tuple[str, types.RequestType, dict]]):
+        """Process a collection of single (non-batchable) requests.
+
+        Args:
+            requests: Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        if not requests:
+            return
+        results = {}
+        for request_id, (model_id, request_type, request_data) in requests.items():
+            with log_timing(f"process_single_request({request_type.value})"):
+                try:
+                    result = self.process_single_request(request_type, model_id, request_data)
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result = types.ErrorResponse(error=str(e), status="failed")
+            results[request_id] = result
+        self._complete_futures(results)
+
+    def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
 
         Args:
-            session: Database session
-            futures: List of FutureDB objects to process
+            requests: Dict mapping request_id to (model_id, request_data) tuples
             batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
-            request_input_type: Pydantic model class for parsing request_data (e.g., types.ForwardBackwardInput)
-            error_type: Error type class to check for failures (e.g., types.ForwardBackwardError)
         """
-        if not futures:
+        if not requests:
             return
-
-        try:
-            results = batch_processor(
-                [(f, f.model_id, request_input_type.model_validate(f.request_data)) for f in futures]
-            )
-
-            # Update each future with its result
-            for future in futures:
-                if future.request_id in results:
-                    result_data = results[future.request_id]
-                    if isinstance(result_data, error_type):
-                        future.status = RequestStatus.FAILED
-                    else:
-                        future.status = RequestStatus.COMPLETED
-                    future.result_data = result_data.model_dump()
-                    future.completed_at = datetime.now(timezone.utc)
-                    session.add(future)
-                    logger.info(f"Completed {future.request_type} request {future.request_id}")
-
-            session.commit()
-
-        except Exception as e:
-            logger.exception(f"Error processing batch: {e}")
-            # Mark all requests in the batch as failed
-            for future in futures:
-                future.result_data = {"error": str(e)}
-                future.status = RequestStatus.FAILED
-                future.completed_at = datetime.now(timezone.utc)
-                session.add(future)
-            session.commit()
+        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+            try:
+                results = batch_processor(requests)
+            except Exception as e:
+                logger.exception(f"Error processing batch: {e}")
+                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+        self._complete_futures(results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
+            # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward operations
-                forward_backward_futures = self.find_batchable_forward_backward(session)
-                sample_futures = self.find_batchable_sample(session)
-                # Get other pending requests (non-forward_backward or those blocked by optim_step)
-                statement = (
-                    select(FutureDB)
-                    .where(FutureDB.status == RequestStatus.PENDING)
-                    .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
-                    .where(FutureDB.request_type != types.RequestType.SAMPLE)
-                    .order_by(FutureDB.request_id)
-                )
-                other_futures = session.exec(statement).all()
+                forward_backward_requests = self.find_batchable_forward_backward(session)
+                # Find pending sample requests that can be batched
+                sample_requests = self.find_batchable_sample(session)
+                # Get other pending requests (non forward_backward and non sampling)
+                other_requests = self.find_single_requests(session)
 
-                self.process_batch_requests(
-                    session,
-                    forward_backward_futures,
-                    self.process_forward_backward_batch,
-                    types.ForwardBackwardInput,
-                    types.ForwardBackwardError,
-                )
+            # Process batches outside of session context
+            self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
+            self.process_batch_requests(sample_requests, self.process_sample_batch)
 
-                self.process_batch_requests(
-                    session,
-                    sample_futures,
-                    self.process_sample_batch,
-                    types.SampleInput,
-                    types.SampleError,
-                )
-
-                # Process other request types individually (in the future we can also batch independent optim_steps)
-                for future in other_futures:
-                    try:
-                        future.result_data = self.process_single_request(
-                            future.request_type, future.model_id, future.request_data
-                        )
-                        future.status = RequestStatus.COMPLETED
-                        future.completed_at = datetime.now(timezone.utc)
-                        session.add(future)
-                        session.commit()
-
-                        logger.info(f"Completed {future.request_type} request {future.request_id}")
-
-                    except Exception as e:
-                        logger.exception(f"Error processing request {future.request_id}: {e}")
-                        future.result_data = {"error": str(e)}
-                        future.status = RequestStatus.FAILED
-                        future.completed_at = datetime.now(timezone.utc)
-                        session.add(future)
-                        session.commit()
+            # Process other request types individually (in the future we can also batch independent optim_steps)
+            self.process_single_requests(other_requests)
 
             # Poll every 100ms
             time.sleep(0.1)

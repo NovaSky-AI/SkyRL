@@ -26,10 +26,6 @@ MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=8
 
-export SKYRL_PYTHONPATH_EXPORT=1
-# make sure PYTHONPATH is set to the location of TransformerEngine installation
-export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
-
 uv run --isolated --frozen --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
