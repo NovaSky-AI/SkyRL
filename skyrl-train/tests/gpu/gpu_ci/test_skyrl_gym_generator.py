@@ -206,6 +206,11 @@ async def run_generator_end_to_end(
     ]
     for key in output_keys:
         assert key in generator_output, f"Key {key} not found in generator output"
+    if max_turns == 1:
+        # make sure that the max number of tokens is less than the max generate length for single turn generation
+        assert "generate/max_num_tokens" in generator_output["rollout_metrics"]
+        assert generator_output["rollout_metrics"]["generate/max_num_tokens"] <= max_generate_length
+
     assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
     assert isinstance(prompts_out[0], list), "Prompts output should be a list"
     assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
@@ -228,6 +233,10 @@ async def run_generator_end_to_end(
         (False, True, 5, 2, 1),  # tests SkyRLGymGenerator.generate_batched for single-turn
         (True, False, 5, 1, 2),  # tests SkyRLGymGenerator.agent_loop for single-turn
         # Add more combinations as needed
+    ],
+    ids=[
+        "test_generator_single_turn_gsm8k_batched",
+        "test_generator_single_turn_gsm8k_async_engine",
     ],
 )
 async def test_generator_single_turn_gsm8k(

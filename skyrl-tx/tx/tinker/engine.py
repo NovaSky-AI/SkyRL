@@ -40,6 +40,17 @@ from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+@contextmanager
+def log_timing(request: str):
+    """Context manager to log execution time for a request."""
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start_time
+        logger.info(f"(timing) {request} took {elapsed:.3f}s")
+
+
 def pad(xs, pad_to: int, *, fill):
     """Pad a list to a specified length with a fill value."""
     return xs + ([fill] * (pad_to - len(xs)))
@@ -947,6 +958,25 @@ class TinkerEngine:
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
+    def process_single_requests(self, requests: dict[str, tuple[str, types.RequestType, dict]]):
+        """Process a collection of single (non-batchable) requests.
+
+        Args:
+            requests: Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        if not requests:
+            return
+        results = {}
+        for request_id, (model_id, request_type, request_data) in requests.items():
+            with log_timing(f"process_single_request({request_type.value})"):
+                try:
+                    result = self.process_single_request(request_type, model_id, request_data)
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result = types.ErrorResponse(error=str(e), status="failed")
+            results[request_id] = result
+        self._complete_futures(results)
+
     def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
 
@@ -956,14 +986,13 @@ class TinkerEngine:
         """
         if not requests:
             return
-        try:
-            results = batch_processor(requests)
-            self._complete_futures(results)
-        except Exception as e:
-            logger.exception(f"Error processing batch: {e}")
-            self._complete_futures(
-                {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
-            )
+        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+            try:
+                results = batch_processor(requests)
+            except Exception as e:
+                logger.exception(f"Error processing batch: {e}")
+                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+        self._complete_futures(results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -982,16 +1011,7 @@ class TinkerEngine:
             self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
-            other_results = {}
-            for request_id, (model_id, request_type, request_data) in other_requests.items():
-                try:
-                    result = self.process_single_request(request_type, model_id, request_data)
-                except Exception as e:
-                    logger.exception(f"Error processing request {request_id}: {e}")
-                    result = types.ErrorResponse(error=str(e), status="failed")
-                other_results[request_id] = result
-
-            self._complete_futures(other_results)
+            self.process_single_requests(other_requests)
 
             # Poll every 100ms
             time.sleep(0.1)
