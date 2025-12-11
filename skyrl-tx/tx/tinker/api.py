@@ -749,9 +749,9 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     timeout = 300  # 5 minutes
     deadline = time.perf_counter() + timeout
 
-    # Start with 500ms, grow to 5s
-    poll = 0.5
-    max_poll = 5.0
+    # Start with 100ms, grow to 1s
+    poll = 0.1
+    max_poll = 1.0
 
     while time.perf_counter() < deadline:
         try:
