@@ -2,7 +2,7 @@
 
 # SAPO Trainer
 
-`run_dapo_aime_qwen3_4b_aime.sh` is a bash script that launches the Qwen3-4B SAPO job using `uv`. It uses the `examples/algorithms/dapo/main_dapo.py` script, but with the SAPO policy loss and 
+`run_dapo_aime_qwen3_4b_aime.sh` is a bash script that launches the Qwen3-4B SAPO job using `uv`. It uses the `examples/algorithms/dapo/main_dapo.py` script, but with the SAPO policy loss and sequence mean loss reduction.
 
 ## Quick Start
 
