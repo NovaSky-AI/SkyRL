@@ -470,6 +470,7 @@ class PolicyLossType(StrEnum):
     CISPO = "cispo"
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
+    SAPO = "sapo"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -498,6 +499,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
+            "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -589,6 +591,74 @@ def ppo_policy_loss(
         loss = loss * tis_imp_ratio
 
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    return loss, clip_ratio
+
+
+@register_policy_loss(PolicyLossType.SAPO)
+def sapo_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """
+    SAPO (Soft Adaptive Policy Optimization) policy loss function.
+
+    Compute the smoothed policy objective and related metrics for SAPO.
+
+    See https://arxiv.org/pdf/2511.20347 for more details.
+
+    """
+    # SAPO must use sequence_mean reduction
+    loss_reduction = config.loss_reduction
+    if loss_reduction != "sequence_mean":
+        # The SAPO paper uses sequence_mean reduction; there's no reason
+        # why a user couldn't use token_mean reduction, but
+        # it's not clear whether it would be stable or not.
+        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+
+        logger_.warning(f"With SAPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
+
+    # temperature for positive and negative token updates
+    tau_pos = torch.as_tensor(config.sapo.tau_pos, dtype=advantages.dtype, device=advantages.device)
+    tau_neg = torch.as_tensor(config.sapo.tau_neg, dtype=advantages.dtype, device=advantages.device)
+
+    def gate_function(x, tau):
+        """The gating function used in SAPO"""
+        return torch.sigmoid(tau * (x - 1.0)) * (4.0 / tau)
+
+    # compute IS at token level:
+    # r_{i,t}(θ) = π_θ(y_{i,t}|x, y_{i,<t}) / π_θold(y_{i,t}|x, y_{i,<t})]
+    # In log space: log(r_{i,t}(θ)) = log_probs - old_log_probs
+    log_ratio = log_probs - old_log_probs
+
+    # Clamp log_ratio for stability -> avoid overflow in exp()
+    log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
+
+    # finally exp() to remove log and get r_{i,t}(θ)
+    ratio = torch.exp(log_ratio)
+
+    # tau_{i,t} is tau_pos if adv > 0 else tau_neg
+    taus = torch.where(
+        condition=advantages > 0,
+        input=tau_pos,  # if A_{i,t} > 0 we set to tau_pos
+        other=tau_neg,  # if A_{i,t} <= 0 we set to tau_neg
+    )
+
+    # compute the gates f_{i,t}(r_{i,t}(θ)) at token level
+    gates = gate_function(ratio, taus)
+
+    # compute policy gradient loss
+    loss = -gates * advantages
+
+    # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+
+    # SAPO does not use clipping, so we set clip_ratio to 0.0 for compatibility
+    clip_ratio = 0.0
+
     return loss, clip_ratio
 
 
