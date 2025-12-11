@@ -499,7 +499,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
-            "sapo": [PolicyLossType.SAPO, compute_policy_loss_kl_cov],
+            "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
