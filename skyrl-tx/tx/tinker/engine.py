@@ -332,15 +332,16 @@ class TinkerEngine:
             # JIT the fused function
             # Input order: input_ids, attention_mask, adapter_indices, target_ids,
             #              loss_mask, loss_fn_types, sampling_logprobs, advantages
-            # adapter_indices and loss_fn_types are replicated (used in bincount/vmap)
-            # Other 2D arrays are sharded along batch dimension
+            # adapter_indices is replicated (used in bincount which needs full view)
+            # All other batch arrays are sharded along batch dimension
+            batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
             input_shardings = (
                 batch_sharded_2d,  # input_ids
                 batch_sharded_2d,  # attention_mask
                 replicated,       # adapter_indices (replicated for bincount)
                 batch_sharded_2d,  # target_ids
                 batch_sharded_2d,  # loss_mask
-                replicated,       # loss_fn_types (replicated)
+                batch_sharded_1d,  # loss_fn_types (sharded, used in vmap over batch)
                 batch_sharded_2d,  # sampling_logprobs
                 batch_sharded_2d,  # advantages
             )
@@ -613,6 +614,7 @@ class TinkerEngine:
 
         # Sharding specs for batch inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+        sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
         replicated = jax.NamedSharding(self.mesh, jax.P(None))
 
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
@@ -620,13 +622,14 @@ class TinkerEngine:
                 mb_end = min(mb_start + micro_bs, total_bs)
                 # Shard the micro-batch inputs appropriately
                 # 2D arrays (batch, seq) are sharded along batch dim
-                # adapter_indices and loss_fn_types are replicated (used in bincount/vmap)
+                # 1D arrays (batch,) like loss_fn_types are also sharded along batch
+                # adapter_indices is replicated (used in bincount which needs full view)
                 mb_input_ids = jax.device_put(input_ids[mb_start:mb_end], sharding_2d)
                 mb_attention_mask = jax.device_put(attention_mask[mb_start:mb_end], sharding_2d)
                 mb_adapter_indices = jax.device_put(adapter_indices[mb_start:mb_end], replicated)
                 mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], sharding_2d)
                 mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], sharding_2d)
-                mb_loss_fn_types = jax.device_put(loss_fn_types[mb_start:mb_end], replicated)
+                mb_loss_fn_types = jax.device_put(loss_fn_types[mb_start:mb_end], sharding_1d)
                 mb_sampling_logprobs = jax.device_put(sampling_logprobs[mb_start:mb_end], sharding_2d)
                 mb_advantages = jax.device_put(advantages[mb_start:mb_end], sharding_2d)
 
