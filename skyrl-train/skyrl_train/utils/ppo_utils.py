@@ -661,6 +661,7 @@ def sapo_policy_loss(
 
     return loss, clip_ratio
 
+
 @register_policy_loss(PolicyLossType.GSPO)
 def gspo_policy_loss(
     log_probs: torch.Tensor,

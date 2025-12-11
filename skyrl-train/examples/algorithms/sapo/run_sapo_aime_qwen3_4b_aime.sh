@@ -1,7 +1,7 @@
 set -x
 
 # Colocated SAPO training+generation for Qwen3-4B-Base on DAPO training data and validate on AIME 2024.
-# Uses 
+# Uses examples/algorithms/dapo/main_dapo.py script, but with the SAPO policy loss and sequence mean loss reduction.
 # bash examples/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/algorithms/sapo/run_sapo_aime_qwen3_4b_aime.sh
 
@@ -35,7 +35,7 @@ MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
-TRAIN_BATCH_SIZE=256
+TRAIN_BATCH_SIZE=512
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
