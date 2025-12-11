@@ -442,6 +442,10 @@ class TinkerEngine:
         Returns sample operations ensuring that each model_id has only one checkpoint_id
         to avoid loading different checkpoints for the same model in a single batch.
 
+        If sample_max_num_sequences is configured, limits to that many requests so we don't
+        produce partial batches in process_sample_batch. If num_samples > 1 for some requests,
+        this may not be perfect, but it's good until we implement continuous batching.
+
         Args:
             session: Database session
 
@@ -464,6 +468,9 @@ class TinkerEngine:
             # take only requests with one checkpoint_id for a given model_id
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
+
+        if self.config.sample_max_num_sequences > 0:
+            batchable = batchable[: self.config.sample_max_num_sequences]
 
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
