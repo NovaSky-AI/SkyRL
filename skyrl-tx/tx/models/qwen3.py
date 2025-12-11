@@ -2,17 +2,21 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
+from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing
 from tx.models.configs import Qwen3Config
 from tx.layers.common import RMSNorm, SwiGLUMLP
 from tx.models.llama3 import Llama3Attention, Llama3Model, Llama3ForCausalLM
-from tx.models.types import CausalLMOutput, ModelOutput
+from tx.models.types import CausalLMOutput
 from tx.utils.generator import KVCache, compute_positions
 
 
 class Qwen3Attention(Llama3Attention):
-    """Qwen3 attention with QK normalization, inheriting from Llama3Attention."""
+    """Qwen3 attention with QK normalization, inheriting from Llama3Attention.
+
+    This class uses the _process_q_k hook to apply QK-Norm, avoiding code
+    duplication of the full attention mechanism. See PR #657 review feedback.
+    """
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         # Initialize parent Llama3Attention
@@ -22,55 +26,9 @@ class Qwen3Attention(Llama3Attention):
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
-    def __call__(
-        self,
-        x: jax.Array,
-        *,
-        attention_mask: jax.Array,
-        positions: jax.Array,
-        adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
-    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-        B, T, _ = x.shape
-
-        # Project and reshape to [B, T, num_heads, head_dim]
-        q = self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim)
-        k = self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
-        v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
-
-        # Apply QK-Norm (Qwen3-specific)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        # Get rope_theta from config
-        from tx.layers.common import apply_rope
-
-        rope_theta = getattr(self.config, "rope_theta", 500000.0)
-
-        # Apply RoPE
-        q = apply_rope(q, positions, self.head_dim, rope_theta)
-        k = apply_rope(k, positions, self.head_dim, rope_theta)
-
-        # Handle KV cache
-        if kv_cache is not None:
-            k_cache, v_cache, cache_position = kv_cache
-            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
-            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
-
-        updated_cache = (k, v)
-
-        # Attention computation
-        attn_output = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool),
-            is_causal=kv_cache is None,
-        )
-
-        output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
-        return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
+    def _process_q_k(self, q: jax.Array, k: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """Apply QK-Norm to query and key tensors (Qwen3-specific)."""
+        return self.q_norm(q), self.k_norm(k)
 
 
 class Qwen3Experts(nnx.Module):
@@ -185,13 +143,11 @@ class Qwen3DecoderLayer(nnx.Module):
         if getattr(config, "num_experts", None):
             self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
         else:
-            max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-            max_lora_rank = getattr(config, "max_lora_rank", 8)
             self.mlp = SwiGLUMLP(
                 config.hidden_size,
                 config.intermediate_size,
-                max_lora_adapters=max_lora_adapters,
-                max_lora_rank=max_lora_rank,
+                max_lora_adapters=config.max_lora_adapters,
+                max_lora_rank=config.max_lora_rank,
                 dtype=dtype,
                 rngs=rngs,
             )
@@ -225,75 +181,19 @@ class Qwen3DecoderLayer(nnx.Module):
 
 
 class Qwen3Model(Llama3Model):
-    """Qwen3 model inheriting from Llama3Model, using LoRAEmbed instead of regular Embed."""
+    """Qwen3 model inheriting from Llama3Model with Qwen3-specific decoder layers.
+
+    The only difference from Llama3Model is the use of Qwen3DecoderLayer (with QK-Norm)
+    instead of Llama3DecoderLayer. Embedding and __call__ are inherited from parent.
+    """
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
+        # Initialize parent (sets up embed_tokens and norm)
+        super().__init__(config, dtype=dtype, rngs=rngs)
 
-        # Use LoRAEmbed for embeddings (Qwen3-specific)
-        self.embed_tokens = LoRAEmbed(
-            num_embeddings=config.vocab_size,
-            features=config.hidden_size,
-            dtype=dtype,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
-            rngs=rngs,
-        )
-
-        # Use Qwen3DecoderLayer instead of Llama3DecoderLayer
+        # Override layers to use Qwen3DecoderLayer (with QK-Norm attention)
         self.layers = nnx.List(
             [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        )
-
-        # Final layer normalization
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-
-    def __call__(
-        self,
-        input_ids: jax.Array,
-        *,
-        attention_mask: jax.Array,
-        positions: jax.Array,
-        output_hidden_states: bool | None = None,
-        adapter_indices: jax.Array | None = None,
-        kv_cache: KVCache | None = None,
-    ) -> ModelOutput:
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
-        # Use LoRAEmbed with adapter_indices
-        hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
-
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
-
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden_states.append(hidden_states)
-
-        # Increment cache_position if cache exists, or use sequence length for new cache
-        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
-
-        return ModelOutput(
-            last_hidden_state=hidden_states,
-            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
-            hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
 

@@ -4,10 +4,29 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
-from tx.layers.lora import LoRALinear
+from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.common import RMSNorm, SwiGLUMLP, apply_rope
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+
+# Default LoRA configuration values
+DEFAULT_MAX_LORA_ADAPTERS = 0
+DEFAULT_MAX_LORA_RANK = 8
+
+
+def _ensure_lora_config(config: LlamaConfig) -> None:
+    """Ensure config has LoRA attributes with defaults.
+
+    Sets default LoRA configuration on configs that don't have them
+    (e.g., plain HuggingFace LlamaConfig). This allows sub-components
+    to access config.max_lora_adapters directly without getattr.
+    """
+    if not hasattr(config, "max_lora_adapters"):
+        config.max_lora_adapters = DEFAULT_MAX_LORA_ADAPTERS
+    if not hasattr(config, "max_lora_rank"):
+        config.max_lora_rank = DEFAULT_MAX_LORA_RANK
+    if not hasattr(config, "shard_attention_heads"):
+        config.shard_attention_heads = True
 
 
 class Llama3Attention(nnx.Module):
@@ -27,15 +46,13 @@ class Llama3Attention(nnx.Module):
 
         # Allow config to override head_dim (used by Qwen3)
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
 
         # Query projection
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
@@ -47,8 +64,8 @@ class Llama3Attention(nnx.Module):
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
@@ -60,8 +77,8 @@ class Llama3Attention(nnx.Module):
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
@@ -73,14 +90,30 @@ class Llama3Attention(nnx.Module):
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(tp_shard, None)),
             rngs=rngs,
         )
+
+    def _process_q_k(self, q: jax.Array, k: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """Hook for subclasses to process Q and K tensors before RoPE.
+
+        This method is a no-op for Llama3 but can be overridden by subclasses
+        (e.g., Qwen3Attention) to apply QK-Norm. This design reduces code
+        duplication per PR #657 review feedback.
+
+        Args:
+            q: Query tensor of shape [B, T, num_heads, head_dim]
+            k: Key tensor of shape [B, T, num_kv_heads, head_dim]
+
+        Returns:
+            Tuple of (processed_q, processed_k) with same shapes
+        """
+        return q, k
 
     def __call__(
         self,
@@ -98,8 +131,11 @@ class Llama3Attention(nnx.Module):
         k = self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
+        # Hook for subclasses to process Q/K (e.g., QK-Norm in Qwen3)
+        q, k = self._process_q_k(q, k)
+
         # Apply RoPE
-        rope_theta = getattr(self.config, "rope_theta", 500000.0)
+        rope_theta = self.config.rope_theta
         q = apply_rope(q, positions, self.head_dim, rope_theta)
         k = apply_rope(k, positions, self.head_dim, rope_theta)
 
@@ -139,13 +175,11 @@ class Llama3DecoderLayer(nnx.Module):
         self.self_attn = Llama3Attention(config, dtype=dtype, rngs=rngs)
 
         # Feed-forward network
-        max_lora_adapters = getattr(config, "max_lora_adapters", 0)
-        max_lora_rank = getattr(config, "max_lora_rank", 8)
         self.mlp = SwiGLUMLP(
             config.hidden_size,
             config.intermediate_size,
-            max_lora_adapters=max_lora_adapters,
-            max_lora_rank=max_lora_rank,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             rngs=rngs,
         )
@@ -186,10 +220,12 @@ class Llama3Model(nnx.Module):
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
 
-        # Token embeddings
-        self.embed_tokens = nnx.Embed(
+        # Token embeddings with LoRA support
+        self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
@@ -218,8 +254,8 @@ class Llama3Model(nnx.Module):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        # Embed input tokens
-        hidden_states = self.embed_tokens(input_ids)
+        # Embed input tokens with LoRA adapter support
+        hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
@@ -257,6 +293,8 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
     """LLaMA 3 model with a language modeling head for causal language modeling."""
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        # Ensure config has LoRA attributes with defaults
+        _ensure_lora_config(config)
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 

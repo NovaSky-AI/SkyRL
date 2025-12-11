@@ -1,5 +1,5 @@
 from tx.models.llama3 import Llama3ForCausalLM
-from tx.models.configs import Qwen3Config
+from tx.models.configs import Llama3Config, LoRAModelConfig, Qwen3Config
 from tx.models.mnist import Mnist
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.models.qwen3 import Qwen3ForCausalLM
@@ -15,8 +15,11 @@ __all__ = [
     Mnist,
     Qwen3ForCausalLM,
     Qwen3MoeForCausalLM,
+    # Configs
+    Llama3Config,
+    LoRAModelConfig,
+    Qwen3Config,
     # Outputs
     CausalLMOutput,
     ModelOutput,
-    Qwen3Config,
 ]
