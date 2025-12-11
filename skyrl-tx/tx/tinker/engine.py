@@ -612,21 +612,35 @@ class TinkerEngine:
         logprobs_device = []
         seq_len = input_ids.shape[1]
 
+        # Sharding specs for batch inputs
+        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+        sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
+                # Shard the micro-batch inputs appropriately
+                mb_input_ids = jax.device_put(input_ids[mb_start:mb_end], sharding_2d)
+                mb_attention_mask = jax.device_put(attention_mask[mb_start:mb_end], sharding_2d)
+                mb_adapter_indices = jax.device_put(adapter_indices[mb_start:mb_end], sharding_1d)
+                mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], sharding_2d)
+                mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], sharding_2d)
+                mb_loss_fn_types = jax.device_put(loss_fn_types[mb_start:mb_end], sharding_1d)
+                mb_sampling_logprobs = jax.device_put(sampling_logprobs[mb_start:mb_end], sharding_2d)
+                mb_advantages = jax.device_put(advantages[mb_start:mb_end], sharding_2d)
+
                 self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
                     self.accumulated_grads,
                     self.lora_params,
                     self.non_lora_params,
-                    input_ids[mb_start:mb_end],
-                    attention_mask[mb_start:mb_end],
-                    adapter_indices[mb_start:mb_end],
-                    target_ids[mb_start:mb_end],
-                    loss_mask[mb_start:mb_end],
-                    loss_fn_types[mb_start:mb_end],
-                    sampling_logprobs[mb_start:mb_end],
-                    advantages[mb_start:mb_end],
+                    mb_input_ids,
+                    mb_attention_mask,
+                    mb_adapter_indices,
+                    mb_target_ids,
+                    mb_loss_mask,
+                    mb_loss_fn_types,
+                    mb_sampling_logprobs,
+                    mb_advantages,
                 )
                 token_losses_device.append(per_token_losses)
                 logprobs_device.append(target_logprobs)
