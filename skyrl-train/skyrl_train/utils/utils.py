@@ -1,8 +1,10 @@
+import ipaddress
 import os
 import time
 import sys
 import logging
 import math
+import socket
 
 import ray
 import torch
@@ -166,7 +168,6 @@ def validate_megatron_cfg(cfg: DictConfig):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
-    assert cfg.trainer.placement.colocate_all, "only colocate_all=True is supported for megatron training"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     if cfg.trainer.flash_attn:
@@ -287,11 +288,6 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-
-        if not cfg.generator.batched:
-            raise ValueError(
-                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
-            )
         assert cfg.trainer.algorithm.policy_loss_type in [
             "regular",
             "dual_clip",
@@ -302,6 +298,15 @@ def validate_cfg(cfg: DictConfig):
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
         assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+
+        if cfg.trainer.target_modules is not None:
+            logger.warning(
+                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
+            )
+        if cfg.trainer.exclude_modules is not None:
+            logger.warning(
+                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
+            )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -383,10 +388,6 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.logprobs > 0:
             raise ValueError(
                 f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
-            )
-        if not cfg.generator.batched:
-            raise NotImplementedError(
-                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
             )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
@@ -572,10 +573,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     if SKYRL_PYTHONPATH_EXPORT:
         # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # this is useful for dependencies that are baked into the docker image but that we don't want to ship + rebuild with UV (i.e. TransformerEngine)
-        # see https://github.com/ray-project/ray/issues/56697 for why this is needed
-        # note that this could potentially cause unexpected issues if there are overlapping installations between the base image
-        # and the pyproject.toml file - to resolve these, make sure to specify exact versions of dependencies in the pyproject.toml
+        # not recommended since it can cause unexpected conflicts with UV packages, but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
@@ -781,3 +779,30 @@ def update_model_config(module_config, override_config_kwargs):
             update_model_config(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
+
+
+def get_tcp_url(host: str, port: int) -> str:
+    """
+    Formats the TCP URL for the given host and port,
+    handling IPv6 addresses correctly.
+    Args:
+        host (str): The hostname or IP address.
+        port (int): The port number.
+    Returns:
+        str: The formatted TCP URL.
+    """
+    try:
+        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+            return f"tcp://[{host}]:{port}"
+    except ValueError:
+        # not a literal IP, probably a hostname
+        pass
+    return f"tcp://{host}:{port}"
+
+
+def get_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port

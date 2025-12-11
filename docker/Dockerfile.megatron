@@ -1,4 +1,4 @@
-FROM anyscale/ray:2.48.0-slim-py312-cu128
+FROM anyscale/ray:2.51.1-slim-py312-cu128
 
 RUN sudo apt-get update -y && sudo apt-get install -y wget kmod libxml2 build-essential libnuma-dev
 
@@ -30,5 +30,5 @@ ENV CUDNN_PATH=/opt/cudnn
 ENV CPATH=${CUDNN_PATH}/include:${CPATH}
 ENV LD_LIBRARY_PATH=${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}
 
-RUN pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.5.0"
+RUN pip install --no-cache-dir --no-build-isolation "transformer_engine[pytorch]==2.7.0"
 # --------------------

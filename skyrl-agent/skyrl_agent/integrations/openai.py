@@ -60,14 +60,20 @@ class OpenAIBackend(AsyncInferBackend):
                 sampling_params = dict(sampling_params)
             payload = sampling_params.copy()
             payload["model"] = self.model_name
-            payload["max_tokens"] = self.model_max_len - len(input_ids) - 1
+            # payload["max_tokens"] = self.model_max_len - len(input_ids) - 1
             print(f"max tokens: {payload['max_tokens']}")
 
             payload["prompt"] = input_ids
             output = await session.post(f"{self.api_url}/v1/completions", json=payload, headers=headers)
             output = await output.json()
 
-        return output["choices"][0]["text"], output["choices"][0]["finish_reason"]
+        meta_info = {
+            "output_tokens": None,
+            "finish_reason": output["choices"][0]["finish_reason"],
+            "logprobs": None,
+        }
+
+        return output["choices"][0]["text"], meta_info
 
 
 class OpenAIGeneratorOutput(GeneratorOutput):

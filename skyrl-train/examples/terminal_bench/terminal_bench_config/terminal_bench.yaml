@@ -1,6 +1,5 @@
 # @package terminal_bench_config
 
 trials_dir: "~/trials"
-sandboxes_dir: "sandboxes" 
 agent_name: "terminus"
-max_episodes: 16 
+max_episodes: 16

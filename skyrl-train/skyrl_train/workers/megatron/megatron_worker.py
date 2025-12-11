@@ -4,13 +4,16 @@ import torch.distributed
 import ray
 from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
+
+import asyncio
 import os
+from datetime import timedelta
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
 from omegaconf import OmegaConf
 
-from mbridge import AutoBridge
+from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
@@ -22,8 +25,9 @@ from skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.megatron_utils import freeze_moe_router, print_model_size
+from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
+from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
@@ -33,24 +37,158 @@ from skyrl_train.workers.worker import (
 )
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
+from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+class MegatronWeightExtractor(WeightExtractor):
+    """Extracts weights from Megatron model-parallel models.
+
+    Uses Megatron's bridge to export weights in HuggingFace format.
+
+    Args:
+        bridge: Megatron AutoBridge instance for weight conversion
+        actor_module: The actor module to extract weights from
+        enable_bucketing: If True, group parameters into size-based buckets for packing
+        bucket_size_threshold_GB: Size threshold in GB for bucketing (only used if enable_bucketing=True)
+        training_dtype: Training dtype for size calculation (only used if enable_bucketing=True)
+    """
+
+    def __init__(
+        self,
+        bridge,
+        actor_module,
+        enable_bucketing: bool = False,
+        bucket_size_threshold_GB: float = 1.0,
+        training_dtype: torch.dtype = torch.bfloat16,
+    ):
+        self.bridge = bridge
+        self.actor_module = actor_module
+        self.enable_bucketing = enable_bucketing
+        self.bucket_size_threshold_GB = bucket_size_threshold_GB
+        self.training_dtype = training_dtype
+
+        # Initialize bucketing if enabled
+        if enable_bucketing:
+            self._init_param_buckets()
+        else:
+            self.param_buckets = None
+
+    def _init_param_buckets(self):
+        """Initialize parameter buckets for packing."""
+        # Get conversion tasks from bridge
+        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
+
+        # Calculate size for each parameter
+        param_info = []
+
+        def calculate_size_in_bytes(param, tp_size, ep_size):
+            if param is None:
+                # need to broadcast for other pp ranks
+                size_in_bytes = None
+            else:
+                # Calculate size for this parameter
+                prec_to_bytes = {
+                    torch.bfloat16: 2,
+                    torch.float32: 4,
+                }
+                scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
+                size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
+
+            # Broadcast size_in_bytes across pipeline parallel ranks
+            return broadcast_object_across_pp_ranks(size_in_bytes)
+
+        for task in weight_conversion_tasks:
+            param_info.append(
+                (
+                    task,
+                    calculate_size_in_bytes(
+                        task.param_weight,
+                        task.mapping.tp_size,
+                        task.mapping.ep_size if task.mapping.is_expert else 1,
+                    ),
+                )
+            )
+
+        # Group parameters into buckets based on size threshold
+        self.param_buckets = [[]]
+        curr_size = 0
+        for task, size in param_info:
+            if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+                self.param_buckets.append([])
+                curr_size = 0
+            self.param_buckets[-1].append(task)
+            curr_size += size
+
+    def extract_weights(self, dtype: torch.dtype):
+        """Extract weights from Megatron model.
+
+        Args:
+            dtype: Target dtype for inference
+
+        Yields:
+            WeightChunk objects (one per parameter, or one per bucket if bucketing enabled)
+        """
+        device = torch.cuda.current_device()
+
+        if not self.enable_bucketing:
+            # No bucketing: yield one chunk per parameter
+            hf_params_generator = self.bridge.export_hf_weights(
+                self.actor_module,
+                show_progress=False,
+                conversion_tasks=None,
+            )
+
+            for name, tensor in hf_params_generator:
+                # Move to device and convert dtype
+                tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+
+                yield WeightChunk(
+                    names=[name],
+                    dtypes=[str(dtype)],
+                    shapes=[list(tensor.shape)],
+                    tensors=[tensor],
+                )
+        else:
+            # Bucketing mode: iterate over buckets, yield one chunk per bucket
+            for bucket in self.param_buckets:
+                hf_params_generator = self.bridge.export_hf_weights(
+                    self.actor_module,
+                    show_progress=False,
+                    conversion_tasks=bucket,
+                )
+
+                # Collect all parameters in this bucket into one chunk
+                names = []
+                dtypes_list = []
+                shapes = []
+                tensors = []
+
+                for name, tensor in hf_params_generator:
+                    # Move to device and convert dtype
+                    tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+
+                    names.append(name)
+                    dtypes_list.append(str(dtype))
+                    shapes.append(list(tensor.shape))
+                    tensors.append(tensor)
+
+                # Yield one chunk containing all parameters in this bucket
+                if tensors:
+                    yield WeightChunk(
+                        names=names,
+                        dtypes=dtypes_list,
+                        shapes=shapes,
+                        tensors=tensors,
+                    )
 
 
 class MegatronWorker:
-    def check_te_import(self):
-        try:
-            import transformer_engine  # noqa: F401
-        except ImportError:
-            raise ValueError(
-                """
-                transformer_engine is required for using the megatron backend.
-                For single node training follow the instructions in the pyproject.toml file to install transformer_engine.
-                For multi node training, please install transformer_engine in the docker image, and set the PYTHONPATH
-                to `/home/ray/anaconda3/lib/python3.12/site-packages` or wherever your base installation of
-                transformer_engine lives.
-            """
-            )
-
-    def init_configs(self, model_path, model_config_kwargs, transformer_config_kwargs, flash_attn=False):
+    def init_configs(
+        self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False
+    ):
+        """
+        Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
+        """
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
@@ -66,32 +204,54 @@ class MegatronWorker:
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
-        bridge = AutoBridge.from_config(hf_config)
-        bridge.set_extra_args(**transformer_config_kwargs)
-        tf_config = bridge.config
+        if not self.cfg.trainer.gradient_checkpointing:
+            for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
+                transformer_config_kwargs[key] = None
+
+        bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
+        provider = bridge.to_megatron_provider()
+        provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
+        provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
+        provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
+        provider.context_parallel_size = megatron_config.context_parallel_size
+        provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
+        provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
+        provider.sequence_parallel = megatron_config.tensor_model_parallel_size > 1
+        provider.attention_backend = "flash" if flash_attn else "fused"
+        provider.variable_seq_lengths = True
+        provider.masked_softmax_fusion = True
+        provider.moe_token_dispatcher_type = "alltoall"
+
+        for k, v in transformer_config_kwargs.items():
+            setattr(provider, k, v)
+        provider.finalize()
+
+        self.provider = provider
         self.bridge = bridge
 
-        self.hf_config = hf_config
         self.strategy.hf_config = hf_config
-        self.tf_config = tf_config
         self.tokenizer = tokenizer
 
     def make_megatron_module(
         self,
-        model_config_kwargs: Dict[str, Any],
         wrap_with_ddp: bool = True,
         ddp_config: Optional[Dict[str, Any]] = None,
+        bf16: bool = True,
     ) -> List[nn.Module]:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
         """
-        model = self.bridge.get_model(
-            post_model_creation_callbacks=[],  # don't rely on these since we might switch to Megatron-Bridge
-            wrap_with_ddp=wrap_with_ddp,
-            ddp_config=ddp_config,
+        from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
+
+        default_ddp_config = DistributedDataParallelConfig()
+        if wrap_with_ddp:
+            default_ddp_config.use_distributed_optimizer = True
+        if ddp_config is not None:
+            for k, v in ddp_config.items():
+                setattr(default_ddp_config, k, v)
+        model = self.provider.provide_distributed_model(
+            ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
-        if model_config_kwargs.get("moe_config", {}).get("freeze_moe_router", False):
-            freeze_moe_router(model)
         return model
 
     def forward(self, data):
@@ -150,7 +310,6 @@ class MegatronWorker:
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.check_te_import()
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -173,7 +332,24 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
+
+        # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
+        # autograd engine tries to track gradients through the default Torch kernel. This fixes a deprecated behaviour in
+        # PyTorch, preventing potential silent errors in future versions.
+
+        if not getattr(torch.distributed, "_skyrl_broadcast_no_grad_patched", False):
+            _orig_broadcast = torch.distributed.broadcast
+
+            def _broadcast_no_grad(*args, **kwargs):
+                with torch.no_grad():
+                    return _orig_broadcast(*args, **kwargs)
+
+            torch.distributed.broadcast = _broadcast_no_grad
+            torch.distributed._skyrl_broadcast_no_grad_patched = True
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.policy.megatron_config,
@@ -196,19 +372,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
-        # get hf_config and tf_config
+        # initialize the bridge and provider objects
         self.init_configs(
             model_path,
+            self.cfg.trainer.policy.megatron_config,
             self.cfg.trainer.policy.megatron_config.model_config_kwargs,
             self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+            bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
         )
 
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
-            self.cfg.trainer.policy.megatron_config.model_config_kwargs,
             wrap_with_ddp=True,
             ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
+            bf16=self.cfg.trainer.bf16,
         )
 
         if self._local_rank == 0 and not os.path.exists(
@@ -216,12 +394,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         ):  # if not local path, try downloading model weights from huggingface
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
-
-        # load weights
-        # NOTE (erictang000): there is currently a bug in mbridge that causes the model to not load correctly if tie_word_embeddings is set
-        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
-        # this is the case for the Qwen2.5-1.5B and 3B models, but not the 7B model
-        self.bridge.load_weights(self.actor_module, model_path)
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
@@ -248,12 +420,24 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # create worker model
         self.model = MegatronModelWrapper(
             config=self.cfg,
-            hf_config=self.hf_config,
-            tf_config=self.tf_config,
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
         )
+
+        # Initialize weight extractor
+        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
+        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        self.weight_extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=self.use_cuda_ipc,
+            bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
+            training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
+        )
+
+        self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """
@@ -323,12 +507,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         temperature=self.cfg.generator.sampling_params.temperature,
                     )
 
+                    if self.empty_cuda_cache:
+                        torch.cuda.empty_cache()
+
                     grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
                         status = {
+                            "final_loss": metrics["final_loss"],
                             "policy_loss": metrics["policy_loss"],
                             "policy_lr": self.optimizer.param_groups[0]["lr"],
                             "ppo_clip_ratio": metrics["ppo_clip_ratio"],
@@ -381,6 +569,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
+        from torch.multiprocessing.reductions import reduce_tensor
+
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
         cache_reset_task = None
@@ -389,48 +579,83 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        per_tensor_param = self.bridge.export_weights(self.actor_module)
-        weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-        current_size = 0
 
-        for name, param in per_tensor_param:
-            # NOTE (erictang000) we do not use bucketed weight updates for megatron here, which means this is not compatible with the FlashRL integration
-            # in the future we should improve this to use bucketed weight updates and support FlashRL + megatron for large models
-            from torch.multiprocessing.reductions import reduce_tensor
+        # Extract weights using the initialized extractor
+        if not self.use_cuda_ipc:
+            # Broadcast path: one chunk per parameter
+            # NOTE: need to optimize this to use buckets for non-colocated weight sync as well
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # Each chunk contains one parameter
+                assert len(chunk) == 1
+                name = chunk.names[0]
+                tensor = chunk.tensors[0]
 
+                if torch.distributed.get_rank() == 0:
+                    update_weight_task = asyncio.create_task(
+                        inference_engine_client.update_named_weights(
+                            {
+                                "names": [name],
+                                "dtypes": [self.cfg.generator.model_dtype],
+                                "shapes": [list(tensor.shape)],
+                            }
+                        )
+                    )
+
+                # Broadcast weights from training rank 0 to inference engine ranks via the update group
+                def broadcast_tensor(tensor):
+                    if torch.distributed.get_rank() == 0:
+                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
+
+                await asyncio.to_thread(broadcast_tensor, tensor)
+                if torch.distributed.get_rank() == 0:
+                    await update_weight_task
+                torch.distributed.barrier()
+        else:
+            # CUDA IPC path: one chunk per bucket (for packing)
             device = torch.cuda.current_device()
-            param = param.to(device, non_blocking=True)
-            param = param.to(generator_dtype)
-            weight = param.data.clone()
-            ipc_handle = reduce_tensor(weight)
+            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
 
-            ipc_handle = {get_physical_gpu_id(): ipc_handle}
-            ipc_handle_list = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+                # Each chunk contains all parameters in one bucket
+                # Calculate total size for packing (in number of elements)
+                total_numel = sum(t.numel() for t in chunk.tensors)
+                packed_tensor = torch.empty(
+                    total_numel,
+                    device=device,
+                    dtype=generator_dtype,
+                    requires_grad=False,
+                )
 
-            if torch.distributed.get_rank() == 0:
+                offset = 0
+                # Copy tensors into consolidated buffers
+                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
+                    size = tensor.numel()
+                    packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
+                    offset += size
+                    weights_update_request["names"].append(name)
+                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                    weights_update_request["shapes"].append(shape)
+                    weights_update_request["sizes"].append(size)
+
+                ipc_handle = reduce_tensor(packed_tensor)
+                ipc_handle = {get_physical_gpu_id(): ipc_handle}
+                ipc_handle_list = [None] * torch.distributed.get_world_size()
+                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+
                 ipc_handles = {}
                 for d in ipc_handle_list:
                     ipc_handles.update(d)
 
-                current_size += weight.nbytes
-                weights_update_request["names"].append(name)
-                weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                weights_update_request["shapes"].append(param.shape)
                 weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                if current_size / (1024**3) > self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB:
+                weights_update_request["packed"] = True
+
+                if torch.distributed.get_rank() == 0:
                     await inference_engine_client.update_named_weights(weights_update_request)
-                    current_size = 0
-                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": []}
-                    # force collect any sent tensors if possible to be memory efficient
-                    torch.cuda.ipc_collect()
+                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
 
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
+                # force collect any sent tensors if possible to be memory efficient
+                torch.cuda.ipc_collect()
 
-        if len(weights_update_request["names"]) > 0 and torch.distributed.get_rank() == 0:
-            await inference_engine_client.update_named_weights(weights_update_request)
-            torch.cuda.ipc_collect()
         torch.distributed.barrier()
         torch.cuda.synchronize()
 
@@ -451,7 +676,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.check_te_import()
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
 
@@ -467,7 +691,10 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         Override DistributedTorchRayActor.init_worker_process_group to use megatron distributed setup to create the mesh.
         """
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         self.strategy = MegatronStrategy(
             megatron_config=self.cfg.trainer.ref.megatron_config,
@@ -490,27 +717,35 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         Initialize the model for the ref worker.
         """
-        # get hf_config and tf_config
+        # initialize the bridge and provider objects
         self.init_configs(
             model_path,
+            self.cfg.trainer.ref.megatron_config,
             self.cfg.trainer.ref.megatron_config.model_config_kwargs,
             self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
+            bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
         )
 
         self.actor_module = self.make_megatron_module(
-            self.cfg.trainer.ref.megatron_config.model_config_kwargs, wrap_with_ddp=False, ddp_config=None
+            wrap_with_ddp=False,
+            ddp_config=None,
+            bf16=self.cfg.trainer.bf16,
         )
 
+        # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
+        if self._local_rank == 0 and not os.path.exists(
+            model_path
+        ):  # if not local path, try downloading model weights from huggingface
+            snapshot_download(model_path)  # will be no-op if already downloaded
+        torch.distributed.barrier()
+
         # load weights
-        self.bridge.load_weights(self.actor_module, model_path)
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
         # create worker model
-        self.model = MegatronModelWrapper(
-            config=self.cfg, hf_config=self.hf_config, tf_config=self.tf_config, actor_module=self.actor_module
-        )
+        self.model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""

@@ -91,6 +91,24 @@ class InferenceEngineClient(InferenceEngineInterface):
             session_ids=session_ids,
         )
 
+        # We do a shortcut for non-batched requests, which can support pause/continue generation for
+        # in-flight weight updates.
+        if num_prompts == 1:
+            # Route to a single engine for this single prompt and use retry flow.
+            assert len(engine_idx_to_prompt_ids) == 1
+            ((engine_idx, prompt_ids_list),) = engine_idx_to_prompt_ids.items()
+            assert prompt_ids_list == [0], "Single prompt should map to index [0]"
+            original_prompt_ids = prompt_token_ids[0]
+            return await self._generate_single_with_retry(
+                engine_idx=engine_idx,
+                original_prompt_ids=original_prompt_ids,
+                sampling_params=sampling_params,
+            )
+
+        # For batched generate(), pause/continue cannot be supported.
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("pause_generation is unsupported for batched InferenceEngineClient.generate().")
+
         # 2. Generate responses concurrently
         tasks: list[asyncio.Task] = []
         indices_list: list[list[int]] = []  # the original prompt indices that each task works on
@@ -129,6 +147,105 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
+        )
+
+    async def _generate_single_with_retry(
+        self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
+    ) -> InferenceEngineOutput:
+        """
+        Generate a single response with retry mechanism.
+
+        This method is equivalent to `_chat_completion_with_retry()` but for the `generate()` codepath.
+        We keep sending `generate` requests (with previous responses accumulated) until the finish_reason
+        is not "abort". It is intended to be used in combination with `pause_generation()` and `resume_generation()` for
+        in-flight weight updates and partial rollouts.
+
+        This method is equivalent to a single `generate()` call if we do not use `pause_generation()`.
+
+        Since we operate purely in the token space, it is token-in-token-out, unlike `_chat_completion_with_retry()`
+        which re-encodes in each new request.
+
+        For subsequent retry requests (`InferenceEngineInput`), we:
+        - Update the `InferenceEngineInput.prompt_token_ids` with the accumulated output tokens.
+        - Skip accumulating `InferenceEngineOutput.responses` since we decode the final output.
+        - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
+
+        For the final response, we return `InferenceEngineOutput` with:
+        - `responses`: decoded at the end from `response_ids` if generation is completed in > 1 turns, otherwise the text response of the first turn.
+        - `response_ids`: the accumulated output tokens
+        - `stop_reasons`: the stop reason of the final response
+        - `response_logprobs`: the accumulated logprobs
+        """
+        if sampling_params is None:
+            sampling_params = {}
+
+        # 1. First determine original max tokens key and value (if any)
+        max_key = None
+        if "max_tokens" in sampling_params:
+            max_key = "max_tokens"
+        elif "max_completion_tokens" in sampling_params:
+            max_key = "max_completion_tokens"
+        original_max_tokens: Optional[int] = sampling_params.get(max_key) if max_key else None
+
+        # 2. Initialize fields we want to accumulate or update in each loop iteration
+        accum_response_ids: List[int] = []
+        accum_response_logprobs: List[float] = []
+        stop_reason: str = "abort"
+
+        # We only use it if generation is completed in one turn to maintain original behavior with no retry.
+        text_response: Optional[str] = None
+        num_turns = 0
+
+        # 3. Loop until geneartion is completed.
+        while stop_reason == "abort":
+            await self._wait_for_generation_to_resume()
+
+            # 3.1. Prepare the request payload.
+            cur_sampling_params = sampling_params.copy()
+            if original_max_tokens is not None:
+                new_max_tokens = original_max_tokens - len(accum_response_ids)
+                assert new_max_tokens >= 0, f"Expect new_max_tokens to be non-negative, but got {new_max_tokens}"
+                cur_sampling_params[max_key] = new_max_tokens
+            new_prompt_ids = original_prompt_ids + accum_response_ids
+            engine_input = InferenceEngineInput(
+                prompt_token_ids=[new_prompt_ids],
+                sampling_params=cur_sampling_params,
+            )
+
+            # 3.2. Send the request.
+            logger.debug(f"generate() request sent (including potential retries): {engine_input}")
+            partial_response: InferenceEngineOutput = await self.engines[engine_idx].generate(engine_input)
+
+            # 3.3. Parse the partial response.
+            assert len(partial_response["response_ids"]) == 1, "Expected exactly one response."
+            new_response_ids: List[int] = partial_response["response_ids"][0]
+            text_response = partial_response["responses"][0]
+            stop_reason = partial_response["stop_reasons"][0]
+            new_response_logprobs: Optional[List[float]] = None
+            new_response_logprobs_list: Optional[List[List[float]]] = partial_response.get("response_logprobs", None)
+            if new_response_logprobs_list is not None and len(new_response_logprobs_list) > 0:
+                new_response_logprobs = new_response_logprobs_list[0]
+
+            # 3.4 Aborted without generating tokens, so partial_response is useless.
+            if stop_reason == "abort" and len(new_response_ids) == 0:
+                continue
+
+            # 3.5 Accumulate outputs
+            accum_response_ids.extend(new_response_ids)
+            if new_response_logprobs is not None:
+                accum_response_logprobs.extend(new_response_logprobs)
+            num_turns += 1
+
+        # 4. Build the final response and return.
+        if num_turns == 1:
+            final_text_response = text_response
+        else:
+            final_text_response = self.tokenizer.decode(accum_response_ids, skip_special_tokens=True)
+        return InferenceEngineOutput(
+            responses=[final_text_response],
+            stop_reasons=[stop_reason],
+            response_ids=[accum_response_ids],
+            response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
         )
 
     async def _chat_completion_with_retry(
@@ -428,7 +545,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("abort_generation")
 
-    def resume_generation(self) -> None:
+    async def resume_generation(self) -> None:
         """
         Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
 

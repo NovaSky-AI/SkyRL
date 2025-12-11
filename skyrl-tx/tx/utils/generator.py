@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+import functools
 
 import jax
-from jax import lax
 import jax.numpy as jnp
-
 import tx.utils.models
 from tx.tinker import types
 
@@ -39,6 +38,19 @@ class KVCache:
         )
 
 
+@jax.tree_util.register_dataclass
+@dataclass
+class DecodeState:
+    """State of the decode loop."""
+
+    kv_cache: KVCache
+    rngs: jax.Array  # of shape [B, key_dim]
+    attention_mask: jax.Array
+    last_positions: jax.Array
+    logits: jax.Array
+    stop_pos: jax.Array  # Position where stop token was found
+
+
 @dataclass
 class GenerateOutput:
     """Result from autoregressive text generation.
@@ -52,18 +64,7 @@ class GenerateOutput:
     generated_ids: list[list[int]]
     stop_reasons: list[str]
     logprobs: list[list[float]]
-
-
-def batched_sample_token(logits: jax.Array, *, temperatures: jax.Array, sample_keys: jax.Array) -> jax.Array:
-    """Sample next token per-example using a per-example PRNGKey."""
-    temperatures = temperatures[:, None]
-    zero_temp_mask = temperatures == 0.0
-    scaled_logits = logits / jnp.where(zero_temp_mask, 1.0, temperatures)
-    # Draw one sample per example
-    sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(sample_keys, scaled_logits)
-    greedy = jnp.argmax(logits, axis=-1)
-    next_token = jnp.where(zero_temp_mask, greedy[:, None], sampled[:, None])
-    return next_token
+    prompt_logprobs: list[list[float]] | None = None
 
 
 def compute_positions(attention_mask: jax.Array) -> jax.Array:
@@ -76,34 +77,105 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
-def next_token_and_logprobs(
-    logits: jax.Array,
-    temperatures: jax.Array,
-    rngs: jax.Array,  # Shape [B, key_dim]
-    all_logprobs: jax.Array,
-    cache_position: int,
-    stop_tokens: jax.Array,
-    stop_pos: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Sample next token and compute logprobs, updating the logprobs array."""
-    split_keys = jax.vmap(jax.random.split)(rngs)
-    next_rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
-    next_token = batched_sample_token(logits, temperatures=temperatures, sample_keys=sample_keys)
-
-    logprobs = jax.nn.log_softmax(logits, axis=-1)
-    sampled_logprobs = jnp.take_along_axis(logprobs, next_token, axis=-1)  # [batch_size, 1]
-    all_logprobs = lax.dynamic_update_slice(all_logprobs, sampled_logprobs, (0, cache_position))
-
-    # Check if sampled token is in stop tokens and update stop position
-    is_stop = jnp.any(next_token == stop_tokens, axis=1, keepdims=True)
-    # Only update stop_pos if not already stopped (stop_pos == -1)
-    stop_pos = jnp.where((stop_pos == -1) & is_stop, cache_position, stop_pos)
-
-    return next_rngs, next_token, all_logprobs, stop_pos
+def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
+    """Compute log probabilities of prompt tokens from prefill logits"""
+    # TODO: Optimize memory usage by avoiding allocation of full vocab dimension.
+    logits_for_prompt = prefill_logits[:, :-1, :]
+    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
+    prompt_tokens = input_ids[:, 1:]
+    prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
+    return prompt_logprobs
 
 
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
+
+    @staticmethod
+    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "prompt_logprobs"))
+    def _prefill_and_decode(
+        model,
+        input_ids: jax.Array,
+        attention_mask: jax.Array,
+        max_length: int,
+        max_new_tokens: int,
+        adapter_indices: jax.Array | None,
+        temperatures: jax.Array,
+        rngs: jax.Array,
+        stop_tokens: jax.Array,
+        prompt_logprobs: bool = False,
+    ):
+        """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
+        # Compute positions from attention mask
+        positions = compute_positions(attention_mask)
+
+        # Prefill: process full prompt
+        outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+
+        # Compute prompt logprobs if requested
+        prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
+
+        # Pad KV cache and attention mask
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
+        decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
+
+        def decode_fn(s: DecodeState, step: jax.Array) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
+            """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
+            # Sample next token
+            split_keys = jax.vmap(jax.random.split)(s.rngs)
+            rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
+
+            zero_temp_mask = temperatures == 0.0
+            scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
+            sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
+                sample_keys, scaled_logits
+            )
+            greedy = jnp.argmax(s.logits, axis=-1)
+            next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
+            log_probs = jax.nn.log_softmax(s.logits, axis=-1)
+            sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
+
+            # Track first stop token position (-1 means not stopped yet)
+            is_stop = jnp.any(next_token == stop_tokens, axis=1)
+            stop_pos = jnp.where((s.stop_pos == -1) & is_stop, step + 1, s.stop_pos)
+
+            # Update attention mask: set next position to 1
+            next_attention_mask = s.attention_mask.at[:, s.kv_cache.cache_position].set(1)
+
+            outputs = model(
+                next_token,
+                attention_mask=next_attention_mask,
+                positions=s.last_positions + 1,
+                kv_cache=s.kv_cache,
+                adapter_indices=adapter_indices,
+            )
+            next_state = DecodeState(
+                kv_cache=outputs.kv_cache,
+                rngs=rngs,
+                attention_mask=next_attention_mask,
+                last_positions=s.last_positions + 1,
+                logits=outputs.logits[:, -1, :],
+                stop_pos=stop_pos,
+            )
+            return next_state, (next_token, sampled_logprob)
+
+        initial_state = DecodeState(
+            kv_cache=kv_cache,
+            rngs=rngs,
+            attention_mask=decode_attention_mask,
+            last_positions=positions[:, -1:],
+            logits=outputs.logits[:, -1, :],
+            stop_pos=jnp.full((input_ids.shape[0],), -1),
+        )
+
+        final_state, (tokens_stacked, logprobs_stacked) = jax.lax.scan(
+            decode_fn, initial_state, xs=jnp.arange(max_new_tokens)
+        )
+
+        # Post-process: transpose scan outputs from [Steps, Batch, 1] to [Batch, Steps]
+        new_tokens = jnp.swapaxes(tokens_stacked, 0, 1).squeeze(-1)
+        new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)
+
+        return new_tokens, new_logprobs, final_state.stop_pos, prompt_logprobs_array
 
     def generate(
         self,
@@ -112,11 +184,9 @@ class GeneratorMixin:
         *,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
+        prompt_logprobs: bool = False,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
-
-        Args:
-            max_length: Maximum sequence length for fixed-size buffers (default: 512).
 
         Returns:
             GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
@@ -127,94 +197,56 @@ class GeneratorMixin:
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
 
-        # One PRNGKey per provided seed. If the caller supplies identical seeds, the corresponding
-        # per-request streams will be identical.
+        # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]
         rngs = jax.vmap(jax.random.PRNGKey)(jnp.array(seeds))
 
         # Extract stop tokens and pad to same length
         max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
-        stop_tokens = jnp.full((batch_size, max(1, max_stop_tokens)), -1, dtype=jnp.int32)
-        for i, sp in enumerate(sampling_params):
-            if sp.stop:
-                stop_tokens = stop_tokens.at[i, : len(sp.stop)].set(jnp.array(sp.stop))
+        stop_tokens = []
+        for sp in sampling_params:
+            stop = sp.stop or []
+            stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
+        stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
-        # Prefill: process full prompt
-        positions = compute_positions(attention_mask)
-        outputs = self(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
-        kv_cache = outputs.kv_cache.pad_to_length(max_length)
+        # Capture prompt lengths for prompt_logprobs if requested
+        prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
 
-        def scan_fn(carry, _):
-            kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos = carry
-            rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-                logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
-            )
-
-            # Update generated_ids and attention mask
-            generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
-            attention_mask = lax.dynamic_update_slice(
-                attention_mask, jnp.ones((batch_size, 1), dtype=attention_mask.dtype), (0, kv_cache.cache_position)
-            )
-            last_positions = last_positions + 1
-
-            # Run decoder step
-            outputs = self(
-                next_token,
-                attention_mask=attention_mask,
-                positions=last_positions,
-                kv_cache=kv_cache,
-                adapter_indices=adapter_indices,
-            )
-
-            new_logits = outputs.logits[:, -1, :]
-            new_carry = (
-                outputs.kv_cache,
-                rngs,
-                generated_ids,
-                attention_mask,
-                last_positions,
-                new_logits,
-                all_logprobs,
-                stop_pos,
-            )
-            return new_carry, None
-
-        # Pad inputs to max_length
-        pad_length = max_length - prompt_length
-        attention_mask = jnp.pad(attention_mask, ((0, 0), (0, pad_length)))
-        generated_ids = jnp.pad(input_ids, ((0, 0), (0, pad_length)))
-        all_logprobs = jnp.zeros((batch_size, max_length), dtype=outputs.logits.dtype)
-        stop_pos = jnp.full((batch_size, 1), -1, dtype=jnp.int32)
-
-        initial_carry = (
-            kv_cache,
-            rngs,
-            generated_ids,
+        new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = self._prefill_and_decode(
+            self,
+            input_ids,
             attention_mask,
-            positions[:, -1:],
-            outputs.logits[:, -1, :],
-            all_logprobs,
-            stop_pos,
-        )
-        (kv_cache, rngs, generated_ids, attention_mask, last_positions, logits, all_logprobs, stop_pos), _ = (
-            jax.lax.scan(scan_fn, initial_carry, xs=None, length=max_new_tokens - 1)
+            max_length,
+            max_new_tokens,
+            adapter_indices,
+            temperatures,
+            rngs,
+            stop_tokens,
+            prompt_logprobs=prompt_logprobs,
         )
 
-        # Sample final token
-        rngs, next_token, all_logprobs, stop_pos = next_token_and_logprobs(
-            logits, temperatures, rngs, all_logprobs, kv_cache.cache_position, stop_tokens, stop_pos
-        )
-        generated_ids = lax.dynamic_update_slice(generated_ids, next_token, (0, kv_cache.cache_position))
+        max_tokens = jnp.array([sp.max_tokens for sp in sampling_params])
+        # stop_pos is -1 if no stop token found; has_stop is true only if found within limit
+        has_stop = (stop_pos != -1) & (stop_pos <= max_tokens)
+        end_positions = jnp.where(has_stop, stop_pos, max_tokens)
 
-        # Compute end position for each sequence: stop_pos + 1 if stopped, else prompt_length + max_tokens
-        end_positions = jnp.where(
-            stop_pos[:, 0] >= 0,
-            stop_pos[:, 0] + 1,
-            prompt_length + jnp.array([sp.max_tokens for sp in sampling_params]),
-        )
+        # Single device-to-host transfer
+        (
+            new_tokens_host,
+            has_stop_host,
+            new_logprobs_host,
+            end_positions_host,
+            prompt_logprobs_host,
+            prompt_lengths_host,
+        ) = jax.device_get((new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths))
 
         return GenerateOutput(
-            generated_ids=[generated_ids[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
-            stop_reasons=["stop" if stop_pos[i, 0] >= 0 else "length" for i in range(batch_size)],
-            logprobs=[all_logprobs[i, prompt_length : end_positions[i]].tolist() for i in range(batch_size)],
+            generated_ids=[new_tokens_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            stop_reasons=["stop" if has_stop_host[i] else "length" for i in range(batch_size)],
+            logprobs=[new_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            prompt_logprobs=(
+                [prompt_logprobs_host[i, : prompt_lengths_host[i] - 1].tolist() for i in range(batch_size)]
+                if prompt_logprobs
+                else None
+            ),
         )

@@ -50,7 +50,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
-from verl.trainer.ppo.ray_trainer import Role, compute_advantage, RayPPOTrainer, apply_kl_penalty, compute_response_mask
+from verl.trainer.ppo.ray_trainer import Role, compute_advantage, RayPPOTrainer
 
 from .upload_utils import upload_to_remote_background
 
@@ -214,7 +214,7 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
             # non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "instance", "data_source"]
             # Dacheng: a hack now to pop 'instance' if it exists (for swe); TODO: make this a config option
             # TODO: A unified pr on data format
-            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+            non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source"]
             if "instance" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("instance")
             else:
@@ -265,6 +265,7 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
             test_output_gen_batch = unpad_dataproto(
                 test_output_gen_batch_padded, pad_size=pad_size * val_num_trajectories
             )  # [B*NT, S]
+            num_val_samples = test_output_gen_batch.batch["responses"].shape[0]
 
             print("validation generation end")
 
@@ -296,8 +297,8 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
             if "__num_turns__" in test_batch.non_tensor_batch:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
 
-            if "data_source" in test_batch.non_tensor_batch:
-                data_source_lst.append(test_batch.non_tensor_batch["data_source"].copy())
+            if "data_source" in test_gen_batch.non_tensor_batch:
+                data_source_lst.append(test_gen_batch.non_tensor_batch["data_source"].copy())
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -443,7 +444,7 @@ class SkyAgentPPOTrainer(RayPPOTrainer):
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 # Dacheng: a hack now to pop 'instance' if it exists (for swe); TODO: make this a config option
                 # TODO: A unified pr on data format
-                non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+                non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source"]
                 if "instance" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("instance")
                 else:

@@ -5,6 +5,8 @@ uv run --extra dev --isolated pytest tests/cpu/generators/test_skyrl_gym_generat
 import pytest
 from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
+import numpy as np
+
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
@@ -316,6 +318,9 @@ def test_generator_output_concatenation():
         "stop_reasons",
         "rollout_metrics",
         "rollout_logprobs",
+        # optional but present in the signature
+        "trajectory_ids",
+        "is_last_step",
     ]
     assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
         "GeneratorOutput fields are not what we expect. "
@@ -336,9 +341,9 @@ def test_generator_output_concatenation():
         "prompt_token_ids": [[5, 6, 7], [8]],
         "response_ids": [[5, 6, 7], [8]],
         "rewards": [2.0, 3.0],
-        "loss_masks": [[1, 1, 1], [1, 1, 1]],
+        "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
-        "rollout_logprobs": [[0.5, 0.6], [0.7, 0.8]],
+        "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -347,9 +352,22 @@ def test_generator_output_concatenation():
     assert concatenated_output["prompt_token_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["response_ids"] == [[1, 2], [3, 4], [5, 6, 7], [8]]
     assert concatenated_output["rewards"] == [1.0, 2.0, 2.0, 3.0]
-    assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1, 1, 1]]
+    assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
-    assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]]
+    assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
+
+    # Validate rollout metrics
+    expected_rollout_metrics = {
+        "generate/min_num_tokens": 1,
+        "generate/max_num_tokens": 3,
+        "generate/avg_num_tokens": 2.0,
+        "generate/std_num_tokens": np.std([2, 2, 3, 1]).item(),
+        "generate/avg_tokens_non_zero_rewards": 2.0,
+        "generate/avg_tokens_zero_rewards": 0,
+    }
+    assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
+    for key, value in expected_rollout_metrics.items():
+        np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
 
 
 def test_get_metrics_from_generator_output():
@@ -599,9 +617,10 @@ async def test_multi_turn_response_truncation(
     # Each turn, observation is 13 tokens due to mock_encode and empty system_prompt_ids
     # And the LLM response is 4 tokens due to MOCK_LLM_OUTPUT_IDS
     # So input_ids are 13, 30, 47, 64. And 64 would cause a break in the loop due to exceeding max_input_len.
-    # Then with 64, we get the `input_ids[initial_prompt_length:]`, which makes our final
-    # response_ids to be 64 - 13 = 51 tokens. So in this case, we are not truncated by expected_max_response_tokens.
-    expected_final_response_tokens = 51
+    # We strip the last observation, which gives us 64 - 13 = 51 tokens,
+    # then with 51, we get the `input_ids[initial_prompt_length:]`, which makes our final
+    # response_ids to be 51 - 13 = 38 tokens. So in this case, we are not truncated by expected_max_response_tokens.
+    expected_final_response_tokens = 38
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,

@@ -9,6 +9,7 @@ uv run --isolated --extra dev pytest tests/cpu/inf_engines/test_inference_engine
 from http import HTTPStatus
 from unittest.mock import patch
 
+from transformers import AutoTokenizer
 from skyrl_train.inference_engines.utils import (
     postprocess_completion_request,
     route_prompts_to_engines,
@@ -18,6 +19,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     ErrorResponse,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
 import pytest
@@ -693,4 +695,211 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
 
     # Since finish_reason != abort on the second call and base_response was None,
     # client should return the second response directly (no accumulation)
+    assert out == engines[0].responses[1]
+
+
+# -------------------------------------------
+# tests for InferenceEngineClient.generate retry logic
+# --------------------------------------------
+
+
+@pytest.mark.parametrize("max_tokens_key", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.asyncio
+async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
+    """
+    Test that generate() with retry logic properly accumulates tokens and adjusts subsequent requests.
+
+    First response aborts with tokens [21, 22]; second aborts with 0 tokens (ignored);
+    third finishes with tokens [23, 24]. Assert:
+    - Continuation requests append accumulated tokens to prompt_token_ids
+    - remaining max_tokens decreases by accumulated tokens
+    - Final response accumulates all tokens and uses last stop_reason
+    """
+
+    class MockEngine:
+        def __init__(self):
+            self.calls = []  # capture InferenceEngineInput calls
+            # Pre-programmed responses
+            self.responses = [
+                # 1) abort with 2 tokens
+                InferenceEngineOutput(
+                    responses=["something"],  # will be ignored since we decode the final output
+                    response_ids=[[21, 22]],
+                    stop_reasons=["abort"],
+                    response_logprobs=[[-0.1, -0.2]],
+                ),
+                # 2) abort with 0 tokens (should be ignored)
+                InferenceEngineOutput(
+                    responses=[""],
+                    response_ids=[[]],
+                    stop_reasons=["abort"],
+                    response_logprobs=None,
+                ),
+                # 3) finish with 2 tokens
+                InferenceEngineOutput(
+                    responses=[" something"],  # will be ignored since we decode the final output
+                    response_ids=[[23, 24]],
+                    stop_reasons=["stop"],
+                    response_logprobs=[[-0.3, -0.4]],
+                ),
+            ]
+
+        async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+            self.calls.append(deepcopy(input_batch))
+            idx = len(self.calls) - 1
+            assert idx < len(self.responses), f"Unexpected extra call {idx}"
+            return deepcopy(self.responses[idx])
+
+    engines = [MockEngine()]
+    cfg = _make_min_cfg()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+
+    # Original request
+    prompt_token_ids = [[1, 2, 3, 4, 5]]  # 5 prompt tokens
+    sampling_params = {max_tokens_key: 10, "temperature": 0.7}
+
+    input_batch = InferenceEngineInput(
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+    )
+
+    out = await client.generate(input_batch)
+
+    # Verify engine received 3 calls
+    assert len(engines[0].calls) == 3
+    first_call = engines[0].calls[0]
+    second_call = engines[0].calls[1]
+    third_call = engines[0].calls[2]
+
+    # First call should have original prompt
+    assert first_call["prompt_token_ids"] == [[1, 2, 3, 4, 5]]
+    assert first_call["sampling_params"][max_tokens_key] == 10
+    assert first_call["sampling_params"]["temperature"] == 0.7
+
+    # Second call should have prompt + first response tokens
+    assert second_call["prompt_token_ids"] == [[1, 2, 3, 4, 5, 21, 22]]
+    assert second_call["sampling_params"][max_tokens_key] == 8  # 10 - 2 already generated
+    assert second_call["sampling_params"]["temperature"] == 0.7
+
+    # Third call should also have prompt + first response tokens (second was ignored)
+    assert third_call["prompt_token_ids"] == [[1, 2, 3, 4, 5, 21, 22]]
+    assert third_call["sampling_params"][max_tokens_key] == 8  # 10 - 2 already generated
+    assert third_call["sampling_params"]["temperature"] == 0.7
+
+    # Final response should accumulate all tokens
+    expected_final_response_ids = [21, 22, 23, 24]
+    expected_final_text_response = tokenizer.decode(expected_final_response_ids, skip_special_tokens=True)
+    assert out["responses"] == [expected_final_text_response]
+    assert out["response_ids"] == [expected_final_response_ids]
+    assert out["stop_reasons"] == ["stop"]
+    assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+
+
+@pytest.mark.asyncio
+async def test_generate_retry_direct_return():
+    """
+    Test that if the first generate() request doesn't abort, it returns directly without retries.
+    """
+
+    class MockEngine:
+        def __init__(self):
+            self.calls = []
+            # Single response that completes immediately
+            self.response = InferenceEngineOutput(
+                responses=["something"],
+                response_ids=[[21, 22, 23, 24]],
+                stop_reasons=["stop"],
+                response_logprobs=[[-0.1, -0.2, -0.3, -0.4]],
+            )
+
+        async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+            self.calls.append(deepcopy(input_batch))
+            return deepcopy(self.response)
+
+    engines = [MockEngine()]
+    cfg = _make_min_cfg()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+
+    prompt_token_ids = [[1, 2, 3, 4, 5]]
+    sampling_params = {"max_tokens": 10}
+
+    input_batch = InferenceEngineInput(
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+    )
+
+    out = await client.generate(input_batch)
+
+    # Verify only one call was made
+    assert len(engines[0].calls) == 1
+
+    # Verify response is returned as-is
+    expected_final_response_ids = [21, 22, 23, 24]
+    # note since we completed in one turn, we return the text response of the first turn returned by
+    # the underlying engine instead re-tokenizing like others
+    assert out["responses"] == ["something"]
+    assert out["response_ids"] == [expected_final_response_ids]
+    assert out["stop_reasons"] == ["stop"]
+    assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+
+
+@pytest.mark.asyncio
+async def test_generate_retry_no_gen_finish():
+    """
+    First response aborts with 0 tokens; next finishes.
+    The second request should resend the original unchanged and the final output equals the second response.
+    """
+    final_response_ids = [21, 22, 23]
+
+    class MockEngine:
+        def __init__(self):
+            self.calls = []
+            self.responses = [
+                # 1) abort with 0 tokens
+                InferenceEngineOutput(
+                    responses=[""],
+                    response_ids=[[]],
+                    stop_reasons=["abort"],
+                    response_logprobs=[[]],
+                ),
+                # 2) finish directly
+                InferenceEngineOutput(
+                    responses=["something"],  # will be ignored since we decode the final output
+                    response_ids=[final_response_ids],
+                    stop_reasons=["stop"],
+                    response_logprobs=[[-0.1, -0.1, -0.1]],
+                ),
+            ]
+
+        async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+            self.calls.append(deepcopy(input_batch))
+            return deepcopy(self.responses[len(self.calls) - 1])
+
+    engines = [MockEngine()]
+    cfg = _make_min_cfg()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+
+    original_prompt_ids = [7, 8, 9]
+    input_batch = InferenceEngineInput(
+        prompt_token_ids=[original_prompt_ids],
+        sampling_params={"max_tokens": 16},
+    )
+
+    out = await client.generate(input_batch)
+
+    # Two calls should have been made, identical inputs since first had 0 tokens
+    assert len(engines[0].calls) == 2
+    first_call, second_call = engines[0].calls
+    assert first_call["prompt_token_ids"] == [original_prompt_ids]
+    assert second_call["prompt_token_ids"] == [original_prompt_ids]
+    assert first_call["sampling_params"]["max_tokens"] == 16
+    assert second_call["sampling_params"]["max_tokens"] == 16
+
+    # Since finish_reason != abort on the second call and no accumulation occurred,
+    # client should return the second response directly (no aggregation)
+    # Besides, since we completed in one turn, we return the text response of the first turn returned by
+    # the underlying engine instead re-tokenizing the accumulated tokens
     assert out == engines[0].responses[1]

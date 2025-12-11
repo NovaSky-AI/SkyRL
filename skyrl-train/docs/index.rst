@@ -12,7 +12,6 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    getting-started/quickstart
    getting-started/overview
    getting-started/development
-   getting-started/runpod
 
 .. toctree::
    :maxdepth: 2
@@ -25,10 +24,10 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :caption: Tutorials
 
    tutorials/new_env
-   tutorials/async
+   tutorials/one_step_off_async
+   tutorials/fully_async
    tutorials/tools_guide
    tutorials/skyrl_gym_generator
-   tutorials/skypilot
 
 .. toctree::
    :maxdepth: 2
@@ -48,8 +47,18 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Recipes
+   :caption: Platforms
 
+   platforms/overview
+   platforms/anyscale
+   platforms/runpod
+   platforms/skypilot
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Recipes
+   
+   recipes/overview
    recipes/skyrl-sql
    recipes/searchr1
 

@@ -74,13 +74,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             self.env_executor = None
 
-        if getattr(self.generator_cfg.sampling_params, "logprobs", None) is not None and not self.generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
-
-        if len(self.generator_cfg.chat_template_kwargs) and self.generator_cfg.batched:
-            raise ValueError(
-                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
-            )
+        self._validate_cfg(generator_cfg)
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
         # correctly format and tokenize observations into `observation_ids`.
@@ -104,6 +98,15 @@ class SkyRLGymGenerator(GeneratorInterface):
                 - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
+
+    def _validate_cfg(self, generator_cfg: DictConfig):
+        if getattr(generator_cfg.sampling_params, "logprobs", None) is not None and not generator_cfg.batched:
+            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
+
+        if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
+            raise ValueError(
+                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
+            )
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
@@ -210,6 +213,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
             )
             stop_strs = current_sampling_params.get("stop", None)
+            added_eos = False
             if (
                 stop_strs is not None
                 and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
@@ -217,6 +221,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
+                    added_eos = True
 
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
@@ -246,7 +251,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             elif self.use_conversation_multi_turn:
                 # b. Token-in-token-out. Follow multi-turn chat history format.
                 input_ids, loss_mask, response_end_idx = self._get_next_input_ids_with_multiturn_chat_template(
-                    input_ids, loss_mask, output_ids, new_obs, done
+                    input_ids, loss_mask, output_ids, new_obs, done, added_eos
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
             else:
@@ -266,7 +271,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                chat_history[initial_chat_history_length:],
+                chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
@@ -277,7 +282,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
         else:
-            response_ids = input_ids[initial_prompt_length:]
+            assert not any(
+                loss_mask[response_end_idx - initial_prompt_length + 1 :]
+            ), "loss_mask at index after response end should be all 0"
+            loss_mask = loss_mask[: response_end_idx - initial_prompt_length + 1]
+            response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
@@ -356,8 +365,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
-        responses = engine_output["responses"]
-        all_response_ids = engine_output["response_ids"]
+        outputs = engine_output["responses"]
+        responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
         logprobs = engine_output.get("response_logprobs", None)
 
@@ -367,20 +376,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
-        for i, (response, response_ids, env, env_class) in enumerate(
-            zip(responses, all_response_ids, envs, env_classes)
-        ):
+        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, response)
+            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
+            if len(response) > max_tokens:
+                response = response[:max_tokens]
+            loss_masks.append([1] * len(response))
+            truncated_responses.append(response)
             if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
+                sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
 
             # Get environment-specific metrics
@@ -388,8 +395,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        prompt_token_ids = self.tokenizer.apply_chat_template(prompts, add_generation_prompt=True, tokenize=True)
-        responses = truncated_responses
+        prompt_token_ids = self.tokenizer.apply_chat_template(
+            init_prompts,
+            add_generation_prompt=True,
+            tokenize=True,
+        )
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.apply_overlong_filtering:
@@ -397,7 +407,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
+            "response_ids": truncated_responses,
             "rewards": rewards,
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
@@ -407,13 +417,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
 
         Returns outputs in the same order as the input batch.
         Args:
             input_batch: GeneratorInput
+            disable_tqdm: bool
         Returns:
             GeneratorOutput
         """
@@ -450,6 +461,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             desc="Generating Trajectories",
             miniters=max(1, len(tasks) // 10),
             mininterval=5,
+            disable=disable_tqdm,
         )
 
         responses = [output.response_ids for output in all_outputs]
@@ -560,6 +572,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         output_ids: List[int],
         new_obs: ConversationType,
         done: bool,
+        added_eos: bool,
     ):
         """
         Update the loss mask and input ids given a new model response and observation, following
@@ -607,7 +620,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         # 1. Directly append generated output
         input_ids += output_ids
         response_end_idx = len(input_ids) - 1
-        loss_mask += [1] * len(output_ids)
+        # if `added_eos` is `True`, then  the EOS token was not generated and only added in the
+        # `agent_loop` function. For consistency with other entities like logprobs , we ignore it in the loss
+        # mask
+        loss_mask += [1] * len(output_ids) if not added_eos else [1] * (len(output_ids) - 1) + [0]
 
         # 2. apply chat template for observations, also generate generation prompt for next turn
         if len(new_obs) > 0:
@@ -615,7 +631,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
             observation_ids = self.tokenizer.apply_chat_template(
                 [*self.base_conversation, *new_obs],
-                add_generation_prompt=True,
+                add_generation_prompt=not done,
                 tokenize=True,
                 **self.generator_cfg.chat_template_kwargs,
             )[len(self.base_conversation_token_ids) :]

@@ -45,7 +45,7 @@ The only requirements are:
 - CUDA version 12.8
 - [uv](https://docs.astral.sh/uv/)
 
-If you're running on an existing Ray cluster, make sure to use Ray 2.48.0 and Python 3.12. If not, proceed with the installation instructions below.
+If you're running on an existing Ray cluster, make sure to use Ray 2.51.1 and Python 3.12. If not, proceed with the installation instructions below.
 
 
 First, clone the repository:

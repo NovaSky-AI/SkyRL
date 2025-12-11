@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorResponse,
-    ErrorInfo,
     CompletionRequest,
     CompletionResponse,
 )
@@ -33,8 +32,9 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype
+from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
+from packaging import version
 
 
 @dataclass
@@ -102,7 +102,7 @@ class WorkerWrap:
 
         self._model_update_group = init_custom_process_group(
             backend=backend,
-            init_method=f"tcp://{master_address}:{master_port}",
+            init_method=get_tcp_url(master_address, master_port),
             world_size=world_size,
             rank=rank,
             group_name=group_name,
@@ -127,29 +127,58 @@ class WorkerWrap:
             del weight
 
     def update_weights_cuda_ipc(
-        self, names: List[str], dtypes: List[str], shapes: List[int], ipc_handles: List[Dict[str, Any]]
+        self,
+        names: List[str],
+        dtypes: List[str],
+        shapes: List[int],
+        sizes: List[int],
+        ipc_handles: List[Dict[str, Any]],
+        packed: bool = False,
     ):
-
         weight_list = []
-        for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
 
-            dtype = str_to_torch_dtype(dtype)
+        if packed:
+            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
+            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
+            assert (
+                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
+            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
+            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
+            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
+
             device = torch.cuda.current_device()
             props = torch.cuda.get_device_properties(device)
             physical_gpu_id = str(props.uuid)
 
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-
-            handle = ipc_handle[physical_gpu_id]
-
+            handle = ipc_handles[0][physical_gpu_id]
             device_id = self.device.index
             func, args = handle
             list_args = list(args)
-            # the key is to change device id to the current device id
-            # in case two processes have different CUDA_VISIBLE_DEVICES
             list_args[6] = device_id
-            weight = func(*list_args)
-            weight_list.append((name, weight))
+            packed_tensor = func(*list_args)
+
+            offset = 0
+            for name, shape, size in zip(names, shapes, sizes):
+                weight_list.append((name, packed_tensor[offset : offset + size].view(*shape)))
+                offset += size
+        else:
+            for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
+
+                dtype = str_to_torch_dtype(dtype)
+                device = torch.cuda.current_device()
+                props = torch.cuda.get_device_properties(device)
+                physical_gpu_id = str(props.uuid)
+
+                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+
+                handle = ipc_handle[physical_gpu_id]
+
+                device_id = self.device.index
+                func, args = handle
+                list_args = list(args)
+                list_args[6] = device_id
+                weight = func(*list_args)
+                weight_list.append((name, weight))
 
         self.model_runner.model.load_weights(weights=weight_list)
 
@@ -354,7 +383,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
 
         if not len(request["names"]):
-            raise ValueError("Update weight request should have atleast one entry in 'names'")
+            raise ValueError("Update weight request should have at least one entry in 'names'")
 
         # Handle LoRA disk loading request
         if self._is_lora_disk_loading_request(request):
@@ -371,7 +400,9 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request["names"],
                     request["dtypes"],
                     request["shapes"],
+                    request.get("sizes", []),
                     [extra["ipc_handles"] for extra in request["extras"]],
+                    request.get("packed", False),
                 ),
             )
         else:
@@ -399,7 +430,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
-        engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+        else:
+            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
@@ -486,6 +520,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def sleep(self, *args: Any, **kwargs: Any):
         engine = self._get_engine()
         output_processor = engine.output_processor
+        # make sure that the engine is alive
+        engine.engine_core.ensure_alive()
         if output_processor.has_unfinished_requests():
             logger.warning(
                 "Calling sleep() with unfinished requests in vLLM engine. This is unexpected since all "
@@ -534,7 +570,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request["names"],
                     request["dtypes"],
                     request["shapes"],
+                    request.get("sizes", []),
                     [extra["ipc_handles"] for extra in request["extras"]],
+                    request.get("packed", False),
                 ),
             )
         else:
@@ -580,13 +618,22 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.BAD_REQUEST.phrase,
+                        code=HTTPStatus.BAD_REQUEST.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
         # 2. Call vllm engine
         try:
@@ -602,13 +649,22 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
-            return ErrorResponse(
-                error=ErrorInfo(
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
+                from vllm.entrypoints.openai.protocol import ErrorInfo
+
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    ),
+                ).model_dump()
+            else:
+                return ErrorResponse(
                     message=str(e),
                     type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                     code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                ),
-            ).model_dump()
+                ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.

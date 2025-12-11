@@ -29,7 +29,8 @@ def cfg() -> DictConfig:
     return cfg
 
 
-def test_ppo_train_basic_execution(ray_init_fixture, cfg):
+@pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False), (True, True), (True, False), (False, True)])
+def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_kl_loss):
     """
     Test that ppo_train runs and returns correct structure.
 
@@ -40,6 +41,12 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg):
     """
     try:
         cfg.trainer.strategy = "deepspeed"  # Strategy logic is not tested here.
+        if use_entropy_loss:
+            cfg.trainer.algorithm.use_entropy_loss = True
+            cfg.trainer.algorithm.entropy_loss_coef = 0.01
+        if use_kl_loss:
+            cfg.trainer.algorithm.use_kl_loss = True
+            cfg.trainer.algorithm.kl_loss_coef = 0.001
 
         actor_group = init_worker_with_type(
             "policy",
@@ -63,7 +70,14 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg):
         train_status = result.metadata["train_status"]
 
         # Validate expected training metrics are present
-        expected_metrics = ["policy_loss", "policy_update_steps", "policy_lr", "ppo_clip_ratio", "policy_entropy"]
+        expected_metrics = [
+            "policy_loss",
+            "policy_update_steps",
+            "policy_lr",
+            "ppo_clip_ratio",
+            "policy_entropy",
+            "final_loss",
+        ]
 
         for metric in expected_metrics:
             assert metric in train_status, f"Should have {metric} in train_status"

@@ -8,4 +8,4 @@ outputs/*
 .venv
 *.log
 *.wandb
-.env
+tinker_output*
