@@ -2,7 +2,7 @@
 
 # SAPO Trainer
 
-`run_dapo_aime_qwen3_4b_aime.sh` is a Slurm script that launches the Qwen3-4B SAPO job using `uv`.
+`run_dapo_aime_qwen3_4b_aime.sh` is a bash script that launches the Qwen3-4B SAPO job using `uv`. It uses the `examples/algorithms/dapo/main_dapo.py` script, but with the SAPO policy loss and 
 
 ## Quick Start
 
@@ -11,10 +11,5 @@
 3. Submit the job:
 
    ```bash
-   cd examples/algorithms/sapo
-   sbatch run_dapo_aime_qwen3_4b_aime.sh
+   bash examples/algorithms/sapo/run_dapo_aime_qwen3_4b_aime.sh
    ```
-
-Logs land in `logs/sapo/30B/` (you can change it) and checkpoints under `$DATA_ROOT/checkpoint/…`. Monitor the job with `squeue -u <user>` or check the `.out/.err` files.
-
-Happy trainings :)

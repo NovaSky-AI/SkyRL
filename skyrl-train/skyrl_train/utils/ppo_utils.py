@@ -605,7 +605,7 @@ def sapo_policy_loss(
 ) -> Tuple[torch.Tensor, float]:
     """
     SAPO (Soft Adaptive Policy Optimization) policy loss function.
-    
+
     Compute the smoothed policy objective and related metrics for SAPO.
 
     See https://arxiv.org/pdf/2511.20347 for more details.
@@ -622,9 +622,9 @@ def sapo_policy_loss(
         logger_.warning(f"With SAPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 
     # temperature for positive and negative token updates
-    tau_pos = torch.as_tensor(config.tau_pos, dtype=advantages.dtype, device=advantages.device)
-    tau_neg = torch.as_tensor(config.tau_neg, dtype=advantages.dtype, device=advantages.device)
-    
+    tau_pos = torch.as_tensor(config.sapo.tau_pos, dtype=advantages.dtype, device=advantages.device)
+    tau_neg = torch.as_tensor(config.sapo.tau_neg, dtype=advantages.dtype, device=advantages.device)
+
     def gate_function(x, tau):
         """The gating function used in SAPO"""
         return torch.sigmoid(tau * (x - 1.0)) * (4.0 / tau)
@@ -633,13 +633,13 @@ def sapo_policy_loss(
     # r_{i,t}(θ) = π_θ(y_{i,t}|x, y_{i,<t}) / π_θold(y_{i,t}|x, y_{i,<t})]
     # In log space: log(r_{i,t}(θ)) = log_probs - old_log_probs
     log_ratio = log_probs - old_log_probs
-    
+
     # Clamp log_ratio for stability -> avoid overflow in exp()
     log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
-    
+
     # finally exp() to remove log and get r_{i,t}(θ)
     ratio = torch.exp(log_ratio)
-    
+
     # tau_{i,t} is tau_pos if adv > 0 else tau_neg
     taus = torch.where(
         condition=advantages > 0,
@@ -652,12 +652,12 @@ def sapo_policy_loss(
 
     # compute policy gradient loss
     loss = -gates * advantages
-    
+
     # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
     # SAPO does not use clipping, so we set clip_ratio to 0.0 for compatibility
-    clip_ratio = 0.0  
+    clip_ratio = 0.0
 
     return loss, clip_ratio
 
