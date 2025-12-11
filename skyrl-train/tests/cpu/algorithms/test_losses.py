@@ -563,3 +563,61 @@ def test_kl_cov_policy_loss():
     assert not torch.allclose(
         loss, regular_loss, rtol=1e-3
     ), f"KL-Cov and regular PPO should differ: kl_cov={loss:.6f} vs regular={regular_loss:.6f}"
+
+
+def test_sapo_policy_loss_basic():
+    """Tests SAPO policy loss against a hand-computed expectation."""
+
+    device = "cpu"
+
+    # Mix of positive and negative advantages so tau_pos / tau_neg both get used
+    advantages = torch.tensor([[1.0, -1.0, 0.5]], device=device)
+
+    # Simple log-prob configuration to produce non-trivial ratios
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    # Ratios ≈ [exp(-0.5), exp(0.2), exp(-0.1)] ≈ [0.6065, 1.2214, 0.9048]
+    log_probs = torch.tensor([[-1.5, -0.8, -1.1]], device=device)
+
+    # SAPO config: uses sequence_mean reduction and distinct tau_pos / tau_neg
+    config = DictConfig(
+        {
+            "policy_loss_type": "sapo",
+            "loss_reduction": "sequence_mean",
+            "max_seq_len": 4,
+            "sapo": {"tau_pos": 1.0, "tau_neg": 2.0},
+        }
+    )
+
+    loss_fn = PolicyLossRegistry.get("sapo")
+
+    # Actual SAPO loss
+    actual_loss, actual_clip_ratio = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+    )
+
+    # --- Hand-computed expectation, mirroring sapo_policy_loss implementation ---
+
+    tau_pos = torch.as_tensor(config.sapo.tau_pos, dtype=advantages.dtype, device=advantages.device)
+    tau_neg = torch.as_tensor(config.sapo.tau_neg, dtype=advantages.dtype, device=advantages.device)
+
+    def gate_function(x, tau):
+        return torch.sigmoid(tau * (x - 1.0)) * (4.0 / tau)
+
+    log_ratio = log_probs - old_log_probs
+    log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)
+    ratio = torch.exp(log_ratio)
+
+    taus = torch.where(advantages > 0, tau_pos, tau_neg)
+    gates = gate_function(ratio, taus)
+
+    loss_per_token = -gates * advantages
+    # sequence_mean reduction: per-sequence token mean, then batch mean
+    expected_loss = loss_per_token.mean(dim=-1).mean()
+
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)
+
+    # SAPO should always report clip_ratio = 0.0
+    assert actual_clip_ratio == 0.0
