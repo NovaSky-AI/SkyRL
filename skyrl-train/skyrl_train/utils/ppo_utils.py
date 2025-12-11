@@ -1076,6 +1076,7 @@ def compute_grpo_outcome_advantage(
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
+        returns = returns.unsqueeze(-1) * response_mask
 
     return scores, returns
 
