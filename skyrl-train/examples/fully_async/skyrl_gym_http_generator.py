@@ -154,6 +154,8 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
                 env_step_output.get("postprocessed_action", None) is None
             ), "postprocessed action is not supported for SkyRLGymHTTPGenerator"
 
+            obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
+
             # Create turn output
             turn_output = TurnOutput(
                 output=output,
@@ -161,6 +163,8 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
                 output_logprobs=response_logprobs,
                 new_obs=new_obs,
                 reward=step_reward,
+                obs_ids=obs_ids,
+                added_eos=False,
             )
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
