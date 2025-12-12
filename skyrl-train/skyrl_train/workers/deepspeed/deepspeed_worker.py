@@ -20,6 +20,7 @@ from skyrl_train.workers.worker import (
 )
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferSender
 
 
 class DeepSpeedWeightExtractor(WeightExtractor):
@@ -200,34 +201,14 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         torch.cuda.empty_cache()
 
         if not self.use_cuda_ipc:
-            # Broadcast path: one chunk per parameter
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # Each chunk contains one parameter
-                assert len(chunk) == 1
-                name = chunk.names[0]
-                shape = chunk.shapes[0]
-                tensor = chunk.tensors[0]
-
-                if torch.distributed.get_rank() == 0:
-                    update_weight_task = asyncio.create_task(
-                        inference_engine_client.update_named_weights(
-                            {
-                                "names": [name],
-                                "dtypes": [self.cfg.generator.model_dtype],
-                                "shapes": [shape],
-                            }
-                        )
-                    )
-
-                # Broadcast tensor
-                def broadcast_tensor(tensor):
-                    if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
-
-                await asyncio.to_thread(broadcast_tensor, tensor)
-                if torch.distributed.get_rank() == 0:
-                    await update_weight_task
-            torch.distributed.barrier()
+            # Broadcast path: use sender abstraction
+            sender = BroadcastWeightTransferSender(
+                rank=torch.distributed.get_rank(),
+                model_update_group=self._model_update_group,
+                model_dtype_str=self.cfg.generator.model_dtype,
+                inference_client=inference_engine_client,
+            )
+            await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
         else:
             # CUDA IPC path: batched chunks (batching handled by extractor)
             from torch.multiprocessing.reductions import reduce_tensor

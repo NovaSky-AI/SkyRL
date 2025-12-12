@@ -31,6 +31,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferReceiver
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
@@ -651,6 +652,12 @@ class VLLMWeightTransferReceiver:
         self.model_config = model_config
         self.device = device
 
+        # Create broadcast receiver for delegation
+        self._broadcast_receiver = BroadcastWeightTransferReceiver(
+            model_dtype=model_config.dtype,
+            model_update_group=model_update_group,
+        )
+
     def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights and yield (name, tensor) tuples.
 
@@ -663,16 +670,7 @@ class VLLMWeightTransferReceiver:
         if is_ipc:
             yield from self._receive_ipc(request)
         else:
-            yield from self._receive_broadcast(request)
-
-    def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive weights via torch.distributed.broadcast."""
-        for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
-            dtype = str_to_torch_dtype(dtype_str)
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self.model_update_group)
-            yield name, weight
+            yield from self._broadcast_receiver.receive_weights(request)
 
     def _receive_ipc(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via CUDA IPC handles."""
