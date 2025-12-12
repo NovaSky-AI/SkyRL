@@ -13,6 +13,11 @@ from .broadcast_strategy import (
     BroadcastWeightTransferSender,
     BroadcastWeightTransferReceiver,
 )
+from .cuda_ipc_strategy import (
+    CudaIpcTransferStrategy,
+    CudaIpcWeightTransferSender,
+    CudaIpcWeightTransferReceiver,
+)
 
 __all__ = [
     "WeightChunk",
@@ -24,4 +29,7 @@ __all__ = [
     "BroadcastTransferStrategy",
     "BroadcastWeightTransferSender",
     "BroadcastWeightTransferReceiver",
+    "CudaIpcTransferStrategy",
+    "CudaIpcWeightTransferSender",
+    "CudaIpcWeightTransferReceiver",
 ]

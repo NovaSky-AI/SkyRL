@@ -21,6 +21,7 @@ from skyrl_train.workers.worker import (
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferSender
+from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferSender
 
 
 class DeepSpeedWeightExtractor(WeightExtractor):
@@ -210,42 +211,14 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             )
             await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
         else:
-            # CUDA IPC path: batched chunks (batching handled by extractor)
-            from torch.multiprocessing.reductions import reduce_tensor
-
-            # Iterate over batched chunks
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
-
-                # Process all parameters in this batch
-                # TODO(haochen): Pack tensors into contiguous buffer before creating IPC handle
-                # (like Megatron does) to reduce number of IPC handles and file descriptors
-                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
-                    # Create IPC handle for tensor
-                    ipc_handle = reduce_tensor(tensor)
-                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                    ipc_handle_list = [None] * torch.distributed.get_world_size()
-                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
-
-                    if torch.distributed.get_rank() == 0:
-                        ipc_handles = {}
-                        for d in ipc_handle_list:
-                            ipc_handles.update(d)
-
-                        weights_update_request["names"].append(name)
-                        weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                        weights_update_request["shapes"].append(shape)
-                        weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-
-                    torch.distributed.barrier()
-                    torch.cuda.synchronize()
-
-                # Send batch
-                if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.update_named_weights(weights_update_request)
-                    torch.cuda.ipc_collect()
-                torch.distributed.barrier()
-                torch.cuda.synchronize()
+            # CUDA IPC path: use sender abstraction
+            sender = CudaIpcWeightTransferSender(
+                rank=torch.distributed.get_rank(),
+                world_size=torch.distributed.get_world_size(),
+                model_dtype_str=self.cfg.generator.model_dtype,
+                inference_client=inference_engine_client,
+            )
+            await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
 
         if cache_reset_task is not None:
             await cache_reset_task

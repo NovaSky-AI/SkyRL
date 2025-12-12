@@ -32,6 +32,7 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferReceiver
+from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferReceiver
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
@@ -652,10 +653,14 @@ class VLLMWeightTransferReceiver:
         self.model_config = model_config
         self.device = device
 
-        # Create broadcast receiver for delegation
+        # Create receivers for delegation
         self._broadcast_receiver = BroadcastWeightTransferReceiver(
             model_dtype=model_config.dtype,
             model_update_group=model_update_group,
+        )
+        self._cuda_ipc_receiver = CudaIpcWeightTransferReceiver(
+            model_dtype=model_config.dtype,
+            device=device,
         )
 
     def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -668,58 +673,9 @@ class VLLMWeightTransferReceiver:
         is_ipc = extras and len(extras) > 0 and "ipc_handles" in extras[0]
 
         if is_ipc:
-            yield from self._receive_ipc(request)
+            yield from self._cuda_ipc_receiver.receive_weights(request)
         else:
             yield from self._broadcast_receiver.receive_weights(request)
-
-    def _receive_ipc(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive weights via CUDA IPC handles."""
-        names = request["names"]
-        dtypes = request["dtypes"]
-        shapes = request["shapes"]
-        sizes = request.get("sizes", [])
-        ipc_handles = [extra["ipc_handles"] for extra in request["extras"]]
-        packed = request.get("packed", False)
-
-        if packed:
-            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
-            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-            assert (
-                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
-            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
-            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
-            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
-
-            cuda_device = torch.cuda.current_device()
-            props = torch.cuda.get_device_properties(cuda_device)
-            physical_gpu_id = str(props.uuid)
-
-            handle = ipc_handles[0][physical_gpu_id]
-            device_id = self.device.index
-            func, args = handle
-            list_args = list(args)
-            list_args[6] = device_id
-            packed_tensor = func(*list_args)
-
-            offset = 0
-            for name, shape, size in zip(names, shapes, sizes):
-                yield name, packed_tensor[offset : offset + size].view(*shape)
-                offset += size
-        else:
-            cuda_device = torch.cuda.current_device()
-            props = torch.cuda.get_device_properties(cuda_device)
-            physical_gpu_id = str(props.uuid)
-            for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
-                dtype = str_to_torch_dtype(dtype_str)
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-
-                handle = ipc_handle[physical_gpu_id]
-                device_id = self.device.index
-                func, args = handle
-                list_args = list(args)
-                list_args[6] = device_id
-                weight = func(*list_args)
-                yield name, weight
 
 
 class VLLMWeightLoader(WeightLoader):

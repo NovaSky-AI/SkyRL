@@ -31,7 +31,6 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
-from skyrl_train.utils import torch_dtype_to_str
 from skyrl_train.inference_engines.sglang.ipc_utils import (
     serialize_ipc_request,
     deserialize_ipc_request,
@@ -108,13 +107,14 @@ def setup_envvars_for_sglang(kwargs, bundle_indices):
         os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
 
 
-class SGLangWeightTransferReceiver:
-    """Receives weights via CUDA IPC for SGLang.
+def sglang_custom_weight_loader(model, named_tensors):
+    """Custom weight loader for SGLang that handles CUDA IPC.
 
-    This receiver is used inside the custom_weight_loader function
-    which is invoked by SGLang's internal mechanisms.
+    This function is called by SGLang's model runner to load weights.
+    It reconstructs tensors from SkyRL's NamedWeightsUpdateRequest
+    using CUDA IPC handles.
 
-    Note: this is not used for the broadcast path.
+    Note: Broadcast path is not handled here.
     Because unlike vLLM where we control WorkerWrap and can store the
     process group there, SGLang's custom_weight_loader only receives (model, tensors).
     The process group (_model_update_group) is stored in model_runner, which is not
@@ -125,57 +125,8 @@ class SGLangWeightTransferReceiver:
     uses SGLang's native update_weights_from_distributed API which has internal access
     to the process group.
     """
+    from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferReceiver
 
-    def __init__(self, model_dtype: str, device_id: int) -> None:
-        """Initialize the receiver.
-
-        Args:
-            model_dtype: Model's dtype as string (e.g., "bfloat16").
-            device_id: Target CUDA device index.
-        """
-        self._model_dtype = model_dtype
-        self._device_id = device_id
-
-    def receive_ipc_weights(
-        self,
-        request: NamedWeightsUpdateRequest,
-    ) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive weights by opening CUDA IPC handles.
-
-        Args:
-            request: Weight update request with IPC handles.
-
-        Yields:
-            (name, tensor) tuples for each weight.
-        """
-        device = torch.cuda.current_device()
-        props = torch.cuda.get_device_properties(device)
-        physical_gpu_id = str(props.uuid)
-
-        for i in range(len(request["names"])):
-            ipc_handles = request["extras"][i]["ipc_handles"]
-            dtype = request["dtypes"][i]
-            weight_name = request["names"][i]
-
-            assert dtype == self._model_dtype, f"mismatch dtype: src {dtype}, dst {self._model_dtype}"
-
-            handle = ipc_handles[physical_gpu_id]
-            func, args = handle
-            list_args = list(args)
-            # Change device id to the current device id
-            # in case two processes have different CUDA_VISIBLE_DEVICES
-            list_args[6] = self._device_id
-            weight = func(*list_args)
-            yield weight_name, weight
-
-
-def sglang_custom_weight_loader(model, named_tensors):
-    """Custom weight loader for SGLang that handles CUDA IPC.
-
-    This function is called by SGLang's model runner to load weights.
-    It reconstructs tensors from SkyRL's NamedWeightsUpdateRequest
-    using CUDA IPC handles.
-    """
     # Extract tensor name and data
     name, tensor = named_tensors[0]
     if name != "ipc_request":
@@ -185,12 +136,12 @@ def sglang_custom_weight_loader(model, named_tensors):
     request = deserialize_ipc_request(tensor)
 
     # Get model info and create receiver
-    model_dtype = torch_dtype_to_str(next(model.parameters()).dtype)
-    device_id = next(model.parameters()).device.index
-    receiver = SGLangWeightTransferReceiver(model_dtype, device_id)
+    model_dtype = next(model.parameters()).dtype
+    device = next(model.parameters()).device
+    receiver = CudaIpcWeightTransferReceiver(model_dtype, device)
 
     # Receive weights via IPC
-    weights_to_load = list(receiver.receive_ipc_weights(request))
+    weights_to_load = list(receiver.receive_weights(request))
     model.load_weights(weights_to_load)
 
 
