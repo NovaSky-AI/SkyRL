@@ -287,7 +287,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         is_lora = request["names"][0] == "lora_disk_load"
         if is_lora:
             assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
+                "vLLM LoRA weight update requests must contain the disk load path under key `lora_disk_path`"
             )
         return is_lora
 
