@@ -131,7 +131,7 @@ class SaveWeightsForSamplerInput(BaseModel):
 
 
 class SaveWeightsForSamplerOutput(BaseModel):
-    path: str
+    path: str | None = None
     type: str
 
 

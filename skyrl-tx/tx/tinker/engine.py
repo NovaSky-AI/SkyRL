@@ -873,7 +873,6 @@ class TinkerEngine:
             )
 
         return types.SaveWeightsForSamplerOutput(
-            path=f"tinker://{model_id}/{checkpoint_id}",
             type="save_weights_for_sampler",
         )
 
