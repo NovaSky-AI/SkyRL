@@ -23,7 +23,7 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         with dest.open("wb") as f:
-            # Use streaming mode for speed, as checkpoint files don't compress well.
+            # Use compresslevel=0 to prioritize speed, as checkpoint files don't compress well.
             with gzip.GzipFile(fileobj=f, mode="wb", compresslevel=0) as gz_stream:
                 with tarfile.open(fileobj=gz_stream, mode="w:") as tar:
                     tar.add(tmp_path, arcname="")
