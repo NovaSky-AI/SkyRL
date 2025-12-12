@@ -287,7 +287,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         is_lora = request["names"][0] == "lora_disk_load"
         if is_lora:
             assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
+                "vLLM LoRA weight update requests must contain the disk load path under key `lora_disk_path`"
             )
         return is_lora
 
@@ -337,11 +337,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError()
+        raise NotImplementedError("`chat_completion is only supported in AsyncVLLMInferenceEngine.")
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError()
+        raise NotImplementedError("`completion` is only supported in AsyncVLLMInferenceEngine.")
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
