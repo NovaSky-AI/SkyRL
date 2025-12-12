@@ -7,6 +7,7 @@ from typing import Callable, TYPE_CHECKING
 
 from cloudpathlib import CloudPath
 from flax import nnx
+from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,11 +16,32 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
+from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
 
 if TYPE_CHECKING:
     import torch
+
+
+def resolve_model_path(model_name_or_path: str) -> str:
+    """Resolve a model name or path to a local directory path.
+
+    If the model_name_or_path points to an existing local directory, it will be
+    used directly. Otherwise, the model will be downloaded from HuggingFace Hub.
+
+    Args:
+        model_name_or_path: Either a local path to a model directory or a
+            HuggingFace model identifier (e.g., "Qwen/Qwen3-0.6B").
+
+    Returns:
+        Path to the local directory containing model config and weights.
+    """
+    local_path = Path(model_name_or_path).expanduser()
+    if local_path.is_dir():
+        logger.info(f"Using local model at {local_path}")
+        return str(local_path)
+    return snapshot_download(model_name_or_path, allow_patterns=["*.safetensors", "*.json"])
 
 
 def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:

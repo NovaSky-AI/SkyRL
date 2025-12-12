@@ -40,17 +40,44 @@ from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
+@contextmanager
+def log_timing(request: str):
+    """Context manager to log execution time for a request."""
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start_time
+        logger.info(f"(timing) {request} took {elapsed:.3f}s")
+
+
 def pad(xs, pad_to: int, *, fill):
     """Pad a list to a specified length with a fill value."""
     return xs + ([fill] * (pad_to - len(xs)))
 
 
-def pad_batch(sequences: list[list], max_length: int, dtype) -> jax.Array:
-    """Pad a batch of sequences to max_length."""
+def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False) -> jax.Array:
+    """Pad a batch of sequences to max_length.
+
+    Args:
+        sequences: List of sequences to pad.
+        max_length: Target length for all sequences.
+        dtype: NumPy dtype for the output array.
+        left: If True, use left-padding (tokens at end). Required for autoregressive
+            generation so the last position corresponds to the last real token.
+            If False (default), use right-padding (tokens at start).
+
+    Returns:
+        A JAX array of shape (batch_size, max_length) with the padded sequences.
+    """
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
     for i, seq in enumerate(sequences):
-        padded[i, : len(seq)] = seq
+        assert len(seq) <= max_length, f"Sequence length {len(seq)} exceeds max_length {max_length}"
+        if left:
+            padded[i, max_length - len(seq) :] = seq
+        else:
+            padded[i, : len(seq)] = seq
     return jnp.asarray(padded)
 
 
@@ -415,6 +442,10 @@ class TinkerEngine:
         Returns sample operations ensuring that each model_id has only one checkpoint_id
         to avoid loading different checkpoints for the same model in a single batch.
 
+        If sample_max_num_sequences is configured, limits to that many requests so we don't
+        produce partial batches in process_sample_batch. If num_samples > 1 for some requests,
+        this may not be perfect, but it's good until we implement continuous batching.
+
         Args:
             session: Database session
 
@@ -437,6 +468,9 @@ class TinkerEngine:
             # take only requests with one checkpoint_id for a given model_id
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
+
+        if self.config.sample_max_num_sequences > 0:
+            batchable = batchable[: self.config.sample_max_num_sequences]
 
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
@@ -688,9 +722,10 @@ class TinkerEngine:
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
+                # Use left-padding for sampling so the last position is always the last real token.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = pad_batch(batch_prompts, max_len, np.int32)
-                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
+                input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
@@ -927,6 +962,25 @@ class TinkerEngine:
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
+    def process_single_requests(self, requests: dict[str, tuple[str, types.RequestType, dict]]):
+        """Process a collection of single (non-batchable) requests.
+
+        Args:
+            requests: Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        if not requests:
+            return
+        results = {}
+        for request_id, (model_id, request_type, request_data) in requests.items():
+            with log_timing(f"process_single_request({request_type.value})"):
+                try:
+                    result = self.process_single_request(request_type, model_id, request_data)
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result = types.ErrorResponse(error=str(e), status="failed")
+            results[request_id] = result
+        self._complete_futures(results)
+
     def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
 
@@ -936,14 +990,13 @@ class TinkerEngine:
         """
         if not requests:
             return
-        try:
-            results = batch_processor(requests)
-            self._complete_futures(results)
-        except Exception as e:
-            logger.exception(f"Error processing batch: {e}")
-            self._complete_futures(
-                {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
-            )
+        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+            try:
+                results = batch_processor(requests)
+            except Exception as e:
+                logger.exception(f"Error processing batch: {e}")
+                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+        self._complete_futures(results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
@@ -962,16 +1015,7 @@ class TinkerEngine:
             self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
-            other_results = {}
-            for request_id, (model_id, request_type, request_data) in other_requests.items():
-                try:
-                    result = self.process_single_request(request_type, model_id, request_data)
-                except Exception as e:
-                    logger.exception(f"Error processing request {request_id}: {e}")
-                    result = types.ErrorResponse(error=str(e), status="failed")
-                other_results[request_id] = result
-
-            self._complete_futures(other_results)
+            self.process_single_requests(other_requests)
 
             # Poll every 100ms
             time.sleep(0.1)

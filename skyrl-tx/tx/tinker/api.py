@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import subprocess
 import random
+import time
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -765,28 +766,44 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    poll_interval = 0.1  # 100ms
+    deadline = time.perf_counter() + timeout
 
-    for _ in range(int(timeout / poll_interval)):
-        async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-            result = await session.exec(statement)
-            future = result.first()
+    # Start with 100ms, grow to 1s
+    poll = 0.1
+    max_poll = 1.0
 
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
+    while time.perf_counter() < deadline:
+        try:
+            async with AsyncSession(req.app.state.db_engine) as session:
+                # First, only query the status to avoid deserializing JSON data
+                statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
+                result = await session.exec(statement)
+                status = result.first()
 
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
+                if not status:
+                    raise HTTPException(status_code=404, detail="Future not found")
 
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
+                # Only fetch full record if status is terminal (completed or failed)
+                if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+                    statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+                    result = await session.exec(statement)
+                    future = result.first()
 
-        await asyncio.sleep(poll_interval)
+                    if future.status == RequestStatus.COMPLETED:
+                        return future.result_data
+
+                    if future.status == RequestStatus.FAILED:
+                        # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                        if future.result_data and "error" in future.result_data:
+                            raise HTTPException(status_code=400, detail=future.result_data["error"])
+                        else:
+                            raise HTTPException(status_code=500, detail="Unknown error")
+        except SATimeoutError:
+            pass
+
+        # Exponential backoff
+        await asyncio.sleep(poll)
+        poll = min(poll * 1.5, max_poll)
 
     raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
