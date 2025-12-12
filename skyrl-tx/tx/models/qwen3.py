@@ -129,6 +129,7 @@ class Qwen3Attention(nnx.Module):
             scale=1.0 / self.head_dim**0.5,
             mask=attention_mask[:, None, None, :].astype(bool),
             is_causal=kv_cache is None,
+            implementation="cudnn",
         )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
