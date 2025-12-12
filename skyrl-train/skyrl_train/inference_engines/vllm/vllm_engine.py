@@ -708,12 +708,11 @@ class VLLMWeightTransferReceiver:
                 yield name, packed_tensor[offset : offset + size].view(*shape)
                 offset += size
         else:
+            cuda_device = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(cuda_device)
+            physical_gpu_id = str(props.uuid)
             for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
                 dtype = str_to_torch_dtype(dtype_str)
-                cuda_device = torch.cuda.current_device()
-                props = torch.cuda.get_device_properties(cuda_device)
-                physical_gpu_id = str(props.uuid)
-
                 assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
 
                 handle = ipc_handle[physical_gpu_id]
