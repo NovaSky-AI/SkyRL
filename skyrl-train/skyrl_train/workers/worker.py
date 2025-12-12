@@ -515,7 +515,8 @@ class PPORayActorGroup:
         *args,
         **kwargs,
     ) -> List[ObjectRef]:
-        """Asynchronously initialize worker state (model, and optimizer if applicable) from model path on all the workers.
+        """Asynchronously initialize worker state (model, and optimizer if applicable) from model path 
+        on all the workers.
 
         Returns:
             A list of ray object refs.
@@ -679,7 +680,8 @@ class PolicyWorkerBase(Worker):
                 status = self.strategy.all_reduce(status)
 
                 # weighted mean for kl
-                # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
+                # TODO (sumanthrh): this weighted mean is no longer correct since we use the max 
+                # response length in the batch.
                 # we can log this in the driver
                 # if "kl" in status:
                 #     status["kl"] *= status["response_length"]
@@ -726,7 +728,8 @@ class PolicyWorkerBase(Worker):
 
     def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
         """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
+        Perform one micro-batch of training, accumulate gradients, and step the optimizer only
+        after `accumulation_steps` micro-batches.
         """
         self.model.train()
         experience.to_device(torch.cuda.current_device())
@@ -989,7 +992,8 @@ class CriticWorkerBase(Worker):
 
     def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
         """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
+        Perform one micro-batch of training, accumulate gradients, and step the optimizer only 
+        after `accumulation_steps` micro-batches.
         """
         experience.to_device(torch.cuda.current_device())
 
