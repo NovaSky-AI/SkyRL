@@ -337,11 +337,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError()
+        raise NotImplementedError("`chat_completion is only supported in AsyncVLLMInferenceEngine.")
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError()
+        raise NotImplementedError("`completion` is only supported in AsyncVLLMInferenceEngine.")
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
