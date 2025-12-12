@@ -1244,7 +1244,10 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
                 # On the final turn, return the final reward.
                 return BaseTextEnvStepOutput(observations=[], reward=2.0, done=True, metadata={})
 
-    mock_make.side_effect = TruncEnv()
+    def mock_make_func(*args, **kwargs):
+        return TruncEnv()
+
+    mock_make.side_effect = mock_make_func
 
     # Generator config: non-retokenize message mode; max_turns=1 so max_response_tokens = max_tokens
     cfg = get_default_config().generator

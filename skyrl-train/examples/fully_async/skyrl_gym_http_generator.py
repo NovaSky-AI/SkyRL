@@ -1,7 +1,14 @@
 import aiohttp
+from typing import Union
 import copy
 from uuid import uuid4
-from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, AgentLoopOutput
+from skyrl_train.generators.skyrl_gym_generator import (
+    SkyRLGymGenerator,
+    TrajectoryOutput,
+    StepWiseOutput,
+    AgentLoopState,
+    TurnOutput,
+)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from omegaconf import DictConfig
 from typing import List, Dict, Any, Optional, Tuple
@@ -44,7 +51,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-    ) -> AgentLoopOutput:
+    ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
 
@@ -66,6 +73,10 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
+        assert (
+            not self.generator_cfg.step_wise_training
+        ), "`step_wise_training` is not supported with `SkyRLGymHTTPGenerator`"
+
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
@@ -74,17 +85,15 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
-        done = False
 
-        # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
+        # Instantiate chat_history, which is used for retokenize_chat_history codepath.
         # Need copy here since the prompt is a list of messages and we are going to modify it.
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         initial_chat_history_length = len(chat_history)
-        chat_end_index = len(chat_history)
-        input_ids = self.tokenizer.apply_chat_template(
+        initial_input_ids = self.tokenizer.apply_chat_template(
             chat_history,
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
@@ -94,15 +103,25 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             **self.generator_cfg.chat_template_kwargs,
         )
 
-        initial_prompt_length = len(input_ids)
-        loss_mask = []  # this excludes the prompt
-        rollout_logprobs = None
+        initial_prompt_length = len(initial_input_ids)
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
-        while not done:
+        # Initialize agent loop state
+        agent_loop_state = AgentLoopState(
+            chat_history=chat_history,
+            input_ids=initial_input_ids,
+            loss_mask=None,
+            rollout_logprobs=None,
+            response_end_idx=None,
+            done=False,
+        )
 
-            if len(input_ids) > max_input_length:
+        stop_reason = None
+
+        while not agent_loop_state.done:
+
+            if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
                 break
 
@@ -110,8 +129,7 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             conn = aiohttp.TCPConnector(limit=0, limit_per_host=0)  # 0 = no limit; without conn, has 100
             async with aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=None)) as session:
                 headers = {"Content-Type": "application/json"}
-                messages = [{"role": m["role"], "content": m["content"]} for m in chat_history]
-                # print(f"CHARLIE messages: {messages}")
+                messages = [{"role": m["role"], "content": m["content"]} for m in agent_loop_state.chat_history]
                 payload = {
                     "model": self.model_name,
                     "messages": messages,
@@ -123,33 +141,42 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             # Parse responses
             output = output_json["choices"][0]["message"]["content"]
             stop_reason = output_json["choices"][0]["finish_reason"]
+            # Note: HTTP endpoint doesn't return output_ids or logprobs, so we set them to empty
+            output_ids = []
+            response_logprobs = None
 
             # 2. Environment step
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
-            done = env_step_output["done"]
+            agent_loop_state.done = env_step_output["done"]
             assert (
                 env_step_output.get("postprocessed_action", None) is None
             ), "postprocessed action is not supported for SkyRLGymHTTPGenerator"
 
+            # Create turn output
+            turn_output = TurnOutput(
+                output=output,
+                output_ids=output_ids,
+                output_logprobs=response_logprobs,
+                new_obs=new_obs,
+                reward=step_reward,
+            )
+
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # We always re-tokenize the entire chat history every turn and at the end.
-            chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
-                chat_history, chat_end_index, output, new_obs
-            )
+            agent_loop_state = self._update_agent_state_by_retokenizing_chat_history(agent_loop_state, turn_output)
             # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
-            per_step_rewards.append((step_reward, None))
+            per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
         # Close the environment
         await self._run_in_executor_if_available(env.close)
 
-        prompt_ids = input_ids[:initial_prompt_length]
-        # print(f"CHARLIE prompt_ids decoded: {self.tokenizer.decode(prompt_ids)}")
+        prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
         response_encodings = self.tokenizer.apply_chat_template(
-            chat_history[initial_chat_history_length:],
+            agent_loop_state.chat_history[initial_chat_history_length:],
             chat_template=self.custom_chat_template,
             add_generation_prompt=False,
             return_dict=True,
@@ -159,9 +186,6 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         )
         loss_mask = response_encodings["assistant_masks"]
         response_ids = response_encodings["input_ids"]
-        # print(f"CHARLIE loss_mask: {loss_mask}")
-        # print(f"CHARLIE response_ids: {response_ids}")
-        # print(f"CHARLIE response_ids decoded: {self.tokenizer.decode(response_ids)}")
 
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
@@ -169,14 +193,14 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
         # TODO(Charlie): Currently, the possible response truncation will not affect the reward
         # in the if branch, but some final rewards may be lost in the else branch. Fix this
         # when we support turn-level rewards for the `retokenize_chat_history` codepath.
-        reward_out = per_step_rewards[-1][0]
+        reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token=False)
 
-        return AgentLoopOutput(
+        return TrajectoryOutput(
             response_ids=response_ids,
             reward=reward_out,
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
-            rollout_logprobs=rollout_logprobs,
+            rollout_logprobs=agent_loop_state.rollout_logprobs,
             env_metrics=env_metrics,
         )

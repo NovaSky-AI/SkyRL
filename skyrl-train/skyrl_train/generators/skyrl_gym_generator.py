@@ -64,7 +64,37 @@ class TurnOutput:
     output_ids: List[str]
     output_logprobs: Optional[List[int]]
     new_obs: ConversationType
+    obs_ids: List[int]
     reward: Optional[int]
+    added_eos: bool = False
+
+    def get_turn_loss_mask(self) -> List[int]:
+        """
+        Get loss mask for this turn's tokens.
+
+        Returns:
+            List[int]: Loss mask where 1 indicates tokens to include in loss computation and 0 indicates
+                tokens to exclude. If `added_eos` is True, the EOS token is masked out (set to 0).
+                Observation tokens are always masked out (set to 0).
+        """
+        # if `added_eos` is `True`, then  the EOS token was not generated and only added in the
+        # `agent_loop` function. For consistency with other entities like logprobs , we ignore it in the loss
+        # mask
+        return ([1] * len(self.output_ids) if not self.added_eos else [1] * (len(self.output_ids) - 1) + [0]) + [
+            0
+        ] * len(self.obs_ids)
+
+    def get_turn_rollout_logprobs(self) -> Optional[List[float]]:
+        """
+        Get rollout logprobs for this turn's tokens.
+
+        Returns:
+            Optional[List[float]]: Logprobs for output tokens followed by dummy values (1.0) for
+                observation tokens. Returns None if output_logprobs is None.
+        """
+        if not self.output_logprobs:
+            return None
+        return self.output_logprobs + [1.0] * len(self.obs_ids)
 
 
 class SkyRLGymGenerator(GeneratorInterface):
@@ -162,7 +192,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-    ) -> TrajectoryOutput:
+    ) -> Union[TrajectoryOutput, StepWiseOutput]:
         """
         Multi-turn generation loop that executes a single trajectory.
 
@@ -188,7 +218,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template  # false
+        # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
+        # This is no longer needed now given that step wise training is supported
+        # TODO (sumanthrh): This path can be deprecated
+        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
@@ -244,16 +277,17 @@ class SkyRLGymGenerator(GeneratorInterface):
                 break
 
             # 1. Generate output
-            if is_step_wise:
+            if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
                     chat_history,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
-                    add_generation_prompt=False,
+                    add_generation_prompt=True,
                     tokenize=True,
                     **self.generator_cfg.chat_template_kwargs,
                 )
-            current_prompt_length = len(agent_loop_state.input_ids)
+                agent_loop_state.loss_mask = agent_loop_state.rollout_logprobs = None
+
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
             )
@@ -302,6 +336,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 output = env_step_output["postprocessed_action"]
                 output_ids = self.tokenizer.encode(output, add_special_tokens=False)
 
+            obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
+
             # final turn output containing generated response and environment observations
             turn_output = TurnOutput(
                 output=output,
@@ -309,7 +345,29 @@ class SkyRLGymGenerator(GeneratorInterface):
                 output_logprobs=response_logprobs,
                 new_obs=new_obs,
                 reward=step_reward,
+                obs_ids=obs_ids,
+                added_eos=added_eos,
             )
+
+            if is_step_wise:
+                # current response + observation ids
+                turn_response_ids = turn_output.output_ids + turn_output.obs_ids
+                turn_prompt_ids = agent_loop_state.input_ids
+
+                # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
+                turn_loss_mask = turn_output.get_turn_loss_mask()
+                turn_response_logprobs: Optional[List[int]] = turn_output.get_turn_rollout_logprobs()
+
+                per_step_output = TrajectoryOutput(
+                    response_ids=turn_response_ids,
+                    reward=step_reward,
+                    loss_mask=turn_loss_mask,
+                    prompt_ids=turn_prompt_ids,
+                    rollout_logprobs=turn_response_logprobs,
+                    stop_reason=stop_reason,
+                    env_metrics=env.get_metrics() if done else {},
+                )
+                agent_loop_output.step_outputs.append(per_step_output)
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # Three ways of managing input
@@ -319,38 +377,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             elif self.use_conversation_multi_turn:
                 # b. Token-in-token-out. Follow multi-turn chat history format.
                 agent_loop_state = self._update_agent_loop_state_with_multiturn_chat_template(
-                    agent_loop_state, turn_output, added_eos
+                    agent_loop_state, turn_output
                 )
-                num_new_observation_ids = (
-                    len(agent_loop_state.input_ids) - current_prompt_length - len(turn_output.output_ids)
-                )
-
-                if is_step_wise:
-                    # current response + observation ids
-                    turn_response_ids = copy.deepcopy(agent_loop_state.input_ids[current_prompt_length:])
-                    turn_loss_mask = copy.deepcopy(
-                        agent_loop_state.loss_mask[-num_new_observation_ids - len(turn_output.output_ids) :]
-                    )
-                    turn_prompt_ids = copy.deepcopy(agent_loop_state.input_ids[:current_prompt_length])
-                    turn_response_logprobs = (
-                        copy.deepcopy(
-                            agent_loop_state.rollout_logprobs[-num_new_observation_ids - len(turn_output.output_ids) :]
-                        )
-                        if get_logprobs
-                        else None
-                    )
-                    # response_end_idx is overriden to be the index in the response_ids for this turn
-                    agent_loop_state.response_end_idx = len(turn_response_ids) - num_new_observation_ids - 1
-                    per_step_output = TrajectoryOutput(
-                        response_ids=turn_response_ids,
-                        reward=step_reward,
-                        loss_mask=turn_loss_mask,
-                        prompt_ids=turn_prompt_ids,
-                        rollout_logprobs=turn_response_logprobs,
-                        stop_reason=stop_reason,
-                        env_metrics=env.get_metrics() if done else {},
-                    )
-                    agent_loop_output.step_outputs.append(per_step_output)
             else:
                 # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
                 agent_loop_state = self._update_agent_loop_state_with_singleturn_chat_template(
@@ -421,8 +449,21 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return agent_loop_output
 
-    def _build_per_token_rewards(self, per_step_rewards, response_ids, appended_eos_token):
-        # Build reward output
+    def _build_per_token_rewards(
+        self, per_step_rewards: List[Tuple[float, Optional[int]]], response_ids: List[int], appended_eos_token: bool
+    ) -> Union[float, List[float]]:
+        """
+        Build reward output from per-step rewards.
+
+        Args:
+            per_step_rewards: List of (reward, response_end_token_idx) tuples for each step
+            response_ids: List of response token IDs
+            appended_eos_token: Whether an EOS token was manually appended at the end
+
+        Returns:
+            Union[float, List[float]]: If custom_chat_template is used, returns the last step's reward (float).
+                Otherwise, returns a list of token-level rewards (List[float]).
+        """
         if self.custom_chat_template:
             # TODO(Charlie): Currently, the possible response truncation will not affect the reward
             # in the if branch, but some final rewards may be lost in the else branch. Fix this
@@ -446,12 +487,60 @@ class SkyRLGymGenerator(GeneratorInterface):
             reward_out = token_level_rewards
         return reward_out
 
+    def get_obs_ids_from_obs(self, new_obs: ConversationType, is_done: bool) -> List[int]:
+        """
+        Returns observation token ids from observation messages for a turn.
+
+        Args:
+            new_obs: Observation messages from the environment step
+            is_done: Whether the agent loop has terminated
+
+        Returns:
+            List[int]: Observation token IDs. For multi-turn mode, includes chat template formatting.
+                For single-turn mode, returns directly encoded observation tokens.
+        """
+        if self.use_conversation_multi_turn:
+            # 2. apply chat template for observations, also generate generation prompt for next turn
+            obs_ids_to_add = []
+            if len(new_obs) > 0:
+                # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
+                # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
+                obs_ids_to_add = self.tokenizer.apply_chat_template(
+                    [*self.base_conversation, *new_obs],
+                    add_generation_prompt=not is_done,
+                    tokenize=True,
+                    **self.generator_cfg.chat_template_kwargs,
+                )[len(self.base_conversation_token_ids) :]
+            elif not is_done:
+                obs_ids_to_add = self.generation_prompt_ids
+        else:
+            # Build observation token ids (encoded directly, not using chat template)
+            # no generation prompt is added in this case
+            obs_ids_to_add = []
+            if len(new_obs) > 0:
+                for obs in new_obs:
+                    obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
+                    obs_ids_to_add.extend(obs_tokens)
+        return obs_ids_to_add
+
     def _update_chat_history(
         self,
         chat_history: ConversationType,
         output: str,
         new_obs: ConversationType,
-    ):
+    ) -> ConversationType:
+        """
+        Update chat history with assistant response and new observations.
+
+        Args:
+            chat_history: Current conversation history
+            output: Assistant's response text
+            new_obs: New observation messages from the environment
+
+        Returns:
+            ConversationType: Updated chat history with assistant response and observations appended.
+                The EOS token is removed from output if present, as it will be reapplied by the chat template.
+        """
         # remove eos token from end of output if it exists, since it will be reapplied by the chat template
         if output.endswith(self.tokenizer.eos_token):
             output = output[: -len(self.tokenizer.eos_token)]
@@ -672,12 +761,22 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
-    def _zero_reward_if_not_stop(self, rewards: List[float], stop_reasons: List[str]):
-        """Sets the reward to 0 if the stop reason is not "stop".
+    def _zero_reward_if_not_stop(
+        self, rewards: List[Union[float, List[float]]], stop_reasons: List[str]
+    ) -> List[Union[float, List[float]]]:
+        """
+        Sets the reward to 0 if the stop reason is not "stop".
 
         This can be useful in cases where the LLM generation was truncated or aborted, but the environment still assigns non-zero reward.
         Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response,
         we typically don't want to reward it. This is a general setting for all environments.
+
+        Args:
+            rewards: List of rewards (can be float or List[float] for per-token rewards)
+            stop_reasons: List of stop reasons for each trajectory
+
+        Returns:
+            List[Union[float, List[float]]]: Modified rewards with non-"stop" cases set to 0
         """
         for i, stop_reason in enumerate(stop_reasons):
             if stop_reason != "stop":
@@ -699,11 +798,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         Update the chat history and input ids given a new model response and observation by retokenizing
         the entire chat history. Hence token-in-token-out is not followed.
 
+        This method is used when `use_conversation_multi_turn=True` and `custom_chat_template` is set.
+        It re-tokenizes the entire chat history every turn, which is useful for cases like removing
+        Qwen3 thinking tokens in non-last-round assistant messages.
+
         Args:
-            agent_loop_state: AgentLoopState
-            turn_output: TurnOutput
+            agent_loop_state: Current agent loop state containing chat history and input IDs
+            turn_output: Turn output containing the model's response and new observations
+
         Returns:
-            AgentLoopState: Updated agent loop state
+            AgentLoopState: Updated agent loop state with retokenized chat history and input IDs.
+                Note: loss_mask, response_end_idx, and rollout_logprobs are set to None as they
+                are computed at the end with the custom chat template.
         """
         assert self.use_conversation_multi_turn and self.custom_chat_template
 
@@ -711,14 +817,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.chat_history, turn_output.output, turn_output.new_obs
         )
 
-        # re-apply whole chat template so length check is correct
-        agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
-            agent_loop_state.chat_history,
-            chat_template=self.custom_chat_template,
-            add_generation_prompt=False,
-            tokenize=True,
-            **self.generator_cfg.chat_template_kwargs,
-        )
         # `loss_mask` is computed at the end with `custom_chat_template`
         agent_loop_state.loss_mask = None
         # untracked state
@@ -731,7 +829,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self,
         agent_loop_state: AgentLoopState,
         turn_output: TurnOutput,
-        added_eos: bool,
     ) -> AgentLoopState:
         """
         Update the loss mask and input ids given a new model response and observation, following
@@ -758,51 +855,39 @@ class SkyRLGymGenerator(GeneratorInterface):
         <|im_end|>
         ...
 
-        the chat template is applied without tokenization before and after the chat history is appended to
-        in order to get new token ids in the chat template format (but without re-tokenizing the entire chat history every turn)
+        The chat template is applied without tokenization before and after the chat history is appended to
+        in order to get new token ids in the chat template format (but without re-tokenizing the entire chat history every turn).
 
         Args:
-            agent_loop_state: AgentLoopState
-            turn_output: TurnOutput
+            agent_loop_state: Current agent loop state containing chat history, input IDs, loss mask, etc.
+            turn_output: Turn output containing the model's response, output IDs, logprobs, and observations
+
         Returns:
-            AgentLoopState: Updated agent loop state
+            AgentLoopState: Updated agent loop state with appended turn IDs, loss mask, and logprobs.
+                For step-wise training, only response_end_idx is updated; loss_mask and rollout_logprobs
+                are set to None as they are tracked per-step.
         """
         agent_loop_state.chat_history = self._update_chat_history(
             agent_loop_state.chat_history, turn_output.output, turn_output.new_obs
         )
 
-        # 1. Directly append generated output
-        agent_loop_state.input_ids += turn_output.output_ids
-        agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) - 1
-        # if `added_eos` is `True`, then  the EOS token was not generated and only added in the
-        # `agent_loop` function. For consistency with other entities like logprobs , we ignore it in the loss
-        # mask
-        agent_loop_state.loss_mask += (
-            [1] * len(turn_output.output_ids) if not added_eos else [1] * (len(turn_output.output_ids) - 1) + [0]
-        )
-        # explicitlly check if `None` because this is empty list at the first response
-        if agent_loop_state.rollout_logprobs is not None:
-            agent_loop_state.rollout_logprobs += turn_output.output_logprobs
+        loss_mask_for_turn = turn_output.get_turn_loss_mask()
+        rollout_logprobs_for_turn = turn_output.get_turn_rollout_logprobs()
 
-        # 2. apply chat template for observations, also generate generation prompt for next turn
-        obs_ids_to_add = []
-        if len(turn_output.new_obs) > 0:
-            # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
-            # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-            obs_ids_to_add = self.tokenizer.apply_chat_template(
-                [*self.base_conversation, *turn_output.new_obs],
-                add_generation_prompt=not agent_loop_state.done,
-                tokenize=True,
-                **self.generator_cfg.chat_template_kwargs,
-            )[len(self.base_conversation_token_ids) :]
-        elif not agent_loop_state.done:
-            obs_ids_to_add = self.generation_prompt_ids
-
-        agent_loop_state.input_ids += obs_ids_to_add
-        agent_loop_state.loss_mask += [0] * len(obs_ids_to_add)
-        if agent_loop_state.rollout_logprobs is not None:
-            # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-            agent_loop_state.rollout_logprobs += [1] * len(obs_ids_to_add)
+        if self.generator_cfg.step_wise_training:
+            # cumulative input_ids is not tracked for step wise training
+            agent_loop_state.response_end_idx = len(turn_output.output_ids) - 1
+            # no running loss_mask or `rollout_logprobs` are tracked for step-wise training
+            agent_loop_state.loss_mask = None
+            agent_loop_state.rollout_logprobs = None
+        else:
+            # Directly append turn output
+            turn_ids = turn_output.output_ids + turn_output.obs_ids
+            agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) + len(turn_output.output_ids) - 1
+            agent_loop_state.input_ids += turn_ids
+            agent_loop_state.loss_mask += loss_mask_for_turn
+            if agent_loop_state.rollout_logprobs is not None:
+                agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
 
         return agent_loop_state
 
@@ -836,34 +921,42 @@ class SkyRLGymGenerator(GeneratorInterface):
                             turn 2 model response goes here:
                             <think>... </think>
                             ...
+
         Args:
-            agent_loop_state: AgentLoopState
-            turn_output: TurnOutput
+            agent_loop_state: Current agent loop state containing chat history, input IDs, loss mask, etc.
+            turn_output: Turn output containing the model's response, output IDs, logprobs, and observations
+
         Returns:
-            AgentLoopState: Updated agent loop state
+            AgentLoopState: Updated agent loop state with appended turn IDs, loss mask, and logprobs.
+                The EOS token is removed from response tokens (if present) since we are continuing
+                the current assistant message. Observations are encoded directly without chat template formatting.
         """
         agent_loop_state.chat_history = self._update_chat_history(
             agent_loop_state.chat_history, turn_output.output, turn_output.new_obs
         )
 
-        # just update raw tokens and loss mask
-        new_resp_tokens = turn_output.output_ids.copy()
-        if new_resp_tokens[-1] == self.tokenizer.eos_token_id:
-            # remove the eos token since we are continuing the current assistant message
-            new_resp_tokens = new_resp_tokens[:-1]
-        agent_loop_state.loss_mask += [1] * len(new_resp_tokens)
-        agent_loop_state.input_ids += new_resp_tokens
-        agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) - 1
-        # explicitlly check if `None` because this is empty at the first response
-        if agent_loop_state.rollout_logprobs is not None:
-            agent_loop_state.rollout_logprobs += turn_output.output_logprobs
+        obs_ids_to_add = turn_output.obs_ids
 
-        if len(turn_output.new_obs) > 0:
-            for obs in turn_output.new_obs:
-                obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                agent_loop_state.loss_mask += [0] * len(obs_tokens)
-                agent_loop_state.input_ids += obs_tokens
-                if agent_loop_state.rollout_logprobs is not None:
-                    # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-                    agent_loop_state.rollout_logprobs += [1] * len(obs_tokens)
+        # Remove EOS token from response tokens since we are continuing the current assistant message
+        new_resp_tokens = turn_output.output_ids.copy()
+        if new_resp_tokens and new_resp_tokens[-1] == self.tokenizer.eos_token_id:
+            new_resp_tokens = new_resp_tokens[:-1]
+
+        turn_ids = new_resp_tokens + obs_ids_to_add
+        loss_mask_for_turn = [1] * len(new_resp_tokens) + [0] * len(obs_ids_to_add)
+        rollout_logprobs_for_turn = None
+        if turn_output.output_logprobs is not None:
+            # For response tokens, use actual logprobs
+            # for obs tokens, use dummy values
+            rollout_logprobs_for_turn = turn_output.output_logprobs[: len(new_resp_tokens)] + [1.0] * len(
+                obs_ids_to_add
+            )
+
+        # Directly append turn output
+        agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) + len(new_resp_tokens) - 1
+        agent_loop_state.input_ids += turn_ids
+        agent_loop_state.loss_mask += loss_mask_for_turn
+        if agent_loop_state.rollout_logprobs is not None:
+            agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
+
         return agent_loop_state
