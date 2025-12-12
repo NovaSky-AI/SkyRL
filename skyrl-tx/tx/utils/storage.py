@@ -22,8 +22,8 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         with dest.open("wb") as f:
-            # Use compresslevel=0 to prioritize speed, as checkpoint files don't compress well.
-            with tarfile.open(fileobj=f, mode="w|gz", compresslevel=0) as tar:
+            # Use streaming mode for speed, as checkpoint files don't compress well.
+            with tarfile.open(fileobj=f, mode="w|gz") as tar:
                 tar.add(tmp_path, arcname="")
 
 
