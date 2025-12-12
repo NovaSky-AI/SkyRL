@@ -202,3 +202,44 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
+
+
+def test_list_training_runs(service_client):
+    """Test the list_training_runs endpoint."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+
+    examples = [
+        make_datum(tokenizer, "Hello, how are you doing today?", " I'm doing well, thank you."),
+        make_datum(tokenizer, "What is your favorite color?", " My favorite color is blue."),
+    ]
+
+    rest_client = service_client.create_rest_client()
+
+    start_count = rest_client.list_training_runs().result().cursor.total_count
+
+    num_training_runs = 3
+    model_ids = []
+    for _ in range(num_training_runs):
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+
+        training_client.forward_backward(examples, "cross_entropy").result()
+        training_client.optim_step(types.AdamParams(learning_rate=1e-4)).result()
+
+        model_ids.append(training_client.model_id)
+
+    training_runs = rest_client.list_training_runs().result()
+    assert len(training_runs.training_runs) == min(20, num_training_runs + start_count)
+    assert training_runs.cursor.total_count == num_training_runs + start_count
+    assert training_runs.cursor.offset == 0
+    assert training_runs.cursor.limit == 20
+
+    training_runs = rest_client.list_training_runs(offset=start_count, limit=num_training_runs).result()
+    assert len(training_runs.training_runs) == num_training_runs
+    assert set(model.training_run_id for model in training_runs.training_runs) == set(model_ids)
+
+    training_runs = rest_client.list_training_runs(offset=start_count, limit=2).result()
+    assert len(training_runs.training_runs) == 2
+
+    training_runs = rest_client.list_training_runs(offset=start_count + 1, limit=1).result()
+    assert len(training_runs.training_runs) == 1
+    assert training_runs.training_runs[0].training_run_id == model_ids[1]
