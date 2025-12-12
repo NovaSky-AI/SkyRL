@@ -153,7 +153,9 @@ class TinkerEngine:
         model_class = get_model_class(self.model_config)
 
         # Create model and load weights
-        self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
+        self.mesh = jax.make_mesh(
+            (self.config.fully_sharded_data_parallel_size, self.config.tensor_parallel_size), ("fsdp", "tp")
+        )
         with jax.set_mesh(self.mesh):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_safetensors(checkpoint_path, self.model_config, self.model)
@@ -324,12 +326,28 @@ class TinkerEngine:
 
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
             scalar = jax.NamedSharding(self.mesh, jax.P())
+            # Shard batch inputs along the FSDP axis (batch, seq_len)
+            batch_sharded_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
 
             # JIT the fused function
+            # Input order: input_ids, attention_mask, adapter_indices, target_ids,
+            #              loss_mask, loss_fn_types, sampling_logprobs, advantages
+            # All batch arrays are sharded along batch dimension
+            batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+            input_shardings = (
+                batch_sharded_2d,  # input_ids
+                batch_sharded_2d,  # attention_mask
+                batch_sharded_1d,  # adapter_indices (sharded, bincount runs per-device)
+                batch_sharded_2d,  # target_ids
+                batch_sharded_2d,  # loss_mask
+                batch_sharded_1d,  # loss_fn_types (sharded, used in vmap over batch)
+                batch_sharded_2d,  # sampling_logprobs
+                batch_sharded_2d,  # advantages
+            )
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d, scalar),
                 donate_argnames=("accumulated_grads",),
             )
 
@@ -600,21 +618,36 @@ class TinkerEngine:
         logprobs_device = []
         seq_len = input_ids.shape[1]
 
+        # Sharding specs for batch inputs
+        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+        sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
+                # Shard the micro-batch inputs appropriately
+                # All batch arrays are sharded along the batch dimension
+                mb_input_ids = jax.device_put(input_ids[mb_start:mb_end], sharding_2d)
+                mb_attention_mask = jax.device_put(attention_mask[mb_start:mb_end], sharding_2d)
+                mb_adapter_indices = jax.device_put(adapter_indices[mb_start:mb_end], sharding_1d)
+                mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], sharding_2d)
+                mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], sharding_2d)
+                mb_loss_fn_types = jax.device_put(loss_fn_types[mb_start:mb_end], sharding_1d)
+                mb_sampling_logprobs = jax.device_put(sampling_logprobs[mb_start:mb_end], sharding_2d)
+                mb_advantages = jax.device_put(advantages[mb_start:mb_end], sharding_2d)
+
                 self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
                     self.accumulated_grads,
                     self.lora_params,
                     self.non_lora_params,
-                    input_ids[mb_start:mb_end],
-                    attention_mask[mb_start:mb_end],
-                    adapter_indices[mb_start:mb_end],
-                    target_ids[mb_start:mb_end],
-                    loss_mask[mb_start:mb_end],
-                    loss_fn_types[mb_start:mb_end],
-                    sampling_logprobs[mb_start:mb_end],
-                    advantages[mb_start:mb_end],
+                    mb_input_ids,
+                    mb_attention_mask,
+                    mb_adapter_indices,
+                    mb_target_ids,
+                    mb_loss_mask,
+                    mb_loss_fn_types,
+                    mb_sampling_logprobs,
+                    mb_advantages,
                 )
                 token_losses_device.append(per_token_losses)
                 logprobs_device.append(target_logprobs)
