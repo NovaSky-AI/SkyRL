@@ -1,6 +1,8 @@
 import os
 import signal
 import uvloop
+import base64
+import pickle
 from vllm import AsyncLLMEngine
 from vllm.utils import FlexibleArgumentParser, set_ulimit
 from vllm.entrypoints.openai.cli_args import (
@@ -108,6 +110,23 @@ class VllmServer:
             await engine.collective_rpc(
                 "update_weights",
                 args=(names, dtypes, shapes),
+            )
+            return {"status": "ok"}
+
+        @app.post("/update_weights_cuda_ipc")
+        async def _update_weights_cuda_ipc(request: Request):
+            data = await request.json()
+            names = data.get("names", [])
+            dtypes = data.get("dtypes", [])
+            shapes = data.get("shapes", [])
+            ipc_handles_b64 = data.get("ipc_handles_b64", [])
+
+            # Decode IPC handles (base64-encoded pickles)
+            ipc_handles = [pickle.loads(base64.b64decode(s)) for s in ipc_handles_b64]
+
+            await engine.collective_rpc(
+                "update_weights_cuda_ipc",
+                args=(names, dtypes, shapes, ipc_handles),
             )
             return {"status": "ok"}
 
