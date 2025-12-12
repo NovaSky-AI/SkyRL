@@ -148,14 +148,14 @@ class SGLangWeightTransferReceiver:
         Yields:
             (name, tensor) tuples for each weight.
         """
+        device = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device)
+        physical_gpu_id = str(props.uuid)
+
         for i in range(len(request["names"])):
             ipc_handles = request["extras"][i]["ipc_handles"]
             dtype = request["dtypes"][i]
             weight_name = request["names"][i]
-
-            device = torch.cuda.current_device()
-            props = torch.cuda.get_device_properties(device)
-            physical_gpu_id = str(props.uuid)
 
             assert dtype == self._model_dtype, f"mismatch dtype: src {dtype}, dst {self._model_dtype}"
 
