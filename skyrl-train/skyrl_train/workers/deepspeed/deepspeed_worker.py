@@ -10,7 +10,6 @@ from transformers.trainer import get_scheduler
 
 from skyrl_train.model_wrapper import get_llm_for_sequence_regression, HFModelWrapper
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
-from skyrl_train.utils import get_physical_gpu_id
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 from skyrl_train.utils.utils import str_to_torch_dtype
 from skyrl_train.workers.worker import (
@@ -159,16 +158,15 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         )
 
         # Initialize weight extractor
-        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
+        from skyrl_train.weight_sync import CudaIpcTransferStrategy
+        use_cuda_ipc = self._transfer_strategy_cls is CudaIpcTransferStrategy
         self.weight_extractor = DeepSpeedWeightExtractor(
             model=self.model.model.module,
             zero_stage=self.zero_stage,
-            group_by_module=self.use_cuda_ipc,
-            batch_size_threshold_gb=(
-                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
-            ),
+            group_by_module=use_cuda_ipc,
+            batch_size_threshold_gb=(self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if use_cuda_ipc else 0.0),
         )
 
         self._model_update_group_name = None

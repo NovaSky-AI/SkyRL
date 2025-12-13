@@ -265,7 +265,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             init_info: WeightSyncInitInfo from the sender.
 
         Note: Remote engines only support broadcast strategy.
-        TODO: Evaluate whether to pass use_cuda_ipc to remote engines.
         """
         return await self._weight_loader.init_communicator(init_info)
 

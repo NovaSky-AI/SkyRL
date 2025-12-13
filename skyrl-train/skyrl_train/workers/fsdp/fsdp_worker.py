@@ -157,15 +157,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         ), "FSDP preparation should create optimizer and scheduler"
 
         # Initialize weight extractor
-        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
-        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
+        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
+        from skyrl_train.weight_sync import CudaIpcTransferStrategy
+        use_cuda_ipc = self._transfer_strategy_cls is CudaIpcTransferStrategy
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
-            group_by_module=self.use_cuda_ipc,
-            batch_size_threshold_gb=(
-                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
-            ),
+            group_by_module=use_cuda_ipc,
+            batch_size_threshold_gb=(self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if use_cuda_ipc else 0.0),
         )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):

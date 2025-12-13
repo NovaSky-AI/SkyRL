@@ -55,53 +55,70 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         self._inference_client = inference_client
 
     async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
-        """Send chunks via CUDA IPC.
+        """Send chunks via CUDA IPC with packed tensors.
 
-        Each chunk can contain multiple parameters (batched). IPC handles are
-        created for each tensor and gathered across all ranks.
+        Each chunk can contain multiple parameters. All tensors in a chunk are
+        packed into a single contiguous buffer, and one IPC handle is created
+        for the packed buffer. This reduces the number of IPC handles and file
+        descriptors.
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
         """
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
+        device = torch.cuda.current_device()
+        dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
 
         for chunk in chunks:
             weights_update_request: NamedWeightsUpdateRequest = {
                 "names": [],
                 "dtypes": [],
                 "shapes": [],
+                "sizes": [],
                 "extras": [],
-                "packed": False,
+                "packed": True,
             }
 
-            # Process all parameters in this batch
-            # TODO(haochen): Pack tensors into contiguous buffer before creating IPC handle
-            # (like Megatron does) to reduce number of IPC handles and file descriptors
+            # Pack all tensors in this chunk into a single contiguous buffer
+            total_numel = sum(t.numel() for t in chunk.tensors)
+            packed_tensor = torch.empty(
+                total_numel,
+                device=device,
+                dtype=dtype,
+                requires_grad=False,
+            )
+
+            offset = 0
             for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
-                # Create IPC handle for tensor
-                ipc_handle = reduce_tensor(tensor)
-                ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                ipc_handle_list = [None] * world_size
-                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+                size = tensor.numel()
+                packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
+                offset += size
+                weights_update_request["names"].append(name)
+                weights_update_request["dtypes"].append(self._init_info.model_dtype_str)
+                weights_update_request["shapes"].append(shape)
+                weights_update_request["sizes"].append(size)
 
-                if rank == 0:
-                    ipc_handles = {}
-                    for d in ipc_handle_list:
-                        ipc_handles.update(d)
+            # Create single IPC handle for the packed buffer
+            ipc_handle = reduce_tensor(packed_tensor)
+            ipc_handle = {get_physical_gpu_id(): ipc_handle}
+            ipc_handle_list = [None] * world_size
+            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
-                    weights_update_request["names"].append(name)
-                    weights_update_request["dtypes"].append(self._init_info.model_dtype_str)
-                    weights_update_request["shapes"].append(shape)
-                    weights_update_request["extras"].append({"ipc_handles": ipc_handles})
+            if rank == 0:
+                ipc_handles = {}
+                for d in ipc_handle_list:
+                    ipc_handles.update(d)
+                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
 
-                torch.distributed.barrier()
-                torch.cuda.synchronize()
+            torch.distributed.barrier()
+            torch.cuda.synchronize()
 
-            # Send batch
+            # Send the packed chunk
             if rank == 0:
                 await self._inference_client.update_named_weights(weights_update_request)
-                torch.cuda.ipc_collect()
+
+            torch.cuda.ipc_collect()
             torch.distributed.barrier()
             torch.cuda.synchronize()
 

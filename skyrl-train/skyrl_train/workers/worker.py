@@ -259,20 +259,15 @@ class Worker(DistributedTorchRayActor):
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
-        from skyrl_train.weight_sync.broadcast_strategy import BroadcastTransferStrategy
-        from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcTransferStrategy
+        from skyrl_train.weight_sync import get_transfer_strategy_cls
 
         assert inference_engine_client is not None
 
         if torch.distributed.get_rank() == 0:
-            # Create init info and sender
-            if self.use_cuda_ipc:
-                init_info = CudaIpcTransferStrategy.create_init_info(self.cfg)
-            else:
-                init_info = BroadcastTransferStrategy.create_init_info(self.cfg)
-
-            strategy_cls = init_info.strategy_type()
-            self._weight_transfer_sender = strategy_cls.create_sender(
+            # Get strategy class and create init info + sender
+            self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
+            init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+            self._weight_transfer_sender = self._transfer_strategy_cls.create_sender(
                 init_info=init_info,
                 inference_client=inference_engine_client,
             )

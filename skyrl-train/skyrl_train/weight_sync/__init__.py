@@ -1,5 +1,7 @@
 """Weight synchronization abstractions for distributed RL training."""
 
+from typing import Type
+
 from .base import WeightChunk
 from .weight_extractor import WeightExtractor
 from .weight_loader import WeightLoader
@@ -22,6 +24,27 @@ from .cuda_ipc_strategy import (
     CudaIpcWeightTransferReceiver,
 )
 
+
+def get_transfer_strategy_cls(cfg: "DictConfig") -> Type[WeightTransferStrategy]:
+    """Get the appropriate transfer strategy class based on config.
+
+    Uses CUDA IPC when:
+    - weight_sync_backend is "nccl"
+    - colocate_all is True (training and inference on same nodes)
+
+    Otherwise uses broadcast.
+
+    Args:
+        cfg: Configuration object containing generator and trainer settings.
+
+    Returns:
+        The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
+    """
+    if cfg.generator.weight_sync_backend == "nccl" and cfg.trainer.placement.colocate_all:
+        return CudaIpcTransferStrategy
+    return BroadcastTransferStrategy
+
+
 __all__ = [
     "WeightChunk",
     "WeightExtractor",
@@ -38,4 +61,5 @@ __all__ = [
     "CudaIpcTransferStrategy",
     "CudaIpcWeightTransferSender",
     "CudaIpcWeightTransferReceiver",
+    "get_transfer_strategy_cls",
 ]
