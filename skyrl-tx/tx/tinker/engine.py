@@ -276,6 +276,7 @@ class TinkerEngine:
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
         def forward_only(
+            accumulated_grads: AccumulatedGradients,
             lora_params: nnx.State,
             non_lora_params: nnx.State,
             input_ids: jax.Array,
@@ -286,7 +287,7 @@ class TinkerEngine:
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
-        ) -> tuple[jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             _, (target_logprobs, per_token_losses) = loss_for_lora(
                 lora_params,
                 non_lora_params,
@@ -299,7 +300,7 @@ class TinkerEngine:
                 sampling_logprobs,
                 advantages,
             )
-            return per_token_losses, target_logprobs
+            return accumulated_grads, per_token_losses, target_logprobs
 
         def forward_backward_and_accumulate(
             accumulated_grads: AccumulatedGradients,
@@ -313,10 +314,10 @@ class TinkerEngine:
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
-        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             """Fused forward-backward-accumulate operation."""
             # Forward-backward
-            (loss, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
+            (_, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
                 lora_params,
                 non_lora_params,
                 input_ids,
@@ -330,7 +331,7 @@ class TinkerEngine:
             )
             # Accumulate gradients
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
-            return new_accumulated_grads, per_token_losses, target_logprobs, loss
+            return new_accumulated_grads, per_token_losses, target_logprobs
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
@@ -357,13 +358,13 @@ class TinkerEngine:
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
                 in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                out_shardings=(accumulated_grads_shardings, replicated, replicated),
                 donate_argnames=("accumulated_grads",),
             )
             self._forward = jax.jit(
                 forward_only,
-                in_shardings=(lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                out_shardings=(replicated, replicated),
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
+                out_shardings=(accumulated_grads_shardings, replicated, replicated),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
@@ -572,14 +573,12 @@ class TinkerEngine:
         self,
         requests: dict[str, tuple[str, types.ForwardBackwardInput]],
         forward_fn: Callable,
-        accumulate_grads: bool = False,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Common batch processing logic for forward-only and forward-backward operations.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
             forward_fn: Callable to perform the forward computation
-            accumulate_grads: Whether to accumulate gradients (forward-only or forward-backward)
 
         Returns:
             Dict mapping request_id to result_data or error info
@@ -646,35 +645,19 @@ class TinkerEngine:
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
 
-                if accumulate_grads:
-                    # Forward-backward with gradient accumulation
-                    self.accumulated_grads, per_token_losses, target_logprobs, _ = forward_fn(
-                        self.accumulated_grads,
-                        self.lora_params,
-                        self.non_lora_params,
-                        input_ids[mb_start:mb_end],
-                        attention_mask[mb_start:mb_end],
-                        adapter_indices[mb_start:mb_end],
-                        target_ids[mb_start:mb_end],
-                        loss_mask[mb_start:mb_end],
-                        loss_fn_types[mb_start:mb_end],
-                        sampling_logprobs[mb_start:mb_end],
-                        advantages[mb_start:mb_end],
-                    )
-                else:
-                    # Forward-only
-                    per_token_losses, target_logprobs = forward_fn(
-                        self.lora_params,
-                        self.non_lora_params,
-                        input_ids[mb_start:mb_end],
-                        attention_mask[mb_start:mb_end],
-                        adapter_indices[mb_start:mb_end],
-                        target_ids[mb_start:mb_end],
-                        loss_mask[mb_start:mb_end],
-                        loss_fn_types[mb_start:mb_end],
-                        sampling_logprobs[mb_start:mb_end],
-                        advantages[mb_start:mb_end],
-                    )
+                self.accumulated_grads, per_token_losses, target_logprobs = forward_fn(
+                    self.accumulated_grads,
+                    self.lora_params,
+                    self.non_lora_params,
+                    input_ids[mb_start:mb_end],
+                    attention_mask[mb_start:mb_end],
+                    adapter_indices[mb_start:mb_end],
+                    target_ids[mb_start:mb_end],
+                    loss_mask[mb_start:mb_end],
+                    loss_fn_types[mb_start:mb_end],
+                    sampling_logprobs[mb_start:mb_end],
+                    advantages[mb_start:mb_end],
+                )
 
                 token_losses_device.append(per_token_losses)
                 logprobs_device.append(target_logprobs)
@@ -722,40 +705,6 @@ class TinkerEngine:
             )
 
         return results
-
-    def process_forward_backward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
-    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process multiple forward_backward requests in a single batch.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples
-
-        Returns:
-            Dict mapping request_id -> result_data or error info
-        """
-        return self._process_batch_pass(
-            requests,
-            self._forward_backward_and_accumulate,
-            accumulate_grads=True,
-        )
-
-    def process_forward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
-    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward-only requests in a single batch.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples
-
-        Returns:
-            Dict mapping request_id to result_data or error info
-        """
-        return self._process_batch_pass(
-            requests,
-            self._forward,
-            accumulate_grads=False,
-        )
 
     def process_sample_batch(
         self, requests: dict[str, tuple[str, types.SampleInput]]
@@ -1076,16 +1025,17 @@ class TinkerEngine:
             results[request_id] = result
         self._complete_futures(results)
 
-    def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
+    def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor, name: str):
         """Generic function to process a batch of requests.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
+            batch_processor: Function to call to process the batch
+            name: Name of the batch processor for logging
         """
         if not requests:
             return
-        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+        with log_timing(f"process_batch_requests({name}, n={len(requests)})"):
             try:
                 results = batch_processor(requests)
             except Exception as e:
@@ -1109,9 +1059,17 @@ class TinkerEngine:
                 other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
-            self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
-            self.process_batch_requests(forward_requests, self.process_forward_batch)
-            self.process_batch_requests(sample_requests, self.process_sample_batch)
+            self.process_batch_requests(
+                forward_backward_requests,
+                lambda r: self._process_batch_pass(r, self._forward_backward_and_accumulate),
+                "forward_backward",
+            )
+            self.process_batch_requests(
+                forward_requests,
+                lambda r: self._process_batch_pass(r, self._forward),
+                "forward",
+            )
+            self.process_batch_requests(sample_requests, self.process_sample_batch, "sample")
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
