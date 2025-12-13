@@ -108,10 +108,6 @@ class ForwardBackwardInput(BaseModel):
     loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
 
 
-class ForwardInput(ForwardBackwardInput):
-    pass
-
-
 class ForwardBackwardOutput(BaseModel):
     loss_fn_output_type: str
     loss_fn_outputs: list[dict]

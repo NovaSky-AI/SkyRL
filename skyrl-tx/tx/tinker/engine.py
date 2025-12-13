@@ -429,21 +429,20 @@ class TinkerEngine:
 
         return results, valid_requests
 
-    def find_batchable_pass(
-        self, session: Session, forward_only: bool
-    ) -> dict[str, tuple[str, types.ForwardInput | types.ForwardBackwardInput]]:
-        """Find all forward-only OR forward-backward requests that come before any destructive update for their model.
+    def find_batchable_model_passes(
+        self, session: Session, request_type: types.RequestType
+    ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
+        """Find all requests of the given type that come before any destructive update for their model.
 
-        Uses look-ahead scheduling: for each model, only returns forward-only OR forward-backward operations
+        Uses look-ahead scheduling: for each model, only returns operations
         that have no optim_step or load_weights blocking them in the queue.
 
         Args:
-            session (Session): db session
-            forward_only (bool): whether we are trying to find forward-only requests or forward-backward requests
+            session: Database session
+            request_type: The type of request to find (e.g., FORWARD or FORWARD_BACKWARD)
 
         Returns:
-            dict[str, tuple[str, types.ForwardInput | types.ForwardBackwardInput]]:
-                Dict mapping request_id to (model_id, request_data) tuples
+            Dict mapping request_id to (model_id, request_data) tuples
         """
         # Find the earliest pending optim_step or load_weights per model (these act as barriers)
         barriers_query = (
@@ -457,21 +456,19 @@ class TinkerEngine:
         )
         barriers = dict(session.exec(barriers_query).all())
 
-        # Get all pending forward-only or forward-backward operations ordered by request_id
-        request_type = types.RequestType.FORWARD if forward_only else types.RequestType.FORWARD_BACKWARD
-        pass_query = (
+        # Get all pending operations of the requested type ordered by request_id
+        query = (
             select(FutureDB)
             .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
         )
-        pass_ops = session.exec(pass_query).all()
+        ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
-        batchable = [op for op in pass_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
+        batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
-        input_type = types.ForwardInput if forward_only else types.ForwardBackwardInput
-        return {f.request_id: (f.model_id, input_type.model_validate(f.request_data)) for f in batchable}
+        return {f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable}
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
@@ -571,7 +568,7 @@ class TinkerEngine:
 
     def _process_batch_pass(
         self,
-        requests: dict[str, tuple[str, types.ForwardBackwardInput | types.ForwardInput]],
+        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
         forward_fn: Callable,
         accumulate_grads: bool = False,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
@@ -742,7 +739,7 @@ class TinkerEngine:
         )
 
     def process_forward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardInput]]
+        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Process forward-only requests in a single batch.
 
@@ -1100,8 +1097,8 @@ class TinkerEngine:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
                 # Use look-ahead scheduling to find batchable forward_backward and forward_only operations
-                forward_backward_requests = self.find_batchable_pass(session, forward_only=False)
-                forward_requests = self.find_batchable_pass(session, forward_only=True)
+                forward_backward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
