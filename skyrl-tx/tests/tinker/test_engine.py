@@ -289,7 +289,7 @@ def test_gradient_checkpointing():
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
 
         # Compute loss, using gradient checkpointing if enabled
-        _, _, _, loss_full = engine._forward_backward_and_accumulate(
+        _, per_token_losses, _ = engine._forward_backward_and_accumulate(
             engine.accumulated_grads,
             engine.lora_params,
             engine.non_lora_params,
@@ -302,7 +302,7 @@ def test_gradient_checkpointing():
             sampling_logprobs,
             advantages,
         )
-        losses.append(float(loss_full))
+        losses.append(float(per_token_losses.mean()))
 
     # Check relative difference between losses is small
     assert abs(losses[0] - losses[1]) / abs(losses[0]) < 5e-3
