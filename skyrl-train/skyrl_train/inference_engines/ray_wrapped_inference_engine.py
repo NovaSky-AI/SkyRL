@@ -40,12 +40,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.sleep.remote(*args, **kwargs)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
-        return await self.inference_engine_actor.init_weight_update_communicator.remote(
-            master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
-        )
+    async def init_weight_update_communicator(self, init_info):
+        return await self.inference_engine_actor.init_weight_update_communicator.remote(init_info)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)

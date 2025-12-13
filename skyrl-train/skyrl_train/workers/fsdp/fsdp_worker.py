@@ -1,4 +1,3 @@
-
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 import ray
 import torch
@@ -16,7 +15,7 @@ except ImportError:
 
 from skyrl_train.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype
+from skyrl_train.utils import str_to_torch_dtype
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
 from skyrl_train.workers.worker import (
@@ -26,8 +25,6 @@ from skyrl_train.workers.worker import (
 )
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
-from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferSender
-from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferSender
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -101,7 +98,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
     def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp3")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
@@ -225,25 +222,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
             return
 
-        # Extract weights using the initialized extractor
-        if not self.use_cuda_ipc:
-            # Broadcast path: use sender abstraction
-            sender = BroadcastWeightTransferSender(
-                rank=torch.distributed.get_rank(),
-                model_update_group=self._model_update_group,
-                model_dtype_str=self.cfg.generator.model_dtype,
-                inference_client=inference_engine_client,
-            )
-            await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
-        else:
-            # CUDA IPC path: use sender abstraction
-            sender = CudaIpcWeightTransferSender(
-                rank=torch.distributed.get_rank(),
-                world_size=torch.distributed.get_world_size(),
-                model_dtype_str=self.cfg.generator.model_dtype,
-                inference_client=inference_engine_client,
-            )
-            await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
+        # Extract and send weights using the sender created at init time
+        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
 
         if cache_reset_task is not None:
             await cache_reset_task

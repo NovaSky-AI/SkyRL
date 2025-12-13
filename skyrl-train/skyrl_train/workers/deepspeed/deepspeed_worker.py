@@ -20,8 +20,6 @@ from skyrl_train.workers.worker import (
 )
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
-from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferSender
-from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferSender
 
 
 class DeepSpeedWeightExtractor(WeightExtractor):
@@ -201,24 +199,8 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
 
         torch.cuda.empty_cache()
 
-        if not self.use_cuda_ipc:
-            # Broadcast path: use sender abstraction
-            sender = BroadcastWeightTransferSender(
-                rank=torch.distributed.get_rank(),
-                model_update_group=self._model_update_group,
-                model_dtype_str=self.cfg.generator.model_dtype,
-                inference_client=inference_engine_client,
-            )
-            await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
-        else:
-            # CUDA IPC path: use sender abstraction
-            sender = CudaIpcWeightTransferSender(
-                rank=torch.distributed.get_rank(),
-                world_size=torch.distributed.get_world_size(),
-                model_dtype_str=self.cfg.generator.model_dtype,
-                inference_client=inference_engine_client,
-            )
-            await sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
+        # Extract and send weights using the sender created at init time
+        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
 
         if cache_reset_task is not None:
             await cache_reset_task

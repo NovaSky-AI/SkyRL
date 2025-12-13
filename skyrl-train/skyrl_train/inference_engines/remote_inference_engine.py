@@ -28,42 +28,36 @@ class RemoteWeightLoader(WeightLoader):
         self._url = url
         self._engine_backend = engine_backend
 
-    async def init_communicator(
-        self,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str,
-        override_existing: bool = False,
-    ) -> Dict[str, Any]:
+    async def init_communicator(self, init_info) -> Dict[str, Any]:
         """Initialize the distributed process group for syncing weights.
 
         Args:
-            master_address: Master address for the process group.
-            master_port: Master port for the process group.
-            rank_offset: Rank offset for this process.
-            world_size: Total world size.
-            group_name: Name of the process group.
-            backend: Backend to use (e.g., "nccl", "gloo").
-            override_existing: Whether to override an existing group.
+            init_info: WeightSyncInitInfo from the sender.
 
         Returns:
             Response from the remote server.
+
+        Raises:
+            ValueError: If init_info strategy is not BroadcastTransferStrategy (remote only supports broadcast).
         """
+        from skyrl_train.weight_sync import BroadcastTransferStrategy
+
+        if init_info.strategy_type() is not BroadcastTransferStrategy:
+            raise ValueError(
+                f"Remote inference engines only support BroadcastTransferStrategy, got: {init_info.strategy_type().__name__}"
+            )
+
         path = "/init_weights_update_group" if self._engine_backend == "sglang" else "/init_weight_update_communicator"
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self._url}{path}",
                 json={
-                    "master_address": master_address,
-                    "master_port": master_port,
-                    "rank_offset": rank_offset,
-                    "world_size": world_size,
-                    "group_name": group_name,
-                    "backend": backend,
-                    "override_existing": override_existing,
+                    "master_address": init_info.master_addr,
+                    "master_port": init_info.master_port,
+                    "rank_offset": init_info.rank_offset,
+                    "world_size": init_info.world_size,
+                    "group_name": init_info.group_name,
+                    "backend": init_info.backend,
                 },
             ) as response:
                 return await response.json()
@@ -264,13 +258,16 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             resp = await session.post(f"{self.url}/sleep", json={"level": kwargs.get("level", 1)})
             return await resp.json()
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
-        """Initialize the distributed process group for syncing weights."""
-        return await self._weight_loader.init_communicator(
-            master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
-        )
+    async def init_weight_update_communicator(self, init_info):
+        """Initialize the distributed process group for syncing weights.
+
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
+
+        Note: Remote engines only support broadcast strategy.
+        TODO: Evaluate whether to pass use_cuda_ipc to remote engines.
+        """
+        return await self._weight_loader.init_communicator(init_info)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:

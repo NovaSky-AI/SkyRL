@@ -469,32 +469,15 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("sleep", *args, **kwargs)
 
-    async def init_weight_update_communicator(
-        self,
-        master_addr,
-        master_port,
-        rank_offset,
-        world_size,
-        group_name,
-        backend,
-        override_existing: bool = False,
-    ):
-        tasks = []
-        rank_offset_count = rank_offset
+    async def init_weight_update_communicator(self, init_info):
+        """Initialize weight update communicator on all engines.
 
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
+        """
+        tasks = []
         for engine in self.engines:
-            tasks.append(
-                engine.init_weight_update_communicator(
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    rank_offset=rank_offset_count,
-                    world_size=world_size,
-                    group_name=group_name,
-                    backend=backend,
-                    override_existing=override_existing,
-                )
-            )
-            rank_offset_count += engine.tp_size() * engine.pp_size()
+            tasks.append(engine.init_weight_update_communicator(init_info))
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

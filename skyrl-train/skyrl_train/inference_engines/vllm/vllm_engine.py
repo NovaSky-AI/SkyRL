@@ -1,5 +1,5 @@
 import os
-from typing import List, Any, Dict, Optional, Tuple, Iterator
+from typing import List, Any, Dict, Optional
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
@@ -21,7 +21,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
-from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
 from skyrl_train.inference_engines.base import (
@@ -31,11 +30,9 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
-from skyrl_train.weight_sync.broadcast_strategy import BroadcastWeightTransferReceiver
-from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferReceiver
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
+from skyrl_train.utils import str_to_torch_dtype
 import time
 from packaging import version
 
@@ -74,53 +71,16 @@ class WorkerWrap:
         """Test RPC call to worker"""
         return args, kwargs
 
-    def init_weight_update_communicator(
-        self,
-        master_address,
-        master_port,
-        rank_offset,
-        world_size,
-        group_name,
-        backend="nccl",
-        override_existing: bool = False,
-    ):
-        """Init torch process group for model weights update"""
+    def init_weight_update_communicator(self, init_info):
+        """Init weight update communicator from init info.
+
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
+        """
         assert torch.distributed.is_initialized(), "default torch process group must be initialized"
-        assert group_name != "", "group name must not be empty"
 
-        if getattr(self, "_model_update_group", None):
-            if override_existing:
-                logger.info("Destroying existing model update group")
-                destroy_process_group(self._model_update_group)
-                self._model_update_group = None
-            else:
-                warnings.warn(
-                    "Detected an existing weights update group. For overriding, use `generator.override_existing_update_group=True`"
-                )
-
-        rank = torch.distributed.get_rank() + rank_offset
-        logger.info(
-            f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
-        )
-
-        self._model_update_group = init_custom_process_group(
-            backend=backend,
-            init_method=get_tcp_url(master_address, master_port),
-            world_size=world_size,
-            rank=rank,
-            group_name=group_name,
-        )
-        logger.info(
-            f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
-            f"rank={rank}, world_size={world_size}, group_name={group_name}",
-        )
-
-        # Create receiver now that we have all the state
-        self._weight_receiver = VLLMWeightTransferReceiver(
-            model_update_group=self._model_update_group,
-            model_config=self.model_config,
-            device=self.device,
-        )
+        strategy_cls = init_info.strategy_type()
+        self._weight_receiver = strategy_cls.create_receiver(init_info)
 
     def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights using the receiver.
@@ -322,14 +282,12 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await asyncio.to_thread(self.llm.sleep, level=level)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info):
         engine = self._get_engine()
         return await asyncio.to_thread(
             engine.collective_rpc,
             "init_weight_update_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+            args=(init_info,),
         )
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -482,13 +440,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await self.llm.sleep(level=level)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info):
         engine = self._get_engine()
         return await engine.collective_rpc(
             "init_weight_update_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+            args=(init_info,),
         )
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -634,55 +590,11 @@ class _MinimalRequest:
         self.state = SimpleNamespace()  # vLLM sets raw_request.state.request_metadata
 
 
-class VLLMWeightTransferReceiver:
-    """Receives weights via broadcast or CUDA IPC for vLLM.
-
-    Handles both transfer strategies based on the request contents.
-    Created locally in WorkerWrap with worker-specific state.
-    """
-
-    def __init__(self, model_update_group: Any, model_config: Any, device: torch.device) -> None:
-        """Initialize the receiver with worker-local state.
-
-        Args:
-            model_update_group: Torch process group for weight updates.
-            model_config: vLLM model configuration.
-            device: CUDA device for this worker.
-        """
-        self.model_update_group = model_update_group
-        self.model_config = model_config
-        self.device = device
-
-        # Create receivers for delegation
-        self._broadcast_receiver = BroadcastWeightTransferReceiver(
-            model_dtype=model_config.dtype,
-            model_update_group=model_update_group,
-        )
-        self._cuda_ipc_receiver = CudaIpcWeightTransferReceiver(
-            model_dtype=model_config.dtype,
-            device=device,
-        )
-
-    def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive weights and yield (name, tensor) tuples.
-
-        Args:
-            request: Weight update request with names, dtypes, shapes, and optionally IPC handles.
-        """
-        extras = request.get("extras")
-        is_ipc = extras and len(extras) > 0 and "ipc_handles" in extras[0]
-
-        if is_ipc:
-            yield from self._cuda_ipc_receiver.receive_weights(request)
-        else:
-            yield from self._broadcast_receiver.receive_weights(request)
-
-
 class VLLMWeightLoader(WeightLoader):
     """Loads weights into vLLM engine, managing RPC coordination.
 
     This loader encapsulates the collective_rpc calls to workers.
-    Workers create VLLMWeightTransferReceiver locally for the actual weight transfer.
+    Workers create the appropriate receiver locally for the actual weight transfer.
     """
 
     def __init__(self, engine: Any, is_async: bool = False) -> None:

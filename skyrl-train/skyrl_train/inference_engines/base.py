@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
+from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -75,9 +78,13 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        """Initialize weight update communicator from init info.
+
+        Args:
+            init_info: WeightSyncInitInfo from the sender containing all info needed
+                to create the appropriate receiver.
+        """
         raise NotImplementedError()
 
     @abstractmethod

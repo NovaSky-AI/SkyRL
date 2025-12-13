@@ -167,42 +167,35 @@ class SGLangWeightLoader(WeightLoader):
         self._engine = engine
         self._tp_size = tp_size
 
-    async def init_communicator(
-        self,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str,
-    ) -> Tuple[bool, str]:
+    async def init_communicator(self, init_info) -> Tuple[bool, str]:
         """Initialize the process group for broadcast weight sync.
 
         This is only needed for the broadcast path. IPC path does not require
         a process group since it uses CUDA IPC handles directly.
 
         Args:
-            master_address: Master address for the process group.
-            master_port: Master port for the process group.
-            rank_offset: Rank offset for this process.
-            world_size: Total world size.
-            group_name: Name of the process group.
-            backend: Backend to use (e.g., "nccl", "gloo").
+            init_info: WeightSyncInitInfo from the sender.
 
         Returns:
             Tuple of (success, message).
         """
-        obj = InitWeightsUpdateGroupReqInput(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-            group_name=group_name,
-            backend=backend,
-        )
-        # NOTE(charlie): Call the async method on tokenizer_manager directly to avoid event loop
-        # conflicts. Same underlying implementation: https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/model_executor/model_runner.py#L689
-        return await self._engine.tokenizer_manager.init_weights_update_group(obj, None)
+        from skyrl_train.weight_sync import BroadcastTransferStrategy
+
+        if init_info.strategy_type() is BroadcastTransferStrategy:
+            obj = InitWeightsUpdateGroupReqInput(
+                master_address=init_info.master_addr,
+                master_port=init_info.master_port,
+                rank_offset=init_info.rank_offset,
+                world_size=init_info.world_size,
+                group_name=init_info.group_name,
+                backend=init_info.backend,
+            )
+            # NOTE(charlie): Call the async method on tokenizer_manager directly to avoid event loop
+            # conflicts. Same underlying implementation: https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/model_executor/model_runner.py#L689
+            return await self._engine.tokenizer_manager.init_weights_update_group(obj, None)
+        else:
+            # CUDA IPC doesn't need process group initialization
+            return (True, "CUDA IPC strategy initialized")
 
     async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights by coordinating with SGLang's weight update APIs.
@@ -351,17 +344,13 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # TODO(charlie): implement this in the future
         raise NotImplementedError()
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info):
         """Initialize weight update communicator for SGLang.
 
-        This initializes the process group for broadcast weight sync. Only needed
-        when using the broadcast transfer path, not for IPC.
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
         """
-        return await self._weight_loader.init_communicator(
-            master_addr, master_port, rank_offset, world_size, group_name, backend
-        )
+        return await self._weight_loader.init_communicator(init_info)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Update named weights in SGLang engine."""

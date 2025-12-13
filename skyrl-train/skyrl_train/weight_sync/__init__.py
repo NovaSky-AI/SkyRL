@@ -7,13 +7,16 @@ from .transfer_strategy import (
     WeightTransferStrategy,
     WeightTransferSender,
     WeightTransferReceiver,
+    WeightSyncInitInfo,
 )
 from .broadcast_strategy import (
+    BroadcastInitInfo,
     BroadcastTransferStrategy,
     BroadcastWeightTransferSender,
     BroadcastWeightTransferReceiver,
 )
 from .cuda_ipc_strategy import (
+    CudaIpcInitInfo,
     CudaIpcTransferStrategy,
     CudaIpcWeightTransferSender,
     CudaIpcWeightTransferReceiver,
@@ -26,6 +29,9 @@ __all__ = [
     "WeightTransferStrategy",
     "WeightTransferSender",
     "WeightTransferReceiver",
+    "WeightSyncInitInfo",
+    "BroadcastInitInfo",
+    "CudaIpcInitInfo",
     "BroadcastTransferStrategy",
     "BroadcastWeightTransferSender",
     "BroadcastWeightTransferReceiver",

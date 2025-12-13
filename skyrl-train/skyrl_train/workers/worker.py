@@ -1,7 +1,5 @@
-import asyncio
 import logging
 import os
-import socket
 from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
@@ -31,13 +29,12 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
-from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
+from skyrl_train.utils.utils import configure_ray_worker_logging
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -256,59 +253,32 @@ class Worker(DistributedTorchRayActor):
     async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
         """Initialize state for weight syncing with Inference Engine Client
 
-        Initializes a custom process group with the rank 0 Worker and all the inference engine ranks
-        for weight syncing.
+        Creates init info and sender, then sends init info to inference engines
+        so they can create receivers.
 
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
+        from skyrl_train.weight_sync.broadcast_strategy import BroadcastTransferStrategy
+        from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcTransferStrategy
+
         assert inference_engine_client is not None
 
         if torch.distributed.get_rank() == 0:
-            master_addr = ray._private.services.get_node_ip_address()
-            with socket.socket() as sock:
-                sock.bind(("", 0))
-                master_port = sock.getsockname()[1]
+            # Create init info and sender
+            if self.use_cuda_ipc:
+                init_info = CudaIpcTransferStrategy.create_init_info(self.cfg)
+            else:
+                init_info = BroadcastTransferStrategy.create_init_info(self.cfg)
 
-            num_inference_engines, tensor_parallel_size, pipeline_parallel_size, data_parallel_size = (
-                self.cfg.generator.num_inference_engines,
-                self.cfg.generator.inference_engine_tensor_parallel_size,
-                self.cfg.generator.inference_engine_pipeline_parallel_size,
-                self.cfg.generator.inference_engine_data_parallel_size,
-            )
-            world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
-
-            backend = self.cfg.generator.weight_sync_backend
-
-            override_existing = False if self.cfg.generator.override_existing_update_group == "disable" else True
-            group_name = "skyrl"
-            self._model_update_group_name = group_name
-
-            tasks = []
-            tasks.append(
-                inference_engine_client.init_weight_update_communicator(
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                    group_name=group_name,
-                    backend=backend,
-                    override_existing=override_existing,
-                )
+            strategy_cls = init_info.strategy_type()
+            self._weight_transfer_sender = strategy_cls.create_sender(
+                init_info=init_info,
+                inference_client=inference_engine_client,
             )
 
-            tasks.append(
-                asyncio.to_thread(
-                    init_custom_process_group,
-                    backend=backend,
-                    init_method=get_tcp_url(master_addr, master_port),
-                    world_size=world_size,
-                    rank=0,
-                    group_name=group_name,
-                )
-            )
-            results = await asyncio.gather(*tasks)
-            self._model_update_group = results[-1]
+            # Send init info to inference engines so they can create receivers
+            await inference_engine_client.init_weight_update_communicator(init_info)
 
             # # Register signal handlers for termination only on rank 0
             # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.

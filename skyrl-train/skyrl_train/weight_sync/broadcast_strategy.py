@@ -5,18 +5,42 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 """
 
 import asyncio
+import socket
+from dataclasses import dataclass
 from typing import Iterable, Iterator, Tuple
 
+import ray
 import torch
 
+from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.utils import get_tcp_url
 from skyrl_train.weight_sync.base import WeightChunk
 from skyrl_train.weight_sync.transfer_strategy import (
+    WeightSyncInitInfo,
     WeightTransferStrategy,
     WeightTransferSender,
     WeightTransferReceiver,
 )
+
+
+@dataclass
+class BroadcastInitInfo(WeightSyncInitInfo):
+    """Initialization info for broadcast-based weight transfer."""
+
+    master_addr: str
+    master_port: int
+    rank_offset: int
+    world_size: int
+    group_name: str
+    backend: str
+    model_dtype_str: str
+
+    @staticmethod
+    def strategy_type() -> type:
+        """Return the strategy class for this init info type."""
+        return BroadcastTransferStrategy
 
 
 class BroadcastWeightTransferSender(WeightTransferSender):
@@ -28,22 +52,19 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
     def __init__(
         self,
-        rank: int,
+        init_info: BroadcastInitInfo,
         model_update_group: torch.distributed.ProcessGroup,
-        model_dtype_str: str,
         inference_client: InferenceEngineClient,
     ) -> None:
         """Initialize the broadcast sender.
 
         Args:
-            rank: This worker's rank in the distributed group.
+            init_info: BroadcastInitInfo containing all config-derived args.
             model_update_group: Process group for broadcast operations.
-            model_dtype_str: Model dtype as string (e.g., "bfloat16") for request metadata.
             inference_client: Client for coordinating with inference engines.
         """
-        self._rank = rank
+        self._init_info = init_info
         self._model_update_group = model_update_group
-        self._model_dtype_str = model_dtype_str
         self._inference_client = inference_client
 
     async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
@@ -62,28 +83,21 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             tensor = chunk.tensors[0]
             shape = chunk.shapes[0]
 
-            update_weight_task = None
-            if self._rank == 0:
-                # Create legacy update request and notify inference engines
-                request: NamedWeightsUpdateRequest = {
-                    "names": [name],
-                    "dtypes": [self._model_dtype_str],
-                    "shapes": [shape],
-                }
-                update_weight_task = asyncio.create_task(
-                    self._inference_client.update_named_weights(request)
-                )
+            # Create update request and notify inference engines
+            # Note: Sender is always on rank 0 in the model update group
+            request: NamedWeightsUpdateRequest = {
+                "names": [name],
+                "dtypes": [self._init_info.model_dtype_str],
+                "shapes": [shape],
+            }
+            update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
 
             # Broadcast tensor from rank 0
             def broadcast_tensor(t: torch.Tensor) -> None:
-                if self._rank == 0:
-                    torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
+                torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
 
             await asyncio.to_thread(broadcast_tensor, tensor)
-
-            if update_weight_task is not None:
-                await update_weight_task
-
+            await update_weight_task
             torch.distributed.barrier()
 
 
@@ -107,9 +121,7 @@ class BroadcastWeightTransferReceiver(WeightTransferReceiver):
         self._model_dtype = model_dtype
         self._model_update_group = model_update_group
 
-    def receive_weights(
-        self, request: NamedWeightsUpdateRequest
-    ) -> Iterator[Tuple[str, torch.Tensor]]:
+    def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via broadcast.
 
         Args:
@@ -131,43 +143,103 @@ class BroadcastWeightTransferReceiver(WeightTransferReceiver):
 
 
 class BroadcastTransferStrategy(WeightTransferStrategy):
-    """Strategy for broadcast-based weight transfer using torch.distributed.
+    """Factory for broadcast-based weight transfer.
 
     This strategy uses NCCL/Gloo broadcast operations to transfer weights from
-    training workers to inference engines. Requires a shared process group.
+    training workers to inference engines.
+
+    All methods are static - no instance state needed.
     """
 
-    def __init__(
-        self,
-        rank: int,
-        model_update_group: torch.distributed.ProcessGroup,
-        model_dtype: torch.dtype,
-    ) -> None:
-        """Initialize the broadcast strategy.
+    @staticmethod
+    def create_init_info(cfg: "DictConfig") -> BroadcastInitInfo:
+        """Create init info with all config-derived args.
 
         Args:
-            rank: This process's rank in the distributed group.
-            model_update_group: Process group for broadcast operations.
-            model_dtype: Model dtype (e.g., torch.bfloat16).
+            cfg: Configuration object containing generator settings.
+
+        Returns:
+            BroadcastInitInfo containing all args needed for sender/receiver creation.
         """
-        from skyrl_train.utils import torch_dtype_to_str
 
-        self._rank = rank
-        self._model_update_group = model_update_group
-        self._model_dtype = model_dtype
-        self._dtype_str = torch_dtype_to_str(model_dtype)
+        num_inference_engines = cfg.generator.num_inference_engines
+        tensor_parallel_size = cfg.generator.inference_engine_tensor_parallel_size
+        pipeline_parallel_size = cfg.generator.inference_engine_pipeline_parallel_size
+        data_parallel_size = cfg.generator.inference_engine_data_parallel_size
+        world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
-    def create_sender(self) -> WeightTransferSender:
-        """Create a broadcast sender."""
-        return BroadcastWeightTransferSender(
-            rank=self._rank,
-            model_update_group=self._model_update_group,
-            model_dtype_str=self._dtype_str,
+        master_addr = ray._private.services.get_node_ip_address()
+        with socket.socket() as sock:
+            sock.bind(("", 0))
+            master_port = sock.getsockname()[1]
+
+        return BroadcastInitInfo(
+            master_addr=master_addr,
+            master_port=master_port,
+            rank_offset=1,
+            world_size=world_size,
+            group_name="skyrl",
+            backend=cfg.generator.weight_sync_backend,
+            model_dtype_str=cfg.generator.model_dtype,
         )
 
-    def create_receiver(self) -> WeightTransferReceiver:
-        """Create a broadcast receiver."""
+    @staticmethod
+    def create_sender(
+        init_info: BroadcastInitInfo,
+        inference_client: InferenceEngineClient,
+    ) -> BroadcastWeightTransferSender:
+        """Create a broadcast sender.
+
+        Sets up the process group and returns a configured sender.
+
+        Args:
+            init_info: BroadcastInitInfo containing config-derived args.
+            inference_client: Client for coordinating with inference engines.
+
+        Returns:
+            A configured BroadcastWeightTransferSender instance.
+        """
+        # Setup process group (sender is always rank 0)
+        model_update_group = init_custom_process_group(
+            backend=init_info.backend,
+            init_method=get_tcp_url(init_info.master_addr, init_info.master_port),
+            world_size=init_info.world_size,
+            rank=0,
+            group_name=init_info.group_name,
+        )
+
+        return BroadcastWeightTransferSender(
+            init_info=init_info,
+            model_update_group=model_update_group,
+            inference_client=inference_client,
+        )
+
+    @staticmethod
+    def create_receiver(init_info: BroadcastInitInfo) -> BroadcastWeightTransferReceiver:
+        """Create a broadcast receiver.
+
+        Sets up the process group and returns a configured receiver.
+
+        Args:
+            init_info: BroadcastInitInfo from the sender.
+
+        Returns:
+            A configured BroadcastWeightTransferReceiver instance.
+        """
+        from skyrl_train.utils import str_to_torch_dtype
+
+        # Setup process group (receiver rank = local rank + rank_offset)
+        rank = torch.distributed.get_rank() + init_info.rank_offset
+        model_update_group = init_custom_process_group(
+            backend=init_info.backend,
+            init_method=get_tcp_url(init_info.master_addr, init_info.master_port),
+            world_size=init_info.world_size,
+            rank=rank,
+            group_name=init_info.group_name,
+        )
+
+        model_dtype = str_to_torch_dtype(init_info.model_dtype_str)
         return BroadcastWeightTransferReceiver(
-            model_dtype=self._model_dtype,
-            model_update_group=self._model_update_group,
+            model_dtype=model_dtype,
+            model_update_group=model_update_group,
         )

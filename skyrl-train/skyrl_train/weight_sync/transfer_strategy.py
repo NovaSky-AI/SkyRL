@@ -6,12 +6,24 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Iterable, Iterator, Tuple
 
 import torch
 
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 from skyrl_train.weight_sync.base import WeightChunk
+
+
+@dataclass
+class WeightSyncInitInfo(ABC):
+    """Base class for weight sync initialization info."""
+
+    @staticmethod
+    @abstractmethod
+    def strategy_type() -> type:
+        """Return the strategy class for this init info type."""
+        ...
 
 
 class WeightTransferSender(ABC):
@@ -52,19 +64,62 @@ class WeightTransferReceiver(ABC):
 
 
 class WeightTransferStrategy(ABC):
-    """Factory for creating transfer senders and receivers.
+    """Stateless factory for creating init info, senders and receivers.
 
-    Each strategy implementation encapsulates the configuration needed for a specific
-    transfer mechanism. Strategy-specific args (rank, process group, etc.) are passed
-    to the strategy constructor, not to create_sender/create_receiver.
+    Each strategy implementation provides static methods to create:
+    - init_info: Contains all config-derived args
+    - sender: Uses init_info + inference_client
+    - receiver: Uses init_info + strategy-specific args
+
+    Usage on sender side:
+        init_info = Strategy.create_init_info(...)
+        sender = Strategy.create_sender(init_info, inference_client)
+
+    Usage on receiver side:
+        receiver = init_info.strategy_type().create_receiver(init_info, ...)
     """
 
+    @staticmethod
     @abstractmethod
-    def create_sender(self) -> WeightTransferSender:
-        """Create a sender for the training worker side."""
+    def create_init_info(cfg: "DictConfig") -> WeightSyncInitInfo:
+        """Create init info with all config-derived args.
+
+        Args:
+            cfg: Configuration object containing generator settings.
+
+        Returns:
+            WeightSyncInitInfo containing all args needed for sender/receiver creation.
+        """
         ...
 
+    @staticmethod
     @abstractmethod
-    def create_receiver(self) -> WeightTransferReceiver:
-        """Create a receiver for the inference engine side."""
+    def create_sender(
+        init_info: WeightSyncInitInfo,
+        inference_client: "InferenceEngineClient",
+    ) -> WeightTransferSender:
+        """Create a sender for the training worker side.
+
+        Args:
+            init_info: WeightSyncInitInfo containing config-derived args.
+            inference_client: Client for coordinating with inference engines.
+
+        Returns:
+            A configured WeightTransferSender instance.
+        """
         ...
+
+    @staticmethod
+    @abstractmethod
+    def create_receiver(init_info: WeightSyncInitInfo) -> WeightTransferReceiver:
+        """Create a receiver for the inference engine side.
+
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
+
+        Returns:
+            A configured WeightTransferReceiver instance.
+        """
+        ...
+
+
