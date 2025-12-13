@@ -468,7 +468,9 @@ class TinkerEngine:
         # Filter: only include ops that come before their model's barrier
         batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
-        return {f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable}
+        return {
+            f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
+        }
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
@@ -1096,8 +1098,10 @@ class TinkerEngine:
         while True:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward and forward_only operations
-                forward_backward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD_BACKWARD)
+                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
+                forward_backward_requests = self.find_batchable_model_passes(
+                    session, types.RequestType.FORWARD_BACKWARD
+                )
                 forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
