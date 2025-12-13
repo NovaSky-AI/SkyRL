@@ -352,7 +352,6 @@ class TinkerEngine:
             )
 
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
-            scalar = jax.NamedSharding(self.mesh, jax.P())
 
             # JIT the fused function
             self._forward_backward_and_accumulate = jax.jit(
