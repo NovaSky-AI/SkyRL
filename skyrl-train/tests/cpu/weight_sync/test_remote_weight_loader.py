@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from skyrl_train.inference_engines.remote_inference_engine import RemoteWeightLoader
+from skyrl_train.weight_sync import BroadcastInitInfo
 
 
 class AsyncContextManagerMock:
@@ -49,15 +50,18 @@ def create_mock_session(mock_response):
 class TestRemoteWeightLoader:
     """Tests for RemoteWeightLoader class."""
 
-    INIT_COMMUNICATOR_PARAMS = {
-        "master_address": "127.0.0.1",
-        "master_port": 29500,
-        "rank_offset": 1,
-        "world_size": 2,
-        "group_name": "test_group",
-        "backend": "nccl",
-        "override_existing": False,
-    }
+    @staticmethod
+    def make_broadcast_init_info():
+        """Create a BroadcastInitInfo for testing."""
+        return BroadcastInitInfo(
+            master_addr="127.0.0.1",
+            master_port=29500,
+            rank_offset=1,
+            world_size=2,
+            group_name="test_group",
+            backend="nccl",
+            model_dtype_str="torch.bfloat16",
+        )
 
     @pytest.mark.parametrize(
         "url,backend",
@@ -85,6 +89,7 @@ class TestRemoteWeightLoader:
         """Test init_communicator calls correct endpoint for each backend."""
         url = "http://localhost:8000"
         loader = RemoteWeightLoader(url=url, engine_backend=backend)
+        init_info = self.make_broadcast_init_info()
 
         mock_response = MagicMock()
         mock_response.json = AsyncMock(return_value={"success": True})
@@ -93,17 +98,21 @@ class TestRemoteWeightLoader:
             mock_session = create_mock_session(mock_response)
             mock_session_class.return_value = AsyncContextManagerMock(mock_session)
 
-            result = await loader.init_communicator(**self.INIT_COMMUNICATOR_PARAMS)
+            result = await loader.init_communicator(init_info)
 
             # Verify correct endpoint called
             mock_session.post.assert_called_once()
             call_args = mock_session.post.call_args
             assert call_args[0][0] == f"{url}{expected_endpoint}"
 
-            # Verify payload matches params
+            # Verify payload matches init_info fields
             payload = call_args[1]["json"]
-            for key, value in self.INIT_COMMUNICATOR_PARAMS.items():
-                assert payload[key] == value
+            assert payload["master_address"] == init_info.master_addr
+            assert payload["master_port"] == init_info.master_port
+            assert payload["rank_offset"] == init_info.rank_offset
+            assert payload["world_size"] == init_info.world_size
+            assert payload["group_name"] == init_info.group_name
+            assert payload["backend"] == init_info.backend
 
             assert result == {"success": True}
 
