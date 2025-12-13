@@ -568,16 +568,16 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def _process_batch_pass(
+    def _process_model_pass_batch(
         self,
         requests: dict[str, tuple[str, types.ForwardBackwardInput]],
-        forward_fn: Callable,
+        model_pass_fn: Callable,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Common batch processing logic for forward-only and forward-backward operations.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            forward_fn: Callable to perform the forward computation
+            model_pass_fn: Callable to perform the model pass (forward or forward_backward)
 
         Returns:
             Dict mapping request_id to result_data or error info
@@ -643,8 +643,7 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
-
-                self.accumulated_grads, per_token_losses, target_logprobs = forward_fn(
+                self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
                     self.accumulated_grads,
                     self.lora_params,
                     self.non_lora_params,
@@ -657,7 +656,6 @@ class TinkerEngine:
                     sampling_logprobs[mb_start:mb_end],
                     advantages[mb_start:mb_end],
                 )
-
                 token_losses_device.append(per_token_losses)
                 logprobs_device.append(target_logprobs)
 
@@ -706,10 +704,10 @@ class TinkerEngine:
         return results
 
     def process_forward_backward_batch(self, requests):
-        return self._process_batch_pass(requests, self._forward_backward_and_accumulate)
+        return self._process_model_pass_batch(requests, self._forward_backward_and_accumulate)
 
     def process_forward_batch(self, requests):
-        return self._process_batch_pass(requests, self._forward)
+        return self._process_model_pass_batch(requests, self._forward)
 
     def process_sample_batch(
         self, requests: dict[str, tuple[str, types.SampleInput]]
