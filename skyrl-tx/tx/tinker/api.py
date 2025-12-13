@@ -248,14 +248,9 @@ class ForwardBackwardRequest(BaseModel):
     forward_backward_input: ForwardBackwardInput
 
 
-class ForwardInput(ForwardBackwardInput):
-    def to_types(self) -> types.ForwardInput:
-        return types.ForwardInput(data=[datum.to_types() for datum in self.data], loss_fn=self.loss_fn)
-
-
 class ForwardRequest(BaseModel):
     model_id: str
-    forward_input: ForwardInput
+    forward_input: ForwardBackwardInput
 
 
 class AdamParams(BaseModel):
