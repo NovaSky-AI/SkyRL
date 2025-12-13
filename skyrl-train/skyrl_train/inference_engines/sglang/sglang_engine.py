@@ -2,7 +2,7 @@
 
 import torch
 import os
-from typing import List, Optional, Tuple, Dict, Any, Iterator
+from typing import List, Optional, Dict, Any, Iterator
 import ray
 from loguru import logger
 import multiprocessing as mp
@@ -167,7 +167,7 @@ class SGLangWeightLoader(WeightLoader):
         self._engine = engine
         self._tp_size = tp_size
 
-    async def init_communicator(self, init_info) -> Tuple[bool, str]:
+    async def init_communicator(self, init_info) -> None:
         """Initialize the process group for broadcast weight sync.
 
         This is only needed for the broadcast path. IPC path does not require
@@ -175,9 +175,6 @@ class SGLangWeightLoader(WeightLoader):
 
         Args:
             init_info: WeightSyncInitInfo from the sender.
-
-        Returns:
-            Tuple of (success, message).
         """
         from skyrl_train.weight_sync import BroadcastTransferStrategy
 
@@ -192,10 +189,9 @@ class SGLangWeightLoader(WeightLoader):
             )
             # NOTE(charlie): Call the async method on tokenizer_manager directly to avoid event loop
             # conflicts. Same underlying implementation: https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/model_executor/model_runner.py#L689
-            return await self._engine.tokenizer_manager.init_weights_update_group(obj, None)
-        else:
-            # CUDA IPC doesn't need process group initialization
-            return (True, "CUDA IPC strategy initialized")
+            success, message = await self._engine.tokenizer_manager.init_weights_update_group(obj, None)
+            if not success:
+                raise RuntimeError(f"Failed to initialize weight update group: {message}")
 
     async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
         """Load weights by coordinating with SGLang's weight update APIs.
