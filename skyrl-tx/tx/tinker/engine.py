@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
@@ -274,6 +275,33 @@ class TinkerEngine:
         # Only differentiate with respect to lora_params (argnums=0)
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
+        def forward_only(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
+            _, (target_logprobs, per_token_losses) = loss_for_lora(
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
+            )
+            return accumulated_grads, per_token_losses, target_logprobs
+
         def forward_backward_and_accumulate(
             accumulated_grads: AccumulatedGradients,
             lora_params: nnx.State,
@@ -286,10 +314,10 @@ class TinkerEngine:
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
-        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             """Fused forward-backward-accumulate operation."""
             # Forward-backward
-            (loss, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
+            (_, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
                 lora_params,
                 non_lora_params,
                 input_ids,
@@ -303,11 +331,12 @@ class TinkerEngine:
             )
             # Accumulate gradients
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
-            return new_accumulated_grads, per_token_losses, target_logprobs, loss
+            return new_accumulated_grads, per_token_losses, target_logprobs
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
             self._forward_backward_and_accumulate = forward_backward_and_accumulate
+            self._forward = forward_only
 
         else:
             # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
@@ -323,14 +352,18 @@ class TinkerEngine:
             )
 
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
-            scalar = jax.NamedSharding(self.mesh, jax.P())
 
             # JIT the fused function
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
                 in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                out_shardings=(accumulated_grads_shardings, replicated, replicated),
                 donate_argnames=("accumulated_grads",),
+            )
+            self._forward = jax.jit(
+                forward_only,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
+                out_shardings=(accumulated_grads_shardings, replicated, replicated),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
@@ -396,14 +429,17 @@ class TinkerEngine:
 
         return results, valid_requests
 
-    def find_batchable_forward_backward(self, session: Session) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
-        """Find all forward_backward ops that come before any destructive update for their model.
+    def find_batchable_model_passes(
+        self, session: Session, request_type: types.RequestType
+    ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
+        """Find all requests of the given type that come before any destructive update for their model.
 
-        Uses look-ahead scheduling: for each model, only returns forward_backward operations
+        Uses look-ahead scheduling: for each model, only returns operations
         that have no optim_step or load_weights blocking them in the queue.
 
         Args:
             session: Database session
+            request_type: The type of request to find (e.g., FORWARD or FORWARD_BACKWARD)
 
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
@@ -420,17 +456,17 @@ class TinkerEngine:
         )
         barriers = dict(session.exec(barriers_query).all())
 
-        # Get all pending forward_backward operations ordered by request_id
-        fwd_bwd_query = (
+        # Get all pending operations of the requested type ordered by request_id
+        query = (
             select(FutureDB)
-            .where(FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
         )
-        fwd_bwd_ops = session.exec(fwd_bwd_query).all()
+        ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
-        batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
+        batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return {
             f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
@@ -487,6 +523,7 @@ class TinkerEngine:
             select(FutureDB)
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type != types.RequestType.FORWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
             .where(FutureDB.request_type != types.RequestType.EXTERNAL)
             .order_by(FutureDB.request_id)
@@ -531,16 +568,19 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def process_forward_backward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
+    def _process_model_pass_batch(
+        self,
+        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+        model_pass_fn: Callable,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process multiple forward_backward requests in a single batch.
+        """Common batch processing logic for forward-only and forward-backward operations.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
+            model_pass_fn: Callable to perform the model pass (forward or forward_backward)
 
         Returns:
-            Dict mapping request_id -> result_data or error info
+            Dict mapping request_id to result_data or error info
         """
         results, valid_requests = self._filter_valid_requests(requests)
 
@@ -603,7 +643,7 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
-                self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
+                self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
                     self.accumulated_grads,
                     self.lora_params,
                     self.non_lora_params,
@@ -662,6 +702,12 @@ class TinkerEngine:
             )
 
         return results
+
+    def process_forward_backward_batch(self, requests):
+        return self._process_model_pass_batch(requests, self._forward_backward_and_accumulate)
+
+    def process_forward_batch(self, requests):
+        return self._process_model_pass_batch(requests, self._forward)
 
     def process_sample_batch(
         self, requests: dict[str, tuple[str, types.SampleInput]]
@@ -987,7 +1033,7 @@ class TinkerEngine:
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
+            batch_processor: Function to call to process the batch
         """
         if not requests:
             return
@@ -1004,8 +1050,11 @@ class TinkerEngine:
         while True:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward operations
-                forward_backward_requests = self.find_batchable_forward_backward(session)
+                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
+                forward_backward_requests = self.find_batchable_model_passes(
+                    session, types.RequestType.FORWARD_BACKWARD
+                )
+                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
@@ -1013,6 +1062,7 @@ class TinkerEngine:
 
             # Process batches outside of session context
             self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
+            self.process_batch_requests(forward_requests, self.process_forward_batch)
             self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
