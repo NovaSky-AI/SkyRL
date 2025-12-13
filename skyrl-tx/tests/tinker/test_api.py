@@ -79,6 +79,15 @@ def test_capabilities(service_client):
     assert BASE_MODEL in model_names
 
 
+def custom_cross_entropy_loss(data, model_logprobs):
+    total_loss = 0.0
+    for datum, log_p in zip(data, model_logprobs):
+        weights = datum.loss_fn_inputs.get("weights")
+        weights = weights.to_torch() if weights else 1.0
+        total_loss += -(log_p * weights).sum()
+    return total_loss, {}
+
+
 def test_training_workflow(service_client):
     """Test a complete training workflow."""
     training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
@@ -126,6 +135,11 @@ def test_training_workflow(service_client):
     training_client.load_state(resume_path)
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
+    # Also check that custom loss function produces the same loss
+    fwdbwd_result_custom = training_client.forward_backward_custom(
+        processed_examples, loss_fn=custom_cross_entropy_loss
+    ).result()
+    assert fwdbwd_result_custom.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
     # Test that we can restore the training run
     training_client = service_client.create_training_client_from_state(resume_path)
