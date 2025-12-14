@@ -53,4 +53,4 @@ def deserialize_ipc_request(tensor: torch.Tensor) -> NamedWeightsUpdateRequest:
         request_data_decoded = base64.b64decode(request_data)
         return pickle.loads(request_data_decoded)
     except Exception as e:
-        raise ValueError(f"Failed to deserialize request data: {e}")
+        raise ValueError("Failed to deserialize request data") from e
