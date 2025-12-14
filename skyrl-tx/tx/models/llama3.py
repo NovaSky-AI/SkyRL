@@ -317,3 +317,6 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
         )
+
+
+LlamaForCausalLM = Llama3ForCausalLM

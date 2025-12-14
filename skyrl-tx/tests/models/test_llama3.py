@@ -58,4 +58,3 @@ def test_llama3(tp: int):
         assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
         # Higher tolerance for final layer due to accumulated numerical differences between PyTorch and JAX
         assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=5e-2, atol=5e-2)
-
