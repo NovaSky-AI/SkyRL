@@ -27,12 +27,10 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
-from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype
 import time
 from packaging import version
 
@@ -82,13 +80,13 @@ class WorkerWrap:
         strategy_cls = init_info.strategy_type()
         self._weight_receiver = strategy_cls.create_receiver(init_info)
 
-    def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
+    def load_weights(self, request: WeightUpdateRequest) -> None:
         """Load weights using the receiver.
 
         This method is called via collective_rpc from VLLMWeightLoader.
 
         Args:
-            request: Weight update request with names, dtypes, shapes, etc.
+            request: Weight update request.
         """
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
@@ -199,15 +197,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
-    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
-        """Check if this is a LoRA disk loading request."""
-        is_lora = request["names"][0] == "lora_disk_load"
-        if is_lora:
-            assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
-            )
-        return is_lora
-
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
@@ -297,17 +286,15 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        from skyrl_train.weight_sync import LoraLoadRequest
 
-        if not len(request["names"]):
-            raise ValueError("Update weight request should have at least one entry in 'names'")
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
 
         # Handle LoRA disk loading request
-        if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
-            return await self._load_lora_from_disk(lora_path)
+        if isinstance(request, LoraLoadRequest):
+            return await self._load_lora_from_disk(request.lora_path)
 
         # Use the weight loader to coordinate weight transfer
         return await self._weight_loader.load_weights(request)
@@ -447,17 +434,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(init_info,),
         )
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
-        if not len(request["names"]):
-            raise ValueError("Update weight request should have atleast one entry in 'names'")
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        from skyrl_train.weight_sync import LoraLoadRequest
 
         # Check for LoRA disk loading request
-        if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
-            return await self._load_lora_from_disk(lora_path)
+        if isinstance(request, LoraLoadRequest):
+            return await self._load_lora_from_disk(request.lora_path)
+
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
 
         # Use the weight loader to coordinate weight transfer
         return await self._weight_loader.load_weights(request)
@@ -607,15 +592,14 @@ class VLLMWeightLoader(WeightLoader):
         self._engine = engine.engine if hasattr(engine, "engine") else engine
         self._is_async = is_async
 
-    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
+    async def load_weights(self, request: WeightUpdateRequest) -> None:
         """Load weights by coordinating RPC to workers.
 
         Sends the request to workers via collective_rpc. Workers create
         the receiver locally and use it to receive and load weights.
 
         Args:
-            request: Weight update request containing names, dtypes, shapes,
-                    and optionally IPC handles.
+            request: Weight update request.
         """
         if self._is_async:
             await self._engine.collective_rpc(

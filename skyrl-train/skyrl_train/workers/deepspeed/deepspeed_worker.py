@@ -169,8 +169,6 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             batch_size_threshold_gb=(self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if use_cuda_ipc else 0.0),
         )
 
-        self._model_update_group_name = None
-
     def process_sequences(self, sequences, input_len, eos_token_id, pad_token_id):
         return self.model.process_sequences(sequences, input_len, eos_token_id, pad_token_id)
 

@@ -28,12 +28,12 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
-from skyrl_train.weight_sync import WeightLoader
-from skyrl_train.inference_engines.sglang.ipc_utils import (
-    serialize_ipc_request,
-    deserialize_ipc_request,
+from skyrl_train.weight_sync import (
+    WeightLoader,
+    WeightUpdateRequest,
+    CudaIpcWeightUpdateRequest,
+    BroadcastWeightUpdateRequest,
 )
 
 
@@ -111,8 +111,7 @@ def sglang_custom_weight_loader(model, named_tensors):
     """Custom weight loader for SGLang that handles CUDA IPC.
 
     This function is called by SGLang's model runner to load weights.
-    It reconstructs tensors from SkyRL's NamedWeightsUpdateRequest
-    using CUDA IPC handles.
+    It reconstructs tensors from CudaIpcWeightUpdateRequest using CUDA IPC handles.
 
     Note: Broadcast path is not handled here.
     Because unlike vLLM where we control WorkerWrap and can store the
@@ -133,7 +132,9 @@ def sglang_custom_weight_loader(model, named_tensors):
         raise ValueError(f"Expected tensor name 'ipc_request', got: {name}")
 
     # Deserialize request from tensor
-    request = deserialize_ipc_request(tensor)
+    from skyrl_train.weight_sync import CudaIpcWeightUpdateRequest
+
+    request = CudaIpcWeightUpdateRequest.deserialize(tensor.cpu().numpy().tobytes())
 
     # Get model info and create receiver
     model_dtype = next(model.parameters()).dtype
@@ -193,28 +194,26 @@ class SGLangWeightLoader(WeightLoader):
             if not success:
                 raise RuntimeError(f"Failed to initialize weight update group: {message}")
 
-    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
+    async def load_weights(self, request: WeightUpdateRequest) -> None:
         """Load weights by coordinating with SGLang's weight update APIs.
 
         Args:
-            request: Weight update request containing names, dtypes, shapes,
-                    and optionally IPC handles.
+            request: Weight update request.
         """
-        extras = request.get("extras")
-        is_ipc = extras is not None and len(extras) > 0 and "ipc_handles" in extras[0]
-
-        if is_ipc:
+        if isinstance(request, CudaIpcWeightUpdateRequest):
             await self._load_via_ipc(request)
-        else:
+        elif isinstance(request, BroadcastWeightUpdateRequest):
             await self._load_via_broadcast(request)
+        else:
+            raise TypeError(f"Unknown request type: {type(request).__name__}")
 
-    async def _load_via_ipc(self, request: NamedWeightsUpdateRequest) -> None:
+    async def _load_via_ipc(self, request: CudaIpcWeightUpdateRequest) -> None:
         """Load weights via CUDA IPC using custom weight loader.
 
         Uses SGLangWeightTransferReceiver internally to receive weights
         from IPC handles.
         """
-        tensor_array = serialize_ipc_request(request)
+        tensor_array = torch.frombuffer(bytearray(request.serialize()), dtype=torch.uint8)
 
         # Use SGLang's API to update weights with our custom loader
         request_tensor = [("ipc_request", tensor_array)]
@@ -230,18 +229,16 @@ class SGLangWeightLoader(WeightLoader):
         if not success:
             raise RuntimeError(f"IPC weight update failed: {message}")
 
-    async def _load_via_broadcast(self, request: NamedWeightsUpdateRequest) -> None:
+    async def _load_via_broadcast(self, request: BroadcastWeightUpdateRequest) -> None:
         """Load weights via torch.distributed broadcast.
 
         Uses SGLang's native update_weights_from_distributed API which internally
         uses the process group created during init_weights_update_group.
         """
-        assert (
-            len(request["names"]) == 1
-        ), f"Broadcast only supports a single weight at a time, got {len(request['names'])} entries"
+        assert len(request) == 1, f"Broadcast only supports a single weight at a time, got {len(request)} entries"
 
         obj = UpdateWeightsFromDistributedReqInput(
-            name=request["names"][0], dtype=request["dtypes"][0], shape=request["shapes"][0]
+            name=request.names[0], dtype=request.dtypes[0], shape=request.shapes[0]
         )
 
         success, message = await self._engine.tokenizer_manager.update_weights_from_distributed(obj, None)
@@ -348,11 +345,8 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """
         return await self._weight_loader.init_communicator(init_info)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest) -> None:
+    async def update_named_weights(self, request: WeightUpdateRequest) -> None:
         """Update named weights in SGLang engine."""
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
         await self._weight_loader.load_weights(request)
 
     async def wake_up(self, tags: Optional[List[str]] = None):

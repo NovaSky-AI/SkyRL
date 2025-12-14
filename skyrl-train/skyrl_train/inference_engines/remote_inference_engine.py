@@ -3,9 +3,8 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
-from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest, BroadcastWeightUpdateRequest
 from typing import List, Optional, Any, Dict
 import json
 from transformers import PreTrainedTokenizerBase
@@ -62,14 +61,14 @@ class RemoteWeightLoader(WeightLoader):
             ) as response:
                 return await response.json()
 
-    async def load_weights(self, request: NamedWeightsUpdateRequest) -> Dict[str, Any]:
+    async def load_weights(self, request: WeightUpdateRequest) -> Dict[str, Any]:
         """Load weights via HTTP to the remote inference server.
 
         Remote engines only support broadcast weight updates (no IPC).
         Each request should contain a single weight to update.
 
         Args:
-            request: Weight update request containing names, dtypes, shapes.
+            request: Weight update request.
 
         Returns:
             Response from the remote server.
@@ -82,9 +81,9 @@ class RemoteWeightLoader(WeightLoader):
             raise ValueError(f"Invalid engine backend: {self._engine_backend}")
 
         async with aiohttp.ClientSession() as session:
-            name = request["names"][0]
-            dtype = request["dtypes"][0]
-            shape = request["shapes"][0]
+            name = request.names[0]
+            dtype = request.dtypes[0]
+            shape = request.shapes[0]
 
             resp = await session.post(
                 f"{self._url}/{weight_update_method}",
@@ -268,18 +267,15 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         """
         return await self._weight_loader.init_communicator(init_info)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
-        assert (
-            len(request["names"]) == 1
-        ), f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
-
-        if request.get("extras") and "ipc_handles" in request["extras"][0]:
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        if not isinstance(request, BroadcastWeightUpdateRequest):
             raise ValueError(
                 "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
             )
+
+        assert (
+            len(request) == 1
+        ), f"Remote inference engines support only requests with a single named weight at a time, got request with {len(request)} entries"
 
         return await self._weight_loader.load_weights(request)
 

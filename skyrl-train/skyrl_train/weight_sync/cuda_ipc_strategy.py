@@ -5,15 +5,14 @@ from training workers to inference engines using CUDA IPC handles.
 """
 
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Tuple
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype
-from skyrl_train.weight_sync.base import WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferStrategy,
@@ -25,12 +24,60 @@ from skyrl_train.weight_sync.transfer_strategy import (
 @dataclass
 class CudaIpcInitInfo(WeightSyncInitInfo):
     """Initialization info for CUDA IPC-based weight transfer."""
+
     model_dtype_str: str
 
     @staticmethod
     def strategy_type() -> type:
         """Return the strategy class for this init info type."""
         return CudaIpcTransferStrategy
+
+
+_IPC_REQUEST_END_MARKER = b"__END_OF_REQUEST__"
+
+
+@dataclass
+class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
+    """Request for CUDA IPC-based weight transfer.
+
+    Contains IPC handles for direct GPU memory access. Tensors are packed into
+    a contiguous buffer to reduce the number of IPC handles.
+    """
+
+    sizes: List[int]  # Size in elements per parameter (for unpacking)
+    ipc_handles: Dict[int, Any]  # GPU ID -> IPC handle for the packed buffer
+
+    def serialize(self) -> bytes:
+        """Serialize the request to bytes."""
+        import pickle
+        import base64
+
+        request_data = pickle.dumps(self)
+        request_data_encoded = base64.b64encode(request_data)
+        data_with_marker = request_data_encoded + _IPC_REQUEST_END_MARKER
+
+        # Pad for 4-byte alignment
+        data_size = len(data_with_marker)
+        padded_size = ((data_size + 3) // 4) * 4
+        result = bytearray(data_with_marker)
+        result.extend(b"\x00" * (padded_size - data_size))
+        return bytes(result)
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> "CudaIpcWeightUpdateRequest":
+        """Deserialize the request from bytes."""
+        import pickle
+        import base64
+
+        end_index = data.find(_IPC_REQUEST_END_MARKER)
+        if end_index == -1:
+            raise ValueError("End marker not found in serialized data")
+        request_data = data[:end_index]
+        try:
+            request_data_decoded = base64.b64decode(request_data)
+            return pickle.loads(request_data_decoded)
+        except Exception as e:
+            raise ValueError("Failed to deserialize request") from e
 
 
 class CudaIpcWeightTransferSender(WeightTransferSender):
@@ -71,14 +118,11 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
 
         for chunk in chunks:
-            weights_update_request: NamedWeightsUpdateRequest = {
-                "names": [],
-                "dtypes": [],
-                "shapes": [],
-                "sizes": [],
-                "extras": [],
-                "packed": True,
-            }
+            # Collect metadata
+            names = []
+            dtypes = []
+            shapes = []
+            sizes = []
 
             # Pack all tensors in this chunk into a single contiguous buffer
             total_numel = sum(t.numel() for t in chunk.tensors)
@@ -94,10 +138,10 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 size = tensor.numel()
                 packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
                 offset += size
-                weights_update_request["names"].append(name)
-                weights_update_request["dtypes"].append(self._init_info.model_dtype_str)
-                weights_update_request["shapes"].append(shape)
-                weights_update_request["sizes"].append(size)
+                names.append(name)
+                dtypes.append(self._init_info.model_dtype_str)
+                shapes.append(shape)
+                sizes.append(size)
 
             # Create single IPC handle for the packed buffer
             ipc_handle = reduce_tensor(packed_tensor)
@@ -105,18 +149,24 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             ipc_handle_list = [None] * world_size
             torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
 
+            ipc_handles = {}
             if rank == 0:
-                ipc_handles = {}
                 for d in ipc_handle_list:
                     ipc_handles.update(d)
-                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
 
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
             # Send the packed chunk
             if rank == 0:
-                await self._inference_client.update_named_weights(weights_update_request)
+                request = CudaIpcWeightUpdateRequest(
+                    names=names,
+                    dtypes=dtypes,
+                    shapes=shapes,
+                    sizes=sizes,
+                    ipc_handles=ipc_handles,
+                )
+                await self._inference_client.update_named_weights(request)
 
             torch.cuda.ipc_collect()
             torch.distributed.barrier()
@@ -137,83 +187,36 @@ class CudaIpcWeightTransferReceiver(WeightTransferReceiver):
         """
         self._model_dtype = model_dtype
 
-    def receive_weights(
-        self, request: NamedWeightsUpdateRequest
-    ) -> Iterator[Tuple[str, torch.Tensor]]:
+    def receive_weights(self, request: CudaIpcWeightUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via CUDA IPC handles.
 
         Args:
-            request: Weight update request with names, dtypes, shapes, and IPC handles.
+            request: CUDA IPC weight update request with names, dtypes, shapes, sizes, and IPC handles.
 
         Yields:
             Tuples of (parameter_name, tensor) for each weight.
         """
-        names = request["names"]
-        dtypes = request["dtypes"]
-        shapes = request["shapes"]
-        sizes = request.get("sizes", [])
-        ipc_handles = [extra["ipc_handles"] for extra in request["extras"]]
-        packed = request.get("packed", False)
-
-        if packed:
-            yield from self._receive_packed(names, dtypes, shapes, sizes, ipc_handles)
-        else:
-            yield from self._receive_unpacked(names, dtypes, shapes, ipc_handles)
-
-    def _receive_packed(
-        self,
-        names: list,
-        dtypes: list,
-        shapes: list,
-        sizes: list,
-        ipc_handles: list,
-    ) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive packed tensors from a single IPC handle."""
-        assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
-        assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
+        assert len(set(request.dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
         assert (
-            str_to_torch_dtype(dtypes[0]) == self._model_dtype
-        ), f"mismatch dtype: src {dtypes[0]}, dst {self._model_dtype}"
-        assert len(sizes) == len(names), "sizes must be provided for packed weight update"
-        assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
+            str_to_torch_dtype(request.dtypes[0]) == self._model_dtype
+        ), f"mismatch dtype: src {request.dtypes[0]}, dst {self._model_dtype}"
+        assert len(request.sizes) == len(request), "sizes must be provided for packed weight update"
+        assert all(isinstance(size, int) for size in request.sizes), "sizes should be a list of integers"
 
         device_id = torch.cuda.current_device()
         props = torch.cuda.get_device_properties(device_id)
         physical_gpu_id = str(props.uuid)
 
-        handle = ipc_handles[0][physical_gpu_id]
+        handle = request.ipc_handles[physical_gpu_id]
         func, args = handle
         list_args = list(args)
         list_args[6] = device_id
         packed_tensor = func(*list_args)
 
         offset = 0
-        for name, shape, size in zip(names, shapes, sizes):
+        for name, shape, size in zip(request.names, request.shapes, request.sizes):
             yield name, packed_tensor[offset : offset + size].view(*shape)
             offset += size
-
-    def _receive_unpacked(
-        self,
-        names: list,
-        dtypes: list,
-        shapes: list,
-        ipc_handles: list,
-    ) -> Iterator[Tuple[str, torch.Tensor]]:
-        """Receive individual tensors from separate IPC handles."""
-        device_id = torch.cuda.current_device()
-        props = torch.cuda.get_device_properties(device_id)
-        physical_gpu_id = str(props.uuid)
-
-        for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
-            dtype = str_to_torch_dtype(dtype_str)
-            assert dtype == self._model_dtype, f"mismatch dtype: src {dtype}, dst {self._model_dtype}"
-
-            handle = ipc_handle[physical_gpu_id]
-            func, args = handle
-            list_args = list(args)
-            list_args[6] = device_id
-            weight = func(*list_args)
-            yield name, weight
 
 
 class CudaIpcTransferStrategy(WeightTransferStrategy):

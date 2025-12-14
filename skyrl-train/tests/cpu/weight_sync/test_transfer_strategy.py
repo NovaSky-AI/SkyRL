@@ -6,6 +6,9 @@ from skyrl_train.weight_sync import (
     CudaIpcTransferStrategy,
     BroadcastInitInfo,
     CudaIpcInitInfo,
+    BroadcastWeightUpdateRequest,
+    CudaIpcWeightUpdateRequest,
+    LoraLoadRequest,
 )
 
 
@@ -68,6 +71,7 @@ class TestCreateInitInfo:
         """BroadcastTransferStrategy.create_init_info should create BroadcastInitInfo with correct fields."""
         # Mock ray to avoid actual network operations
         import skyrl_train.weight_sync.broadcast_strategy as broadcast_module
+
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
         cfg = self._make_cfg(
@@ -89,3 +93,109 @@ class TestCreateInitInfo:
         assert init_info.group_name == "skyrl"
         assert init_info.backend == "gloo"
         assert init_info.model_dtype_str == "torch.bfloat16"
+
+
+class TestBroadcastWeightUpdateRequest:
+    """Tests for BroadcastWeightUpdateRequest."""
+
+    def test_len(self):
+        """__len__ should return number of weights."""
+        request = BroadcastWeightUpdateRequest(
+            names=["layer1.weight", "layer2.weight"],
+            dtypes=["bfloat16", "bfloat16"],
+            shapes=[[4096, 4096], [1024]],
+        )
+        assert len(request) == 2
+
+    def test_mismatched_lengths_raises(self):
+        """Mismatched lengths should raise ValueError."""
+        with pytest.raises(ValueError, match="must have the same length"):
+            BroadcastWeightUpdateRequest(
+                names=["layer1.weight", "layer2.weight"],
+                dtypes=["bfloat16"],
+                shapes=[[4096, 4096]],
+            )
+
+
+class TestCudaIpcWeightUpdateRequest:
+    """Tests for CudaIpcWeightUpdateRequest."""
+
+    def test_serialize_roundtrip(self):
+        """Serialization/deserialization roundtrip preserves data."""
+        request = CudaIpcWeightUpdateRequest(
+            names=["model.layer.weight"],
+            dtypes=["bfloat16"],
+            shapes=[[4096, 4096]],
+            sizes=[4096 * 4096],
+            ipc_handles={"gpu-uuid": "test_handle"},
+        )
+
+        data = request.serialize()
+        result = CudaIpcWeightUpdateRequest.deserialize(data)
+
+        assert result.names == request.names
+        assert result.dtypes == request.dtypes
+        assert result.shapes == request.shapes
+        assert result.sizes == request.sizes
+        assert result.ipc_handles == request.ipc_handles
+
+    def test_serialize_roundtrip_multiple_weights(self):
+        """Roundtrip with multiple weights."""
+        request = CudaIpcWeightUpdateRequest(
+            names=["layer1.weight", "layer2.weight", "layer3.bias"],
+            dtypes=["bfloat16", "bfloat16", "bfloat16"],
+            shapes=[[4096, 4096], [4096, 1024], [1024]],
+            sizes=[4096 * 4096, 4096 * 1024, 1024],
+            ipc_handles={"gpu-0": "handle1"},
+        )
+
+        data = request.serialize()
+        result = CudaIpcWeightUpdateRequest.deserialize(data)
+
+        assert result.names == request.names
+        assert result.dtypes == request.dtypes
+        assert result.shapes == request.shapes
+        assert result.sizes == request.sizes
+        assert result.ipc_handles == request.ipc_handles
+
+    def test_deserialize_missing_end_marker(self):
+        """Missing end marker raises ValueError."""
+
+        invalid_data = b"some_invalid_data"
+
+        with pytest.raises(ValueError, match="End marker not found"):
+            CudaIpcWeightUpdateRequest.deserialize(invalid_data)
+
+    def test_deserialize_invalid_data(self):
+        """Invalid base64/pickle data raises ValueError."""
+        from skyrl_train.weight_sync.cuda_ipc_strategy import _IPC_REQUEST_END_MARKER
+
+        invalid_data = b"not_valid_base64!!!" + _IPC_REQUEST_END_MARKER
+
+        with pytest.raises(ValueError, match="Failed to deserialize"):
+            CudaIpcWeightUpdateRequest.deserialize(invalid_data)
+
+    def test_serialize_aligned_to_4_bytes(self):
+        """Serialized data is 4-byte aligned."""
+        request = CudaIpcWeightUpdateRequest(
+            names=["test"],
+            dtypes=["bfloat16"],
+            shapes=[[10]],
+            sizes=[10],
+            ipc_handles={},
+        )
+        data = request.serialize()
+
+        assert len(data) % 4 == 0
+
+
+class TestLoraLoadRequest:
+    """Tests for LoraLoadRequest."""
+
+    def test_lora_path(self):
+        """lora_path should be stored correctly with empty defaults for base fields."""
+        request = LoraLoadRequest(lora_path="/path/to/lora")
+        assert request.lora_path == "/path/to/lora"
+        assert request.names == []
+        assert request.dtypes == []
+        assert request.shapes == []

@@ -13,10 +13,9 @@ import ray
 import torch
 
 from skyrl_train.distributed.utils import init_custom_process_group
-from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils import get_tcp_url
-from skyrl_train.weight_sync.base import WeightChunk
+from skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferStrategy,
@@ -41,6 +40,16 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     def strategy_type() -> type:
         """Return the strategy class for this init info type."""
         return BroadcastTransferStrategy
+
+
+@dataclass
+class BroadcastWeightUpdateRequest(WeightUpdateRequest):
+    """Request for broadcast-based weight transfer.
+
+    Contains only metadata - actual tensor data is sent via torch.distributed.broadcast.
+    """
+
+    pass
 
 
 class BroadcastWeightTransferSender(WeightTransferSender):
@@ -83,13 +92,12 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             tensor = chunk.tensors[0]
             shape = chunk.shapes[0]
 
-            # Create update request and notify inference engines
-            # Note: Sender is always on rank 0 in the model update group
-            request: NamedWeightsUpdateRequest = {
-                "names": [name],
-                "dtypes": [self._init_info.model_dtype_str],
-                "shapes": [shape],
-            }
+            # Create request and send to inference engines
+            request = BroadcastWeightUpdateRequest(
+                names=[name],
+                dtypes=[self._init_info.model_dtype_str],
+                shapes=[shape],
+            )
             update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
 
             # Broadcast tensor from rank 0
@@ -121,18 +129,18 @@ class BroadcastWeightTransferReceiver(WeightTransferReceiver):
         self._model_dtype = model_dtype
         self._model_update_group = model_update_group
 
-    def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
+    def receive_weights(self, request: BroadcastWeightUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via broadcast.
 
         Args:
-            request: Weight update request with names, dtypes, shapes.
+            request: Broadcast weight update request with names, dtypes, shapes.
 
         Yields:
             Tuples of (parameter_name, tensor) for each weight.
         """
         from skyrl_train.utils import str_to_torch_dtype
 
-        for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
+        for name, dtype_str, shape in zip(request.names, request.dtypes, request.shapes):
             dtype = str_to_torch_dtype(dtype_str)
             assert dtype == self._model_dtype, f"dtype mismatch: request {dtype}, model {self._model_dtype}"
 

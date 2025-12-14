@@ -8,8 +8,8 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
+from skyrl_train.weight_sync import WeightUpdateRequest
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 
 
@@ -43,7 +43,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def init_weight_update_communicator(self, init_info):
         return await self.inference_engine_actor.init_weight_update_communicator.remote(init_info)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+    async def update_named_weights(self, request: WeightUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
     async def teardown(self):

@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired, TYPE_CHECKING
+from typing import List, Dict, TypedDict, Any, Optional, Hashable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl_train.weight_sync import WeightUpdateRequest
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -28,15 +29,6 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
-
-
-class NamedWeightsUpdateRequest(TypedDict):
-    names: List[str]
-    dtypes: List[str]
-    shapes: List[List[int]]
-    sizes: NotRequired[List[int]]
-    extras: Optional[List[Dict[str, Any]]]
-    packed: NotRequired[bool]
 
 
 class InferenceEngineInterface(ABC):
@@ -88,7 +80,7 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+    async def update_named_weights(self, request: "WeightUpdateRequest"):
         raise NotImplementedError()
 
     @abstractmethod

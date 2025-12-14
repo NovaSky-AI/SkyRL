@@ -1,8 +1,10 @@
 """Weight loader interface for inference engines."""
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
-from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.base import WeightUpdateRequest
 
 
 class WeightLoader(ABC):
@@ -14,14 +16,10 @@ class WeightLoader(ABC):
     """
 
     @abstractmethod
-    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
+    async def load_weights(self, request: "WeightUpdateRequest") -> None:
         """Load weights into the inference engine.
 
         Coordinates with the receiver to fetch weights and applies them
         to the model. Handles RPC coordination for distributed engines.
-
-        Args:
-            request: Weight update request containing names, dtypes, shapes,
-                    and optionally IPC handles or other transfer metadata.
         """
         ...

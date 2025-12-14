@@ -7,12 +7,14 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Tuple
+from typing import TYPE_CHECKING, Iterable, Iterator, Tuple
 
 import torch
 
-from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 from skyrl_train.weight_sync.base import WeightChunk
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.base import WeightUpdateRequest
 
 
 @dataclass
@@ -51,11 +53,11 @@ class WeightTransferReceiver(ABC):
     """
 
     @abstractmethod
-    def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
+    def receive_weights(self, request: "WeightUpdateRequest") -> Iterator[Tuple[str, torch.Tensor]]:
         """Yield (name, tensor) tuples by pulling data from transfer channel.
 
         Args:
-            request: Weight update request with metadata (names, dtypes, shapes, extras).
+            request: Weight update request.
 
         Yields:
             Tuples of (parameter_name, tensor) for each weight in the request.

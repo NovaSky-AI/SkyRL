@@ -2,8 +2,8 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
+from skyrl_train.weight_sync import WeightUpdateRequest
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from transformers import PreTrainedTokenizerBase
 import asyncio
@@ -480,7 +480,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             tasks.append(engine.init_weight_update_communicator(init_info))
         await asyncio.gather(*tasks)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+    async def update_named_weights(self, request: WeightUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
     async def reset_prefix_cache(self):

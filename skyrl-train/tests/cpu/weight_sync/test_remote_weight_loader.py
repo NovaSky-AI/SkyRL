@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from skyrl_train.inference_engines.remote_inference_engine import RemoteWeightLoader
-from skyrl_train.weight_sync import BroadcastInitInfo
+from skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
 
 
 class AsyncContextManagerMock:
@@ -132,11 +132,11 @@ class TestRemoteWeightLoader:
         mock_response = MagicMock()
         mock_response.json = AsyncMock(return_value={"success": True})
 
-        request = {
-            "names": ["model.layer.weight"],
-            "dtypes": ["bfloat16"],
-            "shapes": [[4096, 4096]],
-        }
+        request = BroadcastWeightUpdateRequest(
+            names=["model.layer.weight"],
+            dtypes=["bfloat16"],
+            shapes=[[4096, 4096]],
+        )
 
         with patch("aiohttp.ClientSession") as mock_session_class:
             mock_session = create_mock_session(mock_response)
@@ -161,11 +161,11 @@ class TestRemoteWeightLoader:
         """Test load_weights raises ValueError for unknown backend."""
         loader = RemoteWeightLoader(url="http://localhost:8000", engine_backend="unknown")
 
-        request = {
-            "names": ["model.layer.weight"],
-            "dtypes": ["bfloat16"],
-            "shapes": [[4096, 4096]],
-        }
+        request = BroadcastWeightUpdateRequest(
+            names=["model.layer.weight"],
+            dtypes=["bfloat16"],
+            shapes=[[4096, 4096]],
+        )
 
         with pytest.raises(ValueError, match="Invalid engine backend"):
             await loader.load_weights(request)

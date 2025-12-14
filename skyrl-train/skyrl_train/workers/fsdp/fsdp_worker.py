@@ -23,7 +23,7 @@ from skyrl_train.workers.worker import (
     CriticWorkerBase,
     RefWorkerBase,
 )
-from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync import WeightExtractor, WeightChunk, LoraLoadRequest
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 
 
@@ -190,12 +190,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine. `lora_disk_load` is a specific identifier
-            # to tell the inference engine to extract the `lora_disk_path`.
-            lora_request = {
-                "names": ["lora_disk_load"],
-                "extras": [{"lora_disk_path": lora_sync_path}],
-            }
+            # Send LoRA disk loading request to inference engine
+            lora_request = LoraLoadRequest(lora_path=lora_sync_path)
             await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()

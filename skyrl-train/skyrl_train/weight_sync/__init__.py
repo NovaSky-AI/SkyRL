@@ -2,7 +2,7 @@
 
 from typing import Type
 
-from .base import WeightChunk
+from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
 from .weight_extractor import WeightExtractor
 from .weight_loader import WeightLoader
 from .transfer_strategy import (
@@ -16,12 +16,14 @@ from .broadcast_strategy import (
     BroadcastTransferStrategy,
     BroadcastWeightTransferSender,
     BroadcastWeightTransferReceiver,
+    BroadcastWeightUpdateRequest,
 )
 from .cuda_ipc_strategy import (
     CudaIpcInitInfo,
     CudaIpcTransferStrategy,
     CudaIpcWeightTransferSender,
     CudaIpcWeightTransferReceiver,
+    CudaIpcWeightUpdateRequest,
 )
 
 
@@ -49,6 +51,10 @@ __all__ = [
     "WeightChunk",
     "WeightExtractor",
     "WeightLoader",
+    "WeightUpdateRequest",
+    "LoraLoadRequest",
+    "BroadcastWeightUpdateRequest",
+    "CudaIpcWeightUpdateRequest",
     "WeightTransferStrategy",
     "WeightTransferSender",
     "WeightTransferReceiver",
