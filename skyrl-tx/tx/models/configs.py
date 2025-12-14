@@ -3,8 +3,8 @@
 from transformers import PretrainedConfig
 
 
-class LoRAModelConfig(PretrainedConfig):
-    """Base configuration for tx models with LoRA support.
+class ModelConfig(PretrainedConfig):
+    """Configuration for tx models with LoRA support.
 
     Wraps a HuggingFace PretrainedConfig with additional parameters
     for Multi-LoRA training and tensor parallelism.
@@ -34,5 +34,5 @@ class LoRAModelConfig(PretrainedConfig):
 
 
 # Model-specific aliases for clarity and backwards compatibility
-Llama3Config = LoRAModelConfig
-Qwen3Config = LoRAModelConfig
+Llama3Config = ModelConfig
+Qwen3Config = ModelConfig
