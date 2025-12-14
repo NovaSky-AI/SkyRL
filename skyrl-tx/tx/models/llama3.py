@@ -5,7 +5,8 @@ from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
 from tx.layers.lora import LoRAEmbed, LoRALinear
-from tx.layers.common import RMSNorm, SwiGLUMLP, apply_rope
+from tx.layers.common import SwiGLUMLP, apply_rope
+from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 

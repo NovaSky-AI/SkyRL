@@ -5,7 +5,8 @@ from jax import numpy as jnp
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing
 from tx.models.configs import Qwen3Config
-from tx.layers.common import RMSNorm, SwiGLUMLP
+from tx.layers.common import SwiGLUMLP
+from tx.layers.layernorm import RMSNorm
 from tx.models.llama3 import Llama3Attention, Llama3Model, Llama3ForCausalLM
 from tx.models.types import CausalLMOutput
 from tx.utils.generator import KVCache, compute_positions

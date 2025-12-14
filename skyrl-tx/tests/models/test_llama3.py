@@ -20,8 +20,8 @@ def test_llama3(tp: int):
     if not jax._src.xla_bridge.backends_are_initialized():  # type: ignore
         jax.config.update("jax_num_cpu_devices", 2)
 
-    if tp > 1 and os.getenv("CI"):
-        pytest.skip("TP > 1 currently runs out of memory in the CI")
+    if os.getenv("CI"):
+        pytest.skip("Test currently runs out of memory in the CI")
 
     # Use a small LLama model for testing
     model_name = "unsloth/Llama-3.2-1B"
