@@ -25,11 +25,7 @@ def test_llama3(tp: int):
 
     # Use a small LLama model for testing
     model_name = "unsloth/Llama-3.2-1B"
-
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # LLaMA tokenizers don't have a pad token by default, set it to eos_token
-    tokenizer.pad_token = tokenizer.eos_token
-
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     inputs = ["The capital of France is", "The most popular programming language is"]
