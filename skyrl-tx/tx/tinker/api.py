@@ -270,24 +270,7 @@ class OptimStepRequest(BaseModel):
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-    path: str | None = Field(default=None, pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
-    # Fields sent by the Tinker SDK (alternative to path)
-    sampling_session_seq_id: int | None = None
-    seq_id: int | None = None
-
-    @model_validator(mode="after")
-    def validate_path_or_seq_id(self):
-        """Either path or seq_id must be provided to identify the checkpoint."""
-        if self.path is None and self.seq_id is None:
-            raise ValueError("Either 'path' or 'seq_id' must be provided")
-        return self
-
-    def get_checkpoint_path(self) -> str:
-        """Return the checkpoint path, deriving from seq_id if path not provided."""
-        if self.path is not None:
-            return self.path
-        # Generate path from seq_id (format matching SDK expectations)
-        return f"{self.seq_id:06d}"
+    path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
 
 
 class SamplingParams(BaseModel):
@@ -687,13 +670,11 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
 async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights in a format compatible with sampling/inference servers."""
-    checkpoint_path = request.get_checkpoint_path()
-
     # Create pending checkpoint entry (validates model exists)
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
-        checkpoint_id=checkpoint_path,
+        checkpoint_id=request.path,
         checkpoint_type=types.CheckpointType.SAMPLER,
     )
 
@@ -701,7 +682,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=types.SaveWeightsForSamplerInput(path=checkpoint_path),
+        request_data=types.SaveWeightsForSamplerInput(path=request.path),
     )
 
     await session.commit()
