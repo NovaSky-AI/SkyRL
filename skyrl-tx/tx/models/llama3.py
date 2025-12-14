@@ -124,22 +124,6 @@ class Llama3Attention(nnx.Module):
             rngs=rngs,
         )
 
-    def _process_q_k(self, q: jax.Array, k: jax.Array) -> tuple[jax.Array, jax.Array]:
-        """Hook for subclasses to process Q and K tensors before RoPE.
-
-        This method is a no-op for Llama3 but can be overridden by subclasses
-        (e.g., Qwen3Attention) to apply QK-Norm. This design reduces code
-        duplication per PR #657 review feedback.
-
-        Args:
-            q: Query tensor of shape [B, T, num_heads, head_dim]
-            k: Key tensor of shape [B, T, num_kv_heads, head_dim]
-
-        Returns:
-            Tuple of (processed_q, processed_k) with same shapes
-        """
-        return q, k
-
     def __call__(
         self,
         x: jax.Array,
@@ -155,9 +139,6 @@ class Llama3Attention(nnx.Module):
         q = self.q_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_heads, self.head_dim)
         k = self.k_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
-
-        # Hook for subclasses to process Q/K (e.g., QK-Norm in Qwen3)
-        q, k = self._process_q_k(q, k)
 
         # Apply RoPE
         rope_theta = self.config.rope_theta
