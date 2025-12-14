@@ -118,7 +118,7 @@ class VllmServer:
         async def _destroy_weights_update_group(request: Request):
             data = await request.json()  # noqa: F841
             await engine.collective_rpc(
-                "destroy_weights_update_group",
+                "teardown_weight_receiver",
                 args=(),
             )
             return {"status": "ok"}

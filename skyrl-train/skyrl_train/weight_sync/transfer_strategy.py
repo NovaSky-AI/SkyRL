@@ -44,6 +44,11 @@ class WeightTransferSender(ABC):
         """
         ...
 
+    @abstractmethod
+    def teardown(self) -> None:
+        """Clean up resources used by the sender (e.g., destroy process groups)."""
+        ...
+
 
 class WeightTransferReceiver(ABC):
     """Strategy-specific component that receives weights from training workers.
@@ -62,6 +67,11 @@ class WeightTransferReceiver(ABC):
         Yields:
             Tuples of (parameter_name, tensor) for each weight in the request.
         """
+        ...
+
+    @abstractmethod
+    def teardown(self) -> None:
+        """Clean up resources used by the receiver (e.g., destroy process groups)."""
         ...
 
 

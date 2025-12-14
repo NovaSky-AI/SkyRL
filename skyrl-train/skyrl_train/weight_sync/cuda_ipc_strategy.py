@@ -172,6 +172,10 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
+    def teardown(self) -> None:
+        """No-op for CUDA IPC sender (no custom process group to clean up)."""
+        pass
+
 
 class CudaIpcWeightTransferReceiver(WeightTransferReceiver):
     """Receives weights via CUDA IPC handles.
@@ -217,6 +221,10 @@ class CudaIpcWeightTransferReceiver(WeightTransferReceiver):
         for name, shape, size in zip(request.names, request.shapes, request.sizes):
             yield name, packed_tensor[offset : offset + size].view(*shape)
             offset += size
+
+    def teardown(self) -> None:
+        """No-op for CUDA IPC receiver (no custom process group to clean up)."""
+        pass
 
 
 class CudaIpcTransferStrategy(WeightTransferStrategy):

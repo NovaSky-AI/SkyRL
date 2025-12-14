@@ -108,6 +108,13 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             await update_weight_task
             torch.distributed.barrier()
 
+    def teardown(self) -> None:
+        """Destroy the process group used for weight transfer.
+
+        TODO: Integrate with training workers to call this during shutdown.
+        """
+        torch.distributed.destroy_process_group(self._model_update_group)
+
 
 class BroadcastWeightTransferReceiver(WeightTransferReceiver):
     """Receives weights via torch.distributed.broadcast.
@@ -148,6 +155,10 @@ class BroadcastWeightTransferReceiver(WeightTransferReceiver):
             weight = torch.empty(shape, dtype=dtype, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             yield name, weight
+
+    def teardown(self) -> None:
+        """Destroy the process group used for weight transfer."""
+        torch.distributed.destroy_process_group(self._model_update_group)
 
 
 class BroadcastTransferStrategy(WeightTransferStrategy):

@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (
     CompletionResponse,
 )
 from vllm.lora.request import LoRARequest
-from torch.distributed import destroy_process_group
 from uuid import uuid4
 import warnings
 from skyrl_train.inference_engines.base import (
@@ -98,11 +97,11 @@ class WorkerWrap:
             del weight
 
     # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
-    def destroy_weights_update_group(self):
-        if not self._model_update_group:
-            warnings.warn("No model update group to destroy")
+    def teardown_weight_receiver(self):
+        if not hasattr(self, "_weight_receiver") or self._weight_receiver is None:
+            warnings.warn("No weight receiver to teardown")
             return
-        destroy_process_group(self._model_update_group)
+        self._weight_receiver.teardown()
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -300,14 +299,14 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
+        await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):
         return await asyncio.to_thread(self.llm.llm_engine.reset_prefix_cache)
 
-    async def _destroy_weights_update_group(self):
+    async def _teardown_weight_receiver(self):
         engine = self._get_engine()
-        return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
+        return await asyncio.to_thread(engine.collective_rpc, "teardown_weight_receiver")
 
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -448,15 +447,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
+        await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()
         await engine.reset_prefix_cache()
 
-    async def _destroy_weights_update_group(self):
+    async def _teardown_weight_receiver(self):
         engine = self._get_engine()
-        return await engine.collective_rpc("destroy_weights_update_group")
+        return await engine.collective_rpc("teardown_weight_receiver")
 
     # ----------------------------------------
     # Methods for handling OpenAI API requests
