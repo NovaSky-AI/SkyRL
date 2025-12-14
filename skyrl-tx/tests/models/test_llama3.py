@@ -23,7 +23,7 @@ def test_llama3(tp: int):
         pytest.skip("TP > 1 currently runs out of memory in the CI")
 
     # Use a small LLama model for testing
-    model_name = "meta-llama/Llama-3.2-1B"
+    model_name = "unsloth/Llama-3.2-1B"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # LLaMA tokenizers don't have a pad token by default, set it to eos_token

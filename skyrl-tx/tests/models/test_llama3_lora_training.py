@@ -12,7 +12,7 @@ from tx.tinker.types import LoraConfig
 
 
 def test_lora_training():
-    base_model = "meta-llama/Llama-3.2-1B"
+    base_model = "unsloth/Llama-3.2-1B"
     base_config = LlamaConfig.from_pretrained(base_model)
     # Add LoRA config parameters
     base_config.max_lora_adapters = 5
