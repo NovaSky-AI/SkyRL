@@ -9,7 +9,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from tx.models import Llama3ForCausalLM
+from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.configs import Llama3Config
 from tx.utils.models import load_safetensors
 

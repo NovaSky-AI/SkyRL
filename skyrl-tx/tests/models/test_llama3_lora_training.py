@@ -5,7 +5,7 @@ import optax
 from huggingface_hub import snapshot_download
 from transformers import LlamaConfig
 
-from tx.models import Llama3ForCausalLM
+from tx.models.llama3 import Llama3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import update_adapter_config
 from tx.tinker.types import LoraConfig
