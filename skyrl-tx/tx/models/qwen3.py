@@ -5,11 +5,53 @@ from jax import numpy as jnp
 from tx.layers.lora import LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing
 from tx.models.configs import Qwen3Config
-from tx.layers.common import SwiGLUMLP
 from tx.layers.layernorm import RMSNorm
 from tx.models.llama3 import Llama3Attention, Llama3Model, Llama3ForCausalLM
 from tx.models.types import CausalLMOutput
 from tx.utils.generator import KVCache, compute_positions
+
+
+class Qwen3MLP(nnx.Module):
+
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.gate_proj = LoRALinear(
+            config.hidden_size,
+            config.intermediate_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+        self.up_proj = LoRALinear(
+            config.hidden_size,
+            config.intermediate_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+        self.down_proj = LoRALinear(
+            config.intermediate_size,
+            config.hidden_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+
+    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+        gate_out = self.gate_proj(x, adapter_indices)
+        up_out = self.up_proj(x, adapter_indices)
+        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
 class Qwen3Attention(Llama3Attention):
@@ -144,14 +186,7 @@ class Qwen3DecoderLayer(nnx.Module):
         if getattr(config, "num_experts", None):
             self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
         else:
-            self.mlp = SwiGLUMLP(
-                config.hidden_size,
-                config.intermediate_size,
-                max_lora_adapters=config.max_lora_adapters,
-                max_lora_rank=config.max_lora_rank,
-                dtype=dtype,
-                rngs=rngs,
-            )
+            self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,

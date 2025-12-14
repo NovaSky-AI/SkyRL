@@ -5,11 +5,53 @@ from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
 from tx.layers.lora import LoRAEmbed, LoRALinear
-from tx.layers.common import SwiGLUMLP
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+
+
+class Llama3MLP(nnx.Module):
+
+    def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.gate_proj = LoRALinear(
+            config.hidden_size,
+            config.intermediate_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+        self.up_proj = LoRALinear(
+            config.hidden_size,
+            config.intermediate_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+        self.down_proj = LoRALinear(
+            config.intermediate_size,
+            config.hidden_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+
+    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+        gate_out = self.gate_proj(x, adapter_indices)
+        up_out = self.up_proj(x, adapter_indices)
+        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
 class Llama3Attention(nnx.Module):
@@ -158,14 +200,7 @@ class Llama3DecoderLayer(nnx.Module):
         self.self_attn = Llama3Attention(config, dtype=dtype, rngs=rngs)
 
         # Feed-forward network
-        self.mlp = SwiGLUMLP(
-            config.hidden_size,
-            config.intermediate_size,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            rngs=rngs,
-        )
+        self.mlp = Llama3MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
