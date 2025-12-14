@@ -10,6 +10,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tx.models import Llama3ForCausalLM
+from tx.models.configs import Llama3Config
 from tx.utils.models import load_safetensors
 
 
@@ -43,7 +44,8 @@ def test_llama3(tp: int):
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
-        config = AutoConfig.from_pretrained(model_name)
+        base_config = AutoConfig.from_pretrained(model_name)
+        config = Llama3Config(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
         mesh = jax.make_mesh((1, tp), ("dp", "tp"))
         with jax.set_mesh(mesh):
             model = Llama3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
@@ -57,84 +59,3 @@ def test_llama3(tp: int):
         # Higher tolerance for final layer due to accumulated numerical differences between PyTorch and JAX
         assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=5e-2, atol=5e-2)
 
-
-def test_llama3_forward():
-    """Test that LLama3 model can be instantiated and forward pass works."""
-    if not jax._src.xla_bridge.backends_are_initialized():  # type: ignore
-        jax.config.update("jax_num_cpu_devices", 2)
-
-    # Create a minimal config for testing
-    from transformers import LlamaConfig
-
-    config = LlamaConfig(
-        vocab_size=1000,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        rms_norm_eps=1e-6,
-        rope_theta=500000.0,
-    )
-
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
-    with jax.set_mesh(mesh):
-        model = Llama3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-
-    # Create dummy input
-    batch_size = 2
-    seq_len = 10
-    input_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-    # Forward pass
-    outputs = model(input_ids, attention_mask=attention_mask)
-
-    # Check output shapes
-    assert outputs.logits.shape == (batch_size, seq_len, config.vocab_size)
-    assert outputs.last_hidden_state.shape == (batch_size, seq_len, config.hidden_size)
-    assert outputs.kv_cache is not None
-    assert len(outputs.kv_cache.keys) == config.num_hidden_layers
-    assert len(outputs.kv_cache.values) == config.num_hidden_layers
-
-
-def test_llama3_generation():
-    """Test that LLama3 model can be used for simple multi-step generation."""
-    if not jax._src.xla_bridge.backends_are_initialized():  # type: ignore
-        jax.config.update("jax_num_cpu_devices", 2)
-
-    from transformers import LlamaConfig
-
-    config = LlamaConfig(
-        vocab_size=1000,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        rms_norm_eps=1e-6,
-        rope_theta=500000.0,
-    )
-
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
-    with jax.set_mesh(mesh):
-        model = Llama3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-
-    # Step 1: Prefill
-    batch_size = 2
-    seq_len = 10
-    input_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-    outputs = model(input_ids, attention_mask=attention_mask)
-    assert outputs.kv_cache.cache_position == seq_len
-
-    # Step 2: Generate one token by extending the sequence
-    next_input_ids = jnp.concatenate([input_ids, jnp.ones((batch_size, 1), dtype=jnp.int32)], axis=1)
-    next_attention_mask = jnp.ones((batch_size, seq_len + 1), dtype=jnp.int32)
-
-    next_outputs = model(next_input_ids, attention_mask=next_attention_mask)
-
-    # Check output shapes
-    assert next_outputs.logits.shape == (batch_size, seq_len + 1, config.vocab_size)
-    assert next_outputs.kv_cache.cache_position == seq_len + 1

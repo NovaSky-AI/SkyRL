@@ -9,25 +9,6 @@ from tx.layers.common import RMSNorm, SwiGLUMLP, apply_rope
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
-# Default LoRA configuration values
-DEFAULT_MAX_LORA_ADAPTERS = 0
-DEFAULT_MAX_LORA_RANK = 8
-
-
-def _ensure_lora_config(config: LlamaConfig) -> None:
-    """Ensure config has LoRA attributes with defaults.
-
-    Sets default LoRA configuration on configs that don't have them
-    (e.g., plain HuggingFace LlamaConfig). This allows sub-components
-    to access config.max_lora_adapters directly without getattr.
-    """
-    if not hasattr(config, "max_lora_adapters"):
-        config.max_lora_adapters = DEFAULT_MAX_LORA_ADAPTERS
-    if not hasattr(config, "max_lora_rank"):
-        config.max_lora_rank = DEFAULT_MAX_LORA_RANK
-    if not hasattr(config, "shard_attention_heads"):
-        config.shard_attention_heads = True
-
 
 class Llama3Attention(nnx.Module):
     """Multi-head attention with Grouped Query Attention (GQA) support."""
@@ -293,8 +274,6 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
     """LLaMA 3 model with a language modeling head for causal language modeling."""
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        # Ensure config has LoRA attributes with defaults
-        _ensure_lora_config(config)
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
