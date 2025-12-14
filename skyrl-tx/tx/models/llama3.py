@@ -29,7 +29,6 @@ class Llama3Attention(nnx.Module):
         # Allow config to override head_dim (used by Qwen3)
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
 
-        # Query projection
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
@@ -38,11 +37,10 @@ class Llama3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
 
-        # Key projection
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
@@ -51,11 +49,10 @@ class Llama3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
 
-        # Value projection
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
@@ -64,11 +61,10 @@ class Llama3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, tp_shard)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
             rngs=rngs,
         )
 
-        # Output projection
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
@@ -77,7 +73,7 @@ class Llama3Attention(nnx.Module):
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(tp_shard, None)),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, None)),
             rngs=rngs,
         )
 
@@ -98,11 +94,10 @@ class Llama3Attention(nnx.Module):
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(B, T, self.num_kv_heads, self.head_dim)
 
         # Apply RoPE
-        rope_theta = self.config.rope_theta
-        q = apply_rope(q, positions, self.head_dim, rope_theta)
-        k = apply_rope(k, positions, self.head_dim, rope_theta)
+        q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
+        k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Handle KV cache for efficient generation
+        # Handle KV cache
         if kv_cache is not None:
             k_cache, v_cache, cache_position = kv_cache
             k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
@@ -110,7 +105,7 @@ class Llama3Attention(nnx.Module):
 
         updated_cache = (k, v)
 
-        # Attention computation with native GQA support
+        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
         attn_output = jax.nn.dot_product_attention(
             q,
             k,
@@ -168,19 +163,11 @@ class Llama3MLP(nnx.Module):
 
 
 class Llama3DecoderLayer(nnx.Module):
-    """Single transformer decoder layer with pre-normalization."""
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        # Layer normalization before attention
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-
-        # Layer normalization before feed-forward
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-
-        # Self-attention mechanism
         self.self_attn = Llama3Attention(config, dtype=dtype, rngs=rngs)
-
-        # Feed-forward network
         self.mlp = Llama3MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -192,7 +179,6 @@ class Llama3DecoderLayer(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-        # Self-attention with residual connection
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
@@ -204,7 +190,6 @@ class Llama3DecoderLayer(nnx.Module):
         )
         hidden_states = residual + hidden_states
 
-        # Feed-forward with residual connection
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, adapter_indices=adapter_indices)
@@ -214,29 +199,23 @@ class Llama3DecoderLayer(nnx.Module):
 
 
 class Llama3Model(nnx.Module):
-    """LLaMA 3 base model (without language modeling head)."""
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
 
-        # Token embeddings with LoRA support
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            dtype=dtype,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), jax.P("tp", None)),
+            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
             rngs=rngs,
         )
-
-        # Transformer decoder layers
         self.layers = nnx.List(
             [Llama3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
         )
-
-        # Final layer normalization
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -253,12 +232,10 @@ class Llama3Model(nnx.Module):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
-        # Embed input tokens with LoRA adapter support
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
-        # Process through all decoder layers
         for layer_idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
@@ -273,12 +250,10 @@ class Llama3Model(nnx.Module):
             updated_keys.append(k)
             updated_values.append(v)
 
-        # Final normalization
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        # Update cache position
         new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
 
         return ModelOutput(
@@ -289,21 +264,21 @@ class Llama3Model(nnx.Module):
 
 
 class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
-    """LLaMA 3 model with a language modeling head for causal language modeling."""
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
-        # Language modeling head (only if embeddings are not tied)
         if not self.config.tie_word_embeddings:
-            self.lm_head = nnx.Linear(
+            self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), jax.P(None, "tp")),
+                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+                max_lora_adapters=config.max_lora_adapters,
+                max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
 
@@ -322,11 +297,9 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
     ) -> CausalLMOutput:
-        # Compute positions if not provided
         if positions is None:
             positions = compute_positions(attention_mask)
 
-        # Forward pass through the model
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
@@ -335,15 +308,11 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-
-        # Compute logits
         hidden_states = outputs.last_hidden_state
         if self.config.tie_word_embeddings:
-            # Tied embeddings: reuse embedding weights
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
-            # Separate language modeling head
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(
             logits=logits,
