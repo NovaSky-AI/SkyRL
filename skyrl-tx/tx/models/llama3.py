@@ -11,49 +11,6 @@ from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
-class Llama3MLP(nnx.Module):
-
-    def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.gate_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.up_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.down_proj = LoRALinear(
-            config.intermediate_size,
-            config.hidden_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-
-    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        gate_out = self.gate_proj(x, adapter_indices)
-        up_out = self.up_proj(x, adapter_indices)
-        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
-
-
 class Llama3Attention(nnx.Module):
     """Multi-head attention with Grouped Query Attention (GQA) support."""
 
@@ -165,6 +122,49 @@ class Llama3Attention(nnx.Module):
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
+
+
+class Llama3MLP(nnx.Module):
+
+    def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.gate_proj = LoRALinear(
+            config.hidden_size,
+            config.intermediate_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+        self.up_proj = LoRALinear(
+            config.hidden_size,
+            config.intermediate_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+        self.down_proj = LoRALinear(
+            config.intermediate_size,
+            config.hidden_size,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            rngs=rngs,
+        )
+
+    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+        gate_out = self.gate_proj(x, adapter_indices)
+        up_out = self.up_proj(x, adapter_indices)
+        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
 class Llama3DecoderLayer(nnx.Module):
