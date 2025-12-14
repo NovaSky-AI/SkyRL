@@ -358,6 +358,7 @@ class Qwen3Model(nnx.Module):
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
+        # Increment cache_position if cache exists, or use sequence length for new cache
         new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
 
         return ModelOutput(
