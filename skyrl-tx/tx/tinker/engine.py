@@ -39,6 +39,7 @@ from tx.utils.models import (
 )
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
+from tx.kernels.selective_logsoftmax import selective_log_softmax_jax
 
 
 @contextmanager
@@ -247,8 +248,9 @@ class TinkerEngine:
                 self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
             )  # [B, T, V]
 
-            logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
-            target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
+            #logprobs = jax.nn.log_softmax(logits, axis=-1)  # [B, T, V]
+            #target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
+            target_logprobs = selective_log_softmax_jax(logits, target_ids)
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
                 return jax.lax.switch(
