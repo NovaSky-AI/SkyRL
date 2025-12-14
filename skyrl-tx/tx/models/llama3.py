@@ -19,14 +19,11 @@ class Llama3Attention(nnx.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         tp = get_abstract_mesh().shape.get("tp", 1)
-        shard_attention_heads = getattr(config, "shard_attention_heads", True)
-
+        shard_attention_heads = config.shard_attention_heads
         if shard_attention_heads:
             assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
         tp_shard = "tp" if shard_attention_heads else None
-
-        # Allow config to override head_dim (used by Qwen3)
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
 
         self.q_proj = LoRALinear(
@@ -192,8 +189,8 @@ class Llama3DecoderLayer(nnx.Module):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, adapter_indices=adapter_indices)
-        hidden_states = residual + hidden_states
+        mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
+        hidden_states = residual + mlp_output
 
         return hidden_states, updated_cache
 
