@@ -1,3 +1,7 @@
+"""
+uv run --isolated --extra dev pytest tests/cpu/utils/test_logging_utils.py
+"""
+
 import pytest
 
 from skyrl_train.utils.logging_utils import (
@@ -20,8 +24,9 @@ class StubLogger:
         # In real loguru this returns a new logger; here we just ignore options.
         return self
 
-    def info(self, msg, **kwargs):
+    def info(self, msg, *args, **kwargs):
         self.last_message = msg
+        self.last_args = args
         self.last_kwargs = kwargs
 
 

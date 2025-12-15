@@ -49,16 +49,10 @@ def log_example(
         response: The output response string.
         reward: The reward value(s) associated with the response.
     """
+    reward_val = 0.0
+    reward_str = "N/A"
     try:
-        # Normalize to strings
-        if not isinstance(prompt, str):
-            prompt = str(prompt)
-        if not isinstance(response, str):
-            response = str(response)
-
         # --- Reward handling ---
-        reward_val = 0.0
-        reward_str = "N/A"
         if reward is not None:
             if isinstance(reward, list):
                 reward_val = float(sum(reward))
@@ -80,13 +74,10 @@ def log_example(
         log_format = "Example:\n" f"  Input: {prompt_fmt}\n" "  Output (Reward: {reward}):\n" f"{response_fmt}"
 
         # Merge all args for str.format
-        format_args = {}
-        format_args.update(prompt_args)
-        format_args.update(response_args)
-        format_args["reward"] = reward_str
+        format_args = {**prompt_args, **response_args, "reward": reward_str}
 
         # Let Loguru parse tags in log_format and then substitute arguments.
         logger.opt(colors=True).info(log_format, **format_args)
     except Exception as e:
-        logger.info(f"Error pretty printing example, debug printing instead: {e}")
+        logger.info("Error pretty printing example, debug printing instead: {}", e)
         print(f"Example:\n  Input: {prompt}\n  Output (Reward: {reward_str}):\n{response}")
