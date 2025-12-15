@@ -617,9 +617,10 @@ async def test_multi_turn_response_truncation(
     # Each turn, observation is 13 tokens due to mock_encode and empty system_prompt_ids
     # And the LLM response is 4 tokens due to MOCK_LLM_OUTPUT_IDS
     # So input_ids are 13, 30, 47, 64. And 64 would cause a break in the loop due to exceeding max_input_len.
-    # Then with 64, we get the `input_ids[initial_prompt_length:]`, which makes our final
-    # response_ids to be 64 - 13 = 51 tokens. So in this case, we are not truncated by expected_max_response_tokens.
-    expected_final_response_tokens = 51
+    # We strip the last observation, which gives us 64 - 13 = 51 tokens,
+    # then with 51, we get the `input_ids[initial_prompt_length:]`, which makes our final
+    # response_ids to be 51 - 13 = 38 tokens. So in this case, we are not truncated by expected_max_response_tokens.
+    expected_final_response_tokens = 38
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,

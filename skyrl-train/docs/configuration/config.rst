@@ -184,6 +184,9 @@ Megatron Configuration
       transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
         ...
+      # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+      # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+      empty_cuda_cache: true
 
 
 - ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.
@@ -419,6 +422,11 @@ Algorithm Configuration
       use_tis: false 
       tis_imp_ratio_cap: -1.0
 
+      # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
+      sapo:
+        tau_pos: 1.0
+        tau_neg: 1.05 # default values used in the paper with Qwen3-30B-A3B-Base
+
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
 
@@ -479,6 +487,10 @@ Algorithm Configuration
   - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
   - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
 
+- ``algorithm.sapo``: SAPO (as proposed in `this paper <https://arxiv.org/pdf/2511.20347>`) parameters (only used when ``policy_loss_type`` is ``sapo``):
+
+  - ``tau_pos``: Temperature for gating function for tokens with positive advantages.
+  - ``tau_neg``: Temperature for gating function for tokens with negative (or zero) advantages.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -44,3 +44,7 @@ transformer_config_kwargs:
   recompute_modules: ["core_attn"]
   recompute_method: uniform
   recompute_num_layers: 1
+
+# flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+# this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+empty_cuda_cache: true

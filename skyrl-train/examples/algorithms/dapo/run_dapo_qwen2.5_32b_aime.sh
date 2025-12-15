@@ -1,7 +1,7 @@
 set -x
 
 # Colocated DAPO training+generation for Qwen2.5-32B-Instruct on DAPO training data and validate on AIME 2024.
-# uv run examples/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/algorithms/dapo/run_dapo_qwen2.5_32b_aime.sh
 
 MODEL_NAME="Qwen/Qwen2.5-32B"
@@ -37,14 +37,15 @@ MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 20))
 
 # repro run parameters
-SEQUENCE_PARALLEL_SIZE=1
+SEQUENCE_PARALLEL_SIZE=4
 TRAIN_BATCH_SIZE=512
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
-MICRO_FORWARD_BATCH_SIZE_PER_GPU=4
-MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
+MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
+MICRO_TRAIN_BATCH_SIZE_PER_GPU=2
+
 
 uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
@@ -17,7 +18,6 @@ from flax.training import checkpoints
 
 
 import optax
-from huggingface_hub import snapshot_download
 from transformers import PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -35,9 +35,21 @@ from tx.utils.models import (
     extract_adapter_state,
     insert_adapter_state,
     round_up_seq_len,
+    resolve_model_path,
 )
 from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
+
+
+@contextmanager
+def log_timing(request: str):
+    """Context manager to log execution time for a request."""
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start_time
+        logger.info(f"(timing) {request} took {elapsed:.3f}s")
 
 
 def pad(xs, pad_to: int, *, fill):
@@ -45,12 +57,28 @@ def pad(xs, pad_to: int, *, fill):
     return xs + ([fill] * (pad_to - len(xs)))
 
 
-def pad_batch(sequences: list[list], max_length: int, dtype) -> jax.Array:
-    """Pad a batch of sequences to max_length."""
+def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False) -> jax.Array:
+    """Pad a batch of sequences to max_length.
+
+    Args:
+        sequences: List of sequences to pad.
+        max_length: Target length for all sequences.
+        dtype: NumPy dtype for the output array.
+        left: If True, use left-padding (tokens at end). Required for autoregressive
+            generation so the last position corresponds to the last real token.
+            If False (default), use right-padding (tokens at start).
+
+    Returns:
+        A JAX array of shape (batch_size, max_length) with the padded sequences.
+    """
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
     for i, seq in enumerate(sequences):
-        padded[i, : len(seq)] = seq
+        assert len(seq) <= max_length, f"Sequence length {len(seq)} exceeds max_length {max_length}"
+        if left:
+            padded[i, max_length - len(seq) :] = seq
+        else:
+            padded[i, : len(seq)] = seq
     return jnp.asarray(padded)
 
 
@@ -114,7 +142,8 @@ class TinkerEngine:
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
-        base_config = PretrainedConfig.from_pretrained(self.config.base_model)
+        checkpoint_path = resolve_model_path(self.config.base_model)
+        base_config = PretrainedConfig.from_pretrained(checkpoint_path)
         self.model_config = Qwen3Config(
             base_config,
             max_lora_adapters=self.config.max_lora_adapters,
@@ -123,9 +152,6 @@ class TinkerEngine:
         )
 
         model_class = get_model_class(self.model_config)
-
-        # Download model weights from HuggingFace
-        checkpoint_path = snapshot_download(self.config.base_model, allow_patterns=["*.safetensors"])
 
         # Create model and load weights
         self.mesh = jax.make_mesh((1, self.config.tensor_parallel_size), ("dp", "tp"))
@@ -249,6 +275,33 @@ class TinkerEngine:
         # Only differentiate with respect to lora_params (argnums=0)
         loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
+        def forward_only(
+            accumulated_grads: AccumulatedGradients,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+            target_ids: jax.Array,
+            loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
+            _, (target_logprobs, per_token_losses) = loss_for_lora(
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
+            )
+            return accumulated_grads, per_token_losses, target_logprobs
+
         def forward_backward_and_accumulate(
             accumulated_grads: AccumulatedGradients,
             lora_params: nnx.State,
@@ -261,10 +314,10 @@ class TinkerEngine:
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
-        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             """Fused forward-backward-accumulate operation."""
             # Forward-backward
-            (loss, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
+            (_, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
                 lora_params,
                 non_lora_params,
                 input_ids,
@@ -278,11 +331,12 @@ class TinkerEngine:
             )
             # Accumulate gradients
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
-            return new_accumulated_grads, per_token_losses, target_logprobs, loss
+            return new_accumulated_grads, per_token_losses, target_logprobs
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
             self._forward_backward_and_accumulate = forward_backward_and_accumulate
+            self._forward = forward_only
 
         else:
             # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
@@ -298,14 +352,18 @@ class TinkerEngine:
             )
 
             replicated = jax.NamedSharding(self.mesh, jax.P(None))
-            scalar = jax.NamedSharding(self.mesh, jax.P())
 
             # JIT the fused function
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
                 in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                out_shardings=(accumulated_grads_shardings, replicated, replicated, scalar),
+                out_shardings=(accumulated_grads_shardings, replicated, replicated),
                 donate_argnames=("accumulated_grads",),
+            )
+            self._forward = jax.jit(
+                forward_only,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
+                out_shardings=(accumulated_grads_shardings, replicated, replicated),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
@@ -371,14 +429,17 @@ class TinkerEngine:
 
         return results, valid_requests
 
-    def find_batchable_forward_backward(self, session: Session) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
-        """Find all forward_backward ops that come before any destructive update for their model.
+    def find_batchable_model_passes(
+        self, session: Session, request_type: types.RequestType
+    ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
+        """Find all requests of the given type that come before any destructive update for their model.
 
-        Uses look-ahead scheduling: for each model, only returns forward_backward operations
+        Uses look-ahead scheduling: for each model, only returns operations
         that have no optim_step or load_weights blocking them in the queue.
 
         Args:
             session: Database session
+            request_type: The type of request to find (e.g., FORWARD or FORWARD_BACKWARD)
 
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
@@ -395,17 +456,17 @@ class TinkerEngine:
         )
         barriers = dict(session.exec(barriers_query).all())
 
-        # Get all pending forward_backward operations ordered by request_id
-        fwd_bwd_query = (
+        # Get all pending operations of the requested type ordered by request_id
+        query = (
             select(FutureDB)
-            .where(FutureDB.request_type == types.RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type == request_type)
             .where(FutureDB.status == RequestStatus.PENDING)
             .order_by(FutureDB.request_id)
         )
-        fwd_bwd_ops = session.exec(fwd_bwd_query).all()
+        ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
-        batchable = [op for op in fwd_bwd_ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
+        batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return {
             f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
@@ -416,6 +477,10 @@ class TinkerEngine:
 
         Returns sample operations ensuring that each model_id has only one checkpoint_id
         to avoid loading different checkpoints for the same model in a single batch.
+
+        If sample_max_num_sequences is configured, limits to that many requests so we don't
+        produce partial batches in process_sample_batch. If num_samples > 1 for some requests,
+        this may not be perfect, but it's good until we implement continuous batching.
 
         Args:
             session: Database session
@@ -440,6 +505,9 @@ class TinkerEngine:
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
 
+        if self.config.sample_max_num_sequences > 0:
+            batchable = batchable[: self.config.sample_max_num_sequences]
+
         return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
@@ -455,6 +523,7 @@ class TinkerEngine:
             select(FutureDB)
             .where(FutureDB.status == RequestStatus.PENDING)
             .where(FutureDB.request_type != types.RequestType.FORWARD_BACKWARD)
+            .where(FutureDB.request_type != types.RequestType.FORWARD)
             .where(FutureDB.request_type != types.RequestType.SAMPLE)
             .where(FutureDB.request_type != types.RequestType.EXTERNAL)
             .order_by(FutureDB.request_id)
@@ -499,16 +568,19 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def process_forward_backward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
+    def _process_model_pass_batch(
+        self,
+        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+        model_pass_fn: Callable,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process multiple forward_backward requests in a single batch.
+        """Common batch processing logic for forward-only and forward-backward operations.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
+            model_pass_fn: Callable to perform the model pass (forward or forward_backward)
 
         Returns:
-            Dict mapping request_id -> result_data or error info
+            Dict mapping request_id to result_data or error info
         """
         results, valid_requests = self._filter_valid_requests(requests)
 
@@ -571,7 +643,7 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
-                self.accumulated_grads, per_token_losses, target_logprobs, _ = self._forward_backward_and_accumulate(
+                self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
                     self.accumulated_grads,
                     self.lora_params,
                     self.non_lora_params,
@@ -630,6 +702,12 @@ class TinkerEngine:
             )
 
         return results
+
+    def process_forward_backward_batch(self, requests):
+        return self._process_model_pass_batch(requests, self._forward_backward_and_accumulate)
+
+    def process_forward_batch(self, requests):
+        return self._process_model_pass_batch(requests, self._forward)
 
     def process_sample_batch(
         self, requests: dict[str, tuple[str, types.SampleInput]]
@@ -690,9 +768,10 @@ class TinkerEngine:
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
+                # Use left-padding for sampling so the last position is always the last real token.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = pad_batch(batch_prompts, max_len, np.int32)
-                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
+                input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
@@ -930,31 +1009,52 @@ class TinkerEngine:
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
+    def process_single_requests(self, requests: dict[str, tuple[str, types.RequestType, dict]]):
+        """Process a collection of single (non-batchable) requests.
+
+        Args:
+            requests: Dict mapping request_id to (model_id, request_type, request_data) tuples
+        """
+        if not requests:
+            return
+        results = {}
+        for request_id, (model_id, request_type, request_data) in requests.items():
+            with log_timing(f"process_single_request({request_type.value})"):
+                try:
+                    result = self.process_single_request(request_type, model_id, request_data)
+                except Exception as e:
+                    logger.exception(f"Error processing request {request_id}: {e}")
+                    result = types.ErrorResponse(error=str(e), status="failed")
+            results[request_id] = result
+        self._complete_futures(results)
+
     def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
         """Generic function to process a batch of requests.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            batch_processor: Function to call to process the batch (e.g., process_forward_backward_batch)
+            batch_processor: Function to call to process the batch
         """
         if not requests:
             return
-        try:
-            results = batch_processor(requests)
-            self._complete_futures(results)
-        except Exception as e:
-            logger.exception(f"Error processing batch: {e}")
-            self._complete_futures(
-                {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
-            )
+        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+            try:
+                results = batch_processor(requests)
+            except Exception as e:
+                logger.exception(f"Error processing batch: {e}")
+                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+        self._complete_futures(results)
 
     def process_pending_requests(self):
         """Main loop to process pending requests."""
         while True:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward operations
-                forward_backward_requests = self.find_batchable_forward_backward(session)
+                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
+                forward_backward_requests = self.find_batchable_model_passes(
+                    session, types.RequestType.FORWARD_BACKWARD
+                )
+                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
@@ -962,19 +1062,11 @@ class TinkerEngine:
 
             # Process batches outside of session context
             self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
+            self.process_batch_requests(forward_requests, self.process_forward_batch)
             self.process_batch_requests(sample_requests, self.process_sample_batch)
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
-            other_results = {}
-            for request_id, (model_id, request_type, request_data) in other_requests.items():
-                try:
-                    result = self.process_single_request(request_type, model_id, request_data)
-                except Exception as e:
-                    logger.exception(f"Error processing request {request_id}: {e}")
-                    result = types.ErrorResponse(error=str(e), status="failed")
-                other_results[request_id] = result
-
-            self._complete_futures(other_results)
+            self.process_single_requests(other_requests)
 
             # Poll every 100ms
             time.sleep(0.1)

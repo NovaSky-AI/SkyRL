@@ -52,7 +52,7 @@ class StepWiseOutput:
 class AgentLoopState:
     chat_history: ConversationType
     input_ids: List[int]
-    loss_mask: Optional[List[int]]
+    loss_mask: List[int]
     rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
@@ -286,7 +286,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     tokenize=True,
                     **self.generator_cfg.chat_template_kwargs,
                 )
-                agent_loop_state.loss_mask = agent_loop_state.rollout_logprobs = None
+                agent_loop_state.loss_mask = []
+                agent_loop_state.rollout_logprobs = None
 
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
@@ -398,7 +399,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                agent_loop_state.chat_history[initial_chat_history_length:],
+                agent_loop_state.chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
@@ -409,9 +410,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
         elif not self.generator_cfg.step_wise_training:
-            loss_mask = agent_loop_state.loss_mask
-            response_ids = agent_loop_state.input_ids[initial_prompt_length:]
-            rollout_logprobs = agent_loop_state.rollout_logprobs
+            assert not any(
+                agent_loop_state.loss_mask[agent_loop_state.response_end_idx - initial_prompt_length + 1 :]
+            ), "loss_mask at index after response end should be all 0"
+            loss_mask = agent_loop_state.loss_mask[: agent_loop_state.response_end_idx - initial_prompt_length + 1]
+            response_ids = agent_loop_state.input_ids[initial_prompt_length : agent_loop_state.response_end_idx + 1]
+            if agent_loop_state.rollout_logprobs is not None:
+                rollout_logprobs = agent_loop_state.rollout_logprobs[
+                    : agent_loop_state.response_end_idx - initial_prompt_length + 1
+                ]
             # fix index for per_step_rewards
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
             assert len(loss_mask) == len(
@@ -587,8 +594,8 @@ class SkyRLGymGenerator(GeneratorInterface):
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
-        responses = engine_output["responses"]
-        all_response_ids = engine_output["response_ids"]
+        outputs = engine_output["responses"]
+        responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
         logprobs = engine_output.get("response_logprobs", None)
 
@@ -598,20 +605,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
 
-        for i, (response, response_ids, env, env_class) in enumerate(
-            zip(responses, all_response_ids, envs, env_classes)
-        ):
+        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, response)
+            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
-            if len(response_ids) > max_tokens:
-                response_ids = response_ids[:max_tokens]
-            loss_masks.append([1] * len(response_ids))
-            truncated_responses.append(response_ids)
+            if len(response) > max_tokens:
+                response = response[:max_tokens]
+            loss_masks.append([1] * len(response))
+            truncated_responses.append(response)
             if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response_ids)]
+                sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
 
             # Get environment-specific metrics
