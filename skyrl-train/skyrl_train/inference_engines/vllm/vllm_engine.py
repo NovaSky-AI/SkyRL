@@ -74,20 +74,26 @@ class WorkerWrap:
         Args:
             init_info: WeightSyncInitInfo from the sender.
         """
+        from skyrl_train.weight_sync import BroadcastTransferStrategy
+
         assert torch.distributed.is_initialized(), "default torch process group must be initialized"
 
-        if hasattr(self, "_weight_receiver") and self._weight_receiver is not None:
-            if getattr(init_info, "override_existing_model_update_group", False):
-                self._weight_receiver.teardown()
-                self._weight_receiver = None
-            else:
-                warnings.warn(
-                    "Detected an existing weight receiver with the model update group. "
-                    "For overriding, use `generator.override_existing_update_group=enable`"
-                )
-                return
-
         strategy_cls = init_info.strategy_type()
+
+        # TODO(haochen): should we always teardown the receiver?
+        if hasattr(self, "_weight_receiver") and self._weight_receiver is not None:
+            # Only broadcast strategy requires explicit teardown (has process group)
+            if strategy_cls is BroadcastTransferStrategy:
+                if init_info.override_existing_model_update_group:
+                    self._weight_receiver.teardown()
+                    self._weight_receiver = None
+                else:
+                    warnings.warn(
+                        "Detected an existing weight receiver with the model update group. "
+                        "For overriding, use `generator.override_existing_update_group=enable`"
+                    )
+                    return
+
         self._weight_receiver = strategy_cls.create_receiver(init_info)
 
     def load_weights(self, request: WeightUpdateRequest) -> None:
