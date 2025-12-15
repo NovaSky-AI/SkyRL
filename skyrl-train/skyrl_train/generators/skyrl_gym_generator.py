@@ -397,6 +397,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         rollout_logprobs = None
         response_ids = None
 
+        # Prepare the final loss_mask, response_ids and rollout_logprobs .
+        # We remove the final observation messages /token IDs here
+        # Note that during the agent loop, we still add the final observation messages/ tokens because we terminate the agent loop if the input length
+        # exceeds the maximum
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
                 agent_loop_state.chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
