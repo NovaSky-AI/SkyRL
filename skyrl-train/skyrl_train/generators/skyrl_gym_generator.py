@@ -89,12 +89,12 @@ class TurnOutput:
         Get rollout logprobs for this turn's tokens.
 
         Returns:
-            Optional[List[float]]: Logprobs for output tokens followed by dummy values (1.0) for
+            Optional[List[float]]: Logprobs for output tokens followed by dummy values (0.0) for
                 observation tokens. Returns None if output_logprobs is None.
         """
         if not self.output_logprobs:
             return None
-        return self.output_logprobs + [1.0] * len(self.obs_ids)
+        return self.output_logprobs + [0.0] * len(self.obs_ids)
 
 
 class SkyRLGymGenerator(GeneratorInterface):

@@ -1379,7 +1379,6 @@ async def test_step_wise_training_trajectory_ids(mock_make, mock_tokenizer, mock
     }
 
     generator_output: GeneratorOutput = await generator.generate(input_batch)
-    print(generator_output["trajectory_ids"], generator_output)
 
     # Validate trajectory_ids field
     assert "trajectory_ids" in generator_output, "trajectory_ids should be present in output"
