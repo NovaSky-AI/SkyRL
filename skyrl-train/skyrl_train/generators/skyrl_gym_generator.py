@@ -53,7 +53,7 @@ class AgentLoopState:
     chat_history: ConversationType
     input_ids: List[int]
     loss_mask: Optional[List[int]]
-    rollout_logprobs: Optional[List[int]]
+    rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
 
@@ -61,11 +61,11 @@ class AgentLoopState:
 @dataclass
 class TurnOutput:
     output: str
-    output_ids: List[str]
-    output_logprobs: Optional[List[int]]
+    output_ids: List[int]
+    output_logprobs: Optional[List[float]]
     new_obs: ConversationType
     obs_ids: List[int]
-    reward: Optional[int]
+    reward: Optional[float]
     added_eos: bool = False
 
     def get_turn_loss_mask(self) -> List[int]:
@@ -356,7 +356,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
                 # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
                 turn_loss_mask = turn_output.get_turn_loss_mask()
-                turn_response_logprobs: Optional[List[int]] = turn_output.get_turn_rollout_logprobs()
+                turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
 
                 per_step_output = TrajectoryOutput(
                     response_ids=turn_response_ids,
@@ -706,7 +706,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     loss_masks.append(step_output.loss_mask)
                     prompt_token_ids.append(step_output.prompt_ids)
                     env_metrics.append(step_output.env_metrics)
-                    is_last_step.append(True if j == len(output.step_outputs) - 1 else False)
+                    is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
             env_classes = out_env_classes
