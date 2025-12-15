@@ -19,6 +19,7 @@ def _setup_root_logger() -> None:
     handler = RichHandler(
         show_time=False,
         show_level=False,
+        show_path=False,
         markup=True,
     )
     formatter = logging.Formatter("%(levelname)s:     %(message)s")
