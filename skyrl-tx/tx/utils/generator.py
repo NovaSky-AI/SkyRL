@@ -77,6 +77,50 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
 
 
+def find_string_stop_position(
+    tokens: list[int],
+    tokenizer,
+    stop_strings: list[str],
+) -> int | None:
+    """Find the token position where a stop string first appears.
+
+    Decodes the full token sequence and finds the earliest stop string.
+    Then re-encodes the prefix to find the token boundary.
+
+    Args:
+        tokens: List of generated token IDs
+        tokenizer: HuggingFace tokenizer instance
+        stop_strings: List of stop strings to search for
+
+    Returns:
+        Token index to truncate to (exclusive), or None if no stop found.
+    """
+    if not stop_strings or not tokens:
+        return None
+
+    # Decode full sequence
+    text = tokenizer.decode(tokens, skip_special_tokens=False)
+
+    # Find earliest stop string occurrence
+    earliest_pos = len(text)
+    found_stop = None
+    for stop_string in stop_strings:
+        pos = text.find(stop_string)
+        if pos != -1 and pos < earliest_pos:
+            earliest_pos = pos
+            found_stop = stop_string
+
+    if found_stop is None:
+        return None
+
+    # Find token boundary: encode the text up to (and including) stop string
+    # to determine how many tokens to keep
+    prefix_text = text[: earliest_pos + len(found_stop)]
+    prefix_tokens = tokenizer.encode(prefix_text, add_special_tokens=False)
+
+    return len(prefix_tokens)
+
+
 def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
     """Compute log probabilities of prompt tokens from prefill logits"""
     # TODO: Optimize memory usage by avoiding allocation of full vocab dimension.
@@ -185,8 +229,13 @@ class GeneratorMixin:
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
         prompt_logprobs: bool = False,
+        tokenizer=None,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
+
+        Args:
+            tokenizer: Optional tokenizer for string stop sequence detection.
+                Required if any sampling_params has stop_strings set.
 
         Returns:
             GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
@@ -240,10 +289,33 @@ class GeneratorMixin:
             prompt_lengths_host,
         ) = jax.device_get((new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths))
 
+        # Build output lists, applying string stop detection where needed
+        generated_ids = []
+        stop_reasons = []
+        logprobs_out = []
+
+        for i in range(batch_size):
+            tokens = new_tokens_host[i][: end_positions_host[i]].tolist()
+            token_logprobs = new_logprobs_host[i][: end_positions_host[i]].tolist()
+            stop_reason = "stop" if has_stop_host[i] else "length"
+
+            # Apply string stop detection if stop_strings specified and didn't already stop
+            sp = sampling_params[i]
+            if sp.stop_strings and stop_reason == "length" and tokenizer is not None:
+                string_stop_pos = find_string_stop_position(tokens, tokenizer, sp.stop_strings)
+                if string_stop_pos is not None:
+                    tokens = tokens[:string_stop_pos]
+                    token_logprobs = token_logprobs[:string_stop_pos]
+                    stop_reason = "stop"
+
+            generated_ids.append(tokens)
+            stop_reasons.append(stop_reason)
+            logprobs_out.append(token_logprobs)
+
         return GenerateOutput(
-            generated_ids=[new_tokens_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
-            stop_reasons=["stop" if has_stop_host[i] else "length" for i in range(batch_size)],
-            logprobs=[new_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            generated_ids=generated_ids,
+            stop_reasons=stop_reasons,
+            logprobs=logprobs_out,
             prompt_logprobs=(
                 [prompt_logprobs_host[i, : prompt_lengths_host[i] - 1].tolist() for i in range(batch_size)]
                 if prompt_logprobs

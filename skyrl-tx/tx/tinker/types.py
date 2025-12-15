@@ -159,6 +159,7 @@ class SamplingParams(BaseModel):
     max_tokens: int
     seed: int
     stop: list[int] | None = None
+    stop_strings: list[str] | None = None
 
 
 class ModelMetadata(BaseModel):

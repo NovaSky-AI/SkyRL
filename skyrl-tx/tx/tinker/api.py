@@ -276,7 +276,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | None = None
+    stop: Sequence[int] | Sequence[str] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
@@ -293,11 +293,26 @@ class SamplingParams(BaseModel):
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
+        # Determine if stop values are token IDs (int) or strings
+        token_stops = None
+        string_stops = None
+        if self.stop:
+            if all(isinstance(s, int) for s in self.stop):
+                token_stops = list(self.stop)
+            elif all(isinstance(s, str) for s in self.stop):
+                string_stops = list(self.stop)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="stop must be either all integers (token IDs) or all strings, not mixed",
+                )
+
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=self.stop,
+            stop=token_stops,
+            stop_strings=string_stops,
         )
 
 
