@@ -35,6 +35,9 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     group_name: str
     backend: str
     model_dtype_str: str
+    # TODO(haochen): overriding existing model update group is currently only
+    # enabled for vLLM. Because SGLang doesn't use our receiver.
+    override_existing_model_update_group: bool = False
 
     @staticmethod
     def strategy_type() -> type:
@@ -200,6 +203,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             group_name="skyrl",
             backend=cfg.generator.weight_sync_backend,
             model_dtype_str=cfg.generator.model_dtype,
+            override_existing_model_update_group=cfg.generator.override_existing_update_group == "enable",
         )
 
     @staticmethod

@@ -57,6 +57,7 @@ class RemoteWeightLoader(WeightLoader):
                     "world_size": init_info.world_size,
                     "group_name": init_info.group_name,
                     "backend": init_info.backend,
+                    "override_existing": init_info.override_existing_model_update_group,
                 },
             ) as response:
                 return await response.json()

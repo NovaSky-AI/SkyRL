@@ -48,6 +48,7 @@ class TestCreateInitInfo:
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
         data_parallel_size: int = 1,
+        override_existing_update_group: str = "disable",
     ):
         """Create a mock config object for create_init_info."""
         cfg = MagicMock()
@@ -57,6 +58,7 @@ class TestCreateInitInfo:
         cfg.generator.inference_engine_tensor_parallel_size = tensor_parallel_size
         cfg.generator.inference_engine_pipeline_parallel_size = pipeline_parallel_size
         cfg.generator.inference_engine_data_parallel_size = data_parallel_size
+        cfg.generator.override_existing_update_group = override_existing_update_group
         return cfg
 
     def test_cuda_ipc_create_init_info(self):
@@ -93,6 +95,18 @@ class TestCreateInitInfo:
         assert init_info.group_name == "skyrl"
         assert init_info.backend == "gloo"
         assert init_info.model_dtype_str == "torch.bfloat16"
+        assert init_info.override_existing_model_update_group is False
+
+    def test_broadcast_create_init_info_override_existing_enabled(self, monkeypatch):
+        """BroadcastTransferStrategy.create_init_info should set override_existing=True when config is 'enable'."""
+        import skyrl_train.weight_sync.broadcast_strategy as broadcast_module
+
+        monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
+
+        cfg = self._make_cfg(override_existing_update_group="enable")
+        init_info = BroadcastTransferStrategy.create_init_info(cfg)
+
+        assert init_info.override_existing_model_update_group is True
 
 
 class TestBroadcastWeightUpdateRequest:
