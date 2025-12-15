@@ -231,7 +231,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
-        done = False
 
         # Instantiate chat_history and chat_end_index, which are only used if `retokenize_chat_history==True`.
         # Need copy here since the prompt is a list of messages and we are going to modify it.
@@ -366,7 +365,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     prompt_ids=turn_prompt_ids,
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
-                    env_metrics=env.get_metrics() if done else {},
+                    env_metrics=env.get_metrics() if agent_loop_state.done else {},
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
 
@@ -403,7 +402,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         # exceeds the maximum
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
-                agent_loop_state.chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
+                agent_loop_state.chat_history[
+                    initial_chat_history_length : len(agent_loop_state.chat_history) - len(new_obs)
+                ],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
                 return_dict=True,
