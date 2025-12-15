@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
-from rich.logging import RichHandler
 
 try:
     import wandb  # type: ignore[import-not-found]
@@ -17,15 +16,15 @@ def _setup_root_logger() -> None:
     logger = logging.getLogger("tx")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # Prevent propagation to root logger
-    handler = RichHandler(
-        console=Console(soft_wrap=True),
-        show_time=False,
-        show_level=False,
-        show_path=False,
-        markup=True,
-    )
-    formatter = logging.Formatter("%(levelname)s:     %(message)s")
-    handler.setFormatter(formatter)
+    console = Console(highlight=True, markup=True)
+
+    class RichStreamHandler(logging.Handler):
+        def emit(self, record):
+            msg = self.format(record)
+            console.print(msg, highlight=True)
+
+    handler = RichStreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     logger.addHandler(handler)
 
 
