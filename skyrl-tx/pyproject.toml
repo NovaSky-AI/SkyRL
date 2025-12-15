@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=11.3.0",
     "rich>=14.1.0",
     "safetensors>=0.6.2",
+    "tokenizers>=0.21.2",
     "transformers>=4.56.1",
     "typer>=0.17.4",
     # "wandb>=0.22.0",

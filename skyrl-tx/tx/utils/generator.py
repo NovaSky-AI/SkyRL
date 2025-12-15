@@ -6,6 +6,7 @@ import functools
 
 import jax
 import jax.numpy as jnp
+from tokenizers.decoders import DecodeStream
 import tx.utils.models
 from tx.tinker import types
 
@@ -84,8 +85,8 @@ def find_string_stop_position(
 ) -> int | None:
     """Find the token position where a stop string first appears.
 
-    Decodes the full token sequence and finds the earliest stop string.
-    Then re-encodes the prefix to find the token boundary.
+    Incrementally decodes tokens and checks for stop string matches.
+    Uses the tokenizers DecodeStream for efficient incremental decoding.
 
     Args:
         tokens: List of generated token IDs
@@ -98,27 +99,16 @@ def find_string_stop_position(
     if not stop_strings or not tokens:
         return None
 
-    # Decode full sequence
-    text = tokenizer.decode(tokens, skip_special_tokens=False)
+    # Incremental decode using DecodeStream
+    stream = DecodeStream(skip_special_tokens=False)
+    text = ""
+    for i, token in enumerate(tokens):
+        text += stream.step(tokenizer._tokenizer, token)
+        for stop_string in stop_strings:
+            if stop_string in text:
+                return i + 1
 
-    # Find earliest stop string occurrence
-    earliest_pos = len(text)
-    found_stop = None
-    for stop_string in stop_strings:
-        pos = text.find(stop_string)
-        if pos != -1 and pos < earliest_pos:
-            earliest_pos = pos
-            found_stop = stop_string
-
-    if found_stop is None:
-        return None
-
-    # Find token boundary: encode the text up to (and including) stop string
-    # to determine how many tokens to keep
-    prefix_text = text[: earliest_pos + len(found_stop)]
-    prefix_tokens = tokenizer.encode(prefix_text, add_special_tokens=False)
-
-    return len(prefix_tokens)
+    return None
 
 
 def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
