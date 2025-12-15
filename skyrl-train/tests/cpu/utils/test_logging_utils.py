@@ -59,7 +59,7 @@ def test_color_block_format_and_args_multi_line():
 def test_log_example_uses_expected_colors_and_reward_string(reward, expected_color):
     logger = StubLogger()
 
-    prompt = "line1\nline2"
+    prompt = [{"role": "user", "content": "line1\nline2"}]
     response = "out1\nout2"
 
     log_example(logger, prompt=prompt, response=response, reward=reward)
@@ -114,7 +114,7 @@ def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
     )
 
     logger = StubLogger()
-    log_example(logger, prompt="p", response="r", reward=None)
+    log_example(logger, prompt=[{"role": "user", "content": "p"}], response="r", reward=None)
 
     # And the plain-text fallback should be printed to stdout
     captured = capsys.readouterr()

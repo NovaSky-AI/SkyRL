@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 POSITIVE_RESPONSE_COLOR = "green"
 NEGATIVE_RESPONSE_COLOR = "yellow"
@@ -36,7 +36,7 @@ def _color_block_format_and_args(
 
 def log_example(
     logger: Any,
-    prompt: str,
+    prompt: List[Dict[str, Any]],
     response: str,
     reward: Optional[Union[float, List[float]]] = None,
 ) -> None:
@@ -45,13 +45,15 @@ def log_example(
 
     Args:
         logger: The logger instance to use (expected to be loguru logger or compatible).
-        prompt: The input prompt string.
+        prompt: The input prompt in OpenAI message format.
         response: The output response string.
         reward: The reward value(s) associated with the response.
     """
     reward_val = 0.0
     reward_str = "N/A"
     try:
+        prompt_str = str(prompt)
+        response_str = str(response)
         # --- Reward handling ---
         if reward is not None:
             if isinstance(reward, list):
@@ -67,8 +69,8 @@ def log_example(
             response_color = NEGATIVE_RESPONSE_COLOR
 
         # --- Build per-line colored blocks in the *format string* ---
-        prompt_fmt, prompt_args = _color_block_format_and_args(prompt, BASE_PROMPT_COLOR, "p")
-        response_fmt, response_args = _color_block_format_and_args(response, response_color, "r")
+        prompt_fmt, prompt_args = _color_block_format_and_args(prompt_str, BASE_PROMPT_COLOR, "p")
+        response_fmt, response_args = _color_block_format_and_args(response_str, response_color, "r")
 
         # Single format string with only our own markup and placeholders
         log_format = "Example:\n" f"  Input: {prompt_fmt}\n" "  Output (Reward: {reward}):\n" f"{response_fmt}"
