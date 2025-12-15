@@ -103,7 +103,9 @@ def find_string_stop_position(
     stream = DecodeStream(skip_special_tokens=False)
     text = ""
     for i, token in enumerate(tokens):
-        text += stream.step(tokenizer._tokenizer, token)
+        chunk = stream.step(tokenizer._tokenizer, token)
+        if chunk is not None:
+            text += chunk
         for stop_string in stop_strings:
             if stop_string in text:
                 return i + 1
