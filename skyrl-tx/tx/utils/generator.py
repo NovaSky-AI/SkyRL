@@ -299,9 +299,11 @@ class GeneratorMixin:
             token_logprobs = new_logprobs_host[i][: end_positions_host[i]].tolist()
             stop_reason = "stop" if has_stop_host[i] else "length"
 
-            # Apply string stop detection if stop_strings specified and didn't already stop
+            # Apply string stop detection if stop_strings specified
             sp = sampling_params[i]
-            if sp.stop_strings and stop_reason == "length" and tokenizer is not None:
+            if sp.stop_strings:
+                assert tokenizer is not None, "tokenizer is required when stop_strings is specified"
+                assert stop_reason == "length", "stop_tokens cannot be specified when stop_strings is specified"
                 string_stop_pos = find_string_stop_position(tokens, tokenizer, sp.stop_strings)
                 if string_stop_pos is not None:
                     tokens = tokens[:string_stop_pos]
