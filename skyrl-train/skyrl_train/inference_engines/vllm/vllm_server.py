@@ -2,7 +2,8 @@ import os
 import signal
 import uvloop
 from vllm import AsyncLLMEngine
-from vllm.utils import FlexibleArgumentParser, set_ulimit
+from vllm.utils.system_utils import set_ulimit
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -40,6 +41,8 @@ class VllmServer:
         # TODO(tgriggs): Move this elsewhere, make configurable.
         os.environ["VLLM_USE_V1"] = "1"
         engine_args = AsyncEngineArgs.from_cli_args(self.server_args)
+        from vllm.config import WeightTransferConfig
+        engine_args.weight_transfer_config = WeightTransferConfig(backend="nccl")
         engine = AsyncLLMEngine.from_engine_args(
             engine_args=engine_args,
             usage_context=UsageContext.OPENAI_API_SERVER,
@@ -49,30 +52,6 @@ class VllmServer:
         sock = create_server_socket(sock_addr)
         app = build_app(self.server_args)
 
-        @app.post("/init_weight_update_communicator")
-        async def _init_weight_update_communicator(request: Request):
-            data = await request.json()
-            master_addr = data.get("master_address")
-            master_port = data.get("master_port")
-            world_size = data.get("world_size")
-            backend = data.get("backend")
-            group_name = data.get("group_name")
-            rank_offset = data.get("rank_offset")
-            override_existing = data.get("override_existing", False)
-
-            await engine.collective_rpc(
-                "init_weight_update_communicator",
-                args=(
-                    master_addr,
-                    master_port,
-                    rank_offset,
-                    world_size,
-                    group_name,
-                    backend,
-                    override_existing,
-                ),
-            )
-            return {"status": "ok"}
 
         @app.post("/sleep")
         async def _sleep(request: Request):
@@ -98,18 +77,6 @@ class VllmServer:
             await engine.reset_prefix_cache()
             return {"status": "ok"}
 
-        @app.post("/update_weights")
-        async def _update_weights(request: Request):
-            data = await request.json()
-            # engine expects a list of objects
-            names = [data.get("name")]
-            dtypes = [data.get("dtype")]
-            shapes = [data.get("shape")]
-            await engine.collective_rpc(
-                "update_weights",
-                args=(names, dtypes, shapes),
-            )
-            return {"status": "ok"}
 
         @app.post("/destroy_weights_update_group")
         async def _destroy_weights_update_group(request: Request):
@@ -119,9 +86,8 @@ class VllmServer:
                 args=(),
             )
             return {"status": "ok"}
-
-        vllm_config = await engine.get_vllm_config()
-        await init_app_state(engine, vllm_config, app.state, args)
+        
+        await init_app_state(engine, app.state, args)
 
         shutdown_task = await serve_http(
             app,

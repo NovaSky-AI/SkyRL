@@ -38,7 +38,6 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn",
     "polars",
     "s3fs",
     "fastapi",
@@ -117,8 +116,7 @@ sandboxes = [
     "litellm[proxy]>=1.67.5",
 ]
 vllm = [
-    "vllm @ git+https://github.com/SumanthRH/vllm.git@weight_transfer_prototype",
-    "flash-attn==2.8.3",
+    "vllm @ git+https://github.com/SumanthRH/vllm.git@f0438798799a10c2b89c0d00ade3c10a98aafd76",
     "torch==2.9.0",
     "flashinfer-python",
     "flashinfer-jit-cache",

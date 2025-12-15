@@ -17,6 +17,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+RUN_ENGINE_LOCALLY = True
 
 
 def get_test_actor_config() -> DictConfig:
@@ -30,7 +31,11 @@ def get_test_actor_config() -> DictConfig:
         cfg.trainer.placement.policy_num_gpus_per_node = 2
         cfg.generator.async_engine = True
         cfg.generator.num_inference_engines = 1
-        cfg.generator.run_engines_locally = True
+        cfg.generator.run_engines_locally = RUN_ENGINE_LOCALLY
+        if not RUN_ENGINE_LOCALLY:
+            cfg.generator.remote_inference_engine_urls = ["127.0.0.1:8001"]
+        cfg.trainer.flash_attn = False
+        cfg.trainer.use_sample_packing = False
 
         return cfg
 
@@ -75,6 +80,7 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
+    assert not (colocate_all and RUN_ENGINE_LOCALLY), "Colocation is not supported when running engines locally"
     try:
         cfg = get_test_actor_config()
         cfg.trainer.placement.colocate_all = colocate_all
@@ -83,17 +89,36 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         cfg.generator.backend = backend
         cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
-        # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg = init_inference_engines(
-            model=MODEL,
-            cfg=cfg,
-            use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            backend=backend,
-            sleep_level=2,  # since we explicitly sync weights
-        )
+        if RUN_ENGINE_LOCALLY:
+            # If colocate is True, this will load the engine, sleep, and wake up the engine
+            client, pg = init_inference_engines(
+                model=MODEL,
+                cfg=cfg,
+                use_local=True,
+                async_engine=cfg.generator.async_engine,
+                tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+                colocate_all=cfg.trainer.placement.colocate_all,
+                backend=backend,
+                sleep_level=2,  # since we explicitly sync weights
+            )
+        else:
+            from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+            from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(MODEL)
+            inference_engines = create_remote_inference_engines(
+                urls=cfg.generator.remote_inference_engine_urls,
+                model_name=cfg.trainer.policy.model.path,
+                engine_backend=cfg.generator.backend,
+                tokenizer=tokenizer,
+                tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+                pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+                data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+                expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
+            )
+            client = InferenceEngineClient(inference_engines, tokenizer, cfg)
+            pg = None
 
         policy = init_worker_with_type(
             "policy",

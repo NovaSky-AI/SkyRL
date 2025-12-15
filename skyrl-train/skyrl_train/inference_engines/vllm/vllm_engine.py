@@ -541,7 +541,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc(
             "init_weight_transfer",
-            kwargs={"master_address": master_addr, "master_port": master_port, "rank_offset": rank_offset, "world_size": world_size},
+            kwargs={
+                "init_info": {
+                    "master_address": master_addr,
+                    "master_port": master_port,
+                    "rank_offset": rank_offset,
+                    "world_size": world_size,
+                },
+            },
         )
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -574,16 +581,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 ),
             )
         else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
+            # assert (
+            #     len(request["names"]) == 1
+            # ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
             return await engine.collective_rpc(
                 "update_weights",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                ),
+                kwargs={
+                    "update_info": {
+                        "names": request["names"],
+                        "dtype_names": request["dtypes"],
+                        "shapes": request["shapes"],
+                    },
+                },
             )
     
     async def finalize_weight_update(self):

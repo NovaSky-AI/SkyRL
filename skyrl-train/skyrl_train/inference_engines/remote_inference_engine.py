@@ -165,19 +165,33 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         Initialize the distributed process group for syncing weights.
         """
 
-        path = "/init_weights_update_group" if self.engine_backend == "sglang" else "/init_weight_update_communicator"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self.url}{path}",
-                json={
+        if self.engine_backend == "sglang":
+            path = "/init_weights_update_group"
+            payload = {
+                "master_address": master_addr,
+                "master_port": master_port,
+                "rank_offset": rank_offset,
+                "world_size": world_size,
+                "group_name": group_name,
+                "backend": backend,
+                "override_existing": override_existing,
+            }
+        else:
+            # vLLM's built-in /init_weight_transfer endpoint
+            path = "/init_weight_transfer"
+            payload = {
+                "init_info": {
                     "master_address": master_addr,
                     "master_port": master_port,
                     "rank_offset": rank_offset,
                     "world_size": world_size,
-                    "group_name": group_name,
-                    "backend": backend,
-                    "override_existing": override_existing,
-                },
+                }
+            }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.url}{path}",
+                json=payload,
             ) as response:
                 return await response.json()
 
@@ -208,12 +222,25 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             resp = await session.post(
                 f"{self.url}/{weight_update_method}",
                 json={
-                    "name": name,
-                    "dtype": dtype,
-                    "shape": shape,
+                    "update_info": {
+                        "names": [name],
+                        "dtype_names": [dtype],
+                        "shapes": [shape],
+                    }
                 },
             )
             return await resp.json()
+
+    async def finalize_weight_update(self):
+        if self.engine_backend == "vllm":
+            finalize_weight_update_method = "finalize_weight_update"
+        elif self.engine_backend == "sglang":
+            raise NotImplementedError("Finalize weight update is not supported for SGLang.")
+        else:
+            raise ValueError(f"Invalid engine backend: {self.engine_backend}")
+
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(f"{self.url}/{finalize_weight_update_method}")
 
     # TODO(tgriggs): Come up with a (more) elegant way to handle text or json responses, and test it and handle errors.
     async def reset_prefix_cache(self):
