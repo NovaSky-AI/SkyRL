@@ -107,13 +107,22 @@ class TestRemoteWeightLoader:
 
             # Verify payload matches init_info fields
             payload = call_args[1]["json"]
-            assert payload["master_address"] == init_info.master_addr
-            assert payload["master_port"] == init_info.master_port
-            assert payload["rank_offset"] == init_info.rank_offset
-            assert payload["world_size"] == init_info.world_size
-            assert payload["group_name"] == init_info.group_name
-            assert payload["backend"] == init_info.backend
-            assert payload["model_dtype_str"] == init_info.model_dtype_str
+
+            if backend == "vllm":
+                # vLLM uses asdict(init_info) - all fields with original names
+                from dataclasses import asdict
+
+                assert payload == asdict(init_info)
+            else:
+                # SGLang uses only the fields SGLang expects
+                assert payload["master_address"] == init_info.master_addr
+                assert payload["master_port"] == init_info.master_port
+                assert payload["rank_offset"] == init_info.rank_offset
+                assert payload["world_size"] == init_info.world_size
+                assert payload["group_name"] == init_info.group_name
+                assert payload["backend"] == init_info.backend
+                assert "model_dtype_str" not in payload
+                assert "override_existing_model_update_group" not in payload
 
             assert result == {"success": True}
 
@@ -151,9 +160,16 @@ class TestRemoteWeightLoader:
 
             # Verify payload
             payload = call_args[1]["json"]
-            assert payload["name"] == "model.layer.weight"
-            assert payload["dtype"] == "bfloat16"
-            assert payload["shape"] == [4096, 4096]
+            if backend == "vllm":
+                # vLLM uses asdict(request) - plural field names
+                from dataclasses import asdict
+
+                assert payload == asdict(request)
+            else:
+                # SGLang uses singular field names
+                assert payload["name"] == "model.layer.weight"
+                assert payload["dtype"] == "bfloat16"
+                assert payload["shape"] == [4096, 4096]
 
             assert result == {"success": True}
 

@@ -46,22 +46,32 @@ class RemoteWeightLoader(WeightLoader):
                 f"Remote inference engines only support BroadcastTransferStrategy, got: {init_info.strategy_type().__name__}"
             )
 
-        path = "/init_weights_update_group" if self._engine_backend == "sglang" else "/init_weight_update_communicator"
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self._url}{path}",
-                json={
-                    "master_address": init_info.master_addr,
-                    "master_port": init_info.master_port,
-                    "rank_offset": init_info.rank_offset,
-                    "world_size": init_info.world_size,
-                    "group_name": init_info.group_name,
-                    "backend": init_info.backend,
-                    "model_dtype_str": init_info.model_dtype_str,
-                    "override_existing": init_info.override_existing_model_update_group,
-                },
-            ) as response:
-                return await response.json()
+            if self._engine_backend == "sglang":
+                # SGLang native API - only send fields it expects
+                async with session.post(
+                    f"{self._url}/init_weights_update_group",
+                    json={
+                        "master_address": init_info.master_addr,
+                        "master_port": init_info.master_port,
+                        "rank_offset": init_info.rank_offset,
+                        "world_size": init_info.world_size,
+                        "group_name": init_info.group_name,
+                        "backend": init_info.backend,
+                    },
+                ) as response:
+                    return await response.json()
+            elif self._engine_backend == "vllm":
+                # vLLM - our custom API, pass entire init_info
+                from dataclasses import asdict
+
+                async with session.post(
+                    f"{self._url}/init_weight_update_communicator",
+                    json=asdict(init_info),
+                ) as response:
+                    return await response.json()
+            else:
+                raise ValueError(f"Invalid engine backend: {self._engine_backend}")
 
     async def load_weights(self, request: WeightUpdateRequest) -> Dict[str, Any]:
         """Load weights via HTTP to the remote inference server.
@@ -75,27 +85,29 @@ class RemoteWeightLoader(WeightLoader):
         Returns:
             Response from the remote server.
         """
-        if self._engine_backend == "vllm":
-            weight_update_method = "update_weights"
-        elif self._engine_backend == "sglang":
-            weight_update_method = "update_weights_from_distributed"
-        else:
-            raise ValueError(f"Invalid engine backend: {self._engine_backend}")
-
         async with aiohttp.ClientSession() as session:
-            name = request.names[0]
-            dtype = request.dtypes[0]
-            shape = request.shapes[0]
+            if self._engine_backend == "sglang":
+                # SGLang native API expects singular name, dtype, shape
+                resp = await session.post(
+                    f"{self._url}/update_weights_from_distributed",
+                    json={
+                        "name": request.names[0],
+                        "dtype": request.dtypes[0],
+                        "shape": request.shapes[0],
+                    },
+                )
+                return await resp.json()
+            elif self._engine_backend == "vllm":
+                # vLLM - our custom API, pass entire request
+                from dataclasses import asdict
 
-            resp = await session.post(
-                f"{self._url}/{weight_update_method}",
-                json={
-                    "name": name,
-                    "dtype": dtype,
-                    "shape": shape,
-                },
-            )
-            return await resp.json()
+                resp = await session.post(
+                    f"{self._url}/update_weights",
+                    json=asdict(request),
+                )
+                return await resp.json()
+            else:
+                raise ValueError(f"Invalid engine backend: {self._engine_backend}")
 
     async def destroy_group(self) -> Dict[str, Any]:
         """Destroy the weights update group.
