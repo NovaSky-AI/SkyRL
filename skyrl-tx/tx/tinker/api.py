@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence
+from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
@@ -276,7 +276,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | Sequence[str] | None = None
+    stop: list[int] | list[str] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
