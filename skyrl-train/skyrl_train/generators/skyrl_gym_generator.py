@@ -318,7 +318,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     output_ids.append(self.tokenizer.eos_token_id)
                     # dummy logprobs for EOS token id
                     if response_logprobs is not None:
-                        response_logprobs.append(1.0)
+                        response_logprobs.append(0.0)
                     added_eos = True
 
             # 2. Environment step
@@ -436,7 +436,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 response_ids.append(self.tokenizer.eos_token_id)
                 loss_mask.append(1)
                 if rollout_logprobs is not None:
-                    rollout_logprobs.append(1.0)
+                    rollout_logprobs.append(0.0)
                 appended_eos_token = True
 
         if self.generator_cfg.step_wise_training:
@@ -957,7 +957,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         if turn_output.output_logprobs is not None:
             # For response tokens, use actual logprobs
             # for obs tokens, use dummy values
-            rollout_logprobs_for_turn = turn_output.output_logprobs[: len(new_resp_tokens)] + [1.0] * len(
+            rollout_logprobs_for_turn = turn_output.output_logprobs[: len(new_resp_tokens)] + [0.0] * len(
                 obs_ids_to_add
             )
 
