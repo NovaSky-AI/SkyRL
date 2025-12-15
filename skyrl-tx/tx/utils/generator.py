@@ -251,10 +251,10 @@ class GeneratorMixin:
         rngs = jax.vmap(jax.random.PRNGKey)(jnp.array(seeds))
 
         # Extract stop tokens and pad to same length
-        max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
+        max_stop_tokens = max(len(sp.stop_tokens) if sp.stop_tokens else 0 for sp in sampling_params)
         stop_tokens = []
         for sp in sampling_params:
-            stop = sp.stop or []
+            stop = sp.stop_tokens or []
             stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
         stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 

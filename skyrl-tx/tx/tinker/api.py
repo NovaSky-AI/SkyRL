@@ -311,7 +311,7 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=token_stops,
+            stop_tokens=token_stops,
             stop_strings=string_stops,
         )
 
