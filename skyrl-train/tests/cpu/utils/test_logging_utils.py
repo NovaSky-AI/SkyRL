@@ -73,8 +73,7 @@ def test_log_example_uses_expected_colors_and_reward_string(reward, expected_col
     assert "r0" in logger.last_kwargs
 
     # Prompt lines kept as-is
-    assert logger.last_kwargs["p0"] == "line1"
-    assert logger.last_kwargs["p1"] == "line2"
+    assert logger.last_kwargs["p0"] == "[{'role': 'user', 'content': 'line1\\nline2'}]"
 
     # Response lines kept as-is
     assert logger.last_kwargs["r0"] == "out1"
@@ -120,6 +119,6 @@ def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Error pretty printing example" in captured.out
     assert "Example:" in captured.out
-    assert "Input: p" in captured.out
+    assert "Input: [{'role': 'user', 'content': 'p'}]" in captured.out
     assert "Output (Reward: N/A):" in captured.out
     assert "r" in captured.out
