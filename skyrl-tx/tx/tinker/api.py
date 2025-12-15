@@ -294,13 +294,13 @@ class SamplingParams(BaseModel):
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
         # Determine if stop values are token IDs (int) or strings
-        token_stops = None
-        string_stops = None
+        stop_tokens = None
+        stop_strings = None
         if self.stop:
             if all(isinstance(s, int) for s in self.stop):
-                token_stops = list(self.stop)
+                stop_tokens = list(self.stop)
             elif all(isinstance(s, str) for s in self.stop):
-                string_stops = list(self.stop)
+                stop_strings = list(self.stop)
             else:
                 raise HTTPException(
                     status_code=400,
@@ -311,8 +311,8 @@ class SamplingParams(BaseModel):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop_tokens=token_stops,
-            stop_strings=string_stops,
+            stop_tokens=stop_tokens,
+            stop_strings=stop_strings,
         )
 
 
