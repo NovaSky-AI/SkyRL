@@ -52,26 +52,23 @@ class VllmServer:
 
         @app.post("/init_weight_update_communicator")
         async def _init_weight_update_communicator(request: Request):
+            from skyrl_train.weight_sync import BroadcastInitInfo
+
             data = await request.json()
-            master_addr = data.get("master_address")
-            master_port = data.get("master_port")
-            world_size = data.get("world_size")
-            backend = data.get("backend")
-            group_name = data.get("group_name")
-            rank_offset = data.get("rank_offset")
-            override_existing = data.get("override_existing", False)
+            init_info = BroadcastInitInfo(
+                master_addr=data.get("master_address"),
+                master_port=data.get("master_port"),
+                rank_offset=data.get("rank_offset"),
+                world_size=data.get("world_size"),
+                group_name=data.get("group_name"),
+                backend=data.get("backend"),
+                model_dtype_str=data.get("model_dtype_str", "torch.bfloat16"),
+                override_existing_model_update_group=data.get("override_existing", False),
+            )
 
             await engine.collective_rpc(
                 "init_weight_update_communicator",
-                args=(
-                    master_addr,
-                    master_port,
-                    rank_offset,
-                    world_size,
-                    group_name,
-                    backend,
-                    override_existing,
-                ),
+                args=(init_info,),
             )
             return {"status": "ok"}
 
@@ -101,6 +98,7 @@ class VllmServer:
 
         @app.post("/update_weights")
         async def _update_weights(request: Request):
+
             data = await request.json()
             # engine expects a list of objects
             req = NamedWeightsUpdateRequest(

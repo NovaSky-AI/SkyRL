@@ -113,6 +113,7 @@ class TestRemoteWeightLoader:
             assert payload["world_size"] == init_info.world_size
             assert payload["group_name"] == init_info.group_name
             assert payload["backend"] == init_info.backend
+            assert payload["model_dtype_str"] == init_info.model_dtype_str
 
             assert result == {"success": True}
 
