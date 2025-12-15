@@ -300,11 +300,10 @@ class GeneratorMixin:
             stop_reason = "stop" if has_stop_host[i] else "length"
 
             # Apply string stop detection if stop_strings specified
-            sp = sampling_params[i]
-            if sp.stop_strings:
+            if sampling_params[i].stop_strings:
                 assert tokenizer is not None, "tokenizer is required when stop_strings is specified"
                 assert stop_reason == "length", "stop_tokens cannot be specified when stop_strings is specified"
-                string_stop_pos = find_string_stop_position(tokens, tokenizer, sp.stop_strings)
+                string_stop_pos = find_string_stop_position(tokens, tokenizer, sampling_params[i].stop_strings)
                 if string_stop_pos is not None:
                     tokens = tokens[:string_stop_pos]
                     token_logprobs = token_logprobs[:string_stop_pos]
