@@ -24,7 +24,7 @@ def _setup_root_logger() -> None:
             console.print(msg, highlight=True)
 
     handler = RichStreamHandler()
-    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
     logger.addHandler(handler)
 
 
