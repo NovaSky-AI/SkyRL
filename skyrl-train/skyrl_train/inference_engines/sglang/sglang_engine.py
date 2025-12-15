@@ -138,8 +138,7 @@ def sglang_custom_weight_loader(model, named_tensors):
 
     # Get model info and create receiver
     model_dtype = next(model.parameters()).dtype
-    device = next(model.parameters()).device
-    receiver = CudaIpcWeightTransferReceiver(model_dtype, device)
+    receiver = CudaIpcWeightTransferReceiver(model_dtype)
 
     # Receive weights via IPC
     weights_to_load = list(receiver.receive_weights(request))
