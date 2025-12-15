@@ -1,5 +1,5 @@
-# bench_forward_backward.py
 """Benchmark forward/backward passes for the TinkerEngine."""
+
 import argparse
 import time
 
@@ -113,7 +113,10 @@ def run_bench(base_model: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark forward/backward passes")
-    parser.add_argument("--model", default="trl-internal-testing/tiny-Qwen3ForCausalLM",
-                        help="Model to benchmark (default: tiny-Qwen3ForCausalLM)")
+    parser.add_argument(
+        "--model",
+        default="trl-internal-testing/tiny-Qwen3ForCausalLM",
+        help="Model to benchmark (default: tiny-Qwen3ForCausalLM)",
+    )
     args = parser.parse_args()
     run_bench(args.model)
