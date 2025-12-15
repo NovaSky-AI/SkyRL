@@ -74,8 +74,7 @@ def reset_accumulators(engine):
 def run_bench(num_steps=20, warmup_steps=3):
     print(f"\n{'='*80}")
     print(f"Benchmarking: {BASE_MODEL}")
-    print(f"Vocab size: 151,936 tokens (vs 1,000 for tiny model)")
-    print(f"This is where the optimization really matters!")
+    print(f"Vocab size: 151,936 tokens")
     print(f"{'='*80}\n")
     
     print("Building engine (this will download the model ~1.2GB)...")
