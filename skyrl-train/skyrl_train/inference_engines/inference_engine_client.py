@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
 )
-from skyrl_train.weight_sync import WeightUpdateRequest
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from transformers import PreTrainedTokenizerBase
 import asyncio
@@ -21,6 +22,7 @@ import random
 from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
+    from skyrl_train.weight_sync import WeightUpdateRequest
     from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
