@@ -18,6 +18,7 @@ class StubLogger:
 
     def __init__(self) -> None:
         self.last_message = None
+        self.last_args = None
         self.last_kwargs = None
 
     def opt(self, **kwargs):
@@ -115,11 +116,10 @@ def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
     logger = StubLogger()
     log_example(logger, prompt="p", response="r", reward=None)
 
-    # In the error path we log a message mentioning the failure
-    assert "Error pretty printing example" in logger.last_message
-
     # And the plain-text fallback should be printed to stdout
     captured = capsys.readouterr()
+    assert "Error pretty printing example" in captured.out
     assert "Example:" in captured.out
     assert "Input: p" in captured.out
     assert "Output (Reward: N/A):" in captured.out
+    assert "r" in captured.out

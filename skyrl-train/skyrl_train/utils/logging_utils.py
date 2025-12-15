@@ -79,5 +79,5 @@ def log_example(
         # Let Loguru parse tags in log_format and then substitute arguments.
         logger.opt(colors=True).info(log_format, **format_args)
     except Exception as e:
-        logger.info("Error pretty printing example, debug printing instead: {}", e)
+        print(f"Error pretty printing example, debug printing instead: {e}")
         print(f"Example:\n  Input: {prompt}\n  Output (Reward: {reward_str}):\n{response}")
