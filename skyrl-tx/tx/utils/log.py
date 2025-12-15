@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
 from rich.logging import RichHandler
 
 try:
@@ -17,6 +18,7 @@ def _setup_root_logger() -> None:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # Prevent propagation to root logger
     handler = RichHandler(
+        console=Console(soft_wrap=True),
         show_time=False,
         show_level=False,
         show_path=False,
