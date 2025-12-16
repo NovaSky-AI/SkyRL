@@ -189,8 +189,11 @@ class DistributedTorchRayActor:
 
 class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
+        from skyrl_train.weight_sync import get_transfer_strategy_cls
+
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -260,13 +263,11 @@ class Worker(DistributedTorchRayActor):
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
-        from skyrl_train.weight_sync import get_transfer_strategy_cls
 
         assert inference_engine_client is not None
 
         if torch.distributed.get_rank() == 0:
-            # Get strategy class and create init info + sender
-            self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
+            # Create init info + sender
             init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
             self._weight_transfer_sender = self._transfer_strategy_cls.create_sender(
                 init_info=init_info,
