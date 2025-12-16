@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import socket
@@ -267,15 +268,21 @@ class Worker(DistributedTorchRayActor):
         assert inference_engine_client is not None
 
         if torch.distributed.get_rank() == 0:
-            # Create init info + sender
+            # Create init info
             init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
-            self._weight_transfer_sender = self._transfer_strategy_cls.create_sender(
-                init_info=init_info,
-                inference_client=inference_engine_client,
-            )
 
-            # Send init info to inference engines so they can create receivers
-            await inference_engine_client.init_weight_update_communicator(init_info)
+            # Initialize both sender and receivers concurrently
+            # Both may need to join the same process group, so they must run in parallel
+            tasks = [
+                inference_engine_client.init_weight_update_communicator(init_info),
+                asyncio.to_thread(
+                    self._transfer_strategy_cls.create_sender,
+                    init_info=init_info,
+                    inference_client=inference_engine_client,
+                ),
+            ]
+            results = await asyncio.gather(*tasks)
+            self._weight_transfer_sender = results[1]  # sender from second task
 
             # # Register signal handlers for termination only on rank 0
             # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
