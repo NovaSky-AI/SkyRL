@@ -267,30 +267,36 @@ class Worker(DistributedTorchRayActor):
 
         assert inference_engine_client is not None
 
+        # Create init info on all ranks (it's deterministic from cfg)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+
+        # Create sender on all ranks
+        # Strategy implementations may have different logic for different ranks
+        tasks = [
+            asyncio.to_thread(
+                self._transfer_strategy_cls.create_sender,
+                init_info=init_info,
+                inference_client=inference_engine_client,
+            ),
+        ]
+
+        # Only rank 0 initializes receivers on inference engines
+        # NOTE: For broadcast strategy, sender and receiver init must run concurrently
+        # because both need to join the same process group to avoid deadlock
         if torch.distributed.get_rank() == 0:
-            # Create init info
-            init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
-            # Initialize both sender and receivers concurrently
-            # Both may need to join the same process group, so they must run in parallel
-            tasks = [
-                inference_engine_client.init_weight_update_communicator(init_info),
-                asyncio.to_thread(
-                    self._transfer_strategy_cls.create_sender,
-                    init_info=init_info,
-                    inference_client=inference_engine_client,
-                ),
-            ]
-            results = await asyncio.gather(*tasks)
-            self._weight_transfer_sender = results[1]  # sender from second task
+        results = await asyncio.gather(*tasks)
+        self._weight_transfer_sender = results[0]  # sender is always first task
 
-            # # Register signal handlers for termination only on rank 0
-            # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
-            # The better way is to just have this specified in __del__, but there is
-            # no guarattee that __del__ will be called in general. Ray also doesn't
-            # explictly call __del__ when the actor shuts down.
-            # It's commented out so that we can fix this in the future.
-            # atexit.register(self._handle_termination)
+        # # Register signal handlers for termination only on rank 0
+        # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
+        # The better way is to just have this specified in __del__, but there is
+        # no guarattee that __del__ will be called in general. Ray also doesn't
+        # explictly call __del__ when the actor shuts down.
+        # It's commented out so that we can fix this in the future.
+        # if torch.distributed.get_rank() == 0:
+        #     atexit.register(self._handle_termination)
 
         torch.distributed.barrier()
 

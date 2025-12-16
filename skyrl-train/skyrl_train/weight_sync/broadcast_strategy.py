@@ -7,7 +7,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Tuple
+from typing import Iterable, Iterator, Optional, Tuple
 
 import ray
 import torch
@@ -65,14 +65,14 @@ class BroadcastWeightTransferSender(WeightTransferSender):
     def __init__(
         self,
         init_info: BroadcastInitInfo,
-        model_update_group: torch.distributed.ProcessGroup,
+        model_update_group: Optional[torch.distributed.ProcessGroup],
         inference_client: InferenceEngineClient,
     ) -> None:
         """Initialize the broadcast sender.
 
         Args:
             init_info: BroadcastInitInfo containing all config-derived args.
-            model_update_group: Process group for broadcast operations.
+            model_update_group: Process group for broadcast operations (None on non-rank-0 training workers).
             inference_client: Client for coordinating with inference engines.
         """
         self._init_info = init_info
@@ -83,11 +83,20 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         """Send chunks via broadcast.
 
         Each chunk should contain exactly one parameter for broadcast strategy.
-        Rank 0 sends the update request to inference engines, all ranks broadcast.
+        All training ranks iterate through chunks (weight extraction may involve
+        collective ops), but only rank 0 broadcasts to inference engines via the
+        model_update_group.
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
         """
+        rank = torch.distributed.get_rank()
+
+        # Rank 0 must have a process group to broadcast to inference engines
+        if rank == 0:
+            assert self._model_update_group is not None, "Rank 0 must have model_update_group"
+
+        # All ranks iterate through chunks (weight extraction may involve collective ops)
         for chunk in chunks:
             assert len(chunk) == 1, f"Broadcast strategy expects single-parameter chunks, got {len(chunk)}"
 
@@ -95,20 +104,25 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             tensor = chunk.tensors[0]
             shape = chunk.shapes[0]
 
-            # Create request and send to inference engines
-            request = BroadcastWeightUpdateRequest(
-                names=[name],
-                dtypes=[self._init_info.model_dtype_str],
-                shapes=[shape],
-            )
-            update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
+            # Only rank 0 sends request to inference engines
+            if rank == 0:
+                request = BroadcastWeightUpdateRequest(
+                    names=[name],
+                    dtypes=[self._init_info.model_dtype_str],
+                    shapes=[shape],
+                )
+                update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
 
-            # Broadcast tensor from rank 0
+            # Broadcast tensor from rank 0 to inference engines (no-op on other training ranks)
             def broadcast_tensor(t: torch.Tensor) -> None:
-                torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
+                if rank == 0 and self._model_update_group is not None:
+                    torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
 
             await asyncio.to_thread(broadcast_tensor, tensor)
-            await update_weight_task
+
+            if rank == 0:
+                await update_weight_task
+
             torch.distributed.barrier()
 
     def teardown(self) -> None:
@@ -116,7 +130,8 @@ class BroadcastWeightTransferSender(WeightTransferSender):
 
         TODO: Integrate with training workers to call this during shutdown.
         """
-        torch.distributed.destroy_process_group(self._model_update_group)
+        if self._model_update_group is not None:
+            torch.distributed.destroy_process_group(self._model_update_group)
 
 
 class BroadcastWeightTransferReceiver(WeightTransferReceiver):
@@ -213,7 +228,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     ) -> BroadcastWeightTransferSender:
         """Create a broadcast sender.
 
-        Sets up the process group and returns a configured sender.
+        Sets up the process group on rank 0 only (other training ranks don't join).
 
         Args:
             init_info: BroadcastInitInfo containing config-derived args.
@@ -222,14 +237,17 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
         Returns:
             A configured BroadcastWeightTransferSender instance.
         """
-        # Setup process group (sender is always rank 0)
-        model_update_group = init_custom_process_group(
-            backend=init_info.backend,
-            init_method=get_tcp_url(init_info.master_addr, init_info.master_port),
-            world_size=init_info.world_size,
-            rank=0,
-            group_name=init_info.group_name,
-        )
+        # Only rank 0 joins the model_update_group (with inference engines)
+        # Other training ranks don't participate in the process group
+        model_update_group = None
+        if torch.distributed.get_rank() == 0:
+            model_update_group = init_custom_process_group(
+                backend=init_info.backend,
+                init_method=get_tcp_url(init_info.master_addr, init_info.master_port),
+                world_size=init_info.world_size,
+                rank=0,
+                group_name=init_info.group_name,
+            )
 
         return BroadcastWeightTransferSender(
             init_info=init_info,

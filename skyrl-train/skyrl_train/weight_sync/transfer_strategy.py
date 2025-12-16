@@ -39,6 +39,9 @@ class WeightTransferSender(ABC):
     async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
         """Send chunks using this transfer strategy.
 
+        This method must be called on all training ranks. Implementations may have
+        different behavior for different ranks.
+
         Args:
             chunks: Iterable of WeightChunk objects to send.
         """
@@ -60,6 +63,9 @@ class WeightTransferReceiver(ABC):
     @abstractmethod
     def receive_weights(self, request: "WeightUpdateRequest") -> Iterator[Tuple[str, torch.Tensor]]:
         """Yield (name, tensor) tuples by pulling data from transfer channel.
+
+        This method must be called on all inference engine ranks. Implementations may have
+        different behavior for different ranks.
 
         Args:
             request: Weight update request.
@@ -112,6 +118,10 @@ class WeightTransferStrategy(ABC):
     ) -> WeightTransferSender:
         """Create a sender for the training worker side.
 
+        This method must be called on all training ranks. Implementations may
+        have different initialization logic for different ranks (e.g., only rank 0
+        joins a process group for broadcast, while all ranks participate for IPC).
+
         Args:
             init_info: WeightSyncInitInfo containing config-derived args.
             inference_client: Client for coordinating with inference engines.
@@ -126,6 +136,9 @@ class WeightTransferStrategy(ABC):
     def create_receiver(init_info: WeightSyncInitInfo) -> WeightTransferReceiver:
         """Create a receiver for the inference engine side.
 
+        This method must be called on all inference engine ranks. Implementations may
+        have different initialization logic for different ranks.
+
         Args:
             init_info: WeightSyncInitInfo from the sender.
 
@@ -133,5 +146,3 @@ class WeightTransferStrategy(ABC):
             A configured WeightTransferReceiver instance.
         """
         ...
-
-
