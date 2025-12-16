@@ -98,7 +98,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
     def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp3")
+        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
         strategy = FSDPStrategy(
             fsdp_config=self.cfg.trainer.policy.fsdp_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
@@ -160,6 +160,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
         from skyrl_train.weight_sync import CudaIpcTransferStrategy
+
         use_cuda_ipc = self._transfer_strategy_cls is CudaIpcTransferStrategy
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
