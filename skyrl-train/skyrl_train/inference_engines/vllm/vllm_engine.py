@@ -72,11 +72,16 @@ class WorkerWrap:
         """Init weight update communicator from init info.
 
         Args:
-            init_info: WeightSyncInitInfo from the sender.
+            init_info: Pickled bytes of WeightSyncInitInfo from the sender.
         """
+        import pickle
         from skyrl_train.weight_sync import BroadcastTransferStrategy
 
         assert torch.distributed.is_initialized(), "default torch process group must be initialized"
+
+        # Unpickle init_info to restore the original object type
+        assert isinstance(init_info, bytes)
+        init_info = pickle.loads(init_info)
 
         strategy_cls = init_info.strategy_type()
 
@@ -102,8 +107,14 @@ class WorkerWrap:
         This method is called via collective_rpc from VLLMWeightLoader.
 
         Args:
-            request: Weight update request.
+            request: Pickled bytes of WeightUpdateRequest.
         """
+        import pickle
+
+        # Unpickle request to restore the original object type
+        if isinstance(request, bytes):
+            request = pickle.loads(request)
+
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
             weight_list.append((name, tensor))
@@ -288,11 +299,15 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         await asyncio.to_thread(self.llm.sleep, level=level)
 
     async def init_weight_update_communicator(self, init_info):
+        import pickle
+
         engine = self._get_engine()
+        # Pickle the init_info to preserve type through collective_rpc
+        pickled_init_info = pickle.dumps(init_info)
         return await asyncio.to_thread(
             engine.collective_rpc,
             "init_weight_update_communicator",
-            args=(init_info,),
+            args=(pickled_init_info,),
         )
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -444,10 +459,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await self.llm.sleep(level=level)
 
     async def init_weight_update_communicator(self, init_info):
+        import pickle
+
         engine = self._get_engine()
+        # Pickle the init_info to preserve type through collective_rpc
+        pickled_init_info = pickle.dumps(init_info)
         return await engine.collective_rpc(
             "init_weight_update_communicator",
-            args=(init_info,),
+            args=(pickled_init_info,),
         )
 
     async def update_named_weights(self, request: WeightUpdateRequest):
@@ -617,16 +636,21 @@ class VLLMWeightLoader(WeightLoader):
         Args:
             request: Weight update request.
         """
+        import pickle
+
+        # Pickle the request to preserve type through collective_rpc
+        pickled_request = pickle.dumps(request)
+
         if self._is_async:
             await self._engine.collective_rpc(
                 "load_weights",
-                args=(request,),
+                args=(pickled_request,),
             )
         else:
             await asyncio.to_thread(
                 self._engine.collective_rpc,
                 "load_weights",
-                args=(request,),
+                args=(pickled_request,),
             )
 
 

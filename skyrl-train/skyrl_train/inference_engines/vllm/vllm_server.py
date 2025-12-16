@@ -52,14 +52,18 @@ class VllmServer:
 
         @app.post("/init_weight_update_communicator")
         async def _init_weight_update_communicator(request: Request):
+            import pickle
             from skyrl_train.weight_sync import BroadcastInitInfo
 
             data = await request.json()
             init_info = BroadcastInitInfo(**data)
 
+            # Pickle to preserve type through collective_rpc
+            pickled_init_info = pickle.dumps(init_info)
+
             await engine.collective_rpc(
                 "init_weight_update_communicator",
-                args=(init_info,),
+                args=(pickled_init_info,),
             )
             return {"status": "ok"}
 
