@@ -48,6 +48,17 @@ def make_mock_cfg(
 class SenderActor:
     """Generic sender actor for transfer strategies."""
 
+    def __init__(self):
+        # Initialize a real process group to simulate training worker group
+        if not dist.is_initialized():
+            port = get_free_port()
+            dist.init_process_group(
+                backend="nccl",
+                init_method=f"tcp://localhost:{port}",
+                world_size=1,
+                rank=0,
+            )
+
     def create_init_info(self, strategy_cls, cfg):
         """Create init info using the strategy."""
         return strategy_cls.create_init_info(cfg)
@@ -56,8 +67,6 @@ class SenderActor:
         self, strategy_cls, init_info, names: list, shapes: list, receiver_handle, send_individually: bool = False
     ):
         """Create sender and send weights."""
-        from unittest.mock import patch
-
         dtype_str = init_info.model_dtype_str
         dtype = str_to_torch_dtype(dtype_str)
         tensors = [torch.randn(shape, device="cuda", dtype=dtype) for shape in shapes]
@@ -70,24 +79,16 @@ class SenderActor:
                 ray.get(self.receiver_handle.receive_weights.remote(request))
 
         mock_client = MockInferenceClient(receiver_handle)
+
         sender = strategy_cls.create_sender(init_info, mock_client)
 
-        # Patch torch.distributed for CUDA IPC tests that don't need a real process group
-        # In practice, these would return the rank of the training worker group
-        with patch("torch.distributed.get_rank", return_value=0), patch(
-            "torch.distributed.get_world_size", return_value=1
-        ), patch(
-            "torch.distributed.all_gather_object", side_effect=lambda obj_list, obj: obj_list.__setitem__(0, obj)
-        ), patch(
-            "torch.distributed.barrier"
-        ):
-            if send_individually:
-                for name, tensor, shape in zip(names, tensors, shapes):
-                    chunk = WeightChunk(names=[name], dtypes=[dtype_str], shapes=[shape], tensors=[tensor])
-                    await sender.send_chunks([chunk])
-            else:
-                chunk = WeightChunk(names=names, dtypes=[dtype_str] * len(names), shapes=shapes, tensors=tensors)
+        if send_individually:
+            for name, tensor, shape in zip(names, tensors, shapes):
+                chunk = WeightChunk(names=[name], dtypes=[dtype_str], shapes=[shape], tensors=[tensor])
                 await sender.send_chunks([chunk])
+        else:
+            chunk = WeightChunk(names=names, dtypes=[dtype_str] * len(names), shapes=shapes, tensors=tensors)
+            await sender.send_chunks([chunk])
 
         return [t.cpu() for t in tensors]
 
@@ -96,10 +97,9 @@ class SenderActor:
 class ReceiverActor:
     """Generic receiver actor for transfer strategies."""
 
-    def __init__(self, strategy_cls, init_info, init_process_group: bool = False):
-        if init_process_group:
-            # Initialize default process group so torch.distributed.get_rank() works.
-            # In production, this is the inference engine's model parallel group.
+    def __init__(self, strategy_cls, init_info):
+        # Initialize a real process group to simulate inference engine's model parallel group
+        if not dist.is_initialized():
             port = get_free_port()
             dist.init_process_group(
                 backend="nccl",
@@ -119,13 +119,12 @@ class ReceiverActor:
         return self.received_weights
 
 
-def _run_weight_sync_e2e(strategy_cls, cfg, init_process_group: bool, send_individually: bool, colocate: bool = False):
+def _run_weight_sync_e2e(strategy_cls, cfg, send_individually: bool, colocate: bool = False):
     """Run end-to-end weight sync test for a given strategy.
 
     Args:
         strategy_cls: Transfer strategy class to test.
         cfg: Mock config object.
-        init_process_group: Whether to initialize torch.distributed process group.
         send_individually: Whether to send weights one at a time or batched.
         colocate: Whether to colocate sender and receiver on the same GPU (required for CUDA IPC).
     """
@@ -146,16 +145,12 @@ def _run_weight_sync_e2e(strategy_cls, cfg, init_process_group: bool, send_indiv
         sender = SenderActor.options(**actor_options).remote()
         init_info = ray.get(sender.create_init_info.remote(strategy_cls, cfg))
 
-        receiver = ReceiverActor.options(**actor_options).remote(
-            strategy_cls, init_info, init_process_group=init_process_group
-        )
+        receiver = ReceiverActor.options(**actor_options).remote(strategy_cls, init_info)
     else:
         sender = SenderActor.options(num_gpus=1).remote()
         init_info = ray.get(sender.create_init_info.remote(strategy_cls, cfg))
 
-        receiver = ReceiverActor.options(num_gpus=1).remote(
-            strategy_cls, init_info, init_process_group=init_process_group
-        )
+        receiver = ReceiverActor.options(num_gpus=1).remote(strategy_cls, init_info)
 
     names = ["layer1.weight", "layer1.bias", "layer2.weight"]
     shapes = [[32, 64], [64], [16, 16]]
@@ -180,9 +175,7 @@ class TestCudaIpcTransferStrategy:
     def test_weight_sync_e2e(self, ray_init_fixture):
         """Test CUDA IPC strategy end-to-end."""
         cfg = make_mock_cfg(model_dtype="bfloat16", colocate_all=True)
-        _run_weight_sync_e2e(
-            CudaIpcTransferStrategy, cfg, init_process_group=False, send_individually=False, colocate=True
-        )
+        _run_weight_sync_e2e(CudaIpcTransferStrategy, cfg, send_individually=False, colocate=True)
 
 
 class TestBroadcastTransferStrategy:
@@ -191,4 +184,4 @@ class TestBroadcastTransferStrategy:
     def test_weight_sync_e2e(self, ray_init_fixture):
         """Test Broadcast strategy end-to-end."""
         cfg = make_mock_cfg(weight_sync_backend="nccl", model_dtype="bfloat16", colocate_all=False)
-        _run_weight_sync_e2e(BroadcastTransferStrategy, cfg, init_process_group=True, send_individually=True)
+        _run_weight_sync_e2e(BroadcastTransferStrategy, cfg, send_individually=True)
