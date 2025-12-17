@@ -100,15 +100,15 @@ class Qwen3Attention(nnx.Module):
         if isinstance(kv_cache, PagedKVCache):
             # Paged attention path
             seq_indices = jnp.arange(B)
-            
+
             # Determine if this is prefill (multiple tokens) or generation (single token)
             is_prefill = T > 1
-            
+
             # Create padding mask from attention_mask [B, kv_len]
             # The attention_mask indicates valid (non-padding) positions
             kv_len = jnp.max(kv_cache.page_offsets) + T
             paged_attn_mask = jnp.arange(kv_len)[None, :] < (kv_cache.page_offsets[:, None] + T)
-            
+
             attn_output, updated_cache = paged_attention_with_update(
                 q=q,
                 k_new=k,

@@ -140,13 +140,13 @@ def write_to_paged_cache(
     )
 
     # Perform vectorized scatter update
-    k_pages_updated = cache.k_pages.at[
-        update_indices[0], update_indices[1], update_indices[2], update_indices[3]
-    ].set(k_new_flat.ravel())
+    k_pages_updated = cache.k_pages.at[update_indices[0], update_indices[1], update_indices[2], update_indices[3]].set(
+        k_new_flat.ravel()
+    )
 
-    v_pages_updated = cache.v_pages.at[
-        update_indices[0], update_indices[1], update_indices[2], update_indices[3]
-    ].set(v_new_flat.ravel())
+    v_pages_updated = cache.v_pages.at[update_indices[0], update_indices[1], update_indices[2], update_indices[3]].set(
+        v_new_flat.ravel()
+    )
 
     # Update page offsets
     new_offsets = cache.page_offsets.at[seq_indices].add(seq_len)
