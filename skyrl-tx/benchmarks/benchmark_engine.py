@@ -141,7 +141,7 @@ def main():
         config_fields["checkpoints_base"] = AnyPath(config_fields["checkpoints_base"])
     config = EngineConfig(**config_fields)
 
-    print(f"Model: {config.base_model}")
+    print(f"EngineConfig: {config}")
     print(f"Benchmark: {args.benchmark}")
     print("Building engine...")
 
