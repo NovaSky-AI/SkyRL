@@ -192,3 +192,51 @@ class SampleOutput(BaseModel):
 class EngineMetrics(BaseModel):
     train_seq_len_jit_times: dict[int, float] = {}
     sample_seq_len_jit_times: dict[int, float] = {}
+
+
+# Prepared batch data for backend processing
+# These are prepared by the engine and passed to the backend
+
+class PreparedModelPassBatch(BaseModel):
+    """Prepared batch data for forward/forward_backward operations.
+
+    Engine extracts this from requests, backend converts to JAX arrays and computes.
+    """
+
+    # Per-example data (list of lists)
+    all_input_ids: list[list[int]]
+    all_targets: list[list[int]]
+    all_token_weights: list[list[float]]
+    all_sampling_logprobs: list[list[float]]
+    all_advantages: list[list[float]]
+
+    # Per-example scalars
+    all_adapter_indices: list[int]
+    all_loss_fn_types: list[int]
+
+    # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
+    request_batch_slices: list[tuple[str, str, int, int]]
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class PreparedSampleBatch(BaseModel):
+    """Prepared batch data for sample operations.
+
+    Engine extracts this from requests, backend converts to JAX arrays and computes.
+    """
+
+    # Per-sample data
+    all_prompts: list[list[int]]
+    all_sampling_params: list[SamplingParams]
+    all_adapter_indices: list[int]
+
+    # Whether any request needs prompt logprobs
+    needs_prompt_logprobs: bool
+
+    # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
+    request_batch_slices: list[tuple[str, str, int, int, bool]]
+
+    class Config:
+        arbitrary_types_allowed = True
