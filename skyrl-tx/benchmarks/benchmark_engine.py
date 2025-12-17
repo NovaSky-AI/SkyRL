@@ -4,7 +4,6 @@ import argparse
 import time
 
 import jax
-from cloudpathlib import AnyPath
 
 from tx.tinker.engine import TinkerEngine
 from tx.tinker.config import EngineConfig, add_model
