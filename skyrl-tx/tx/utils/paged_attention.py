@@ -99,36 +99,54 @@ def write_to_paged_cache(
     """
     batch_size, seq_len, num_kv_heads, head_dim = k_new.shape
 
-    def write_sequence(carry, inputs):
-        k_pages, v_pages = carry
-        seq_idx, k_seq, v_seq, page_offset = inputs
+    # Get current page offsets for the sequences being updated
+    page_offsets_for_seqs = cache.page_offsets[seq_indices]  # [batch_size]
 
-        # Get page table for this sequence
-        seq_page_table = cache.page_table[seq_idx]
+    # Compute logical positions for all tokens: [batch_size, seq_len]
+    token_positions = page_offsets_for_seqs[:, None] + jnp.arange(seq_len)[None, :]
 
-        def write_token(token_carry, token_inputs):
-            k_pages_inner, v_pages_inner, offset = token_carry
-            k_token, v_token = token_inputs
+    # Calculate page indices and positions within pages
+    page_indices_in_table = token_positions // cache.page_size  # [batch_size, seq_len]
+    pos_in_page = token_positions % cache.page_size  # [batch_size, seq_len]
 
-            # Calculate page and position within page
-            page_idx_in_table = offset // cache.page_size
-            pos_in_page = offset % cache.page_size
-            physical_page = seq_page_table[page_idx_in_table]
+    # Get page tables for the sequences being updated: [batch_size, max_num_pages]
+    seq_page_tables = cache.page_table[seq_indices]
 
-            # Update pages
-            k_pages_inner = k_pages_inner.at[physical_page, pos_in_page].set(k_token)
-            v_pages_inner = v_pages_inner.at[physical_page, pos_in_page].set(v_token)
+    # Map to physical pages using advanced indexing
+    # We need to gather from seq_page_tables using page_indices_in_table
+    batch_idx = jnp.arange(batch_size)[:, None]  # [batch_size, 1]
+    physical_pages = seq_page_tables[batch_idx, page_indices_in_table]  # [batch_size, seq_len]
 
-            return (k_pages_inner, v_pages_inner, offset + 1), None
+    # Flatten indices for scatter update
+    # Shape: [batch_size * seq_len]
+    flat_physical_pages = physical_pages.ravel()
+    flat_pos_in_page = pos_in_page.ravel()
 
-        (k_pages, v_pages, _), _ = jax.lax.scan(write_token, (k_pages, v_pages, page_offset), (k_seq, v_seq))
+    # Flatten k_new and v_new: [batch_size * seq_len, num_kv_heads, head_dim]
+    k_new_flat = k_new.reshape(-1, num_kv_heads, head_dim)
+    v_new_flat = v_new.reshape(-1, num_kv_heads, head_dim)
 
-        return (k_pages, v_pages), None
-
-    page_offsets_for_seqs = cache.page_offsets[seq_indices]
-    (k_pages_updated, v_pages_updated), _ = jax.lax.scan(
-        write_sequence, (cache.k_pages, cache.v_pages), (seq_indices, k_new, v_new, page_offsets_for_seqs)
+    # Create index arrays for scatter update
+    # We need indices of shape [batch_size * seq_len, num_kv_heads, head_dim]
+    num_updates = batch_size * seq_len
+    update_indices = jnp.stack(
+        [
+            jnp.repeat(flat_physical_pages, num_kv_heads * head_dim),
+            jnp.tile(jnp.repeat(flat_pos_in_page, num_kv_heads * head_dim), 1),
+            jnp.tile(jnp.repeat(jnp.arange(num_kv_heads), head_dim), num_updates),
+            jnp.tile(jnp.arange(head_dim), num_updates * num_kv_heads),
+        ],
+        axis=0,
     )
+
+    # Perform vectorized scatter update
+    k_pages_updated = cache.k_pages.at[
+        update_indices[0], update_indices[1], update_indices[2], update_indices[3]
+    ].set(k_new_flat.ravel())
+
+    v_pages_updated = cache.v_pages.at[
+        update_indices[0], update_indices[1], update_indices[2], update_indices[3]
+    ].set(v_new_flat.ravel())
 
     # Update page offsets
     new_offsets = cache.page_offsets.at[seq_indices].add(seq_len)
@@ -201,6 +219,7 @@ def paged_attention(
     seq_indices: jax.Array,
     attention_mask: Optional[jax.Array] = None,
     scale: Optional[float] = None,
+    is_causal: bool = False,
 ) -> jax.Array:
     """Compute attention using paged KV cache.
 
@@ -208,8 +227,9 @@ def paged_attention(
         q: Query tensor [batch_size, seq_len, num_heads, head_dim]
         cache: Paged KV cache
         seq_indices: Sequence indices [batch_size]
-        attention_mask: Optional attention mask [batch_size, seq_len, kv_len]
+        attention_mask: Optional attention mask [batch_size, kv_len] for padding
         scale: Attention scale factor (default: 1/sqrt(head_dim))
+        is_causal: Whether to apply causal masking (for prefill)
 
     Returns:
         Attention output [batch_size, seq_len, num_heads, head_dim]
@@ -219,29 +239,28 @@ def paged_attention(
     # Read K, V from paged cache
     k, v = read_from_paged_cache(cache, seq_indices)
 
-    # Handle GQA: repeat KV heads if needed
-    num_kv_heads = k.shape[2]
-    if num_heads != num_kv_heads:
-        num_repeats = num_heads // num_kv_heads
-        k = jnp.repeat(k, num_repeats, axis=2)
-        v = jnp.repeat(v, num_repeats, axis=2)
-
-    # Compute attention
+    # Compute attention using JAX's optimized implementation
+    # This correctly handles causal masking and GQA
     if scale is None:
         scale = 1.0 / jnp.sqrt(head_dim)
 
-    # Compute attention scores: [batch_size, num_heads, seq_len, kv_len]
-    scores = jnp.einsum("bthd,bThd->bhtT", q, k) * scale
-
-    # Apply mask if provided
+    # Convert attention_mask to the format expected by dot_product_attention
+    # attention_mask should be [batch_size, kv_len] indicating valid positions
+    mask = None
     if attention_mask is not None:
-        # Expand mask to match attention scores shape
-        mask_expanded = attention_mask[:, None, :, :]  # [B, 1, T, T]
-        scores = jnp.where(mask_expanded, scores, -1e9)
+        # Expand to [batch_size, 1, 1, kv_len] for broadcasting
+        mask = attention_mask[:, None, None, :].astype(bool)
 
-    # Softmax and weighted sum
-    attn_weights = jax.nn.softmax(scores, axis=-1)
-    output = jnp.einsum("bhtT,bThd->bthd", attn_weights, v)
+    # Use JAX's optimized dot_product_attention
+    # This handles causal masking, GQA, and padding correctly
+    output = jax.nn.dot_product_attention(
+        q,
+        k,
+        v,
+        scale=scale,
+        mask=mask,
+        is_causal=is_causal,
+    )
 
     return output
 
@@ -254,6 +273,7 @@ def paged_attention_with_update(
     seq_indices: jax.Array,
     attention_mask: Optional[jax.Array] = None,
     scale: Optional[float] = None,
+    is_causal: bool = False,
 ) -> Tuple[jax.Array, PagedKVCache]:
     """Compute attention and update paged cache in one pass.
 
@@ -266,8 +286,9 @@ def paged_attention_with_update(
         v_new: New values to add [batch_size, seq_len, num_kv_heads, head_dim]
         cache: Current paged KV cache
         seq_indices: Sequence indices [batch_size]
-        attention_mask: Optional attention mask
+        attention_mask: Optional attention mask [batch_size, kv_len] for padding
         scale: Attention scale factor
+        is_causal: Whether to apply causal masking (True for prefill, False for generation)
 
     Returns:
         Tuple of (attention_output, updated_cache)
@@ -276,6 +297,6 @@ def paged_attention_with_update(
     updated_cache = write_to_paged_cache(cache, k_new, v_new, seq_indices)
 
     # Compute attention using updated cache
-    output = paged_attention(q, updated_cache, seq_indices, attention_mask, scale)
+    output = paged_attention(q, updated_cache, seq_indices, attention_mask, scale, is_causal)
 
     return output, updated_cache
