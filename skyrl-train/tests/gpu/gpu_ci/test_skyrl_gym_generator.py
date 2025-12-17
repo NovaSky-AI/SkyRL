@@ -33,6 +33,7 @@ def get_test_config(
     model,
     is_step_wise,
     temperature,
+    get_logprobs,
 ):
     # Create a mock generator config
     cfg = get_default_config()
@@ -42,7 +43,8 @@ def get_test_config(
         {
             "sampling_params": {
                 "max_generate_length": max_generate_length,
-                "logprobs": None,
+                # 0 -> get logprobs for the first/ chosen token
+                "logprobs": 0 if get_logprobs else None,
                 "temperature": temperature,
             },
             "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
@@ -127,6 +129,7 @@ async def run_generator_end_to_end(
     max_env_workers=10,
     is_step_wise: bool = False,
     temperature=1.0,
+    get_logprobs: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -162,6 +165,7 @@ async def run_generator_end_to_end(
         model,
         is_step_wise,
         temperature,
+        get_logprobs,
     )
 
     env_cfg = cfg.environment.skyrl_gym
@@ -201,7 +205,7 @@ async def run_generator_end_to_end(
                 "top_k": -1,
                 "max_generate_length": max_generate_length,
                 "min_p": 0.0,
-                "logprobs": None,
+                "logprobs": 0 if get_logprobs else None,
                 "stop": ["</search>", "</answer>"] if env_class == "search" else None,
             }
         ),
@@ -215,6 +219,9 @@ async def run_generator_end_to_end(
         {
             "response": generator_output["response_ids"][i],
             "loss_mask": generator_output["loss_masks"][i],
+            "rollout_logprobs": (
+                generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+            ),
         }
         for i in range(len(generator_output["response_ids"]))
     ]
@@ -226,6 +233,7 @@ async def run_generator_end_to_end(
         "loss_masks",
         "stop_reasons",
         "rollout_metrics",
+        "rollout_logprobs",
     ]
     for key in output_keys:
         assert key in generator_output, f"Key {key} not found in generator output"
@@ -242,11 +250,19 @@ async def run_generator_end_to_end(
         assert (
             len(outputs) == num_prompts * n_samples_per_prompt
         ), "Mismatch between number of outputs and expected outputs"
+
+    if get_logprobs:
+        assert generator_output["rollout_logprobs"] is not None, "expected `rollout_logprobs` to be computed"
+
     for i in range(len(outputs)):
         response_length = len(outputs[i]["response"])
         # TODO (erictang000): make this more precise for multi-turn
         assert response_length <= max_generate_length + max_input_length, f"Output {i} exceeds max length"
         assert response_length == len(outputs[i]["loss_mask"]), f"Output {i} loss mask length mismatch"
+        if get_logprobs:
+            assert response_length == len(
+                outputs[i]["rollout_logprobs"]
+            ), f"Output {i} rollout logprobs lenght mismatch"
 
     # TODO (tgriggs): Extend this test to compare the outputs to HF generation with temperature 0
     return generator_output
@@ -279,6 +295,8 @@ async def test_generator_single_turn_gsm8k(
             n_samples_per_prompt=n_samples_per_prompt,
             num_inference_engines=num_inference_engines,
             tensor_parallel_size=tensor_parallel_size,
+            # TODO (sumanthrh): Add tests for non-batched mode once supported
+            get_logprobs=batched,
         )
     finally:
         ray.shutdown()
