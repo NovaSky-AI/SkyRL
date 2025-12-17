@@ -83,7 +83,7 @@ class WorkerWrap:
         assert torch.distributed.is_initialized(), "default torch process group must be initialized"
 
         # Unpickle init_info to restore the original object type
-        assert isinstance(init_info, bytes)
+        assert isinstance(init_info, bytes), f"Expected bytes, got {type(init_info).__name__}"
         init_info = pickle.loads(init_info)
 
         strategy_cls = init_info.strategy_type()
@@ -104,7 +104,7 @@ class WorkerWrap:
 
         self._weight_receiver = strategy_cls.create_receiver(init_info)
 
-    def load_weights(self, request: WeightUpdateRequest) -> None:
+    def load_weights(self, request: bytes) -> None:
         """Load weights using the receiver.
 
         This method is called via collective_rpc from VLLMWeightLoader.
@@ -115,8 +115,8 @@ class WorkerWrap:
         import pickle
 
         # Unpickle request to restore the original object type
-        if isinstance(request, bytes):
-            request = pickle.loads(request)
+        assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
+        request = pickle.loads(request)
 
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
