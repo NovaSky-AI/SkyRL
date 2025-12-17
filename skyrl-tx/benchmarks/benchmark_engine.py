@@ -68,8 +68,8 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args):
             engine.lora_params, engine.config.max_lora_adapters
         )
 
-    print(f"Warming up ({args.warmup_steps} steps)...")
-    for _ in range(args.warmup_steps):
+    print(f"Warming up ({args.num_warmup_steps} steps)...")
+    for _ in range(args.num_warmup_steps):
         engine.process_forward_backward_batch(reqs)
         reset_accumulators()
 
@@ -87,9 +87,8 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args):
     print(f"\nResults:")
     print(f"  steps:       {args.num_steps}")
     print(f"  elapsed:     {elapsed:.3f} s")
-    print(f"  steps/sec:   {args.num_steps / elapsed:.2f}")
     print(f"  tokens/sec:  {total_tokens / elapsed:.0f}")
-    print(f"  ms/step:     {(elapsed / args.num_steps) * 1000:.2f}")
+    print(f"  sec/step:     {elapsed / args.num_steps:.2f}")
 
 
 def run_sample_bench(engine: TinkerEngine, args):
@@ -100,8 +99,8 @@ def run_sample_bench(engine: TinkerEngine, args):
         prompt_tokens = [int(x) for x in jax.random.randint(jax.random.PRNGKey(i), (args.seq_len,), 1, 1000)]
         reqs[str(i)] = ("", make_sample_input(engine.config.base_model, prompt_tokens, args.sample_max_tokens))
 
-    print(f"Warming up ({args.warmup_steps} steps)...")
-    for _ in range(args.warmup_steps):
+    print(f"Warming up ({args.num_warmup_steps} steps)...")
+    for _ in range(args.num_warmup_steps):
         engine.process_sample_batch(reqs)
 
     print(f"Running benchmark ({args.num_steps} steps)...")
@@ -117,9 +116,8 @@ def run_sample_bench(engine: TinkerEngine, args):
     print(f"\nResults:")
     print(f"  steps:                {args.num_steps}")
     print(f"  elapsed:              {elapsed:.3f} s")
-    print(f"  steps/sec:            {args.num_steps / elapsed:.2f}")
     print(f"  tokens generated/sec: {total_tokens / elapsed:.0f}")
-    print(f"  ms/step:              {(elapsed / args.num_steps) * 1000:.2f}")
+    print(f"  sec/step:              {elapsed / args.num_steps:.2f}")
 
 
 def main():
@@ -128,7 +126,7 @@ def main():
 
     parser.add_argument("--benchmark", choices=["fwd_bwd", "sample", "all"], default="all", help="Benchmark to run")
     parser.add_argument("--num-steps", type=int, default=30, help="Number of benchmark steps")
-    parser.add_argument("--warmup-steps", type=int, default=5, help="Number of warmup steps")
+    parser.add_argument("--num-warmup-steps", type=int, default=5, help="Number of warmup steps")
     parser.add_argument("--num-requests", type=int, default=32, help="Number of requests per batch")
     parser.add_argument("--seq-len", type=int, default=64, help="Sequence length for inputs")
     parser.add_argument("--samples-per-request", type=int, default=2, help="Samples per request (fwd_bwd only)")
