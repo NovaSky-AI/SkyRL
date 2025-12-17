@@ -230,10 +230,13 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
-        response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
-        )
+        rollout_details = getattr(results.agent_result, "rollout_details", None), 
+        # response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+        #     response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
+        # )
+        response_ids = rollout_details._completion_token_ids_list
+        prompt_ids = rollout_details._prompt_token_ids_list
+        rollout_logprobs = rollout_details._logprobs_list
 
         # Determine stop reason
         max_response_tokens = (
@@ -255,5 +258,6 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
+            rollout_logprobs=rollout_logprobs,
             summarization_count=summarization_count,
         )

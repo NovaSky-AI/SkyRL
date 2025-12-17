@@ -23,7 +23,7 @@ class AsyncPPOExp(BasePPOExp):
         generator,
         colocate_pg,
     ):
-        return AsyncRayPPOTrainer(
+        return FullyAsyncRayPPOTrainer(
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,
@@ -33,7 +33,7 @@ class AsyncPPOExp(BasePPOExp):
             generator=generator,
             colocate_pg=colocate_pg,
         )
-
+        
     def run(self):
         trainer = self._setup_trainer()
         # Start the async training loop

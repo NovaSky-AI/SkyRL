@@ -52,6 +52,28 @@ class TerminalBenchExp(BasePPOExp):
             return prompts_dataset
         return None
 
+    def get_trainer(
+        self,
+        cfg,
+        tracker,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        inference_engine_client,
+        generator,
+        colocate_pg,
+    ):
+        return AsyncRayPPOTrainer(
+            cfg=cfg,
+            tracker=tracker,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=colocate_pg,
+        )
+
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
