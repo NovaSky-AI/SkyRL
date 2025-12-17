@@ -34,13 +34,25 @@ except ImportError:
 def _get_maxtext_base_config_path() -> str:
     """Get the absolute path to MaxText's base.yml config file."""
     if not MAXTEXT_AVAILABLE:
-        return ""
+        raise RuntimeError("MaxText is not available")
     import os
+    from importlib.resources import files
+    try:
+        # Try importlib.resources first (works if MaxText packages configs properly)
+        config_path = str(files("MaxText").joinpath("configs", "base.yml"))
+        if os.path.exists(config_path):
+            return config_path
+    except (TypeError, FileNotFoundError):
+        pass
+    # Fallback: derive from package location
     maxtext_pkg_dir = os.path.dirname(MaxText.__file__)
     maxtext_root = os.path.dirname(os.path.dirname(maxtext_pkg_dir))
     config_path = os.path.join(maxtext_root, "src", "MaxText", "configs", "base.yml")
     if not os.path.exists(config_path):
-        config_path = os.path.expanduser("~/maxtext/src/MaxText/configs/base.yml")
+        raise FileNotFoundError(
+            f"Could not find MaxText base.yml config. Tried: {config_path}. "
+            "Ensure MaxText is installed correctly or set MAXTEXT_CONFIG_PATH environment variable."
+        )
     return config_path
 
 
