@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--num-requests", type=int, default=32, help="Number of requests per batch")
     parser.add_argument("--seq-len", type=int, default=64, help="Sequence length for inputs")
     parser.add_argument("--samples-per-request", type=int, default=2, help="Samples per request (fwd_bwd only)")
-    parser.add_argument("--num-adapters", type=int, default=4, help="Number of LoRA adapters to create")
+    parser.add_argument("--num-adapters", type=int, default=2, help="Number of LoRA adapters to create")
     parser.add_argument("--sample-max-tokens", type=int, default=32, help="Max tokens to generate (sampling only)")
 
     args = parser.parse_args()
