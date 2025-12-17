@@ -5,7 +5,10 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
 )
 from skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest, BroadcastWeightUpdateRequest
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 import json
 from transformers import PreTrainedTokenizerBase
 
@@ -27,7 +30,7 @@ class RemoteWeightLoader(WeightLoader):
         self._url = url
         self._engine_backend = engine_backend
 
-    async def init_communicator(self, init_info) -> Dict[str, Any]:
+    async def init_communicator(self, init_info: "WeightSyncInitInfo") -> Dict[str, Any]:
         """Initialize the distributed process group for syncing weights.
 
         Args:
@@ -271,7 +274,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             resp = await session.post(f"{self.url}/sleep", json={"level": kwargs.get("level", 1)})
             return await resp.json()
 
-    async def init_weight_update_communicator(self, init_info):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
         """Initialize the distributed process group for syncing weights.
 
         Args:

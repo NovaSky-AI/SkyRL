@@ -1,5 +1,8 @@
 import os
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
@@ -68,7 +71,7 @@ class WorkerWrap:
         """Test RPC call to worker"""
         return args, kwargs
 
-    def init_weight_update_communicator(self, init_info):
+    def init_weight_update_communicator(self, init_info: bytes):
         """Init weight update communicator from init info.
 
         Args:
@@ -298,7 +301,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await asyncio.to_thread(self.llm.sleep, level=level)
 
-    async def init_weight_update_communicator(self, init_info):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
         import pickle
 
         engine = self._get_engine()
@@ -458,7 +461,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await self.llm.sleep(level=level)
 
-    async def init_weight_update_communicator(self, init_info):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
         import pickle
 
         engine = self._get_engine()
