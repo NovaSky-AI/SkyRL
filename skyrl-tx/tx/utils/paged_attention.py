@@ -176,10 +176,6 @@ def read_from_paged_cache(
     Returns:
         Tuple of (keys, values) with shape [batch_size, seq_len, num_kv_heads, head_dim]
     """
-    batch_size = seq_indices.shape[0]
-    num_kv_heads = cache.k_pages.shape[2]
-    head_dim = cache.k_pages.shape[3]
-
     # Determine sequence lengths
     seq_lens = cache.page_offsets[seq_indices]
     if max_len is not None:
