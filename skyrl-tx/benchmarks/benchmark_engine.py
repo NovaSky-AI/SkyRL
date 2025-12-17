@@ -52,7 +52,7 @@ def build_engine(config: EngineConfig, num_adapters: int) -> TinkerEngine:
     return engine
 
 
-def run_fwd_bwd_bench(engine: TinkerEngine, args):
+def run_fwd_bwd_bench(engine: TinkerEngine, args: argparse.Namespace):
     print("\n=== Forward/Backward Benchmark ===")
 
     token_lists = [
