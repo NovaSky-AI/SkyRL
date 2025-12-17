@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence
+from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
@@ -276,7 +276,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | None = None
+    stop: list[int] | list[str] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
@@ -293,11 +293,26 @@ class SamplingParams(BaseModel):
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
+        # Determine if stop values are token IDs (int) or strings
+        stop_tokens = None
+        stop_strings = None
+        if self.stop:
+            if all(isinstance(s, int) for s in self.stop):
+                stop_tokens = list(self.stop)
+            elif all(isinstance(s, str) for s in self.stop):
+                stop_strings = list(self.stop)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="stop must be either all integers (token IDs) or all strings, not mixed",
+                )
+
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=self.stop,
+            stop_tokens=stop_tokens,
+            stop_strings=stop_strings,
         )
 
 

@@ -18,7 +18,7 @@ from flax.training import checkpoints
 
 
 import optax
-from transformers import PretrainedConfig
+from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
@@ -143,6 +143,7 @@ class TinkerEngine:
 
         # Initialize the shared base model with LoRA config
         checkpoint_path = resolve_model_path(self.config.base_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
         base_config = PretrainedConfig.from_pretrained(checkpoint_path)
         self.model_config = Qwen3Config(
             base_config,
@@ -781,6 +782,7 @@ class TinkerEngine:
                         sampling_params=sampling_params,
                         adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
                         prompt_logprobs=needs_prompt_logprobs,
+                        tokenizer=self.tokenizer,
                     )
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start

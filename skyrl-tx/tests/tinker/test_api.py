@@ -216,3 +216,47 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
+
+
+def test_sample_with_stop_strings(service_client):
+    """Test the sample endpoint with string stop sequences."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
+
+    # Generate a baseline sample without stop strings
+    baseline_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=50, seed=42),
+        num_samples=1,
+    ).result()
+
+    baseline_tokens = baseline_result.sequences[0].tokens
+    baseline_text = tokenizer.decode(baseline_tokens)
+
+    # Find a substring that appears in the generated text to use as stop string
+    # Use a short substring from the middle of the text
+    mid_point = len(baseline_text) // 2
+    stop_string = baseline_text[mid_point : mid_point + 5]
+
+    # Skip test if we couldn't find a good stop string
+    if not stop_string or stop_string not in baseline_text:
+        pytest.skip("Could not find a suitable stop string in generated text")
+
+    # Generate with the stop string
+    stopped_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=50, seed=42, stop=[stop_string]),
+        num_samples=1,
+    ).result()
+
+    stopped_tokens = stopped_result.sequences[0].tokens
+    stopped_text = tokenizer.decode(stopped_tokens)
+
+    # Verify the stop string handling
+    assert stopped_result.sequences[0].stop_reason == "stop"
+    # The output should be shorter than or equal to baseline
+    assert len(stopped_tokens) <= len(baseline_tokens)
+    # The stop string should appear at or near the end of the decoded text
+    assert stop_string in stopped_text
