@@ -124,7 +124,7 @@ def sglang_custom_weight_loader(model, named_tensors):
     uses SGLang's native update_weights_from_distributed API which has internal access
     to the process group.
     """
-    from skyrl_train.weight_sync.cuda_ipc_strategy import CudaIpcWeightTransferReceiver
+    from skyrl_train.weight_sync import CudaIpcWeightUpdateRequest, CudaIpcWeightTransferReceiver
 
     # Extract tensor name and data
     name, tensor = named_tensors[0]
@@ -132,8 +132,6 @@ def sglang_custom_weight_loader(model, named_tensors):
         raise ValueError(f"Expected tensor name 'ipc_request', got: {name}")
 
     # Deserialize request from tensor
-    from skyrl_train.weight_sync import CudaIpcWeightUpdateRequest
-
     request = CudaIpcWeightUpdateRequest.deserialize(tensor.cpu().numpy().tobytes())
 
     # Get model info and create receiver
