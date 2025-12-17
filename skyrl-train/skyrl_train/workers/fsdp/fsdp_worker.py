@@ -248,7 +248,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 # Broadcast tensor
                 def broadcast_tensor(tensor):
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
+                        if self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.generator.backend == "vllm":
+                            self._model_update_group.broadcast(tensor.data, src=0, stream=torch.cuda.current_stream())
+                        else:
+                            torch.distributed(tensor.data, 0, group=self._model_update_group)
 
                 await asyncio.to_thread(broadcast_tensor, tensor)
                 if torch.distributed.get_rank() == 0:

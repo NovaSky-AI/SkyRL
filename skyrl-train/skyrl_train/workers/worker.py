@@ -31,7 +31,7 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
-from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.distributed.utils import init_custom_process_group, stateless_init_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
@@ -297,11 +297,31 @@ class Worker(DistributedTorchRayActor):
                 )
             )
 
+            def _init_process_group(backend, master_addr, master_port, world_size, rank, group_name):
+                if backend == "nccl" and self.cfg.generator.backend == "vllm":
+                    model_update_group = stateless_init_process_group(
+                        master_address=master_addr,
+                        master_port=master_port,
+                        world_size=world_size,
+                        rank=rank,
+                        device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+                    )
+                else:
+                    model_update_group = init_custom_process_group(
+                        backend=backend,
+                        init_method=get_tcp_url(master_addr, master_port),
+                        rank=rank,
+                        world_size=world_size,
+                        group_name=group_name,
+                    )
+                return model_update_group
+
             tasks.append(
                 asyncio.to_thread(
-                    init_custom_process_group,
+                    _init_process_group,
                     backend=backend,
-                    init_method=get_tcp_url(master_addr, master_port),
+                    master_addr=master_addr,
+                    master_port=master_port,
                     world_size=world_size,
                     rank=0,
                     group_name=group_name,

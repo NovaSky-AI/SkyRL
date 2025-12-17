@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
-from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.distributed.utils import init_custom_process_group, stateless_init_process_group
 from uuid import uuid4
 import warnings
 from skyrl_train.inference_engines.base import (
@@ -99,14 +99,23 @@ class WorkerWrap:
         logger.info(
             f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
         )
-
-        self._model_update_group = init_custom_process_group(
-            backend=backend,
-            init_method=get_tcp_url(master_address, master_port),
-            world_size=world_size,
-            rank=rank,
-            group_name=group_name,
-        )
+        self._weight_sync_backend = backend
+        if backend == "nccl":
+            self._model_update_group = stateless_init_process_group(
+                master_address=master_address,
+                master_port=master_port,
+                world_size=world_size,
+                rank=rank,
+                device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+            )
+        else:
+            self._model_update_group = init_custom_process_group(
+                backend=backend,
+                init_method=get_tcp_url(master_address, master_port),
+                rank=rank,
+                world_size=world_size,
+                group_name=group_name,
+            )
         logger.info(
             f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
@@ -114,12 +123,17 @@ class WorkerWrap:
 
     def update_weights(self, names: List[str], dtypes: List[str], shapes: List[List[int]]):
         """Broadcast weight to all vllm workers from source rank 0 (actor model)"""
+
         weight_list = []
         for name, dtype, shape in zip(names, dtypes, shapes):
             dtype = str_to_torch_dtype(dtype)
             assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
             weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+            if self._weight_sync_backend == "nccl":
+                self._model_update_group.broadcast(weight, src=0, stream=torch.cuda.current_stream())
+            else:
+                torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+
             weight_list.append((name, weight))
 
         self.model_runner.model.load_weights(weights=weight_list)
