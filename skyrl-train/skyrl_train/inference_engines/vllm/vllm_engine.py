@@ -1,5 +1,5 @@
 import os
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Tuple, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
@@ -30,6 +30,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
@@ -99,21 +100,17 @@ class WorkerWrap:
         logger.info(
             f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
         )
-        self._weight_sync_backend = backend
+
         if backend == "nccl":
             self._model_update_group = stateless_init_process_group(
-                master_address=master_address,
-                master_port=master_port,
-                world_size=world_size,
-                rank=rank,
-                device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+                master_address, master_port, rank, world_size, torch.device(f"cuda:{torch.cuda.current_device()}")
             )
         else:
             self._model_update_group = init_custom_process_group(
                 backend=backend,
                 init_method=get_tcp_url(master_address, master_port),
-                rank=rank,
                 world_size=world_size,
+                rank=rank,
                 group_name=group_name,
             )
         logger.info(
@@ -121,78 +118,24 @@ class WorkerWrap:
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
 
-    def update_weights(self, names: List[str], dtypes: List[str], shapes: List[List[int]]):
-        """Broadcast weight to all vllm workers from source rank 0 (actor model)"""
+        # Create receiver now that we have all the state
+        self._weight_receiver = VLLMWeightTransferReceiver(
+            model_update_group=self._model_update_group,
+            model_config=self.model_config,
+            device=self.device,
+        )
 
+    def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
+        """Load weights using the receiver.
+
+        This method is called via collective_rpc from VLLMWeightLoader.
+
+        Args:
+            request: Weight update request with names, dtypes, shapes, etc.
+        """
         weight_list = []
-        for name, dtype, shape in zip(names, dtypes, shapes):
-            dtype = str_to_torch_dtype(dtype)
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
-            if self._weight_sync_backend == "nccl":
-                self._model_update_group.broadcast(weight, src=0, stream=torch.cuda.current_stream())
-            else:
-                torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-
-            weight_list.append((name, weight))
-
-        self.model_runner.model.load_weights(weights=weight_list)
-        for weight in weight_list:
-            del weight
-
-    def update_weights_cuda_ipc(
-        self,
-        names: List[str],
-        dtypes: List[str],
-        shapes: List[int],
-        sizes: List[int],
-        ipc_handles: List[Dict[str, Any]],
-        packed: bool = False,
-    ):
-        weight_list = []
-
-        if packed:
-            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
-            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-            assert (
-                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
-            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
-            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
-            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
-
-            device = torch.cuda.current_device()
-            props = torch.cuda.get_device_properties(device)
-            physical_gpu_id = str(props.uuid)
-
-            handle = ipc_handles[0][physical_gpu_id]
-            device_id = self.device.index
-            func, args = handle
-            list_args = list(args)
-            list_args[6] = device_id
-            packed_tensor = func(*list_args)
-
-            offset = 0
-            for name, shape, size in zip(names, shapes, sizes):
-                weight_list.append((name, packed_tensor[offset : offset + size].view(*shape)))
-                offset += size
-        else:
-            for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
-
-                dtype = str_to_torch_dtype(dtype)
-                device = torch.cuda.current_device()
-                props = torch.cuda.get_device_properties(device)
-                physical_gpu_id = str(props.uuid)
-
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-
-                handle = ipc_handle[physical_gpu_id]
-
-                device_id = self.device.index
-                func, args = handle
-                list_args = list(args)
-                list_args[6] = device_id
-                weight = func(*list_args)
-                weight_list.append((name, weight))
+        for name, tensor in self._weight_receiver.receive_weights(request):
+            weight_list.append((name, tensor))
 
         self.model_runner.model.load_weights(weights=weight_list)
 
@@ -225,6 +168,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
+
+        # Weight loader is created by subclass after engine initialization
+        self._weight_loader = None
 
     def tp_size(self):
         return self._tp_size
@@ -316,6 +262,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_loader = VLLMWeightLoader(self.llm, is_async=False)
+
     def _create_engine(self, *args, **kwargs):
         # Pipeline parallelism requires AsyncLLMEngine
         if kwargs.get("pipeline_parallel_size", 1) > 1:
@@ -404,28 +354,8 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_path = request["extras"][0]["lora_disk_path"]
             return await self._load_lora_from_disk(lora_path)
 
-        engine = self._get_engine()
-        # Use IPC if handles are provided
-        if request.get("extras") and "ipc_handles" in request["extras"][0]:
-            return await asyncio.to_thread(
-                engine.collective_rpc,
-                "update_weights_cuda_ipc",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                    request.get("sizes", []),
-                    [extra["ipc_handles"] for extra in request["extras"]],
-                    request.get("packed", False),
-                ),
-            )
-        else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await asyncio.to_thread(
-                engine.collective_rpc, "update_weights", args=(request["names"], request["dtypes"], request["shapes"])
-            )
+        # Use the weight loader to coordinate weight transfer
+        return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
         await self._destroy_weights_update_group()
@@ -440,6 +370,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
@@ -572,35 +506,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_path = request["extras"][0]["lora_disk_path"]
             return await self._load_lora_from_disk(lora_path)
 
-        engine = self._get_engine()
-        # Use IPC if handles are provided
-
-        is_ipc = request.get("extras") and "ipc_handles" in request["extras"][0]
-
-        if is_ipc:
-            return await engine.collective_rpc(
-                "update_weights_cuda_ipc",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                    request.get("sizes", []),
-                    [extra["ipc_handles"] for extra in request["extras"]],
-                    request.get("packed", False),
-                ),
-            )
-        else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await engine.collective_rpc(
-                "update_weights",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                ),
-            )
+        # Use the weight loader to coordinate weight transfer
+        return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
         await self._destroy_weights_update_group()
@@ -728,6 +635,143 @@ class _MinimalRequest:
     def __init__(self, headers):
         self.headers = headers  # Expect a mapping with .get support
         self.state = SimpleNamespace()  # vLLM sets raw_request.state.request_metadata
+
+
+class VLLMWeightTransferReceiver:
+    """Receives weights via broadcast or CUDA IPC for vLLM.
+
+    Handles both transfer strategies based on the request contents.
+    Created locally in WorkerWrap with worker-specific state.
+    """
+
+    def __init__(self, model_update_group: Any, model_config: Any, device: torch.device) -> None:
+        """Initialize the receiver with worker-local state.
+
+        Args:
+            model_update_group: Torch process group for weight updates.
+            model_config: vLLM model configuration.
+            device: CUDA device for this worker.
+        """
+        self.model_update_group = model_update_group
+        self.model_config = model_config
+        self.device = device
+
+    def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
+        """Receive weights and yield (name, tensor) tuples.
+
+        Args:
+            request: Weight update request with names, dtypes, shapes, and optionally IPC handles.
+        """
+        extras = request.get("extras")
+        is_ipc = extras and len(extras) > 0 and "ipc_handles" in extras[0]
+
+        if is_ipc:
+            yield from self._receive_ipc(request)
+        else:
+            yield from self._receive_broadcast(request)
+
+    def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
+        """Receive weights via torch.distributed.broadcast."""
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
+        for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
+            dtype = str_to_torch_dtype(dtype_str)
+            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+            weight = torch.empty(shape, dtype=dtype, device="cuda")
+            if isinstance(self.model_update_group, PyNcclCommunicator):
+                self.model_update_group.broadcast(weight, src=0, stream=torch.cuda.current_stream())
+            else:
+                torch.distributed.broadcast(weight, 0, group=self.model_update_group)
+            yield name, weight
+
+    def _receive_ipc(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
+        """Receive weights via CUDA IPC handles."""
+        names = request["names"]
+        dtypes = request["dtypes"]
+        shapes = request["shapes"]
+        sizes = request.get("sizes", [])
+        ipc_handles = [extra["ipc_handles"] for extra in request["extras"]]
+        packed = request.get("packed", False)
+
+        if packed:
+            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
+            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
+            assert (
+                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
+            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
+            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
+            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
+
+            cuda_device = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(cuda_device)
+            physical_gpu_id = str(props.uuid)
+
+            handle = ipc_handles[0][physical_gpu_id]
+            device_id = self.device.index
+            func, args = handle
+            list_args = list(args)
+            list_args[6] = device_id
+            packed_tensor = func(*list_args)
+
+            offset = 0
+            for name, shape, size in zip(names, shapes, sizes):
+                yield name, packed_tensor[offset : offset + size].view(*shape)
+                offset += size
+        else:
+            cuda_device = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(cuda_device)
+            physical_gpu_id = str(props.uuid)
+            for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
+                dtype = str_to_torch_dtype(dtype_str)
+                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+
+                handle = ipc_handle[physical_gpu_id]
+                device_id = self.device.index
+                func, args = handle
+                list_args = list(args)
+                list_args[6] = device_id
+                weight = func(*list_args)
+                yield name, weight
+
+
+class VLLMWeightLoader(WeightLoader):
+    """Loads weights into vLLM engine, managing RPC coordination.
+
+    This loader encapsulates the collective_rpc calls to workers.
+    Workers create VLLMWeightTransferReceiver locally for the actual weight transfer.
+    """
+
+    def __init__(self, engine: Any, is_async: bool = False) -> None:
+        """Initialize the loader.
+
+        Args:
+            engine: The vLLM engine (LLM or AsyncLLMEngine).
+            is_async: Whether this is for AsyncVLLMInferenceEngine.
+        """
+        self._engine = engine.engine if hasattr(engine, "engine") else engine
+        self._is_async = is_async
+
+    async def load_weights(self, request: NamedWeightsUpdateRequest) -> None:
+        """Load weights by coordinating RPC to workers.
+
+        Sends the request to workers via collective_rpc. Workers create
+        the receiver locally and use it to receive and load weights.
+
+        Args:
+            request: Weight update request containing names, dtypes, shapes,
+                    and optionally IPC handles.
+        """
+        if self._is_async:
+            await self._engine.collective_rpc(
+                "load_weights",
+                args=(request,),
+            )
+        else:
+            await asyncio.to_thread(
+                self._engine.collective_rpc,
+                "load_weights",
+                args=(request,),
+            )
 
 
 VLLMRayActor = ray.remote(VLLMInferenceEngine)
