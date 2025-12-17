@@ -161,6 +161,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
         from skyrl_train.weight_sync import CudaIpcTransferStrategy
+
         use_cuda_ipc = self._transfer_strategy_cls is CudaIpcTransferStrategy
         self.weight_extractor = DeepSpeedWeightExtractor(
             model=self.model.model.module,

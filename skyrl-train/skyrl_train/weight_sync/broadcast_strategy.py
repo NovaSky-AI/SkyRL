@@ -7,7 +7,10 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator, Optional, Tuple
+from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
 
 import ray
 import torch

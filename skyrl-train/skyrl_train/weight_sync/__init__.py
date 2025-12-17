@@ -1,6 +1,9 @@
 """Weight synchronization abstractions for distributed RL training."""
 
-from typing import Type
+from typing import Type, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
 
 from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
 from .weight_extractor import WeightExtractor

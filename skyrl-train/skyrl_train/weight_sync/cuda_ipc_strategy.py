@@ -5,7 +5,10 @@ from training workers to inference engines using CUDA IPC handles.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor

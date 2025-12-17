@@ -2,7 +2,7 @@
 
 import torch
 import os
-from typing import List, Optional, Dict, Any, Iterator
+from typing import List, Optional, Dict, Any
 import ray
 from loguru import logger
 import multiprocessing as mp
