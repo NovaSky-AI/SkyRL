@@ -91,7 +91,7 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args: argparse.Namespace):
     print(f"  sec/step:     {elapsed / args.num_steps:.2f}")
 
 
-def run_sample_bench(engine: TinkerEngine, args):
+def run_sample_bench(engine: TinkerEngine, args: argparse.Namespace):
     print("\n=== Sampling Benchmark ===")
 
     reqs = {}
