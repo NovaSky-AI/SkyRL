@@ -378,7 +378,7 @@ class NativeBackend(AbstractBackend):
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
-        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
+        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids), self.config.min_seq_len)
 
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
         target_ids = pad_batch(all_targets, max_len, np.int32)
