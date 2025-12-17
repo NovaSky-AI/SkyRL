@@ -21,13 +21,13 @@ import asyncio
 import ray
 import torch
 import torch.distributed as dist
-from dataclasses import replace
 from unittest.mock import MagicMock
 
 from skyrl_train.weight_sync import (
     WeightChunk,
     CudaIpcTransferStrategy,
     BroadcastTransferStrategy,
+    WeightSyncInitInfo,
 )
 from skyrl_train.utils.utils import get_free_port, str_to_torch_dtype
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -267,14 +267,10 @@ def _run_weight_sync_e2e(
     ray.get([sender.init_process_group.remote(master_addr, training_master_port) for sender in senders])
 
     # Only rank 0 creates init_info
-    init_info = ray.get(senders[0].create_init_info.remote(strategy_cls, cfg))
+    init_info: WeightSyncInitInfo = ray.get(senders[0].create_init_info.remote(strategy_cls, cfg))
 
     # Create receiver actors
     receivers = []
-    # For broadcast strategy, adjust rank_offset per engine to simulate InferenceEngineClient behavior
-    # rank_offset determines each engine's rank in the model_update_group (only present in BroadcastInitInfo)
-    rank_offset = getattr(init_info, "rank_offset", None)
-
     for i in range(num_inference_engines):
         if colocate:
             # CUDA IPC: sender and receiver share GPU (0.5 each)
@@ -289,15 +285,9 @@ def _run_weight_sync_e2e(
             # Broadcast: each actor on separate GPU for NCCL
             receiver_options = {"num_gpus": 1}
 
-        # Adjust init_info for broadcast strategy (simulates InferenceEngineClient.init_weight_update_communicator)
-        # Each engine gets a different rank_offset so its workers join model_update_group at correct ranks
-        receiver_init_info = init_info
-        if rank_offset is not None:
-            # Adjust rank_offset per engine
-            # Production: rank_offset += tp_size * pp_size (workers per engine)
-            # Test: rank_offset += 1 (each engine has 1 worker, so each engine increments by 1)
-            adjusted_rank_offset = rank_offset + i
-            receiver_init_info = replace(init_info, rank_offset=adjusted_rank_offset)
+        # Use for_engine() to get per-engine init_info
+        # Test assumes tp_size=pp_size=1 (single worker per engine)
+        receiver_init_info = init_info.for_engine(engine_index=i, tp_size=1, pp_size=1)
 
         receiver = ReceiverActor.options(**receiver_options).remote(strategy_cls, receiver_init_info)
         receivers.append(receiver)

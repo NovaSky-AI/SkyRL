@@ -484,30 +484,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             init_info: WeightSyncInitInfo from the sender.
 
         Note:
-            For broadcast strategy, rank_offset is adjusted per engine to ensure
-            unique ranks across all workers in multi-engine setups.
+            Per-engine adjustments (e.g., rank_offset for broadcast) are handled
+            by init_info.for_engine().
         """
-        from dataclasses import replace
-        from skyrl_train.weight_sync import BroadcastInitInfo
-
         tasks = []
-
-        # TODO(haochen): Move rank_offset adjustment to engine side. Each engine should
-        # store its engine_index at creation time and compute its own rank offset as:
-        # rank = 1 + engine_index * tp_size * pp_size + local_rank
-        # This would allow removing rank_offset from BroadcastInitInfo entirely.
-        if isinstance(init_info, BroadcastInitInfo):
-            rank_offset = init_info.rank_offset
-            for engine in self.engines:
-                # Adjust rank_offset per engine for unique ranks
-                engine_init_info = replace(init_info, rank_offset=rank_offset)
-                rank_offset += engine.tp_size() * engine.pp_size()
-                tasks.append(engine.init_weight_update_communicator(engine_init_info))
-        else:
-            # Other strategies (e.g., CUDA IPC) don't need rank adjustment
-            for engine in self.engines:
-                tasks.append(engine.init_weight_update_communicator(init_info))
-
+        for i, engine in enumerate(self.engines):
+            engine_init_info = init_info.for_engine(i, engine.tp_size(), engine.pp_size())
+            tasks.append(engine.init_weight_update_communicator(engine_init_info))
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: WeightUpdateRequest):

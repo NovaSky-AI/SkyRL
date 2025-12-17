@@ -27,6 +27,22 @@ class WeightSyncInitInfo(ABC):
         """Return the strategy class for this init info type."""
         ...
 
+    def for_engine(self, engine_index: int, tp_size: int, pp_size: int) -> "WeightSyncInitInfo":
+        """Return init_info adjusted for a specific engine.
+
+        Override in subclasses that need per-engine adjustments (e.g., rank offset).
+        Default implementation returns self unchanged.
+
+        Args:
+            engine_index: Index of the engine (0-based).
+            tp_size: Tensor parallel size of the engine.
+            pp_size: Pipeline parallel size of the engine.
+
+        Returns:
+            Adjusted init_info for the specific engine.
+        """
+        return self
+
 
 class WeightTransferSender(ABC):
     """Strategy-specific component that sends WeightChunk data to inference actors.
@@ -90,11 +106,12 @@ class WeightTransferStrategy(ABC):
     - receiver: Uses init_info + strategy-specific args
 
     Usage on sender side:
-        init_info = Strategy.create_init_info(...)
+        init_info = Strategy.create_init_info(cfg)
         sender = Strategy.create_sender(init_info, inference_client)
 
-    Usage on receiver side:
-        receiver = init_info.strategy_type().create_receiver(init_info, ...)
+    Usage on receiver side (for each engine):
+        engine_init_info = init_info.for_engine(engine_index, tp_size, pp_size)
+        receiver = engine_init_info.strategy_type().create_receiver(engine_init_info)
     """
 
     @staticmethod

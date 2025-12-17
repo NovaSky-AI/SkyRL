@@ -6,7 +6,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 
 import asyncio
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Iterator, Optional, Tuple
 
 import ray
@@ -43,6 +43,20 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     def strategy_type() -> type:
         """Return the strategy class for this init info type."""
         return BroadcastTransferStrategy
+
+    def for_engine(self, engine_index: int, tp_size: int, pp_size: int) -> "BroadcastInitInfo":
+        """Return init_info with rank_offset adjusted for this engine.
+
+        Args:
+            engine_index: Index of the engine (0-based).
+            tp_size: Tensor parallel size of the engine.
+            pp_size: Pipeline parallel size of the engine.
+
+        Returns:
+            BroadcastInitInfo with adjusted rank_offset.
+        """
+        cumulative_offset = engine_index * tp_size * pp_size
+        return replace(self, rank_offset=self.rank_offset + cumulative_offset)
 
 
 @dataclass
