@@ -41,13 +41,10 @@ def get_free_port():
         return sock.getsockname()[1]
 
 
+# Reference: https://github.com/vllm-project/vllm/blob/196cdc3224112df7f68c901fe4c5314875a65be8/examples/offline_inference/rlhf.py
 def stateless_init_process_group(master_address, master_port, rank, world_size, device):
-    """
-    vLLM provides `StatelessProcessGroup` to create a process group
+    """Uses vLLM's `StatelessProcessGroup` to create a process group
     without considering the global process group in torch.distributed.
-    It is recommended to create `StatelessProcessGroup`, and then initialize
-    the data-plane communication (NCCL) between external (train processes)
-    and vLLM workers.
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
