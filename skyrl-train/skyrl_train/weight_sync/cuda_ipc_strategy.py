@@ -45,7 +45,7 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
     """
 
     sizes: List[int]  # Size in elements per parameter (for unpacking)
-    ipc_handles: Dict[int, Any]  # GPU ID -> IPC handle for the packed buffer
+    ipc_handles: Dict[str, Any]  # Physical GPU UUID -> IPC handle for the packed buffer
 
     def serialize(self) -> bytes:
         """Serialize the request to bytes."""
@@ -208,8 +208,7 @@ class CudaIpcWeightTransferReceiver(WeightTransferReceiver):
         assert all(isinstance(size, int) for size in request.sizes), "sizes should be a list of integers"
 
         device_id = torch.cuda.current_device()
-        props = torch.cuda.get_device_properties(device_id)
-        physical_gpu_id = str(props.uuid)
+        physical_gpu_id = get_physical_gpu_id()
 
         handle = request.ipc_handles[physical_gpu_id]
         func, args = handle
