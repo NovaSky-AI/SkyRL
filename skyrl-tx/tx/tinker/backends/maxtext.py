@@ -275,38 +275,18 @@ class MaxTextBackend(AbstractBackend):
 
     def process_forward_backward_batch(
         self,
-        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
-        models: dict[str, types.ModelMetadata],
+        prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Process forward_backward requests using MaxText model."""
-        if not requests:
-            return {}
-
-        all_input_ids = []
-        all_targets = []
-        all_token_weights = []
-        request_batch_slices = []
-        results = {}
-
-        for request_id, (model_id, request_data) in requests.items():
-            request_start = len(all_input_ids)
-            if model_id not in models:
-                logger.warning(f"Model {model_id} not loaded, skipping forward_backward request")
-                results[request_id] = types.ErrorResponse(error=f"Model {model_id} not loaded", status="failed")
-                continue
-
-            for item in request_data.data:
-                tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
-                all_input_ids.append(tokens)
-                loss_fn_inputs = item.loss_fn_inputs
-                all_targets.append(loss_fn_inputs.target_tokens.data)
-                all_token_weights.append(loss_fn_inputs.weights.data)
-
-            request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+        all_input_ids = prepared_batch.all_input_ids
+        all_targets = prepared_batch.all_targets
+        all_token_weights = prepared_batch.all_token_weights
+        request_batch_slices = prepared_batch.request_batch_slices
 
         if not all_input_ids:
-            return results
+            return {}
 
+        results = {}
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids), self.config.min_seq_len)
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
         target_ids = pad_batch(all_targets, max_len, np.int32)
@@ -420,10 +400,16 @@ class MaxTextBackend(AbstractBackend):
 
         return types.OptimStepOutput()
 
+    def process_forward_batch(
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
+    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        """Process forward-only requests - not implemented for MaxText."""
+        raise NotImplementedError("Forward-only pass not yet implemented for MaxText backend")
+
     def process_sample_batch(
         self,
-        requests: dict[str, tuple[str, types.SampleInput]],
-        models: dict[str, types.ModelMetadata],
+        prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Process sample requests - not implemented for MaxText."""
         raise NotImplementedError("Sampling not yet implemented for MaxText backend")
