@@ -352,14 +352,16 @@ class Qwen3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
-        
+
         # Check if using paged attention
-        using_paged_attention = isinstance(kv_cache, list) and len(kv_cache) > 0 and isinstance(kv_cache[0], PagedKVCache)
-        
+        using_paged_attention = (
+            isinstance(kv_cache, list) and len(kv_cache) > 0 and isinstance(kv_cache[0], PagedKVCache)
+        )
+
         if using_paged_attention:
             # Paged attention path
             updated_paged_caches = []
-            
+
             for layer_idx, layer in enumerate(self.layers):
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
@@ -395,7 +397,8 @@ class Qwen3Model(nnx.Module):
                     attention_mask=attention_mask,
                     positions=positions,
                     adapter_indices=adapter_indices,
-                    kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
+                    kv_cache=kv_cache
+                    and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
                 )
                 updated_keys.append(k)
                 updated_values.append(v)

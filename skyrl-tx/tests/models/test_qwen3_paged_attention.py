@@ -42,7 +42,7 @@ class TestQwen3PagedAttention:
     def test_attention_with_paged_cache(self):
         """Test Qwen3Attention with paged KV cache."""
         config = create_test_config(use_paged_attention=True)
-        
+
         batch_size = 2
         seq_len = 8
         head_dim = config.hidden_size // config.num_attention_heads
@@ -82,7 +82,7 @@ class TestQwen3PagedAttention:
     def test_attention_standard_vs_paged(self):
         """Compare standard and paged attention outputs."""
         config = create_test_config(use_paged_attention=True)
-        
+
         batch_size = 1
         seq_len = 4
         head_dim = config.hidden_size // config.num_attention_heads
@@ -128,7 +128,7 @@ class TestQwen3PagedAttention:
     def test_model_with_paged_cache(self):
         """Test full Qwen3ForCausalLM with paged cache."""
         config = create_test_config(use_paged_attention=True)
-        
+
         batch_size = 2
         seq_len = 10
         head_dim = config.hidden_size // config.num_attention_heads
@@ -149,11 +149,7 @@ class TestQwen3PagedAttention:
         ]
 
         # Create inputs
-        input_ids = jax.random.randint(
-            jax.random.PRNGKey(0),
-            (batch_size, seq_len),
-            0, config.vocab_size
-        )
+        input_ids = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones_like(input_ids)
 
         # Forward pass
@@ -172,7 +168,7 @@ class TestQwen3PagedAttention:
     def test_incremental_generation(self):
         """Test incremental generation with paged cache."""
         config = create_test_config(use_paged_attention=True)
-        
+
         batch_size = 1
         prefill_len = 5
         gen_len = 3
@@ -194,11 +190,7 @@ class TestQwen3PagedAttention:
         ]
 
         # Prefill
-        input_ids = jax.random.randint(
-            jax.random.PRNGKey(0),
-            (batch_size, prefill_len),
-            0, config.vocab_size
-        )
+        input_ids = jax.random.randint(jax.random.PRNGKey(0), (batch_size, prefill_len), 0, config.vocab_size)
         attention_mask = jnp.ones_like(input_ids)
 
         output = model(
@@ -232,7 +224,7 @@ class TestQwen3PagedAttention:
     def test_backward_compatibility(self):
         """Test that model works with standard KVCache when paged attention is disabled."""
         config = create_test_config(use_paged_attention=False)
-        
+
         batch_size = 2
         seq_len = 8
 
@@ -240,11 +232,7 @@ class TestQwen3PagedAttention:
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
 
         # Create inputs
-        input_ids = jax.random.randint(
-            jax.random.PRNGKey(0),
-            (batch_size, seq_len),
-            0, config.vocab_size
-        )
+        input_ids = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones_like(input_ids)
 
         # Forward pass without cache (should work)
@@ -259,10 +247,10 @@ class TestQwen3PagedAttention:
     def test_different_page_sizes(self):
         """Test paged attention with different page sizes."""
         page_sizes = [4, 8, 16, 32]
-        
+
         for page_size in page_sizes:
             config = create_test_config(use_paged_attention=True, page_size=page_size)
-            
+
             batch_size = 1
             seq_len = 10
             head_dim = config.hidden_size // config.num_attention_heads

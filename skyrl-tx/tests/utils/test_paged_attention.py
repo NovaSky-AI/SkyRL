@@ -1,11 +1,9 @@
 """Tests for paged attention implementation."""
 
-import jax
 import jax.numpy as jnp
 import pytest
 
 from tx.utils.paged_attention import (
-    PagedKVCache,
     create_paged_kv_cache,
     paged_attention,
     paged_attention_with_update,
@@ -214,9 +212,7 @@ class TestPagedAttention:
         seq_indices = jnp.array([0])
 
         # Compute attention and update cache
-        output, updated_cache = paged_attention_with_update(
-            q, k, v, cache, seq_indices
-        )
+        output, updated_cache = paged_attention_with_update(q, k, v, cache, seq_indices)
 
         # Check output shape
         assert output.shape == (batch_size, seq_len, num_heads, head_dim)
