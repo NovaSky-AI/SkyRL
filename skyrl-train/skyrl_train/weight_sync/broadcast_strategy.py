@@ -35,7 +35,7 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     group_name: str
     backend: str
     model_dtype_str: str
-    # TODO(haochen): overriding existing model update group is currently only
+    # NOTE: overriding existing model update group is currently only
     # enabled for vLLM. Because SGLang doesn't use our receiver.
     override_existing_model_update_group: bool = False
 
