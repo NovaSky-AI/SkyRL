@@ -66,6 +66,16 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
+    def configure_adapter(self, adapter_index: int, lora_config: types.LoraConfig) -> None:
+        """Configure LoRA adapter rank and scaling in all LoRA layers.
+
+        Args:
+            adapter_index: The adapter slot index
+            lora_config: LoRA configuration with rank and alpha
+        """
+        pass
+
+    @abstractmethod
     def process_forward_backward_batch(
         self,
         prepared_batch: types.PreparedModelPassBatch,

@@ -19,6 +19,7 @@ from flax.training import checkpoints
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
+from tx.layers.lora import update_adapter_config
 from tx.tinker import types
 from tx.tinker.config import EngineConfig
 from tx.tinker.backends.backend import AbstractBackend
@@ -120,6 +121,9 @@ class NativeBackend(AbstractBackend):
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(
                 self.model, self.model.is_lora_param, ...
             )
+
+            # Initialize adapter 0 with dummy config (required for base model sampling path)
+            update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
 
             # Initialize global accumulated gradients
             self.accumulated_grads = AccumulatedGradients.create(
@@ -339,6 +343,10 @@ class NativeBackend(AbstractBackend):
             # These values are always overridden by the hyperparams in the optim_step request.
             tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
             return nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
+
+    def configure_adapter(self, adapter_index: int, lora_config: types.LoraConfig) -> None:
+        """Configure LoRA adapter rank and scaling in all LoRA layers."""
+        update_adapter_config(self.model, adapter_index, lora_config)
 
     def _process_model_pass_batch(
         self,

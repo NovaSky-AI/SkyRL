@@ -19,7 +19,6 @@ from tx.tinker.backends import NativeBackend
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.storage import download_and_unpack
-from tx.layers.lora import update_adapter_config
 from tx.utils.log import logger
 
 
@@ -181,6 +180,11 @@ class TinkerEngine:
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
 
+    @property
+    def metrics(self) -> types.EngineMetrics:
+        """Pass-through to backend metrics for backwards compatibility."""
+        return self.backend.metrics
+
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
         """Context manager to handle checkpoint DB status updates.
@@ -334,8 +338,8 @@ class TinkerEngine:
         # Create optimizer via backend
         self.optimizers[model_id] = self.backend.create_optimizer(model_id)
 
-        # Update the adapter's rank and scaling in all LoRA layers
-        update_adapter_config(self.backend.model, adapter_index, lora_config)
+        # Configure adapter's rank and scaling in all LoRA layers
+        self.backend.configure_adapter(adapter_index, lora_config)
 
         logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, config {lora_config}")
 
