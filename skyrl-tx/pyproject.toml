@@ -31,7 +31,7 @@ gpu = [
 ]
 
 maxtext = [
-    "maxtext @ git+https://github.com/OhadRubin/maxtext",
+    "maxtext @ git+https://github.com/OhadRubin/maxtext@1edde4d1b1d562173d1753650b0234aa5c6a2fea",
 ]
 
 tpu = [
