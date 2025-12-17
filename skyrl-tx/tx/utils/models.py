@@ -269,14 +269,14 @@ def insert_adapter_state(
     nnx.update(lora_params, updated)
 
 
-def round_up_seq_len(seq_len: int) -> int:
+def round_up_seq_len(seq_len: int, min_seq_len: int = 32) -> int:
     """
     Rounds a sequence length up to roughly two significant binary digits.
     We do this to pad sequences, so the Jax JIT compiler needs to
     compile fewer different shapes.
     """
-    if seq_len <= 32:
-        return 32
+    if seq_len <= min_seq_len:
+        return min_seq_len
 
     # Find the position of the most significant bit.
     msb_pos = seq_len.bit_length() - 1

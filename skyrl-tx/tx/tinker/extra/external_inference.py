@@ -1,3 +1,5 @@
+import shutil
+
 import httpx
 from datetime import datetime, timezone
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -31,7 +33,7 @@ class ExternalInferenceClient:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
+                timeout=httpx.Timeout(600.0, connect=10.0),  # 10 minutes for inference, 10s for connect
             ) as http_client:
                 result = await self._forward_to_engine(sample_req, model_id, checkpoint_id, http_client)
             result_data = result.model_dump()
@@ -66,10 +68,10 @@ class ExternalInferenceClient:
         if not target_dir.exists():
             try:
                 with download_and_unpack(checkpoint_path) as extracted_path:
-                    extracted_path.rename(target_dir)
+                    # shutil.move allows moving between filesystems.
+                    shutil.move(str(extracted_path), str(target_dir))
             except FileExistsError:
-                # This could happen if two processes try to download the file.
-                # In that case the other process won the race and created target_dir.
+                # Race condition: another process created target_dir
                 pass
 
         payload = {

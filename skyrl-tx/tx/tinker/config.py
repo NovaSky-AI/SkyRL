@@ -54,6 +54,10 @@ class EngineConfig(BaseModel):
         default=Path("/tmp/lora_models"),
         description="Directory where LoRA models will be extracted for external inference engines",
     )
+    min_seq_len: int = Field(
+        default=32,
+        description="Minimum sequence length for padding buckets (sequences shorter than this are padded up to this length)",
+    )
     maxtext_config_str: str | None = Field(
         default=None,
         description="MaxText config as space-separated key=value string. If set, uses MaxTextBackend instead of NativeBackend.",
