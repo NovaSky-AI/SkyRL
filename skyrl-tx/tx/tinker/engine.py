@@ -15,7 +15,7 @@ from flax.training import checkpoints
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends import NativeBackend
+from tx.tinker.backends import NativeBackend, MaxTextBackend, parse_maxtext_config
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.storage import download_and_unpack
@@ -32,7 +32,7 @@ class TinkerEngine:
     - Storing models and optimizers dicts
     - Validating requests against loaded models
 
-    Computation is delegated to the backend (NativeBackend).
+    Computation is delegated to the backend (NativeBackend or MaxTextBackend).
     """
 
     def _filter_valid_requests(
@@ -173,7 +173,11 @@ class TinkerEngine:
         self.optimizers: dict[str, nnx.Optimizer] = {}
 
         # Initialize the backend (handles model state and computation)
-        self.backend = NativeBackend(config)
+        if config.maxtext_config_str:
+            maxtext_config = parse_maxtext_config(config.maxtext_config_str)
+            self.backend = MaxTextBackend(config, maxtext_config)
+        else:
+            self.backend = NativeBackend(config)
 
         logger.info(
             f"Initialized TinkerEngine with backend={type(self.backend).__name__}, "
