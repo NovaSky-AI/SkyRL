@@ -84,7 +84,7 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args):
     elapsed = time.perf_counter() - start
 
     total_tokens = args.num_steps * args.num_requests * args.samples_per_request * args.seq_len
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  steps:       {args.num_steps}")
     print(f"  elapsed:     {elapsed:.3f} s")
     print(f"  tokens/sec:  {total_tokens / elapsed:.0f}")
@@ -113,7 +113,7 @@ def run_sample_bench(engine: TinkerEngine, args):
     elapsed = time.perf_counter() - start
 
     total_tokens = args.num_steps * args.num_requests * args.sample_max_tokens
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  steps:                {args.num_steps}")
     print(f"  elapsed:              {elapsed:.3f} s")
     print(f"  tokens generated/sec: {total_tokens / elapsed:.0f}")
