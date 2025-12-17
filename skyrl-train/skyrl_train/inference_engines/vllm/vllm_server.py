@@ -17,7 +17,6 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
 from fastapi import Request
-from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 
 
 # TODO(tgriggs): Handle errors and use best practices for vLLM server
@@ -93,17 +92,18 @@ class VllmServer:
 
         @app.post("/update_weights")
         async def _update_weights(request: Request):
+            import pickle
+            from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
 
             data = await request.json()
-            # engine expects a list of objects
-            req = NamedWeightsUpdateRequest(
-                names=[data.get("name")],
-                dtypes=[data.get("dtype")],
-                shapes=[data.get("shape")],
-            )
+            weight_request = BroadcastWeightUpdateRequest(**data)
+
+            # Pickle to preserve type through collective_rpc
+            pickled_request = pickle.dumps(weight_request)
+
             await engine.collective_rpc(
                 "load_weights",
-                args=(req,),
+                args=(pickled_request,),
             )
             return {"status": "ok"}
 
