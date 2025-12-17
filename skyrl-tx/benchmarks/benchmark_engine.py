@@ -137,8 +137,6 @@ def main():
 
     # Build EngineConfig from parsed args
     config_fields = {name: getattr(args, name) for name in EngineConfig.model_fields.keys() if hasattr(args, name)}
-    if config_fields.get("checkpoints_base") is not None:
-        config_fields["checkpoints_base"] = AnyPath(config_fields["checkpoints_base"])
     config = EngineConfig(**config_fields)
 
     print(f"EngineConfig: {config}")
