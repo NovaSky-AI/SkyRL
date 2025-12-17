@@ -14,6 +14,7 @@ from flax.linen import partitioning as nn_partitioning
 from tx.tinker import types
 from tx.tinker.config import EngineConfig
 from tx.tinker.backends.backend import AbstractBackend
+from tx.tinker.backends.utils import pad_batch
 from tx.utils.models import round_up_seq_len, convert_maxtext_lora_to_hf
 from tx.utils.storage import pack_and_upload
 from tx.utils.log import logger
@@ -53,20 +54,6 @@ def parse_maxtext_config(config_str: str):
     from MaxText import pyconfig as maxtext_pyconfig
     return maxtext_pyconfig.initialize(argv)
 
-
-
-
-def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False) -> jax.Array:
-    """Pad a batch of sequences to max_length."""
-    batch_size = len(sequences)
-    padded = np.zeros((batch_size, max_length), dtype=dtype)
-    for i, seq in enumerate(sequences):
-        assert len(seq) <= max_length, f"Sequence length {len(seq)} exceeds max_length {max_length}"
-        if left:
-            padded[i, max_length - len(seq):] = seq
-        else:
-            padded[i, :len(seq)] = seq
-    return jnp.asarray(padded)
 
 
 def _count_params(pytree) -> int:
