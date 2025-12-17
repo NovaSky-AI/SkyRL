@@ -48,7 +48,9 @@ class TestQwen3PagedAttention:
         head_dim = config.hidden_size // config.num_attention_heads
 
         # Create attention layer
-        attn = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        mesh = jax.make_mesh((1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto))
+        with jax.set_mesh(mesh):
+            attn = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
 
         # Create paged cache
         paged_cache = create_paged_kv_cache(
@@ -88,8 +90,10 @@ class TestQwen3PagedAttention:
         head_dim = config.hidden_size // config.num_attention_heads
 
         # Create two attention layers with same weights
-        attn1 = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
-        attn2 = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+        mesh = jax.make_mesh((1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto))
+        with jax.set_mesh(mesh):
+            attn1 = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+            attn2 = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
 
         # Create inputs
         x = jax.random.normal(jax.random.PRNGKey(0), (batch_size, seq_len, config.hidden_size))
@@ -134,7 +138,9 @@ class TestQwen3PagedAttention:
         head_dim = config.hidden_size // config.num_attention_heads
 
         # Create model
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        mesh = jax.make_mesh((1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto))
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
 
         # Create paged caches for all layers
         paged_caches = [
@@ -175,7 +181,9 @@ class TestQwen3PagedAttention:
         head_dim = config.hidden_size // config.num_attention_heads
 
         # Create model
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        mesh = jax.make_mesh((1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto))
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
 
         # Create paged caches
         paged_caches = [
@@ -229,7 +237,9 @@ class TestQwen3PagedAttention:
         seq_len = 8
 
         # Create model
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        mesh = jax.make_mesh((1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto))
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
 
         # Create inputs
         input_ids = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, config.vocab_size)
@@ -256,7 +266,11 @@ class TestQwen3PagedAttention:
             head_dim = config.hidden_size // config.num_attention_heads
 
             # Create attention layer
-            attn = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+            mesh = jax.make_mesh(
+                (1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto)
+            )
+            with jax.set_mesh(mesh):
+                attn = Qwen3Attention(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
 
             # Create paged cache
             paged_cache = create_paged_kv_cache(
