@@ -14,11 +14,10 @@ set -x
 : "${NUM_GPUS:=4}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
 
-ENV_CLASS="gsm8k_multi_turn"
 : "${INFERENCE_BACKEND:=vllm}"
 # : "${INFERENCE_BACKEND:=sglang}"
 
-uv run --isolated --extra $INFERENCE_BACKEND --with ray==2.48.0 -- python -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -35,10 +34,10 @@ uv run --isolated --extra $INFERENCE_BACKEND --with ray==2.48.0 -- python -m sky
   trainer.eval_before_train=true \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=32 \
-  trainer.policy_mini_batch_size=32 \
-  trainer.micro_forward_batch_size_per_gpu=4 \
-  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.train_batch_size=1024 \
+  trainer.policy_mini_batch_size=256 \
+  trainer.micro_forward_batch_size_per_gpu=64 \
+  trainer.micro_train_batch_size_per_gpu=64 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -48,15 +47,13 @@ uv run --isolated --extra $INFERENCE_BACKEND --with ray==2.48.0 -- python -m sky
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
-  generator.batched=false \
-  environment.env_class=$ENV_CLASS \
-  generator.step_wise_training=true \
-  generator.n_samples_per_prompt=4 \
+  generator.batched=true \
+  environment.env_class=gsm8k \
+  generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
-  generator.max_turns=5 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="gsm8k_multi_turn" \
-  trainer.run_name="gsm8k_multi_turn_step_wise" \
+  trainer.project_name="gsm8k" \
+  trainer.run_name="gsm8k_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt_step_wise" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   $@
