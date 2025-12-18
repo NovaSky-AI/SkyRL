@@ -174,8 +174,8 @@ def validate_megatron_cfg(cfg: DictConfig):
         import flash_attn
 
         version = flash_attn.__version__
-        if version > "2.7.4.post1":
-            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
+        # if version > "2.8.1":
+        #     logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
