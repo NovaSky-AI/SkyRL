@@ -1,8 +1,9 @@
 """Weight synchronization abstractions for distributed RL training."""
 
-from typing import Type
+from typing import Type, TYPE_CHECKING
 
-from omegaconf import DictConfig, OmegaConf
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
 
 from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
 from .weight_extractor import WeightExtractor
@@ -44,9 +45,7 @@ def get_transfer_strategy_cls(cfg: "DictConfig") -> Type[WeightTransferStrategy]
     Returns:
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
-    weight_sync_backend = OmegaConf.select(cfg, "generator.weight_sync_backend", default="nccl")
-    colocate_all = OmegaConf.select(cfg, "trainer.placement.colocate_all", default=False)
-    if weight_sync_backend == "nccl" and colocate_all:
+    if cfg.generator.weight_sync_backend == "nccl" and cfg.trainer.placement.colocate_all:
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
 
