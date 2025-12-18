@@ -74,8 +74,8 @@ class SkyRLGymHTTPGenerator(SkyRLGymGenerator):
             rollout_logprobs: Optional[List[float]]
         """
         assert (
-            not self.generator_cfg.step_wise_training
-        ), "`step_wise_training` is not supported with `SkyRLGymHTTPGenerator`"
+            not self.generator_cfg.step_wise_trajectories
+        ), "`step_wise_trajectories` is not supported with `SkyRLGymHTTPGenerator`"
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config

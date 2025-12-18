@@ -58,7 +58,7 @@ def get_test_config(
             "enable_http_endpoint": False,
             "http_endpoint_host": "127.0.0.1",
             "http_endpoint_port": 8000,
-            "step_wise_training": is_step_wise,
+            "step_wise_trajectories": is_step_wise,
         },
     )
 

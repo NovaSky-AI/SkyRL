@@ -164,17 +164,17 @@ class SkyRLGymGenerator(GeneratorInterface):
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
             )
 
-        if self.generator_cfg.step_wise_training:
+        if self.generator_cfg.step_wise_trajectories:
             if self.batched:
-                raise ValueError("`step_wise_training` doesn't support `batched=True`")
+                raise ValueError("`step_wise_trajectories` doesn't support `batched=True`")
 
             if self.custom_chat_template is not None:
                 raise ValueError(
-                    f"`step_wise_training` doesn't support custom chat template, got {generator_cfg.chat_template}"
+                    f"`step_wise_trajectories` doesn't support custom chat template, got {generator_cfg.chat_template}"
                 )
 
             if not self.use_conversation_multi_turn:
-                raise ValueError("`step_wise_training` doesn't support `use_conversation_multi_turn=False`")
+                raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
@@ -255,7 +255,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
-        is_step_wise = self.generator_cfg.step_wise_training
+        is_step_wise = self.generator_cfg.step_wise_trajectories
 
         agent_loop_output = StepWiseOutput(step_outputs=[]) if is_step_wise else None
 
@@ -414,7 +414,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
-        elif not self.generator_cfg.step_wise_training:
+        elif not self.generator_cfg.step_wise_trajectories:
             assert not any(
                 agent_loop_state.loss_mask[agent_loop_state.response_end_idx - initial_prompt_length + 1 :]
             ), "loss_mask at index after response end should be all 0"
@@ -440,7 +440,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_logprobs.append(0.0)
                 appended_eos_token = True
 
-        if self.generator_cfg.step_wise_training:
+        if self.generator_cfg.step_wise_trajectories:
             for per_step_output, (reward, resp_end_idx) in zip(agent_loop_output.step_outputs, per_step_rewards):
                 per_token_reward = [0.0] * len(per_step_output.response_ids)
                 per_token_reward[resp_end_idx] = float(reward)
@@ -666,7 +666,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_classes = input_batch["env_classes"]
         env_extras = input_batch["env_extras"]
         trajectory_ids = input_batch.get("trajectory_ids", None)
-        if self.generator_cfg.step_wise_training:
+        if self.generator_cfg.step_wise_trajectories:
             assert trajectory_ids is not None, "`trajectory_ids` is a required field for step wise training"
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
@@ -698,7 +698,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             disable=disable_tqdm,
         )
 
-        if self.generator_cfg.step_wise_training:
+        if self.generator_cfg.step_wise_trajectories:
             responses = []
             rewards = []
             stop_reasons = []
@@ -738,7 +738,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
 
         if get_logprobs:
-            if self.generator_cfg.step_wise_training:
+            if self.generator_cfg.step_wise_trajectories:
                 rollout_logprobs = sum(
                     [[step_output.rollout_logprobs for step_output in output.step_outputs] for output in all_outputs],
                     [],
@@ -884,7 +884,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask_for_turn = turn_output.get_turn_loss_mask()
         rollout_logprobs_for_turn = turn_output.get_turn_rollout_logprobs()
 
-        if self.generator_cfg.step_wise_training:
+        if self.generator_cfg.step_wise_trajectories:
             # cumulative input_ids is not tracked for step wise training
             agent_loop_state.response_end_idx = len(turn_output.output_ids) - 1
             # no running loss_mask or `rollout_logprobs` are tracked for step-wise training

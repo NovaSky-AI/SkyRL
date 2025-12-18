@@ -1290,7 +1290,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_step_wise_training_trajectory_ids(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
+async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
     """Test step-wise training: validate trajectory_ids field is correctly populated."""
     from skyrl_train.generators.base import TrajectoryID
 
@@ -1341,7 +1341,7 @@ async def test_step_wise_training_trajectory_ids(mock_make, mock_tokenizer, mock
 
     mock_make.side_effect = mock_make_func
 
-    # Generator config with step_wise_training enabled
+    # Generator config with step_wise_trajectories enabled
     cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
@@ -1351,7 +1351,7 @@ async def test_step_wise_training_trajectory_ids(mock_make, mock_tokenizer, mock
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.step_wise_training = True
+    cfg.step_wise_trajectories = True
     cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymGenerator(
@@ -1413,7 +1413,7 @@ async def test_step_wise_training_trajectory_ids(mock_make, mock_tokenizer, mock
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_step_wise_training_basic_output_validation(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
+async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
     """Test step-wise training: validate basic output structure and fields."""
     from skyrl_train.generators.base import TrajectoryID
 
@@ -1459,7 +1459,7 @@ async def test_step_wise_training_basic_output_validation(mock_make, mock_tokeni
 
     mock_make.return_value = MultiStepEnv()
 
-    # Generator config with step_wise_training enabled
+    # Generator config with step_wise_trajectories enabled
     cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
@@ -1469,7 +1469,7 @@ async def test_step_wise_training_basic_output_validation(mock_make, mock_tokeni
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.step_wise_training = True
+    cfg.step_wise_trajectories = True
     cfg.chat_template = {"source": "name", "name_or_path": None}
 
     generator = SkyRLGymGenerator(

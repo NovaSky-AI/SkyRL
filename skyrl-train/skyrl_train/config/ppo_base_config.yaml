@@ -301,7 +301,7 @@ generator:
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}
 
-  step_wise_training: false
+  step_wise_trajectories: false
 
 environment:
   env_class: "gsm8k"
