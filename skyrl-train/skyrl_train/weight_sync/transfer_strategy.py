@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 class WeightSyncInitInfo(ABC):
     """Base class for weight sync initialization info."""
 
-    override_existing_receiver: bool = True
+    override_existing_receiver: bool
     """Whether to override an existing weight receiver. If False and a receiver exists, init is skipped."""
 
     @staticmethod
