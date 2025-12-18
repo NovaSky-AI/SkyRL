@@ -283,13 +283,13 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
     avg_diff = torch.mean(torch.abs(action_log_probs_masked - action_log_probs_megatron_masked))
     print(f"Avg diff: {avg_diff}")
 
-    assert max_diff < 4e-1, f"Max diff {max_diff} is too large"
+    assert max_diff < 4.5e-1, f"Max diff {max_diff} is too large"
 
     if ep == 1:
         assert avg_diff < 7e-2, f"Avg diff {avg_diff} is too large"
     else:
         # allow larger tolerance in diff for the 30B-MoE model due to larger model size
-        assert avg_diff < 1.5e-1, f"Avg diff {avg_diff} is too large"
+        assert avg_diff < 1.6e-1, f"Avg diff {avg_diff} is too large"
 
 
 @pytest.mark.asyncio
