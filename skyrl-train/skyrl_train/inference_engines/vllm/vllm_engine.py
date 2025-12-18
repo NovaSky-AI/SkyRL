@@ -319,12 +319,12 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def update_named_weights(self, request: WeightUpdateRequest):
         from skyrl_train.weight_sync import LoraLoadRequest
 
-        if not len(request):
-            raise ValueError("Weight update request must not be empty")
-
         # Handle LoRA disk loading request
         if isinstance(request, LoraLoadRequest):
             return await self._load_lora_from_disk(request.lora_path)
+
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
 
         # Use the weight loader to coordinate weight transfer
         return await self._weight_loader.load_weights(request)
