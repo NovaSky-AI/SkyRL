@@ -5,12 +5,13 @@ from training workers to inference engines using CUDA IPC handles.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
 import torch
+
 from torch.multiprocessing.reductions import reduce_tensor
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -22,6 +23,9 @@ from skyrl_train.weight_sync.transfer_strategy import (
     WeightTransferSender,
     WeightTransferReceiver,
 )
+
+# IPC handle type: (rebuild_func, args) returned by reduce_tensor
+IpcHandle = Tuple[Callable[..., torch.Tensor], Tuple[Any, ...]]
 
 
 @dataclass
@@ -48,7 +52,7 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
     """
 
     sizes: List[int]  # Size in elements per parameter (for unpacking)
-    ipc_handles: Dict[str, Any]  # Physical GPU UUID -> IPC handle for the packed buffer
+    ipc_handles: Dict[str, IpcHandle]  # Physical GPU UUID -> IPC handle for the packed buffer
 
     def serialize(self) -> bytes:
         """Serialize the request to bytes."""
@@ -147,15 +151,16 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
                 sizes.append(size)
 
             # Create single IPC handle for the packed buffer
-            ipc_handle = reduce_tensor(packed_tensor)
-            ipc_handle = {get_physical_gpu_id(): ipc_handle}
-            ipc_handle_list = [None] * world_size
-            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
+            ipc_handle: IpcHandle = reduce_tensor(packed_tensor)
+            ipc_handle_dict: Dict[str, IpcHandle] = {get_physical_gpu_id(): ipc_handle}
+            ipc_handle_list: List[Dict[str, IpcHandle] | None] = [None] * world_size
+            torch.distributed.all_gather_object(ipc_handle_list, ipc_handle_dict)
 
-            ipc_handles = {}
+            ipc_handles: Dict[str, IpcHandle] = {}
             if rank == 0:
                 for d in ipc_handle_list:
-                    ipc_handles.update(d)
+                    if d is not None:
+                        ipc_handles.update(d)
 
             torch.distributed.barrier()
             torch.cuda.synchronize()
