@@ -48,7 +48,7 @@ class TestCreateInitInfo:
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
         data_parallel_size: int = 1,
-        override_existing_update_group: str = "disable",
+        override_existing_update_group: str = "enable",
     ):
         """Create a mock config object for create_init_info."""
         cfg = MagicMock()
@@ -83,6 +83,7 @@ class TestCreateInitInfo:
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
             data_parallel_size=1,
+            override_existing_update_group="enable",
         )
         init_info = BroadcastTransferStrategy.create_init_info(cfg)
 

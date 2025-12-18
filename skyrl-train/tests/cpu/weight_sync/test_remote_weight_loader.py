@@ -61,6 +61,7 @@ class TestRemoteWeightLoader:
             group_name="test_group",
             backend="nccl",
             model_dtype_str="torch.bfloat16",
+            override_existing_receiver=True,
         )
 
     @pytest.mark.parametrize(
