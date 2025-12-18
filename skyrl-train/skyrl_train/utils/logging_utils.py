@@ -5,13 +5,12 @@ NEGATIVE_RESPONSE_COLOR = "yellow"
 BASE_PROMPT_COLOR = "cyan"
 
 
-def _color_block_format_and_args(
+def _color_block_format_and_kwargs(
     text: str,
     color: str,
     field_prefix: str,
 ) -> tuple[str, dict]:
-    """
-    Build a format string and kwargs for a multi-line colored block.
+    """Build a format string and kwargs for a multi-line colored block.
 
     The format string will look like:
         "<color>{p0}</color>\n<color>{p1}</color>\n..."
@@ -22,16 +21,16 @@ def _color_block_format_and_args(
     lines = text.splitlines() or [""]
 
     fmt_lines = []
-    args: dict[str, str] = {}
+    kwargs: dict[str, str] = {}
 
     for i, line in enumerate(lines):
         key = f"{field_prefix}{i}"
         # NOTE: double braces {{ }} so that {key} survives into str.format
         fmt_lines.append(f"<{color}>{{{key}}}</{color}>")
-        args[key] = line
+        kwargs[key] = line
 
     fmt = "\n".join(fmt_lines)
-    return fmt, args
+    return fmt, kwargs
 
 
 def log_example(
@@ -69,17 +68,17 @@ def log_example(
             response_color = NEGATIVE_RESPONSE_COLOR
 
         # --- Build per-line colored blocks in the *format string* ---
-        prompt_fmt, prompt_args = _color_block_format_and_args(prompt_str, BASE_PROMPT_COLOR, "p")
-        response_fmt, response_args = _color_block_format_and_args(response_str, response_color, "r")
+        prompt_fmt, prompt_kwargs = _color_block_format_and_kwargs(prompt_str, BASE_PROMPT_COLOR, "p")
+        response_fmt, response_kwargs = _color_block_format_and_kwargs(response_str, response_color, "r")
 
         # Single format string with only our own markup and placeholders
-        log_format = "Example:\n" f"  Input: {prompt_fmt}\n" "  Output (Reward: {reward}):\n" f"{response_fmt}"
+        log_format = "Example:\n" f"  Input: {prompt_fmt}\n" "  Output (Total Reward: {reward}):\n" f"{response_fmt}"
 
         # Merge all args for str.format
-        format_args = {**prompt_args, **response_args, "reward": reward_str}
+        format_kwargs = {**prompt_kwargs, **response_kwargs, "reward": reward_str}
 
         # Let Loguru parse tags in log_format and then substitute arguments.
-        logger.opt(colors=True).info(log_format, **format_args)
+        logger.opt(colors=True).info(log_format, **format_kwargs)
     except Exception as e:
         print(f"Error pretty printing example, debug printing instead: {e}")
-        print(f"Example:\n  Input: {prompt}\n  Output (Reward: {reward_str}):\n{response}")
+        print(f"Example:\n  Input: {prompt}\n  Output (Total Reward: {reward_str}):\n{response}")

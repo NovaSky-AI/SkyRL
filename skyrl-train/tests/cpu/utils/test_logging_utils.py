@@ -8,7 +8,7 @@ from skyrl_train.utils.logging_utils import (
     BASE_PROMPT_COLOR,
     NEGATIVE_RESPONSE_COLOR,
     POSITIVE_RESPONSE_COLOR,
-    _color_block_format_and_args,
+    _color_block_format_and_kwargs,
     log_example,
 )
 
@@ -31,19 +31,19 @@ class StubLogger:
         self.last_kwargs = kwargs
 
 
-def test_color_block_format_and_args_single_line():
-    fmt, args = _color_block_format_and_args("hello", "red", "p")
+def test_color_block_format_and_kwargs_single_line():
+    fmt, kwargs = _color_block_format_and_kwargs("hello", "red", "p")
 
     assert fmt == "<red>{p0}</red>"
-    assert args == {"p0": "hello"}
+    assert kwargs == {"p0": "hello"}
 
 
-def test_color_block_format_and_args_multi_line():
+def test_color_block_format_and_kwargs_multi_line():
     text = "line1\nline2"
-    fmt, args = _color_block_format_and_args(text, "blue", "x")
+    fmt, kwargs = _color_block_format_and_kwargs(text, "blue", "x")
 
     assert fmt == "<blue>{x0}</blue>\n<blue>{x1}</blue>"
-    assert args == {"x0": "line1", "x1": "line2"}
+    assert kwargs == {"x0": "line1", "x1": "line2"}
 
 
 @pytest.mark.parametrize(
@@ -66,7 +66,7 @@ def test_log_example_uses_expected_colors_and_reward_string(reward, expected_col
 
     # Basic structure checks
     assert logger.last_message.startswith("Example:\n  Input: ")
-    assert "Output (Reward: {reward}):" in logger.last_message
+    assert "Output (Total Reward: {reward}):" in logger.last_message
 
     # Placeholder keys from helper should be present
     assert "p0" in logger.last_kwargs
@@ -99,16 +99,14 @@ def test_log_example_uses_expected_colors_and_reward_string(reward, expected_col
 
 
 def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
-    """
-    Force an exception inside log_example and ensure the fallback path prints.
-    """
+    """Force an exception inside log_example and ensure the fallback path prints."""
 
     def broken_color_block(*args, **kwargs):
         raise RuntimeError("boom")
 
     # Patch the helper to raise
     monkeypatch.setattr(
-        "skyrl_train.utils.logging_utils._color_block_format_and_args",
+        "skyrl_train.utils.logging_utils._color_block_format_and_kwargs",
         broken_color_block,
     )
 
@@ -120,5 +118,5 @@ def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
     assert "Error pretty printing example" in captured.out
     assert "Example:" in captured.out
     assert "Input: [{'role': 'user', 'content': 'p'}]" in captured.out
-    assert "Output (Reward: N/A):" in captured.out
+    assert "Output (Total Reward: N/A):" in captured.out
     assert "r" in captured.out
