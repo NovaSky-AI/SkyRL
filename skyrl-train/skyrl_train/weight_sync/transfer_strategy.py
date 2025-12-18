@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 class WeightSyncInitInfo(ABC):
     """Base class for weight sync initialization info."""
 
+    override_existing_receiver: bool = True
+    """Whether to override an existing weight receiver. If False and a receiver exists, init is skipped."""
+
     @staticmethod
     @abstractmethod
     def strategy_type() -> type:

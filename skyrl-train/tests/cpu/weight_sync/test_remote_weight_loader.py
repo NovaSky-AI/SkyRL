@@ -122,7 +122,7 @@ class TestRemoteWeightLoader:
                 assert payload["group_name"] == init_info.group_name
                 assert payload["backend"] == init_info.backend
                 assert "model_dtype_str" not in payload
-                assert "override_existing_model_update_group" not in payload
+                assert "override_existing_receiver" not in payload
 
             assert result == {"success": True}
 

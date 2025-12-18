@@ -95,18 +95,18 @@ class TestCreateInitInfo:
         assert init_info.group_name == "skyrl"
         assert init_info.backend == "gloo"
         assert init_info.model_dtype_str == "torch.bfloat16"
-        assert init_info.override_existing_model_update_group is False
+        assert init_info.override_existing_receiver is True
 
-    def test_broadcast_create_init_info_override_existing_enabled(self, monkeypatch):
-        """BroadcastTransferStrategy.create_init_info should set override_existing=True when config is 'enable'."""
+    def test_broadcast_create_init_info_override_existing_receiver_disabled(self, monkeypatch):
+        """BroadcastTransferStrategy.create_init_info should set override_existing_receiver=False when config is 'disable'."""
         import skyrl_train.weight_sync.broadcast_strategy as broadcast_module
 
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
-        cfg = self._make_cfg(override_existing_update_group="enable")
+        cfg = self._make_cfg(override_existing_update_group="disable")
         init_info = BroadcastTransferStrategy.create_init_info(cfg)
 
-        assert init_info.override_existing_model_update_group is True
+        assert init_info.override_existing_receiver is False
 
 
 class TestBroadcastWeightUpdateRequest:

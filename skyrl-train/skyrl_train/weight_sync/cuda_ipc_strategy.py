@@ -248,7 +248,10 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
         Returns:
             CudaIpcInitInfo containing all args needed for sender/receiver creation.
         """
-        return CudaIpcInitInfo(model_dtype_str=cfg.generator.model_dtype)
+        return CudaIpcInitInfo(
+            model_dtype_str=cfg.generator.model_dtype,
+            override_existing_receiver=cfg.generator.override_existing_update_group == "enable",
+        )
 
     @staticmethod
     def create_sender(
