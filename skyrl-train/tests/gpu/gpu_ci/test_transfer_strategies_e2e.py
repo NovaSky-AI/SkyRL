@@ -21,8 +21,7 @@ import asyncio
 import ray
 import torch
 import torch.distributed as dist
-from unittest.mock import MagicMock
-
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.weight_sync import (
     WeightChunk,
     CudaIpcTransferStrategy,
@@ -34,17 +33,17 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from ray.util.placement_group import placement_group
 
 
-def make_mock_cfg(
+def make_cfg(
     weight_sync_backend: str,
     model_dtype: str,
     num_inference_engines: int,
     colocate_all: bool,
 ):
-    """Create a mock config object.
+    """Create a config object.
 
     Assumes no intra-engine parallelism (tp=pp=dp=1).
     """
-    cfg = MagicMock()
+    cfg = get_default_config()
     cfg.generator.weight_sync_backend = weight_sync_backend
     cfg.generator.model_dtype = model_dtype
     cfg.generator.num_inference_engines = num_inference_engines
@@ -345,7 +344,7 @@ class TestCudaIpcTransferStrategy:
 
     def test_weight_sync_e2e(self, ray_init_fixture):
         """Test CUDA IPC strategy end-to-end with 2 training ranks and 2 inference engines."""
-        cfg = make_mock_cfg(
+        cfg = make_cfg(
             weight_sync_backend="nccl",
             model_dtype="bfloat16",
             num_inference_engines=2,
@@ -370,7 +369,7 @@ class TestBroadcastTransferStrategy:
 
     def test_weight_sync_e2e(self, ray_init_fixture):
         """Test Broadcast strategy end-to-end with 2 training ranks and 2 inference engines."""
-        cfg = make_mock_cfg(
+        cfg = make_cfg(
             weight_sync_backend="nccl",
             model_dtype="bfloat16",
             num_inference_engines=2,

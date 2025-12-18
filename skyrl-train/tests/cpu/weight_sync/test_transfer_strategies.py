@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.weight_sync import (
     get_transfer_strategy_cls,
     BroadcastTransferStrategy,
@@ -16,8 +16,8 @@ class TestGetTransferStrategyCls:
     """Tests for get_transfer_strategy_cls function."""
 
     def _make_cfg(self, weight_sync_backend: str, colocate_all: bool):
-        """Create a mock config object."""
-        cfg = MagicMock()
+        """Create a config object."""
+        cfg = get_default_config()
         cfg.generator.weight_sync_backend = weight_sync_backend
         cfg.trainer.placement.colocate_all = colocate_all
         return cfg
@@ -50,8 +50,8 @@ class TestCreateInitInfo:
         data_parallel_size: int = 1,
         override_existing_update_group: str = "enable",
     ):
-        """Create a mock config object for create_init_info."""
-        cfg = MagicMock()
+        """Create a config object for create_init_info."""
+        cfg = get_default_config()
         cfg.generator.weight_sync_backend = weight_sync_backend
         cfg.generator.model_dtype = model_dtype
         cfg.generator.num_inference_engines = num_inference_engines
