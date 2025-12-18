@@ -166,6 +166,7 @@ class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
     loaded_checkpoint_id: str | None = None
+    last_used: float | None = None  # timestamp from time.time()
 
 
 class SampleInput(BaseModel):
@@ -215,7 +216,7 @@ class PreparedModelPassBatch(BaseModel):
     all_loss_fn_types: list[int]
 
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
-    request_batch_slices: list[tuple[str, str, int, int]]
+    request_batch_slices: list[tuple[int, str, int, int]]
 
     class Config:
         arbitrary_types_allowed = True

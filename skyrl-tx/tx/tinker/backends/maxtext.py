@@ -20,21 +20,15 @@ from tx.utils.storage import pack_and_upload
 from tx.utils.log import logger
 
 # MaxText imports
-try:
-    import MaxText
-    from MaxText import maxtext_utils
-    from MaxText import model_creation_utils as maxtext_model_creation
-    from MaxText import sharding as maxtext_sharding
-    from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
-    MAXTEXT_AVAILABLE = True
-except ImportError:
-    MAXTEXT_AVAILABLE = False
-    logger.warning("MaxText not available.")
+import MaxText
+from MaxText import maxtext_utils
+from MaxText import model_creation_utils as maxtext_model_creation
+from MaxText import sharding as maxtext_sharding
+from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+
 
 def _get_maxtext_base_config_path() -> str:
     """Get the absolute path to MaxText's base.yml config file."""
-    if not MAXTEXT_AVAILABLE:
-        raise RuntimeError("MaxText is not available")
     import os
     from importlib.resources import files
     try:
@@ -58,7 +52,7 @@ def _get_maxtext_base_config_path() -> str:
 
 def parse_maxtext_config(config_str: str):
     """Parse MaxText config from space-separated key=value string."""
-    if not config_str or not MAXTEXT_AVAILABLE:
+    if not config_str:
         return None
     config_path = _get_maxtext_base_config_path()
     logger.info(f"Using MaxText config: {config_path}")
@@ -117,10 +111,19 @@ class AccumulatedGradients:
 
 
 class MaxTextBackend(AbstractBackend):
-    """Backend for MaxText models with context parallelism."""
+    """Backend for MaxText models with context parallelism.
+
+    This is a single-adapter backend (max_lora_adapters must be 1).
+    """
 
     def __init__(self, config: EngineConfig, maxtext_config):
         """Initialize MaxText backend."""
+        if config.max_lora_adapters != 1:
+            raise ValueError(
+                f"MaxTextBackend only supports single adapter (max_lora_adapters=1), "
+                f"got max_lora_adapters={config.max_lora_adapters}"
+            )
+
         self.config = config
         self.maxtext_config = maxtext_config
         self.metrics = types.EngineMetrics()
@@ -145,9 +148,8 @@ class MaxTextBackend(AbstractBackend):
         self.accumulated_grads = AccumulatedGradients.create(self.lora_params)
         self._log_accumulated_grads()
 
-        # Create optimizer with lora_filter
-        tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
-        self.optimizer = nnx.Optimizer(self.model, tx, wrt=lora_filter)
+        # Per-model optimizer storage (managed internally)
+        self.optimizers: dict[str, nnx.Optimizer] = {}
 
         logger.info(f"Initialized MaxText model with context_parallel_size={maxtext_config.context_parallel_size}")
 
@@ -236,6 +238,27 @@ class MaxTextBackend(AbstractBackend):
         else:
             yield
 
+    def register_model(self, model_id: str, adapter_index: int, lora_config: types.LoraConfig) -> None:
+        """Register a new model with the backend.
+
+        Creates optimizer for the model. MaxText is single-adapter so adapter_index is ignored.
+        """
+        tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
+        self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.lora_filter)
+        logger.info(f"Registered model {model_id} with MaxText backend")
+
+    def unregister_model(self, model_id: str, adapter_index: int) -> None:
+        """Unregister a model from the backend.
+
+        Removes optimizer and zeros LoRA weights.
+        """
+        self.optimizers.pop(model_id, None)
+
+        # Zero out all LoRA weights (single adapter)
+        zeroed_params = jax.tree.map(jnp.zeros_like, self.lora_params)
+        nnx.update(self.lora_params, zeroed_params)
+        logger.info(f"Unregistered model {model_id} from MaxText backend")
+
     def precompile_kernels(self, seq_lens: list[int]):
         """Precompile JIT kernels for specified sequence lengths."""
         if not seq_lens or self.config.enforce_eager:
@@ -268,11 +291,6 @@ class MaxTextBackend(AbstractBackend):
 
         logger.info(f"Precompilation complete for {len(seq_lens)} sequence lengths")
 
-    def create_optimizer(self, model_id: str) -> nnx.Optimizer:
-        """Create an optimizer for a model."""
-        tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
-        return nnx.Optimizer(self.model, tx, wrt=self.lora_filter)
-
     def process_forward_backward_batch(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -298,10 +316,6 @@ class MaxTextBackend(AbstractBackend):
         seq_lens = [len(seq) for seq in all_input_ids]
 
         data_sharding = maxtext_sharding.get_input_data_sharding(self.maxtext_config, self.mesh)
-        input_ids = jax.device_put(input_ids, data_sharding)
-        positions = jax.device_put(positions, data_sharding)
-        target_ids = jax.device_put(target_ids, data_sharding)
-        loss_mask = jax.device_put(loss_mask, data_sharding)
 
         token_losses_device = []
         logprobs_device = []
@@ -315,12 +329,17 @@ class MaxTextBackend(AbstractBackend):
                     print(f"MaxText forward-backward: batch [{mb_start}:{mb_end}], seq_len={seq_len}", flush=True)
                     tic = time.time()
 
+                    mb_input_ids = jax.device_put(input_ids[mb_start:mb_end], data_sharding)
+                    mb_positions = jax.device_put(positions[mb_start:mb_end], data_sharding)
+                    mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], data_sharding)
+                    mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], data_sharding)
+
                     _, target_logprobs, per_token_losses, grads = self._forward_backward(
                         self.model,
-                        input_ids[mb_start:mb_end],
-                        positions[mb_start:mb_end],
-                        target_ids[mb_start:mb_end],
-                        loss_mask[mb_start:mb_end],
+                        mb_input_ids,
+                        mb_positions,
+                        mb_target_ids,
+                        mb_loss_mask,
                     )
 
                     _ = jax.device_get(target_logprobs)
@@ -375,15 +394,15 @@ class MaxTextBackend(AbstractBackend):
     def process_optim_step(
         self,
         model_id: str,
+        adapter_index: int,
         request_data: types.OptimStepInput,
-        optimizer: nnx.Optimizer,
-        adapter_index: int | None = None,
     ) -> types.OptimStepOutput:
         """Process an optim_step request."""
         if self.accumulated_grads.count[0] == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
             return types.OptimStepOutput()
 
+        optimizer = self.optimizers[model_id]
         hp = optimizer.opt_state.hyperparams
         hp["learning_rate"][...] = request_data.adam_params.learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
@@ -419,7 +438,6 @@ class MaxTextBackend(AbstractBackend):
         output_path,
         model_id: str,
         models: dict[str, types.ModelMetadata],
-        optimizers: dict[str, nnx.Optimizer],
     ) -> None:
         """Save training checkpoint in HuggingFace PEFT format as tar.gz."""
         with pack_and_upload(output_path) as temp_dir:
@@ -436,13 +454,19 @@ class MaxTextBackend(AbstractBackend):
         self,
         model_id: str,
         models: dict[str, types.ModelMetadata],
-        optimizers: dict[str, nnx.Optimizer],
     ) -> dict:
-        """Extract LoRA state for checkpointing."""
+        """Extract LoRA state and optimizer state for checkpointing.
+
+        Creates copies of the arrays to ensure the cached state is independent
+        from the live model state (which may be zeroed on eviction).
+        """
+        # Copy arrays to avoid caching references that get zeroed
+        lora_weights_copy = jax.tree.map(jnp.copy, self.lora_params)
+        optimizer_state_copy = jax.tree.map(jnp.copy, nnx.state(self.optimizers[model_id]))
         return {
-            "lora_params": self.lora_params,
-            "lora_rank": self.maxtext_config.lora_rank,
-            "lora_alpha": self.maxtext_config.lora_alpha,
+            "lora_weights": lora_weights_copy,
+            "optimizer_state": optimizer_state_copy,
+            "lora_config": models[model_id].lora_config.model_dump(),
         }
 
     def insert_checkpoint_data(
@@ -450,10 +474,30 @@ class MaxTextBackend(AbstractBackend):
         model_id: str,
         checkpoint_data: dict,
         models: dict[str, types.ModelMetadata],
-        optimizers: dict[str, nnx.Optimizer],
     ) -> None:
-        """Insert checkpoint data - not implemented for MaxText."""
-        raise NotImplementedError("Loading checkpoints not yet implemented for MaxText backend")
+        """Insert checkpoint data into model state.
+
+        Reshards the cached arrays to match the current model's sharding.
+        """
+        optimizer = self.optimizers[model_id]
+
+        # Reshard cached weights to match current model sharding
+        def reshard_to_match(cached, current):
+            """Reshard cached array to match current array's sharding."""
+            sharding = current.sharding
+            return jax.device_put(cached, sharding)
+
+        resharded_lora = jax.tree.map(
+            reshard_to_match, checkpoint_data["lora_weights"], self.lora_params
+        )
+        resharded_optim = jax.tree.map(
+            reshard_to_match, checkpoint_data["optimizer_state"], nnx.state(optimizer)
+        )
+
+        # Update model state
+        nnx.update(self.lora_params, resharded_lora)
+        nnx.update(nnx.state(optimizer), resharded_optim)
+        logger.info(f"Restored checkpoint data for model {model_id}")
 
     def save_sampler_checkpoint(
         self,

@@ -133,16 +133,34 @@ async def create_checkpoint(
     try:
         await session.flush()
     except IntegrityError:
-        # Determine which constraint failed by checking if the model exists
+        await session.rollback()
+        # Check if the model exists
         statement = select(ModelDB).where(ModelDB.model_id == model_id)
         result = await session.exec(statement)
 
         if not result.first():
             raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-        else:
-            raise HTTPException(
-                status_code=409, detail=f"Checkpoint '{checkpoint_id}' already exists for model '{model_id}'"
-            )
+
+        # Delete existing checkpoint and create new one
+        delete_stmt = select(CheckpointDB).where(
+            CheckpointDB.model_id == model_id,
+            CheckpointDB.checkpoint_id == checkpoint_id,
+            CheckpointDB.checkpoint_type == checkpoint_type,
+        )
+        existing = (await session.exec(delete_stmt)).first()
+        if existing:
+            await session.delete(existing)
+            await session.flush()
+
+        # Re-add the new checkpoint
+        checkpoint_db = CheckpointDB(
+            model_id=model_id,
+            checkpoint_id=checkpoint_id,
+            checkpoint_type=checkpoint_type,
+            status=CheckpointStatus.PENDING,
+        )
+        session.add(checkpoint_db)
+        await session.flush()
 
 
 class LoRAConfig(BaseModel):
