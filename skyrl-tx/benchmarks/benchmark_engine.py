@@ -124,13 +124,13 @@ def main():
     add_model(parser, EngineConfig)
 
     parser.add_argument("--benchmark", choices=["fwd_bwd", "sample", "all"], default="all", help="Benchmark to run")
-    parser.add_argument("--num-steps", type=int, default=30, help="Number of benchmark steps")
-    parser.add_argument("--num-warmup-steps", type=int, default=5, help="Number of warmup steps")
-    parser.add_argument("--num-requests", type=int, default=32, help="Number of requests per batch")
-    parser.add_argument("--seq-len", type=int, default=64, help="Sequence length for inputs")
-    parser.add_argument("--samples-per-request", type=int, default=2, help="Samples per request (fwd_bwd only)")
+    parser.add_argument("--num-steps", type=int, default=5, help="Number of benchmark steps")
+    parser.add_argument("--num-warmup-steps", type=int, default=2, help="Number of warmup steps")
+    parser.add_argument("--num-requests", type=int, default=256, help="Number of requests per batch")
+    parser.add_argument("--seq-len", type=int, default=128, help="Sequence length for inputs")
+    parser.add_argument("--samples-per-request", type=int, default=1, help="Samples per request (fwd_bwd only)")
     parser.add_argument("--num-adapters", type=int, default=2, help="Number of LoRA adapters to create")
-    parser.add_argument("--sample-max-tokens", type=int, default=32, help="Max tokens to generate (sampling only)")
+    parser.add_argument("--sample-max-tokens", type=int, default=128, help="Max tokens to generate (sampling only)")
 
     args = parser.parse_args()
 
@@ -138,8 +138,9 @@ def main():
     config_fields = {name: getattr(args, name) for name in EngineConfig.model_fields.keys() if hasattr(args, name)}
     config = EngineConfig(**config_fields)
 
+    bench_config = {k: v for k, v in vars(args).items() if k not in EngineConfig.model_fields}
     print(f"EngineConfig: {config}")
-    print(f"Benchmark: {args.benchmark}")
+    print(f"BenchmarkConfig: {bench_config}")
     print("Building engine...")
 
     num_adapters = args.num_adapters if args.benchmark in ("fwd_bwd", "all") else 0
