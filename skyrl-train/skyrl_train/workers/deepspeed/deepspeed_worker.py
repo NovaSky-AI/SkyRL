@@ -162,12 +162,14 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         # transfer strategy, we can enable it for other strategies as well.
         from skyrl_train.weight_sync import CudaIpcTransferStrategy
 
-        use_cuda_ipc = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
         self.weight_extractor = DeepSpeedWeightExtractor(
             model=self.model.model.module,
             zero_stage=self.zero_stage,
-            group_by_module=use_cuda_ipc,
-            batch_size_threshold_gb=(self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if use_cuda_ipc else 0.0),
+            group_by_module=group_by_module,
+            batch_size_threshold_gb=(
+                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
+            ),
         )
 
     def process_sequences(self, sequences, input_len, eos_token_id, pad_token_id):

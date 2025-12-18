@@ -295,8 +295,7 @@ class Worker(DistributedTorchRayActor):
         # no guarattee that __del__ will be called in general. Ray also doesn't
         # explictly call __del__ when the actor shuts down.
         # It's commented out so that we can fix this in the future.
-        # if torch.distributed.get_rank() == 0:
-        #     atexit.register(self._handle_termination)
+        # atexit.register(self._handle_termination)
 
         torch.distributed.barrier()
 
