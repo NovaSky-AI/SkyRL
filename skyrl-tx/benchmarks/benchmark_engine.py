@@ -29,13 +29,13 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
     return types.ForwardBackwardInput(data=samples, loss_fn="cross_entropy")
 
 
-def make_sample_input(base_model: str, prompt_tokens: list[int], max_tokens: int) -> types.SampleInput:
+def make_sample_input(prompt_tokens: list[int], max_tokens: int, checkpoint_id: str) -> types.SampleInput:
     return types.SampleInput(
-        base_model=base_model,
+        base_model=None,
         prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=prompt_tokens)]),
         sampling_params=types.SamplingParams(temperature=1.0, max_tokens=max_tokens, seed=42),
         num_samples=1,
-        checkpoint_id="",
+        checkpoint_id=checkpoint_id,
         prompt_logprobs=False,
     )
 
@@ -43,11 +43,14 @@ def make_sample_input(base_model: str, prompt_tokens: list[int], max_tokens: int
 def build_engine(config: EngineConfig, num_adapters: int) -> TinkerEngine:
     engine = TinkerEngine(config)
     for i in range(num_adapters):
+        model_id = f"adapter_{i}"
         engine.process_single_request(
             types.RequestType.CREATE_MODEL,
-            f"adapter_{i}",
+            model_id,
             {"lora_config": {"rank": config.max_lora_rank, "alpha": 32}},
         )
+        # Mark as loaded so sampling uses in-memory weights
+        engine.models[model_id].loaded_checkpoint_id = model_id
     return engine
 
 
@@ -62,24 +65,14 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args: argparse.Namespace):
     model_ids = list(engine.models.keys())
     reqs = {str(i): (model_ids[i % len(model_ids)], fb_input) for i in range(args.num_requests)}
 
-    def reset_accumulators():
-        engine.accumulated_grads = type(engine.accumulated_grads).create(
-            engine.lora_params, engine.config.max_lora_adapters
-        )
-
     print(f"Warming up ({args.num_warmup_steps} steps)...")
     for _ in range(args.num_warmup_steps):
         engine.process_forward_backward_batch(reqs)
-        reset_accumulators()
 
     print(f"Running benchmark ({args.num_steps} steps)...")
-    jax.block_until_ready(engine.lora_params)
-
     start = time.perf_counter()
     for _ in range(args.num_steps):
         engine.process_forward_backward_batch(reqs)
-        reset_accumulators()
-    jax.block_until_ready(engine.lora_params)
     elapsed = time.perf_counter() - start
 
     total_tokens = args.num_steps * args.num_requests * args.samples_per_request * args.seq_len
@@ -93,22 +86,21 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args: argparse.Namespace):
 def run_sample_bench(engine: TinkerEngine, args: argparse.Namespace):
     print("\n=== Sampling Benchmark ===")
 
+    model_ids = list(engine.models.keys())
     reqs = {}
     for i in range(args.num_requests):
         prompt_tokens = [int(x) for x in jax.random.randint(jax.random.PRNGKey(i), (args.seq_len,), 1, 1000)]
-        reqs[str(i)] = ("", make_sample_input(engine.config.base_model, prompt_tokens, args.sample_max_tokens))
+        model_id = model_ids[i % len(model_ids)]
+        reqs[str(i)] = (model_id, make_sample_input(prompt_tokens, args.sample_max_tokens, checkpoint_id=model_id))
 
     print(f"Warming up ({args.num_warmup_steps} steps)...")
     for _ in range(args.num_warmup_steps):
         engine.process_sample_batch(reqs)
 
     print(f"Running benchmark ({args.num_steps} steps)...")
-    jax.block_until_ready(engine.lora_params)
-
     start = time.perf_counter()
     for _ in range(args.num_steps):
         engine.process_sample_batch(reqs)
-    jax.block_until_ready(engine.lora_params)
     elapsed = time.perf_counter() - start
 
     total_tokens = args.num_steps * args.num_requests * args.sample_max_tokens
@@ -143,8 +135,7 @@ def main():
     print(f"BenchmarkConfig: {bench_config}")
     print("Building engine...")
 
-    num_adapters = args.num_adapters if args.benchmark in ("fwd_bwd", "all") else 0
-    engine = build_engine(config, num_adapters)
+    engine = build_engine(config, args.num_adapters)
 
     if args.benchmark in ("fwd_bwd", "all"):
         run_fwd_bwd_bench(engine, args)
