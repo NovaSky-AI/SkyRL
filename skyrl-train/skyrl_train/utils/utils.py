@@ -504,6 +504,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
+        # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
+        env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
