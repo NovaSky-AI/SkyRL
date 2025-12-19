@@ -382,7 +382,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         model_name = model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, model_config, base_model_paths)
+        models = OpenAIServingModels(engine, base_model_paths)
 
         # TODO(Charlie): adding custom chat template for chat completion. Hacky!
         if custom_chat_template_path:
@@ -396,7 +396,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # support OAI-style tool calling; and `request_logger` for better debugging.
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             response_role="assistant",
             request_logger=None,
@@ -408,7 +407,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             request_logger=None,
         )
