@@ -1,4 +1,5 @@
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
+from omegaconf import OmegaConf, DictConfig
 from enum import Enum
 import ray
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -6,13 +7,16 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import os
 from loguru import logger
 import json
+import torch
 import numpy as np
 from collections import defaultdict
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorOutput
 from transformers import AutoTokenizer
 from pathlib import Path
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
+from skyrl_train.dataset import PromptDataset
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -85,30 +89,6 @@ def extract_step_from_path(path: str) -> int:
     if basename.startswith(GLOBAL_STEP_PREFIX):
         return int(basename.split(GLOBAL_STEP_PREFIX)[1])
     return -1
-
-
-def get_latest_checkpoint_step(checkpoint_base_path: str) -> int:
-    """
-    Get the latest global step from checkpoint directory by reading latest_ckpt_global_step.txt.
-
-    Args:
-        checkpoint_base_path: Base path where checkpoints are stored
-
-    Returns:
-        int: Latest global step, or 0 if no checkpoint found
-    """
-    latest_file_path = os.path.join(checkpoint_base_path, "latest_ckpt_global_step.txt")
-
-    if not io.exists(latest_file_path):
-        return 0
-
-    try:
-        with io.open_file(latest_file_path, "r") as f:
-            content = f.read().strip()
-        return int(content)
-    except (ValueError, IOError) as e:
-        logger.warning(f"Failed to read latest checkpoint step from {latest_file_path}: {e}")
-        return 0
 
 
 def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
@@ -290,14 +270,14 @@ def dump_per_dataset_eval_results(
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        print(f"Dumped eval data for {data_source} to {filename}")
+        logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
     aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
     with open(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
-    print(f"Dumped aggregated eval metrics to {aggregated_filename}")
+    logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
 
 
 class DynamicSamplingState(TypedDict, total=False):
@@ -576,13 +556,17 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     return filtered
 
 
-def validate_generator_output(input_batch: GeneratorInput, generator_output: GeneratorOutput):
-    """Validate the generator output."""
+def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput):
+    """Validate the generator output.
+
+    Args:
+        num_prompts: Number of input prompts used to produce this output.
+        generator_output: The generated output batch to validate.
+    """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
 
     # check that input prompts, response ids, and prompt token ids are all the same length
-    num_prompts = len(input_batch["prompts"])
     num_responses = len(generator_output["response_ids"])
     num_prompt_tokens = len(generator_output["prompt_token_ids"])
     assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
@@ -633,3 +617,58 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
         assert all(
             not isinstance(reward, list) for reward in rewards
         ), "rewards must be `List[float]` or `List[List[float]]`"
+
+
+def build_dataloader(
+    cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+) -> StatefulDataLoader:
+    """
+    Build the dataloader for the training or evaluation dataset.
+
+    Args:
+        cfg: Config object
+        dataset: Dataset object
+        is_train: Whether to build the dataloader for training or evaluation
+        is_fully_async: If is_train, whether to build the dataloader for fully async training, which
+            mainly makes the batch size 1.
+    """
+    # prepare dataloader
+    batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
+
+    # Seed the dataloader for reproducibility.
+    seeded_generator = torch.Generator()
+    seeded_generator.manual_seed(cfg.trainer.seed)
+
+    dataloader = StatefulDataLoader(
+        dataset,
+        batch_size=batch_size if not is_fully_async else 1,
+        shuffle=True if is_train else False,
+        collate_fn=dataset.collate_fn,
+        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        drop_last=True if is_train else False,
+        generator=seeded_generator,
+    )
+    if is_train:
+        if not is_fully_async:
+            logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        else:
+            logger.info(f"Total steps: {len(dataloader) // cfg.trainer.train_batch_size * cfg.trainer.epochs}")
+    else:
+        logger.info(f"Validation set size: {len(dataloader)}")
+
+    return dataloader
+
+
+def get_rope_scaling_config(trainer_cfg: DictConfig) -> dict[str, Any]:
+    if "rope_scaling" not in trainer_cfg:
+        return {}
+    if trainer_cfg.rope_scaling is None:
+        return None
+    return OmegaConf.to_container(trainer_cfg.rope_scaling)
+
+
+def get_rope_theta_config(trainer_cfg: DictConfig) -> int | None:
+    if "rope_theta" not in trainer_cfg:
+        return None
+    return trainer_cfg.rope_theta

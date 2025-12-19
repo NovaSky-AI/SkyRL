@@ -1,7 +1,7 @@
 SkyRLGymGenerator: Multi-turn Tokenization and Token-in-Token-out
 =================================================================
 
-Last updated: 2025-08-22
+Last updated: 2025-10-08
 
 This document explains how ``SkyRLGymGenerator`` manages the chat history and tokens for both
 single-turn and multi-turn rollouts, and how token-in-token-out (TI/TO) is enforced.
@@ -46,16 +46,18 @@ differently. The codepaths are determined by:
 - Config's ``generator.use_conversation_multi_turn``: If ``False``, all turns' observations and assistant
   generations are stored in the same assistant message. If ``True``, each observation from the
   environment's ``step()`` is a message.
-- Whether ``get_custom_chat_template(model_name)`` returns a template (currently used for Qwen3).
+- Config's ``generator.chat_template``: Optional custom chat template (primarily for Qwen3 thinking-token handling).
 
 The three codepaths are:
 
-1) Multi-turn conversation with chat template (the more conventional way)
+1) (Default) Multi-turn conversation, strictly appending tokens
 
-   - Enabled when ``use_conversation_multi_turn == True`` and ``custom_chat_template is None``.
+   - Enabled when ``use_conversation_multi_turn == True`` and ``generator.chat_template`` is not defined.
+   - These are the default values for these configs, so this is the default codepath.
    - Each observation is a turn of message following the model's chat template, appending
      LLM-generated response and observations as raw tokens to maintain TI/TO, but requires the
-     fixed-base approach to ensure the raw tokens follow the model's chat template correctly.
+     fixed-base approach to ensure the raw tokens follow the model's chat template correctly
+     (see :ref:`multi-turn-tokenization-and-ti-to`).
    - TI/TO: enforced.
    - Example with Qwen2.5 chat template:
 
@@ -75,7 +77,7 @@ The three codepaths are:
   Observation2<|im_end|>
   ...
 
-2) Single assistant-message for all turns (single-turn chat template)
+2) Single assistant message for all turns, strictly appending tokens
 
    - Enabled when ``use_conversation_multi_turn == False``.
    - Keep an entire multi-step interaction inside a single assistant message, appending
@@ -98,8 +100,8 @@ The three codepaths are:
 
 3) Always re-tokenize full chat history (no TI/TO)
 
-   - Enabled when ``use_conversation_multi_turn == True`` and a ``custom_chat_template`` is present.
-   - Serve models like Qwen3 that require special handling (e.g., strip non-last-turn thinking
+   - Enabled when ``use_conversation_multi_turn == True`` and a ``generator.chat_template`` is defined.
+   - Mainly to serve models like Qwen3 that require special handling (e.g., strip non-last-turn thinking
      tokens). We can also get ``[assistant_masks]`` and ``[input_ids]`` from the final tokenized chat
      history with the help of ``{% generation %}`` and ``{% endgeneration %}`` tags in the jinja template.
    - Chat history is maintained as string messages and re-tokenized every turn and
@@ -108,13 +110,29 @@ The three codepaths are:
 
 .. note::
 
-  Currently, the Qwen3 model by default follows the 3rd codepath (i.e. TI/TO is not enforced). That
-  is, this codepath rolls out Qwen3 by following the inference chat template, and returns only the
-  last-turn thinking tokens to Generator for the training pipeline.
+  Qwen3's official chat template strips earlier-turn thinking tokens.
+  
+  With code path 1 (the default, no custom chat template), we never retokenize the chat history, so
+  earlier-turn thinking tokens remain in the strictly appended token sequence for each turn's
+  inference. When passing the token sequence to the training pipeline, all turns' thinking tokens
+  are kept as well.
 
-  It is debatable whether this is the best method to train Qwen3. We will soon add a configuration flag
-  that only directs to codepath 3 when turned on. Otherwise when false, Qwen3 will follow the
-  first two codepaths and save all thinking tokens to the training pipeline.
+  Alternatively, with code path 3 (set ``generator.chat_template`` as below), we retokenize each
+  turn and the template strips earlier-turn thinking tokens, keeping only the last turn's thinking
+  tokens in both inference and training.
+
+  .. code-block:: yaml
+
+    chat_template:
+      source: "name"
+      name_or_path: "qwen3_without_thinking"
+
+  It remains an open question which is best for training Qwen3. We will soon add a custom attention mask
+  to match the official chat template's inference behavior (stripping thinking tokens),
+  while preserving on-policy training by masking the previous turns' thinking tokens during training.
+
+
+.. _multi-turn-tokenization-and-ti-to:
 
 Multi-turn Tokenization and TI/TO
 ---------------------------------
@@ -141,7 +159,6 @@ Specifically, we instantiate a ``base_conversation`` that we never change ("fixe
   self.base_conversation = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "I am a user."},
-    {"role": "assistant", "content": "I am an assistant."},
   ]
   self.base_conversation_token_ids = tokenizer.apply_chat_template(
     self.base_conversation,
@@ -169,7 +186,6 @@ message. For instance, in Qwen2.5 and Qwen3, the ``base_conversation_token_ids``
 
   <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
   <|im_start|>user\nI am a user.<|im_end|>\n
-  <|im_start|>assistant\nI am an assistant.<|im_end|>\n
 
 Note that there is a ``\n`` in the assistant's message before the next user's message starts.
 If we do token-in-token-out, there is no way for the LLM engine to generate ``\n`` since the

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import socket
+from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
@@ -14,11 +15,16 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.optim import Optimizer
 import torch.distributed
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import (
+    PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
+    placement_group_table,
+)
 
-from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils import io
+from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
 from skyrl_train.distributed.strategy import DistributedStrategy
@@ -26,13 +32,12 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group
-from skyrl_train.utils.torch_utils import chunked_entropy_from_logits
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -74,7 +79,10 @@ class DistributedTorchRayActor:
 
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed
@@ -107,6 +115,9 @@ class DistributedTorchRayActor:
 
     def get_mesh_rank(self):
         return self.mesh_rank
+
+    def get_gpu_id(self):
+        return ray.get_gpu_ids()[0]
 
     @staticmethod
     def _get_current_node_ip():
@@ -148,7 +159,13 @@ class DistributedTorchRayActor:
                 ("maskp", POINTER(c_ulong)),
             ]
 
-        LIBNUMA = CDLL(find_library("numa"))
+        try:
+            LIBNUMA = CDLL(find_library("numa"))
+        except Exception as e:
+            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
+            _SET_AFFINITY = True
+            return
+
         LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
@@ -164,8 +181,11 @@ class DistributedTorchRayActor:
             LIBNUMA.numa_set_membind(bitmask)
 
         numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        num_gpu_pre_numa_node = 8 // numa_nodes
-        numa_bind(self._local_rank // num_gpu_pre_numa_node)
+        if numa_nodes <= 0:
+            numa_nodes = 1
+        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
+        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
+        numa_bind(target_nid)
         _SET_AFFINITY = True
 
 
@@ -250,11 +270,13 @@ class Worker(DistributedTorchRayActor):
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
 
-            num_inference_engines, tensor_parallel_size = (
+            num_inference_engines, tensor_parallel_size, pipeline_parallel_size, data_parallel_size = (
                 self.cfg.generator.num_inference_engines,
                 self.cfg.generator.inference_engine_tensor_parallel_size,
+                self.cfg.generator.inference_engine_pipeline_parallel_size,
+                self.cfg.generator.inference_engine_data_parallel_size,
             )
-            world_size = num_inference_engines * tensor_parallel_size + 1
+            world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
             backend = self.cfg.generator.weight_sync_backend
 
@@ -279,7 +301,7 @@ class Worker(DistributedTorchRayActor):
                 asyncio.to_thread(
                     init_custom_process_group,
                     backend=backend,
-                    init_method=f"tcp://{master_addr}:{master_port}",
+                    init_method=get_tcp_url(master_addr, master_port),
                     world_size=world_size,
                     rank=0,
                     group_name=group_name,
@@ -375,7 +397,22 @@ class PPORayActorGroup:
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
-        # Use placement group to lock resources for models of same type
+        if self.colocate_all:
+            assert (
+                pg is not None
+            ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
+            pg_data = placement_group_table(pg)
+            assert (
+                len(pg_data["bundles"]) == world_size
+            ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
+
+        reordered_bundle_indices = []
+        if pg is not None:
+            pg_data = placement_group_table(pg)
+            should_reorder_bundles = len(pg_data["bundles"]) == world_size
+            if should_reorder_bundles:
+                reordered_bundle_indices = get_reordered_bundle_indices(pg)
+
         if self._num_gpus_per_node > 1 and pg is None:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
@@ -391,7 +428,8 @@ class PPORayActorGroup:
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg, placement_group_bundle_index=0
+                    placement_group=pg,
+                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
                 ),
             ).remote(
                 cfg=self.cfg,
@@ -432,7 +470,11 @@ class PPORayActorGroup:
                         resources=self._resources,
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
-                            placement_group_bundle_index=rank if self.colocate_all else rank // self._num_gpus_per_node,
+                            placement_group_bundle_index=(
+                                reordered_bundle_indices[rank]
+                                if reordered_bundle_indices
+                                else rank // self._num_gpus_per_node
+                            ),
                         ),
                     ).remote(
                         cfg=self.cfg,
@@ -480,26 +522,32 @@ class PPORayActorGroup:
         """
         return [actor.init_model.remote(*args, **kwargs) for actor in self._actor_handlers]
 
-    def offload_to_cpu(self, nonblocking=False):
+    def offload_to_cpu(self, nonblocking=False, offload_optimizer=True, offload_model=True):
         """Offload all worker state to CPU.
 
         Args:
             nonblocking: Whether this operation is synchronous or asynchronous.
             If `nonblocking=True`, then the function returns a list of object refs.
         """
-        refs = [actor.offload_to_cpu.remote() for actor in self._actor_handlers]
+        refs = [
+            actor.offload_to_cpu.remote(offload_optimizer=offload_optimizer, offload_model=offload_model)
+            for actor in self._actor_handlers
+        ]
         if nonblocking:
             return refs
         return ray.get(refs)
 
-    def backload_to_gpu(self, nonblocking=False):
+    def backload_to_gpu(self, nonblocking=False, backload_optimizer=True, backload_model=True):
         """Backload worker state to GPU
 
         Args:
             nonblocking: Whether this operation is synchronous or asynchronous.
             If `nonblocking=True`, then the function returns a list of ObjectRefs.
         """
-        refs = [actor.backload_to_gpu.remote() for actor in self._actor_handlers]
+        refs = [
+            actor.backload_to_gpu.remote(backload_optimizer=backload_optimizer, backload_model=backload_model)
+            for actor in self._actor_handlers
+        ]
         if nonblocking:
             return refs
         return ray.get(refs)
@@ -613,7 +661,7 @@ class PolicyWorkerBase(Worker):
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             pbar = tqdm(
                 dataloader,
-                desc=f"Actor Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
+                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
@@ -704,6 +752,7 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.generator.sampling_params.temperature,
                 return_output=True,
                 compute_entropy=True,
+                entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
             )
             # loss function
             # TODO: recompute advantages
@@ -715,17 +764,18 @@ class PolicyWorkerBase(Worker):
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
-        # entropy
-        with torch.no_grad():
-            if self.cfg.trainer.use_sample_packing:
-                # batch_size, seqlen
-                entropy_BS = output["entropy"]
-                entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-            else:
-                action_logits = output["logits"][:, -num_actions - 1 : -1, :]
-                entropy_BS = chunked_entropy_from_logits(action_logits, requires_grad=False)
 
-            entropy = entropy_BS.sum().item() / entropy_BS.numel()
+        # entropy loss
+        with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
+            # batch_size, seqlen
+            entropy_BS = output["entropy"]
+            entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
+            entropy = masked_mean(entropy_BS, loss_mask)
+
+        if self.cfg.trainer.algorithm.use_entropy_loss:
+            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
+        else:
+            entropy_loss_term = torch.tensor(0.0)
 
         # kl loss
         if self.cfg.trainer.algorithm.use_kl_loss:
@@ -738,8 +788,9 @@ class PolicyWorkerBase(Worker):
             kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
         else:
             kl_loss = torch.tensor(0.0)
+        kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-        loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+        loss = policy_loss + kl_loss_term - entropy_loss_term
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
@@ -754,10 +805,11 @@ class PolicyWorkerBase(Worker):
 
         # status
         status = {
+            "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "ppo_clip_ratio": clip_ratio,
-            "policy_entropy": entropy,
+            "policy_entropy": entropy.item(),
         }
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
@@ -799,7 +851,7 @@ class PolicyWorkerBase(Worker):
         return states
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model to HuggingFace format
+        # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
             self.model,
             export_dir,
@@ -834,7 +886,6 @@ class PolicyWorkerBase(Worker):
 
 
 class CriticWorkerBase(Worker):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
@@ -883,7 +934,7 @@ class CriticWorkerBase(Worker):
         return output
 
     def save_hf_model(self, export_dir: str, tokenizer):
-        # Save model to HuggingFace format
+        # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
             self.model,
             export_dir,
@@ -1004,30 +1055,6 @@ class CriticWorkerBase(Worker):
             load_lr_scheduler_states=load_lr_scheduler_states,
         )
         return states
-
-
-class RewardWorkerBase(Worker):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model: nn.Module = None
-
-    def _forward_micro_batch(
-        self,
-        micro_batch: TrainingInputBatch,
-    ) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        attention_mask = micro_batch["attention_mask"]
-        self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            reward = self.model(sequences, attention_mask)
-        reward = reward.to("cpu")
-        output = TrainingOutputBatch(
-            {"output": reward},
-        )
-        output.metadata = micro_batch.metadata
-        return output
 
 
 class RefWorkerBase(Worker):

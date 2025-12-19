@@ -1,5 +1,4 @@
 import random
-import os
 from abc import ABC, abstractmethod
 
 from loguru import logger
@@ -10,7 +9,7 @@ from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
-from skyrl_train.utils import io
+from skyrl_train.utils.io import io
 
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
@@ -108,21 +107,20 @@ class DistributedStrategy(ABC):
             dist.all_gather(ret, data.to(torch.cuda.current_device()))
             return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
 
-    def save_hf_configs(self, model_config: PretrainedConfig, ckpt_dir: str, tokenizer: PreTrainedTokenizer = None):
+    def save_hf_configs(self, model_config: PretrainedConfig, hf_dir: str, tokenizer: PreTrainedTokenizer = None):
         """
-        Save model and tokenizer configs to ckpt_dir/huggingface
+        Save model and tokenizer configs to hf_dir
 
         Args:
             model_config: PretrainedConfig - huggingface model config
-            ckpt_dir: str - the directory to save the configs to
+            hf_dir: str - the directory to save the huggingface configs to
             tokenizer: PreTrainedTokenizer - tokenizer to save
         """
-        hf_config_tokenizer_path = os.path.join(ckpt_dir, "huggingface")
-        io.makedirs(hf_config_tokenizer_path, exist_ok=True)
+        io.makedirs(hf_dir, exist_ok=True)
 
-        with io.local_work_dir(hf_config_tokenizer_path) as work_dir:
+        with io.local_work_dir(hf_dir) as work_dir:
             model_config.save_pretrained(work_dir)
-            if tokenizer is not None:
+            if tokenizer:
                 tokenizer.save_pretrained(work_dir)
 
             if hasattr(model_config, "name_or_path") and model_config.name_or_path:

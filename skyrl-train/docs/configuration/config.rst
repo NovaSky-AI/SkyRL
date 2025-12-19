@@ -131,7 +131,7 @@ Logging and Debugging Configuration
 Training Backends
 -----------------
 
-We support three backends: FSDP1, FSDP2 and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
+We support four backends: FSDP1, FSDP2, Megatron, and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
 
 .. _fsdp-configurations:
 
@@ -157,6 +157,57 @@ We use the same configuration group for FSDP1 and FSDP2
     In FSDP, ``cpu_offload`` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
 
     In `skyrl-train`, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on :doc:`model placement and colocation <placement>`
+
+.. _megatron-configurations:
+
+Megatron Configuration
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+    megatron_config:
+      tensor_model_parallel_size: 1 
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: null
+
+      ddp_config: # pass-through config to Megatron's `DistributedDataParallelConfig` object
+        # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
+        ...
+      optimizer_config_kwargs: # pass-through kwargs to Megatron's `OptimizerConfig` object
+        # any overlapping arguments with those we attempt to resolve in trainer.policy.optimizer_config will be overridden by the values here
+        # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/optimizer/optimizer_config.py#L12
+        ...
+      model_config_kwargs: # pass-through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
+        ...
+      transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
+        # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
+        ...
+      # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+      # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+      empty_cuda_cache: true
+
+
+- ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.
+- ``megatron_config.pipeline_model_parallel_size``: Pipeline model parallel size for sharding model layers across multiple GPUs.
+- ``megatron_config.context_parallel_size``: Context parallel size for reducing activation memory across the sequence length dimension.
+- ``megatron_config.expert_model_parallel_size``: The expert parallel size for sharding expert modules across multiple GPUs.
+- ``megatron_config.expert_tensor_parallel_size``: The tensor parallel size for each expert module. If set to ``null``, then the value will be resolved to ``tensor_model_parallel_size`` by Megatron. It is recommended to set this to ``1`` when enabling ``expert_model_parallel_size > 1`` for the best performance.
+
+Some rules for configuring these parameters:
+
+- ``model_size = pp_size * tp_size * cp_size``
+- ``dp_size = world_size / model_size``
+- ``world_size % (pp_size * ep_size * etp_size) == 0``
+    - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
+
+.. warning::
+  
+  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
+
+  We recommend leaving this setting to ``false``
+
 
 .. _deepspeed-configurations:
 
@@ -189,19 +240,27 @@ For both the critic and policy model, we provide a common optimizer configuratio
 - ``optimizer_config.weight_decay``: L2 regularization strength for AdamW.
 - ``optimizer_config.max_grad_norm``: Gradient clipping parameter. The total L2 norm of the model gradients will be scaled to this value during training.
 - ``optimizer_config.offload_after_step``: Whether to offload optimizer state to CPU after step if colocated. When generation and training workers are colocated, we recommend using the default setting of ``true``. In some cases with non-colocation, it can be desirable to leave optimizer state on GPU memory to avoid offloading costs as well as additional CPU memory usage.
-- ``optimizer_config.num_warmup_steps``: Number of warmup steps for the learning rate scheduler.
-- ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from ([Hugging Face Docs](https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType)).
+- ``optimizer_config.num_warmup_steps``: Number of mini-batch steps to warmup the optimizer for.
+- ``optimizer_config.scheduler``: Which learning rate scheduler to use. Intended to align with ``transformers.SchedulerType`` from `Huggingface <https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType>`_.
 
 Policy Configuration
 --------------------
 
-This section configures the policy model used for training, including optimizer, FSDP, and sequence parallelism options.
+This section configures the policy model used for training, including optimizer, FSDP, sequence parallelism, and LoRA options.
 
 .. code-block:: yaml
 
    policy:
      model:
        path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
+       lora:
+         rank: 0                    # LoRA rank (0 = disabled)
+         alpha: 16                  # LoRA scaling parameter
+         dropout: 0                 # LoRA dropout rate
+         lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for LoRA adapter sync
+         target_modules: "all-linear"  # Apply to all linear layers OR
+         # specify specific modules as a list
+         exclude_modules: null  # Modules to exclude from LoRA
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
      optimizer_config:
@@ -228,18 +287,33 @@ This section configures the policy model used for training, including optimizer,
 - ``policy.use_torch_compile``: Whether to enable torch compile for entropy calculation
 - ``policy.record_memory``: Whether to record memory usage. If ``True``, this will use PyTorch's `memory snapshotting utility <https://docs.pytorch.org/docs/stable/torch_cuda_memory.html>`_ to record memory usage and dump memory snapshots after each policy model training step.
 
+LoRA Configuration
+~~~~~~~~~~~~~~~~~~
+
+LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training only a small number of additional low-rank matrices instead of the full model weights:
+
+- ``policy.model.lora.rank``: LoRA rank for low-rank decomposition. Set to 0 to disable LoRA. Higher values increase model capacity but also memory usage. Common values include 8, 16, 32, or 64.
+- ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
+- ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
+- ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
 
 
 Critic Configuration
 --------------------
 
-We support similar configuration options as the policy model.
+We support similar configuration options as the policy model, including LoRA.
 
 .. code-block:: yaml
 
     critic:
       model:
         path: null
+        lora:
+          rank: 0                    # LoRA rank (0 = disabled)
+          alpha: 16                  # LoRA scaling parameter
+          dropout: 0                 # LoRA dropout rate
+          target_modules: "all-linear"
+          exclude_modules: null  # Modules to exclude from LoRA
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6
@@ -261,6 +335,8 @@ Reference Model Configuration
 .. code-block:: yaml
 
     ref:
+      model:
+        path: ${trainer.policy.model.path}
       deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
         cpu_offload: false
@@ -268,6 +344,7 @@ Reference Model Configuration
         fsdp_size: -1
       sequence_parallel_size: 1
 
+- ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
@@ -327,9 +404,13 @@ Algorithm Configuration
         kl_cov_frac: 0.2 # percentage of tokens to apply KL regularization to (20%)
         ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
+      # cispo parameters (only used when policy_loss_type: "cispo")
+      cispo: 
+        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+        cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+
       # value loss parameters
       value_clip: 0.2
-      normalize_reward: true
 
       # dynamic sampling parameters
       dynamic_sampling:
@@ -340,6 +421,11 @@ Algorithm Configuration
       # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
       use_tis: false 
       tis_imp_ratio_cap: -1.0
+
+      # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
+      sapo:
+        tau_pos: 1.0
+        tau_neg: 1.05 # default values used in the paper with Qwen3-30B-A3B-Base
 
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
@@ -360,9 +446,10 @@ Algorithm Configuration
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
-  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements "GSPO-token" variant from the paper.
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
+  - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
@@ -378,7 +465,6 @@ Algorithm Configuration
 - ``algorithm.eps_clip_high``: Upper bound for PPO clipping.
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
-- ``algorithm.normalize_reward``: Whether to normalize critic model output (i.e., values). When ``true``, the critic model learns the mean and standard deviation of the values during training and normalizes the values during forward pass.
 - ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
   - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
@@ -395,6 +481,16 @@ Algorithm Configuration
 
   - ``kl_cov_frac``: Percentage of tokens to apply KL regularization to.
   - ``ppo_kl_coef``: Coefficient for KL regularization term.
+
+- ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
+
+  - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
+  - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
+
+- ``algorithm.sapo``: SAPO (as proposed in `this paper <https://arxiv.org/pdf/2511.20347>`) parameters (only used when ``policy_loss_type`` is ``sapo``):
+
+  - ``tau_pos``: Temperature for gating function for tokens with positive advantages.
+  - ``tau_neg``: Temperature for gating function for tokens with negative (or zero) advantages.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -437,6 +533,7 @@ Generator Configuration
     backend: "vllm"
     weight_sync_backend: "nccl"
     inference_engine_tensor_parallel_size: 4
+    inference_engine_pipeline_parallel_size: 1
     inference_engine_expert_parallel_size: 1  
     inference_engine_data_parallel_size: 1
     n_samples_per_prompt: 5
@@ -451,6 +548,15 @@ Generator Configuration
     max_num_seqs: 1024
     remote_inference_engine_urls: ["127.0.0.1:8001"]
     max_turns: 1
+
+    # Custom chat template configuration if needed
+    chat_template:
+      source: "name"  # "name" or "file"
+      name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
+    
+    # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
+    chat_template_kwargs: {}
+
     engine_init_kwargs: {}
 
     override_existing_update_group: "auto" # "auto", "enable", "disable"
@@ -505,15 +611,15 @@ Inference Engine Configuration
 - ``generator.model_dtype``: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
 - ``generator.async_engine``:  Whether to use an asynchronous/ offline inference engine. Applicable only when ``backend="vllm"``.
 - ``generator.inference_engine_tensor_parallel_size``: Tensor parallel size for the inference engine.
+- ``generator.inference_engine_pipeline_parallel_size``: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
 - ``generator.inference_engine_expert_parallel_size``: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
-- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. NOTE: dp_size>1 is not yet supported: https://github.com/NovaSky-AI/SkyRL/issues/202
+- ``generator.inference_engine_data_parallel_size``: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
 - ``generator.gpu_memory_utilization``: GPU memory utilization for the inference engine. Applicable only for ``run_engines_locally=true``.
 - ``generator.vllm_v1_disable_multiproc``: If ``true``, this will set ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
 - ``generator.enable_prefix_caching``: Whether to enable prefix caching for the inference engine. Applicable only when ``backend="vllm"``. This can be left to the default ``true`` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
 - ``generator.enable_chunked_prefill``: Whether to enable chunked prefill for the inference engine. Applicable only when ``backend="vllm"``. With vLLM, this can be left to the default ``true`` in most cases.
 - ``generator.max_num_seqs``: Continous batching parameter for vLLM. Maximum number of sequences to pack into a batch.
 - ``generator.max_num_batched_tokens``: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
-
 
 Generation Parameters
 ~~~~~~~~~~~~~~~~~~~~~
@@ -533,9 +639,14 @@ Generation Parameters
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
 - ``generator.use_conversation_multi_turn``: Whether to use conversation format for multi-turn generation. If set to ``true`` then observations are appended to the chat history as a new turn. If set to ``false`` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus ``false`` can be used for full control over the exact tokens added after environment interaction.
 - ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
+- ``generator.chat_template``: Custom chat template configuration if needed.
+    - ``generator.chat_template.source``: Source of the chat template. Can be either ``name`` or ``file``.
+    - ``generator.chat_template.name_or_path``: Name or path of the chat template. If the source is ``name``, then it should be one of the supported templates in :code_link:`skyrl_train/generators/utils.py`. If the source is ``file``, then this field should be a path to a Jinja2 template file.
+- ``generator.chat_template_kwargs``: Chat templating kwargs to pass to ``tokenizer.apply_chat_template``. Applicable only for non-batched generation with ``generator.batched=false``.
 
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
+- ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

@@ -11,7 +11,7 @@
 
 `skyrl-train` is **for users who want to modify anything:**
 
-- **Quickly develop new environments** without modifying or understanding the training code .
+- **Quickly develop new environments** without modifying or understanding the training code.
 - **Modify the training execution plan** such as model placement, colocation or disaggregation of training and generation, and async RL.
 - **Implement custom trajectory generation** specific to your use-case, such as custom sampling methods, tree search, etc.
 - … make any other flexible modifications to the RL workflow!
@@ -20,14 +20,14 @@
 ## Key Features
 The `skyrl-train` package supports:
 - PPO and GRPO
-- Training Backends: FSDP, FSDP2, and DeepSpeed
+- Training Backends: FSDP, FSDP2, Megatron, and DeepSpeed
 - Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
 - Ulysses sequence parallelism for long-context training
 - Colocated or disaggregated training and generation (including on heterogeneous hardware)
 - Synchronous RL or async one-off pipelining
 - Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
 - Weight sync via NCCL, gloo, or checkpoint-and-load
-- Integration with `skyrl-gym` to run any environment in the gynasium
+- Integration with `skyrl-gym` to run any environment in the gymnasium
 - Sequence packing and Flash Attention 2
 
 ## Documentation
@@ -45,7 +45,7 @@ The only requirements are:
 - CUDA version 12.8
 - [uv](https://docs.astral.sh/uv/)
 
-If you're running on an existing Ray cluster, make sure to use Ray 2.48.0 and Python 3.12. If not, proceed with the installation instructions below.
+If you're running on an existing Ray cluster, make sure to use Ray 2.51.1 and Python 3.12. If not, proceed with the installation instructions below.
 
 
 First, clone the repository:
@@ -88,7 +88,7 @@ For detailed installation instructions, as well as more examples, please refer t
 
 ## Training on a new task or environment
 
-To implement a new task or environment using the SkyRL-Gym interface, please see our see our [Walkthrough Docs](https://skyrl.readthedocs.io/en/latest/tutorials/new_env.html).
+To implement a new task or environment using the SkyRL-Gym interface, please see our [Walkthrough Docs](https://skyrl.readthedocs.io/en/latest/tutorials/new_env.html).
 
 If you don't want to use the SkyRL-Gym interface, or you have an existing task or agentic pipeline implementation and just want to train with it on top of SkyRL, we recommend you create a simple custom [`Generator`](skyrl_train/generators/base.py), which requires implementing a single method, `generate()`. We have one example of a custom Generator at [`SkyRLGymGenerator`](skyrl_train/generators/skyrl_gym_generator.py) which executes environments written in the SkyRL-Gym interface. We are working to provide more example integrations of agent harnesses -- please reach out if you'd like yours to be one of them!
 

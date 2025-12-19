@@ -9,7 +9,7 @@ from unittest.mock import patch, Mock
 import torch
 
 
-from skyrl_train.utils.io import (
+from skyrl_train.utils.io.io import (
     is_cloud_path,
     makedirs,
     exists,
@@ -21,7 +21,6 @@ from skyrl_train.utils.io import (
     list_dir,
 )
 from skyrl_train.utils.trainer_utils import (
-    get_latest_checkpoint_step,
     list_checkpoint_dirs,
     cleanup_old_checkpoints,
 )
@@ -152,24 +151,6 @@ class TestCheckpointUtilities:
         found_dirs = list_checkpoint_dirs(non_existent_path)
         assert found_dirs == []
 
-    def test_get_latest_checkpoint_step_local(self):
-        """Test getting latest checkpoint step for local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            latest_file = os.path.join(temp_dir, "latest_ckpt_global_step.txt")
-
-            # Test non-existent file
-            assert get_latest_checkpoint_step(temp_dir) == 0
-
-            # Test with valid step
-            with open_file(latest_file, "w") as f:
-                f.write("1500")
-            assert get_latest_checkpoint_step(temp_dir) == 1500
-
-            # Test with whitespace
-            with open_file(latest_file, "w") as f:
-                f.write("  2000  \n")
-            assert get_latest_checkpoint_step(temp_dir) == 2000
-
     def test_cleanup_old_checkpoints_local(self):
         """Test cleanup of old checkpoints for local paths."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -213,7 +194,7 @@ class TestCheckpointUtilities:
 class TestCloudFileOperationsMocked:
     """Test cloud file operations with mocked fsspec."""
 
-    @patch("skyrl_train.utils.io._get_filesystem")
+    @patch("skyrl_train.utils.io.io._get_filesystem")
     def test_list_checkpoint_dirs_cloud(self, mock_get_filesystem):
         """Test list_checkpoint_dirs with cloud storage."""
         mock_fs = Mock()
@@ -234,7 +215,7 @@ class TestCloudFileOperationsMocked:
         expected = ["global_step_1000", "global_step_2000"]
         assert sorted(result) == sorted(expected)
 
-    @patch("skyrl_train.utils.io._get_filesystem")
+    @patch("skyrl_train.utils.io.io._get_filesystem")
     def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem):
         """Test cleanup_old_checkpoints with cloud storage."""
         mock_fs = Mock()
@@ -295,7 +276,9 @@ class TestCheckpointScenarios:
             assert exists(latest_checkpoint_file)
 
             # Verify latest step can be retrieved
-            assert get_latest_checkpoint_step(temp_dir) == global_step
+            with open_file(latest_checkpoint_file, "r") as f:
+                ckpt_iteration = int(f.read().strip())
+            assert ckpt_iteration == global_step
 
 
 class TestContextManagers:
@@ -323,8 +306,8 @@ class TestContextManagers:
             with open(test_file, "r") as f:
                 assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.upload_directory")
-    @patch("skyrl_train.utils.io.is_cloud_path")
+    @patch("skyrl_train.utils.io.io.upload_directory")
+    @patch("skyrl_train.utils.io.io.is_cloud_path")
     def test_local_work_dir_cloud_path(self, mock_is_cloud_path, mock_upload_directory):
         """Test local_work_dir with a cloud path."""
         mock_is_cloud_path.return_value = True
@@ -369,8 +352,8 @@ class TestContextManagers:
                 with open(read_file, "r") as f:
                     assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.download_directory")
-    @patch("skyrl_train.utils.io.is_cloud_path")
+    @patch("skyrl_train.utils.io.io.download_directory")
+    @patch("skyrl_train.utils.io.io.is_cloud_path")
     def test_local_read_dir_cloud_path(self, mock_is_cloud_path, mock_download_directory):
         """Test local_read_dir with a cloud path."""
         mock_is_cloud_path.return_value = True

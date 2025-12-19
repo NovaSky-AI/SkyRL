@@ -1,14 +1,31 @@
 import torch
-from loguru import logger
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
 from skyrl_train.inference_engines.base import ConversationType
+from omegaconf import DictConfig
+from loguru import logger
+from skyrl_gym.metrics import aggregate_for_environment
 
 CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 thinking mode to remove think tokens similar to generation phase
-    "qwen3_thinking": (
+    # chat template for qwen3 that preserves thinking tokens
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # chat template for qwen3 that strips non-last-turn thinking tokens (same as the official Qwen3 chat
+    # template but we add `generation` and `endgeneration` tags)
+    "qwen3_without_thinking": (
         "{% for message in messages %}"
         "{% if (message['role'] != 'assistant') %}"
         "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
@@ -27,14 +44,64 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
+    # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
+    "qwen2_5_with_generation_tag_simplified": (
+        "{% for message in messages %}"
+        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
+        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
+        "{% elif message.role == 'assistant' %}"
+        "{{ '<|im_start|>' + message.role + '\n'}}"
+        "{% generation %}"
+        "{{ message.content + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{ '\n' }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n' }}"
+        "{% endif %}"
+    ),
 }
 
 
-def get_custom_chat_template(model_name: str) -> str:
-    if "Qwen3" in model_name:
-        return CUSTOM_CHAT_TEMPLATES["qwen3_thinking"]
-    else:
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
+    """
+    Get custom chat template based on the new config structure.
+
+    Args:
+        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
+
+    Returns:
+        Chat template string or None
+    """
+    if chat_template_config is None:
         return None
+
+    source = chat_template_config.get("source")
+    if not source:
+        raise ValueError("'source' is required in chat_template_config")
+
+    name_or_path = chat_template_config.get("name_or_path")
+    if not name_or_path:
+        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
+
+    if source == "name":
+        if name_or_path in CUSTOM_CHAT_TEMPLATES:
+            return CUSTOM_CHAT_TEMPLATES[name_or_path]
+        else:
+            raise ValueError(
+                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
+            )
+    elif source == "file":
+        try:
+            with open(name_or_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError as e:
+            raise ValueError(f"Template file '{name_or_path}' not found") from e
+        except OSError as e:
+            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
+    else:
+        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def get_generation_prompt_ids(tokenizer, custom_chat_template=None) -> List[int]:
@@ -93,9 +160,10 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
     """
-    Used in eval to concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches.
 
-    `rollout_metrics` are not concatenated because they are already aggregated.
+    We only aggregate rollout metrics the can deduced by responses and rewards, but not
+    those that use `env_metrics` or `env_classes`.
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -108,14 +176,37 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
         "rewards": sum([output["rewards"] for output in generator_outputs], []),
         "loss_masks": sum([output["loss_masks"] for output in generator_outputs], []),
+        "stop_reasons": (
+            sum([output["stop_reasons"] for output in generator_outputs], [])
+            if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
+            else None
+        ),
         "rollout_logprobs": (
             sum([output["rollout_logprobs"] for output in generator_outputs], [])
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
     }
-    if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None:
-        result["stop_reasons"] = sum([output["stop_reasons"] for output in generator_outputs], [])
+
+    # propagate additional keys with list values as-is
+    additional_keys = [
+        key for key in generator_outputs[0] if key not in result and isinstance(generator_outputs[0][key], list)
+    ]
+    if len(additional_keys):
+        logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
+    for key in additional_keys:
+        result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
+
+    # Re-aggregate rollout metrics
+    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    result["rollout_metrics"] = rollout_metrics
+
+    # Validate the generator output using the number of prompts
+    # Import here to avoid circular dependency.
+    from skyrl_train.utils.trainer_utils import validate_generator_output
+
+    num_prompts = len(result["prompt_token_ids"])
+    validate_generator_output(num_prompts, result)
 
     return result
 
@@ -139,7 +230,24 @@ def apply_overlong_filtering(
     ]
 
 
-def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], List[List[float]]]):
+def get_rollout_metrics(
+    responses: List[List[int]],
+    rewards: Union[List[float], List[List[float]]],
+    env_metrics: Optional[List[Dict[str, Any]]] = None,
+    env_classes: Optional[List[str]] = None,
+):
+    """
+    Computes rollout metrics including token statistics and optional environment-specific metrics.
+
+    Args:
+        responses: List of token ID sequences for each response
+        rewards: List of rewards (either per-trajectory or per-token)
+        env_metrics: Optional list of environment-specific metrics for each trajectory
+        env_classes: Optional list of environment class names for each trajectory
+
+    Returns:
+        Dictionary of aggregated metrics
+    """
     num_tokens_arr = np.array([len(response) for response in responses])
     # Support both response-level and token-level rewards
     flat_rewards = []
@@ -158,7 +266,7 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
     # average tokens for zero rewards
     avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
 
-    return {
+    rollout_metrics = {
         "generate/min_num_tokens": np.min(num_tokens_arr).item(),
         "generate/max_num_tokens": np.max(num_tokens_arr).item(),
         "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
@@ -167,7 +275,76 @@ def get_rollout_metrics(responses: List[List[int]], rewards: Union[List[float], 
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
 
-def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None):
+    if env_metrics is not None and env_classes is not None:
+        env_to_metrics = defaultdict(list)
+        for i, metrics in enumerate(env_metrics):
+            env_to_metrics[env_classes[i]].append(metrics)
+        for env_name, metrics in env_to_metrics.items():
+            # Aggregate metrics across all trajectories for the same environment
+            agg = aggregate_for_environment(env_name, metrics)
+            for key, value in agg.items():
+                rollout_metrics[f"environment/{key}"] = value
+
+    return rollout_metrics
+
+
+def prepare_generator_input(
+    prompts: List[Any],
+    n_samples_per_prompt: int,
+    sampling_params: Dict[str, Any],
+    default_env_class: str,
+    training_phase: TrainingPhase,
+    global_step: int,
+) -> Tuple[GeneratorInput, List[str]]:
+    """Prepares the generator input for training and eval
+
+    Args:
+        prompts (List[Any]): list of prompts
+        n_samples_per_prompt (int): how many samples to create per prompt
+        sampling_params (Dict[str, Any]): sampling parameters
+        default_env_class (str): env class to use if env class missing from prompts
+        training_phase (TrainingPhase): training or eval
+        global_step (int): current global step
+
+    Returns:
+        Tuple[GeneratorInput, List[str]]: generator input and list of uuids
+    """
+
+    all_prompts = [prompt["prompt"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+
+    all_envs = [
+        prompt["env_class"] if prompt["env_class"] is not None else default_env_class
+        for prompt in prompts
+        for _ in range(n_samples_per_prompt)
+    ]
+
+    # all the other columns are env_extras
+    env_extras = [prompt["env_extras"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+
+    # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
+    trajectory_ids = []
+    uids = []
+    for _, prompt in enumerate(prompts):
+        uid: str = prompt["uid"]
+
+        # Create TrajectoryID for each repetition
+        for repetition_id in range(n_samples_per_prompt):
+            trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
+            uids.append(uid)
+
+    generator_input: GeneratorInput = {
+        "prompts": all_prompts,
+        "env_classes": all_envs,
+        "env_extras": env_extras,
+        "sampling_params": sampling_params,
+        "trajectory_ids": trajectory_ids,
+        "batch_metadata": BatchMetadata(global_step=global_step, training_phase=training_phase),
+    }
+
+    return generator_input, uids
+
+
+def encode_messages_subset(messages: ConversationType, tokenizer):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -204,7 +381,6 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        chat_template=custom_chat_template,
     )
 
     full_conversation = base_conversation + messages
@@ -212,13 +388,12 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        chat_template=custom_chat_template,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None):
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -238,7 +413,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer, custom_chat_template=custom_chat_template)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -249,7 +424,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer, custom_chat_template=custom_chat_template)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.
@@ -265,13 +440,10 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
             # 1) generation prompt IDs -- mask is 0
             # 2) tokens actually generated by the assistant (including the EOS) -- mask is 1
             # 3) tokens after the EOS token (the `\n` in Qwen models) -- mask is 0
-            if cur_token_ids[: len(generation_prompt_ids)] != generation_prompt_ids:
-                # NOTE(Charlie): this is possible if the assistant message, say generated a \n at start.
-                # Now after encoding, we would combine \n\n to a single token.
-                logger.warning(
-                    f"Assistant message tokens should start with generation prompt. "
-                    f"Expected {generation_prompt_ids}, got {cur_token_ids[:len(generation_prompt_ids)]}"
-                )
+            assert cur_token_ids[: len(generation_prompt_ids)] == generation_prompt_ids, (
+                f"Assistant message tokens should start with generation prompt. "
+                f"Expected {generation_prompt_ids}, got {cur_token_ids[:len(generation_prompt_ids)]}"
+            )
             if tokenizer.eos_token_id in cur_token_ids:
                 last_eos_token_index = len(cur_token_ids) - 1 - cur_token_ids[::-1].index(tokenizer.eos_token_id)
                 generated_token_ids = cur_token_ids[len(generation_prompt_ids) : last_eos_token_index + 1]

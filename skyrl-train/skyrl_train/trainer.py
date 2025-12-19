@@ -5,14 +5,16 @@ from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
+from ray import ObjectRef
 import torch
 from loguru import logger
 from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
-from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
+from collections import defaultdict
 
+import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -20,16 +22,14 @@ from skyrl_train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     GeneratorInterface,
-    TrajectoryID,
-    BatchMetadata,
-    TrainingPhase,
 )
-from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
+import copy
+from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.utils import ppo_utils
-from skyrl_train.utils import trainer_utils, io
+from skyrl_train.utils import ppo_utils, trainer_utils
+from skyrl_train.utils.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.ppo_utils import (
@@ -42,7 +42,6 @@ from skyrl_train.utils.ppo_utils import (
 )
 from skyrl_train.distributed.dispatch import MeshRank, concatenate_outputs_after_mesh_dispatch, ActorInfo
 from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.weights_manager import InferenceWeightsManager, ConditionalWeightsManager
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.trainer_utils import (
@@ -51,14 +50,15 @@ from skyrl_train.utils.trainer_utils import (
     get_node_ids,
     extract_step_from_path,
     validate_consistency_for_latest_checkpoint,
-    calculate_per_dataset_metrics,
-    dump_per_dataset_eval_results,
     validate_generator_output,
     GLOBAL_STEP_PREFIX,
     ResumeMode,
     DynamicSamplingState,
+    build_dataloader,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.evaluate import evaluate, evaluate_step_wise
+from skyrl_train.utils.logging_utils import log_example
 
 
 class RayPPOTrainer:
@@ -74,16 +74,20 @@ class RayPPOTrainer:
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg
+        self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.generator = generator
-        self.train_dataloader = (
-            self.build_dataloader(train_dataset, is_train=True) if train_dataset is not None else None
+        self.train_dataloader = None
+        self.total_training_steps = None
+        self._build_train_dataloader_and_compute_training_steps()
+
+        self.eval_dataloader = (
+            build_dataloader(self.cfg, eval_dataset, is_train=False) if eval_dataset is not None else None
         )
-        self.eval_dataloader = self.build_dataloader(eval_dataset, is_train=False) if eval_dataset is not None else None
         self.colocate_pg = colocate_pg
 
         self.resume_mode = ResumeMode(cfg.trainer.resume_mode)
@@ -96,169 +100,85 @@ class RayPPOTrainer:
         self.policy_model: PPORayActorGroup = None
         self.critic_model: Optional[PPORayActorGroup] = None
         self.ref_model: Optional[PPORayActorGroup] = None
-        self.reward_model: Optional[PPORayActorGroup] = None
         # used for checkpoint cleanup
         self._node_ids: Optional[List[str]] = None
-
-        self.weights_manager: InferenceWeightsManager = None
-        self.eval_weights_manager: InferenceWeightsManager = None
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
 
-    def build_dataloader(self, dataset: PromptDataset, is_train=True):
+    def _build_train_dataloader_and_compute_training_steps(self):
         """
-        Build the dataloader for the training or evaluation dataset
+        Hook for constructing the training dataloader. Subclasses can override
+        this to customize dataloader behavior. For instance, fully async training
+        needs a batch size of 1, among other features.
+        Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
         """
-        # prepare dataloader
-        batch_size = self.cfg.trainer.train_batch_size if is_train else self.cfg.trainer.eval_batch_size
-
-        # Seed the dataloader for reproducibility.
-        seeded_generator = torch.Generator()
-        seeded_generator.manual_seed(self.cfg.trainer.seed)
-
-        dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=True if is_train else False,
-            collate_fn=dataset.collate_fn,
-            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-            num_workers=0 if self.cfg.generator.enable_http_endpoint else 8,
-            drop_last=True if is_train else False,
-            generator=seeded_generator,
-        )
-        if is_train:
-            self.total_training_steps = len(dataloader) * self.cfg.trainer.epochs
-            print(f"Total steps: {self.total_training_steps}")
-        else:
-            print(f"Validation set size: {len(dataloader)}")
-
-        return dataloader
+        self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
+        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
 
     @torch.no_grad()
-    async def eval(self, eval_only: bool = False) -> Dict[str, float]:
+    async def eval(self) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
         The eval metrics are recorded after having finished training `self.global_step` steps.
         Metrics recorded in global_step 0 corresponds to evaluations before training.
 
-        Args:
-            eval_only: True for eval-only (ie, non-training) runs
-
         Returns:
             A dictionary of evaluation metrics.
         """
-
-        # 0. Make a copy of self.all_metrics (will restore at the end)
-        # eval() might accidentally mutate `self.all_metrics` since it is mutated in
-        # methods like `self.generate()`.
-        all_metrics_copy = self.all_metrics.copy()
-
-        # 1. Get all generator outputs
-        generator_outputs: List[GeneratorOutput] = []
-        concat_all_envs: List[str] = []
-        concat_env_extras: List[Dict[str, Any]] = []
-        concat_uids: List[str] = []
-        sampling_params = self.cfg.generator.eval_sampling_params
-        pbar = tqdm(total=len(self.eval_dataloader), initial=0, desc="Evaluation Progress")
-        for _, prompts in enumerate(self.eval_dataloader):
-            pbar.update(1)
-            generator_input, uids = self._prepare_generator_input(
-                self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params, "eval"
+        if self.cfg.trainer.step_wise_training:
+            eval_metrics = await evaluate_step_wise(
+                eval_dataloader=self.eval_dataloader,
+                generator=self.generator,
+                cfg=self.cfg,
+                global_step=self.global_step,
+                tokenizer=self.tokenizer,
             )
-            generator_output: GeneratorOutput = await self.generate(generator_input)
-            generator_outputs.append(generator_output)
-            concat_all_envs.extend(generator_input["env_classes"])
-            concat_env_extras.extend(generator_input["env_extras"])
-            concat_uids.extend(uids)
-        concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
-
-        # Extract data_sources from env_extras
-        concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-        vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("Eval output example: ", vis)
-
-        # 2. Group data by data source and calculate per-dataset metrics
-        eval_metrics = calculate_per_dataset_metrics(
-            concat_generator_outputs, concat_uids, concat_data_sources, self.cfg.generator.eval_n_samples_per_prompt
-        )
-
-        # 3. Calculate overall metrics across all datasets
-        overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
-        eval_metrics.update(
-            {
-                "eval/all/avg_score": overall_avg_score,
-                f"eval/all/pass_at_{self.cfg.generator.eval_n_samples_per_prompt}": overall_pass_at_n,
-            }
-        )
-
-        # 4. Prepare dumping data
-        # TODO[Ben] update this to be cloud-compatible
-        if self.cfg.trainer.dump_eval_results:
-            with Timer("dump_eval_results"):
-                data_save_dir = (
-                    Path(self.cfg.trainer.export_path)
-                    / "dumped_evals"
-                    / ("eval_only" if eval_only else f"global_step_{self.global_step}_evals")
-                )
-                data_save_dir.mkdir(parents=True, exist_ok=True)
-                dump_per_dataset_eval_results(
-                    data_save_dir,
-                    self.tokenizer,
-                    concat_generator_outputs,
-                    concat_data_sources,
-                    concat_all_envs,
-                    concat_env_extras,
-                    eval_metrics,
-                )
-
-        # 5. Restore self.all_metrics
-        self.all_metrics = all_metrics_copy
-
+        else:
+            eval_metrics = await evaluate(
+                eval_dataloader=self.eval_dataloader,
+                generator=self.generator,
+                cfg=self.cfg,
+                global_step=self.global_step,
+                tokenizer=self.tokenizer,
+            )
         return eval_metrics
 
     async def train(self):
         """
         Main training loop for PPO
         """
-
-        self.weights_manager = InferenceWeightsManager(
-            self.policy_model,
-            self.inference_engine_client,
-            self.cfg.trainer.placement.colocate_all,
-            sleep_on_exit=True,
-        )
-        self.eval_weights_manager = InferenceWeightsManager(
-            self.policy_model,
-            self.inference_engine_client,
-            self.cfg.trainer.placement.colocate_all,
-            sleep_on_exit=False,
-        )
-
         # Initialize weight sync state between policy model and inference engines.
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
         # Load policy model to GPU before loading checkpoint.
-        if self.cfg.trainer.placement.colocate_all:
+        if self.colocate_all:
             self.policy_model.backload_to_gpu()
 
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.global_step = self.load_checkpoints()
+                self.global_step, _ = self.load_checkpoints()
+
+        if self.colocate_all:
+            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
+        with Timer("sync_weights"):
+            ray.get(self.sync_policy_weights_to_inference_engines())
+        if self.colocate_all:
+            with Timer("offload_policy_model_to_cpu"):
+                self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+            asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
 
         # Eval before training
-        inference_engine_is_active = False
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
-            async with self.eval_weights_manager:
-                with Timer("eval", self.all_timings):
-                    eval_metrics = await self.eval()
-                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
-            inference_engine_is_active = True
+            with Timer("eval", self.all_timings):
+                eval_metrics = asyncio.run(self.eval())
+                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -271,57 +191,51 @@ class RayPPOTrainer:
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
+                    # for colocate_all=true, inference engine is always on GPU when starting the training step
 
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
-                    generator_input, uids = self._prepare_generator_input(
-                        self.cfg.generator.n_samples_per_prompt,
+                    generator_input, uids = prepare_generator_input(
                         rand_prompts,
-                        self.cfg.generator.sampling_params,
+                        self.cfg.generator.n_samples_per_prompt,
+                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        self.cfg.environment.env_class,
                         "train",
+                        self.global_step,
                     )
 
-                    # if the inference engine is already active due to continuing sampling or eval, we don't want to trigger weight management
-                    weights_manager = ConditionalWeightsManager(
-                        self.weights_manager, condition=not inference_engine_is_active
-                    )
+                    # 1.1 generation phase
+                    with Timer("generate", self.all_timings):
+                        generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
 
-                    # NOTE: Policy model is on GPU at the beginning of each training step, unless eval was run prior to the step
-                    # in which case the inference engine is active and the policy model is on CPU.
-                    # After exiting the context manager, the policy model is on CPU with `colocate_all` enabled
-                    # Policy model stays on cpu because the training loop will carefully backload different models depending on colocation strategy
-                    async with weights_manager:
-                        # 1.1 generation phase
-                        with Timer("generate", self.all_timings):
-                            generator_output: GeneratorOutput = await self.generate(generator_input)
+                    if self.cfg.trainer.step_wise_training:
+                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
+                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
+                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
 
-                        # dynamic sampling
-                        if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                            generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
-                            # update weights manager condition to ensure we trigger sleep only when we are not continuing sampling
-                            weights_manager.update_condition(condition=not keep_sampling)
-                            inference_engine_is_active = keep_sampling
-                            if keep_sampling:  # continue sampling
-                                # update progress bar for current batch (but not global step)
-                                pbar.update(1)
-                                continue
+                    # dynamic sampling
+                    if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
+                        generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
+                        if keep_sampling:  # continue sampling
+                            # update progress bar for current batch (but not global step)
+                            pbar.update(1)
+                            continue
 
-                        # if we are not continuing sampling, we trigger sleep and mark inference engine as inactive
-                        weights_manager.update_condition(True)
-                        inference_engine_is_active = False
+                    if self.colocate_all:
+                        # if we are not continuing sampling, we sleep the inference engine
+                        asyncio.run(self.inference_engine_client.sleep())
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
-                    vis_prompt = self.tokenizer.decode(generator_output["prompt_token_ids"][0])
-                    vis_response = self.tokenizer.decode(generator_output["response_ids"][0])
-                    logger.info(
-                        f"Example:\n"
-                        f"  Prompt: {generator_input['prompts'][0]}\n"
-                        f"  Input decoded: {vis_prompt}\n"
-                        f"  Output decoded: {vis_response}"
+                    vis = self.tokenizer.decode(generator_output["response_ids"][0])
+                    log_example(
+                        logger,
+                        prompt=generator_input["prompts"][0],
+                        response=vis,
+                        reward=generator_output["rewards"][0],
                     )
 
                     with Timer("convert_to_training_input", self.all_timings):
@@ -341,7 +255,7 @@ class RayPPOTrainer:
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
                         # remove some unwanted keys
-                        for key in ["custom_rewards", "rm_rewards"]:
+                        for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
 
@@ -358,15 +272,39 @@ class RayPPOTrainer:
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
-                # 5. conditionally save checkpoints and hf model
-                if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                    with Timer("save_checkpoints", self.all_timings):
-                        self.save_checkpoints()
-                if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                    with Timer("save_hf_model", self.all_timings):
-                        self.save_models()
+                    # 5. conditionally save checkpoints and hf model
+                    if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                        with Timer("save_checkpoints", self.all_timings):
+                            self.save_checkpoints()
+                    if (
+                        self.cfg.trainer.hf_save_interval > 0
+                        and self.global_step % self.cfg.trainer.hf_save_interval == 0
+                    ):
+                        with Timer("save_hf_model", self.all_timings):
+                            self.save_models()
 
-                # 6. set logs
+                    # 6. conditionally sync policy and ref at the end of the epoch
+                    if (
+                        self.cfg.trainer.update_ref_every_epoch
+                        and self.ref_model is not None
+                        and iter == len(self.train_dataloader) - 1
+                        and epoch != self.cfg.trainer.epochs - 1  # skip updating ref at the end of the last epoch
+                    ):
+                        with Timer("update_ref_with_policy", self.all_timings):
+                            self.update_ref_with_policy()
+
+                    # 7. sync weights to inference engines
+                    if self.colocate_all:
+                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                        asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
+                    with Timer("sync_weights", self.all_timings):
+                        ray.get(self.sync_policy_weights_to_inference_engines())
+                    if self.colocate_all:
+                        with Timer("offload_policy_model_to_cpu"):
+                            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+                        asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
+
+                # 8. set logs
                 logger.info(status)
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
@@ -374,11 +312,9 @@ class RayPPOTrainer:
                     self.global_step % self.cfg.trainer.eval_interval == 0
                     or self.global_step == self.total_training_steps
                 ):
-                    async with self.eval_weights_manager:
-                        with Timer("eval", self.all_timings):
-                            eval_metrics = await self.eval()
-                            self.all_metrics.update(eval_metrics)
-                    inference_engine_is_active = True
+                    with Timer("eval", self.all_timings):
+                        eval_metrics = asyncio.run(self.eval())
+                        self.all_metrics.update(eval_metrics)
 
                 log_payload = {
                     **self.all_metrics,
@@ -395,16 +331,10 @@ class RayPPOTrainer:
 
                 del training_input, generator_output
 
-            # Ensure that the policy model is on GPU at the end of every epoch
-            if inference_engine_is_active and self.cfg.trainer.placement.colocate_all:
-                await self.inference_engine_client.sleep()
-                self.policy_model.backload_to_gpu()
-                inference_engine_is_active = False
-            if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
-                with Timer("update_ref_with_policy", self.all_timings):
-                    self.update_ref_with_policy()
-
         pbar.close()
+        if self.colocate_all:
+            asyncio.run(self.inference_engine_client.sleep())
+            self.policy_model.backload_to_gpu()
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
                 self.save_checkpoints()
@@ -422,69 +352,14 @@ class RayPPOTrainer:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
         if self.ref_model is not None:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-        if self.reward_model is not None:
-            dp_size = math.lcm(dp_size, self.reward_model.actor_infos[0].rank.dp_size)
         return entries[: (len(entries) // dp_size) * dp_size]
 
-    def _prepare_generator_input(
-        self,
-        n_samples_per_prompt: int,
-        rand_prompts: List[Any],
-        sampling_params: Dict[str, Any],
-        training_phase: TrainingPhase,
-    ) -> Tuple[GeneratorInput, List[str]]:
-        """
-        Replicate prompts if needed and generate uids.
-        """
-        all_prompts = sum([[prompt["prompt"]] * n_samples_per_prompt for prompt in rand_prompts], [])
-
-        all_envs = sum(
-            [
-                [prompt["env_class"] if prompt["env_class"] is not None else self.cfg.environment.env_class]
-                * n_samples_per_prompt
-                for prompt in rand_prompts
-            ],
-            [],
-        )
-
-        # all the other columns are env_extras
-        env_extras = sum(
-            [[prompt["env_extras"]] * n_samples_per_prompt for prompt in rand_prompts],
-            [],
-        )
-        request_sampling_params = get_sampling_params_for_backend(self.cfg.generator.backend, sampling_params)
-
-        # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
-        trajectory_ids = []
-        uids = []
-        for prompt_idx, prompt in enumerate(rand_prompts):
-            uid: str = prompt["uid"]
-
-            # Create TrajectoryID for each repetition
-            for repetition_id in range(n_samples_per_prompt):
-                trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
-                uids.append(uid)
-
-        generator_input: GeneratorInput = {
-            "prompts": all_prompts,
-            "env_classes": all_envs,
-            "env_extras": env_extras,
-            "sampling_params": request_sampling_params,
-            "trajectory_ids": trajectory_ids,
-            "batch_metadata": BatchMetadata(global_step=self.global_step, training_phase=training_phase),
-        }
-
-        return generator_input, uids
-
-    def build_models(self, PolicyWorker, CriticWorker, RefWorker, RewardWorker=None):
+    def build_models(self, PolicyWorker, CriticWorker, RefWorker):
         """
         Initialize the actors for training, and handle colocation logic
         """
         cfg = self.cfg
         pg = None
-
-        if RewardWorker is not None and cfg.trainer.reward.model.path:
-            raise NotImplementedError("reward models are not supported yet")
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
@@ -495,6 +370,7 @@ class RayPPOTrainer:
             num_rollout_gpus = (
                 cfg.generator.num_inference_engines
                 * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
                 * cfg.generator.inference_engine_data_parallel_size
             )
             assert (
@@ -547,21 +423,6 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
-            # reward model
-            if RewardWorker is not None and cfg.trainer.reward.model.path:
-                reward_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.reward_num_nodes,
-                    cfg.trainer.placement.reward_num_gpus_per_node,
-                    RewardWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.2,
-                    colocate_all=True,
-                    sequence_parallel_size=cfg.trainer.reward.sequence_parallel_size,
-                )
-            else:
-                reward_model = None
-
         else:
             if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
                 assert (
@@ -603,57 +464,23 @@ class RayPPOTrainer:
             else:
                 ref_model = None
 
-            # if colocated, create placement group for critic and reward model explicitly.
-            pg = None
-            if cfg.trainer.placement.colocate_critic_reward:
-                assert (
-                    cfg.trainer.placement.critic_num_nodes == cfg.trainer.placement.reward_num_nodes
-                    and cfg.trainer.placement.critic_num_gpus_per_node == cfg.trainer.placement.reward_num_gpus_per_node
-                ), "num_nodes and num_gpus_per_node must be the same when colocate critic and reward model."
-
-                bundles = [
-                    {
-                        "GPU": cfg.trainer.placement.critic_num_gpus_per_node,
-                        "CPU": cfg.trainer.placement.critic_num_gpus_per_node,
-                    }
-                    for _ in range(cfg.trainer.placement.critic_num_nodes)
-                ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(
                     cfg,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.75 if pg else 1,
+                    num_gpus_per_actor=1,
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
                 )
             else:
                 critic_model = None
 
-            # reward model
-            if RewardWorker is not None and cfg.trainer.reward.model.path:
-                reward_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.reward_num_nodes,
-                    cfg.trainer.placement.reward_num_gpus_per_node,
-                    RewardWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.25 if pg else 1,
-                    colocate_all=False,
-                    sequence_parallel_size=cfg.trainer.reward.sequence_parallel_size,
-                )
-            else:
-                reward_model = None
-
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
-                refs.extend(ref_model.async_init_model(cfg.trainer.policy.model.path))
+                refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
@@ -667,13 +494,11 @@ class RayPPOTrainer:
                         num_training_steps=self.total_training_steps,
                     )
                 )
-            if cfg.trainer.reward.model.path:
-                refs.extend(reward_model.async_init_model(cfg.trainer.reward.model.path))
             ray.get(refs)
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.policy.model.path))
+                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
                 ref_model.offload_to_cpu()
             ray.get(
                 policy_model.async_init_model(
@@ -691,16 +516,12 @@ class RayPPOTrainer:
                     )
                 )
                 critic_model.offload_to_cpu()
-            if cfg.trainer.reward.model.path:
-                ray.get(reward_model.async_init_model(cfg.trainer.reward.model.path))
-                reward_model.offload_to_cpu()
 
         self.policy_model: PPORayActorGroup = policy_model
         self.critic_model: Optional[PPORayActorGroup] = critic_model
         self.ref_model: Optional[PPORayActorGroup] = ref_model
-        self.reward_model: Optional[PPORayActorGroup] = reward_model
 
-        logger.info("init policy/ref/critic/reward models done")
+        logger.info("init policy/ref/critic models done")
 
     def init_weight_sync_state(self):
         """
@@ -717,7 +538,7 @@ class RayPPOTrainer:
         """Converts lists to a padded batch of tensors for training"""
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
         response_ids: List[List[int]] = generator_output["response_ids"]
-        custom_rewards: List[List[float]] = generator_output["rewards"]
+        rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
@@ -726,14 +547,14 @@ class RayPPOTrainer:
             sequences_tensor,
             attention_masks_tensor,
             response_masks_tensor,
-            custom_rewards_tensor,
+            rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
             response_ids,
-            custom_rewards,
+            rewards,
             loss_masks,
             logprobs,
         )
@@ -748,19 +569,40 @@ class RayPPOTrainer:
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
                 "attention_mask": attention_masks_tensor,
                 "response_mask": response_masks_tensor,
-                "custom_rewards": custom_rewards_tensor,
+                "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "is_last_step": (
+                    torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
+                    if generator_output.get("is_last_step", None) is not None
+                    else None
+                ),
             },
         )
-        training_input.metadata = {
-            "uids": uids,
-        }
+        training_input.metadata = {"uids": uids}
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        training_input.metadata["avg_response_length"] = sum(
-            len(sample_response_ids) for sample_response_ids in response_ids
-        ) / len(response_ids)
+        if self.cfg.trainer.step_wise_training:
+            assert (
+                "trajectory_ids" in generator_output
+            ), "Expected `trajectory_ids` in generator output for step wise training"
+            training_input.metadata["trajectory_ids"] = [
+                trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
+            ]
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids)
+                for sample_response_ids, is_last_step in zip(response_ids, generator_output["is_last_step"])
+                if is_last_step
+            ) / len(response_ids)
+        else:
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids) for sample_response_ids in response_ids
+            ) / len(response_ids)
+
+        logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
+        training_input = self.pad_batch(training_input)
+        logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
+
         return training_input
 
     @torch.no_grad()
@@ -783,7 +625,8 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        validate_generator_output(input_batch, generator_output)
+        if not self.cfg.trainer.step_wise_training:
+            validate_generator_output(len(input_batch["prompts"]), generator_output)
 
         return generator_output
 
@@ -794,11 +637,29 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
+        generator_output_for_metrics = generator_output
+        uids_for_metrics = uids
+        if self.cfg.trainer.step_wise_training:
+            generator_output_for_metrics = defaultdict(list)
+            for key in generator_output:
+                if isinstance(generator_output[key], list):
+                    generator_output_for_metrics[key] = [
+                        generator_output[key][i]
+                        for i in range(len(generator_output[key]))
+                        if generator_output["is_last_step"][i]
+                    ]
+            uids_for_metrics = [
+                uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
+            ]
+
+        # only use `generator_output_for_metrics` for metrics calculation
+        # For step-wise training, we only calculate metrics for the last step of each trajectory
         mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
-            generator_output,
-            uids,
+            generator_output_for_metrics,
+            uids_for_metrics,
         )
 
+        # these use the full generator output
         rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
         responses: List[List[int]] = generator_output["response_ids"]
         per_token_rewards: List[List[float]] = []
@@ -835,39 +696,79 @@ class RayPPOTrainer:
             - `["sequences"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["response_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
             - `["loss_mask"]`: Integer[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size"]
-            - `["rm_rewards"]`: Float[torch.Tensor, "batch_size"]
-            - `["custom_rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
+            - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `.metadata["uids"]`: List[str]
 
         Adds:
             - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        # TODO (erictang000): we are just supporting custom rewards for now
-        token_level_rewards = data["custom_rewards"]
+        token_level_rewards = data["rewards"]
 
-        advantages, returns = ppo_utils.compute_advantages_and_returns(
-            token_level_rewards=token_level_rewards,
-            response_mask=data["response_mask"],
-            index=data.metadata["uids"],
-            adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
-            config=self.cfg.trainer.algorithm,
-            values=data["values"],
-            gamma=self.cfg.trainer.algorithm.gamma,
-            lambd=self.cfg.trainer.algorithm.lambd,
-            grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
-        )
+        if self.cfg.trainer.step_wise_training:
+            is_last_step = data["is_last_step"].bool()
+            response_mask = data["response_mask"]
+            index = np.array(data.metadata["uids"])
+            adv_estimator = self.cfg.trainer.algorithm.advantage_estimator
+            config = self.cfg.trainer.algorithm
+            values = data["values"]
+            gamma = self.cfg.trainer.algorithm.gamma
+            lambd = self.cfg.trainer.algorithm.lambd
+            grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
+            last_step_rewards = token_level_rewards[is_last_step]
+            # compatible with any advantage estimator
+            last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
+                token_level_rewards=last_step_rewards,
+                response_mask=response_mask[is_last_step],
+                index=index[is_last_step.cpu().numpy()],
+                adv_estimator=adv_estimator,
+                values=values[is_last_step] if values is not None else None,
+                config=config,
+                gamma=gamma,
+                lambd=lambd,
+                grpo_norm_by_std=grpo_norm_by_std,
+            )
+            traj_ids = (
+                torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
+            )
+            num_groups = traj_ids[-1].item() + 1
+            assert num_groups == len(
+                last_step_advantages
+            ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
+            advantages = last_step_advantages[traj_ids]
+            returns = last_step_returns[traj_ids]
+        else:
+            advantages, returns = ppo_utils.compute_advantages_and_returns(
+                token_level_rewards=token_level_rewards,
+                response_mask=data["response_mask"],
+                index=data.metadata["uids"],
+                adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+                config=self.cfg.trainer.algorithm,
+                values=data["values"],
+                gamma=self.cfg.trainer.algorithm.gamma,
+                lambd=self.cfg.trainer.algorithm.lambd,
+                grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+            )
         data["returns"] = returns
         data["advantages"] = advantages
 
-        return_sums = token_level_rewards.sum(dim=-1)
-        avg_rewards: float = return_sums.mean().item()
+        # remove padding while calculating metrics
+        pad_size = data.metadata.get("pad_size", 0)
+        num_samples = len(token_level_rewards)
+
+        return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        if self.cfg.trainer.step_wise_training:
+            avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
+        else:
+            avg_rewards: float = return_sums.mean().item()
 
         avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
 
-        valid_advantages = torch.masked_select(data["advantages"], data["response_mask"].bool())
+        valid_advantages = torch.masked_select(
+            data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
+        )
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
 
@@ -875,17 +776,17 @@ class RayPPOTrainer:
             data.metadata["metrics"] = {}
         data.metadata["metrics"].update(
             {
-                "avg_rewards": avg_rewards,
+                "avg_final_rewards": avg_rewards,
                 "avg_response_length": avg_response_length,
                 "avg_advantages": avg_advantages,
                 "avg_advantages_abs": avg_advantages_abs,
             }
         )
 
-        logger.info(f"avg_raw_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
+        logger.info(f"avg_final_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
         self.all_metrics.update(
             {
-                "loss/avg_raw_rewards": avg_rewards,
+                "loss/avg_final_rewards": avg_rewards,
                 "loss/avg_raw_advantages": avg_advantages,
                 "loss/avg_raw_advantages_abs": avg_advantages_abs,
             }
@@ -899,6 +800,48 @@ class RayPPOTrainer:
         data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
+
+    def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
+        """Pad the batch to be divisible by dp size"""
+        import math
+
+        dp_size = self.policy_model.actor_infos[0].rank.dp_size
+        if self.critic_model is not None:
+            dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
+        if self.ref_model is not None:
+            dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
+
+        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
+        new_tensors = {}
+        training_input.metadata["pad_size"] = pad_size
+        if pad_size == 0:
+            return training_input
+        for key, tensor in training_input.items():
+            if tensor is not None:
+                additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
+
+                if key == "is_last_step":
+                    padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                elif key == "loss_mask":
+                    # ensures that padding tensors don't count towards the loss
+                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                else:
+                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
+                    # `pad_size` is guaranteed to be smaller than batch_size
+                    padding_tensor = tensor[:pad_size].clone()
+                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+
+        new_training_input = TrainingInputBatch(new_tensors)
+        new_training_input.metadata = {}
+        new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
+        if "trajectory_ids" in training_input.metadata:
+            new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
+                f"pad{i}" for i in range(pad_size)
+            ]
+        for key, value in training_input.metadata.items():
+            if key not in ["uids", "trajectory_ids"]:
+                new_training_input.metadata[key] = copy.deepcopy(value)
+        return new_training_input
 
     @torch.no_grad()
     def fwd_logprobs_values_reward(
@@ -917,8 +860,7 @@ class RayPPOTrainer:
         Adds:
             - `["base_action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
-            - `["values"]`: Float[torch.Tensor, "batch_size"]
-            - `["rm_rewards"]`: Float[torch.Tensor, "batch_size"]
+            - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
         data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
 
@@ -931,36 +873,26 @@ class RayPPOTrainer:
         values = None
 
         # calculate critic values
-        if self.cfg.trainer.placement.colocate_all and self.critic_model is not None:
-            self.critic_model.backload_to_gpu()
+        if self.colocate_all and self.critic_model is not None:
+            self.critic_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
         if self.critic_model is not None:
             value_refs = self.critic_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
-            if self.cfg.trainer.placement.colocate_all:
+            if self.colocate_all:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
-                self.critic_model.offload_to_cpu()
+                self.critic_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # calculate ref log probs
         if self.ref_model is not None:
-            if self.cfg.trainer.placement.colocate_policy_ref or self.cfg.trainer.placement.colocate_all:
+            if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 self.ref_model.backload_to_gpu()
 
             base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
 
-        # handle colocate critic and reward model
-        if (
-            self.cfg.trainer.placement.colocate_critic_reward
-            and not self.cfg.trainer.placement.colocate_all
-            and self.critic_model is not None
-        ):
-            all_rank_values = ray.get(value_refs)
-            values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
-            ray.get(self.critic_model.async_run_ray_method("pass_through", "empty_cache"))
-
         if self.ref_model is not None:
             # handle colocate policy and ref model
-            if self.cfg.trainer.placement.colocate_policy_ref or self.cfg.trainer.placement.colocate_all:
+            if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
                 base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
                 self.ref_model.offload_to_cpu()
@@ -968,32 +900,22 @@ class RayPPOTrainer:
         else:
             base_log_probs = None
 
-        # calculate rewards
-        rewards = None
-        if self.cfg.trainer.use_orm_score and self.reward_model:
-            reward_refs = self.reward_model.async_run_ray_method("mesh", "forward")
-
-            if self.cfg.trainer.placement.colocate_all:
-                all_rank_rewards = ray.get(reward_refs)
-                rewards = collect_results(self.reward_model.actor_infos, all_rank_rewards, key="output")
-
         # calculate action log probs
-        if self.cfg.trainer.placement.colocate_all:
-            self.policy_model.backload_to_gpu()
+        if self.colocate_all:
+            self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
         action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
-        if self.cfg.trainer.placement.colocate_all:
+        if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
-            self.policy_model.offload_to_cpu()
+            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
         # if not colocate_policy_ref, then need to gather base_log_probs
-        # if not colocate_critic_reward and self.critic_model is not None, then need to gather value
-        # reward_refs is always handled at last
-        if not self.cfg.trainer.placement.colocate_all:
+        # if self.critic_model is not None, then need to gather value
+        if not self.colocate_all:
             if not self.cfg.trainer.placement.colocate_policy_ref:
-                if not self.cfg.trainer.placement.colocate_critic_reward and self.critic_model is not None:
+                if self.critic_model is not None:
                     all_rank_values = ray.get(value_refs)
                     values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
@@ -1003,30 +925,23 @@ class RayPPOTrainer:
                 else:
                     base_log_probs = None
 
-            elif not self.cfg.trainer.placement.colocate_critic_reward and self.critic_model is not None:
+            elif self.critic_model is not None:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
 
-            if self.cfg.trainer.use_orm_score and self.reward_model:
-                all_rank_rewards: List[TrainingOutputBatch] = ray.get(reward_refs)
-                rewards = collect_results(self.reward_model.actor_infos, all_rank_rewards, key="output")
-
-        if not self.cfg.trainer.placement.colocate_all:
+        if not self.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
             if self.ref_model is not None:
                 empty_cache_refs.extend(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
             if self.critic_model is not None:
                 empty_cache_refs.extend(self.critic_model.async_run_ray_method("pass_through", "empty_cache"))
-            if self.reward_model is not None:
-                empty_cache_refs.extend(self.reward_model.async_run_ray_method("pass_through", "empty_cache"))
             ray.get(empty_cache_refs)
 
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
-        rewards = rewards[: len(sequences_all)] if rewards is not None else None
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
@@ -1034,12 +949,15 @@ class RayPPOTrainer:
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
-        # rewards from the reward model
-        training_input["rm_rewards"] = rewards  # `None` or torch.Tensor
 
         if self.cfg.generator.sampling_params.logprobs is not None:
             # calculates the difference in probs between inference and trainer components
-            prob_diff = (training_input["rollout_logprobs"].exp() - action_log_probs.exp()).abs()
+            # only consider response tokens
+            logprobs_diff = (
+                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
+                - action_log_probs[training_input["loss_mask"] > 0]
+            )
+            prob_diff = logprobs_diff.exp().abs()
             prob_diff_mean = prob_diff.mean().item()
             prob_diff_std = prob_diff.std().item()
             self.all_metrics.update(
@@ -1056,7 +974,7 @@ class RayPPOTrainer:
     ) -> TrainingInputBatch:
         """Applies a penalty for KL divergence between the policy log probs and the base model log probs to the rewards."""
         loss_masks_all: torch.Tensor = data["loss_mask"]
-        custom_rewards: torch.Tensor = data["custom_rewards"]
+        rewards: torch.Tensor = data["rewards"]
         base_action_log_probs: torch.Tensor = data["base_action_log_probs"]
         action_log_probs: torch.Tensor = data["action_log_probs"]
 
@@ -1076,8 +994,8 @@ class RayPPOTrainer:
             if self.reward_kl_controller is not None
             else self.cfg.trainer.algorithm.kl_loss_coef
         )
-        custom_rewards = custom_rewards - kl * max(0, kl_loss_coef)
-        data["custom_rewards"] = custom_rewards
+        rewards = rewards - kl * max(0, kl_loss_coef)
+        data["rewards"] = rewards
 
         avg_kl: float = kl_mean.mean().item()
         avg_kl_max: float = kl_max.mean().item()
@@ -1106,12 +1024,17 @@ class RayPPOTrainer:
 
         return data
 
+    def sync_policy_weights_to_inference_engines(self) -> List[ObjectRef]:
+        return self.policy_model.async_run_ray_method(
+            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+        )
+
     def train_critic_and_policy(self, data: TrainingInputBatch):
         """
         Run the training step for the policy and critic models (this is overlapped if colocate_all is False).
         """
         data.metadata["global_step"] = self.global_step
-        if self.cfg.trainer.placement.colocate_all:
+        if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
                     self.critic_model.backload_to_gpu()
@@ -1210,8 +1133,6 @@ class RayPPOTrainer:
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)
-        if model_type == "reward_model":
-            model = model[0]
         return model._actor_handlers[rank]
 
     def _get_mesh_rank(self, rank: int, model_type: str = "") -> MeshRank:
@@ -1222,12 +1143,13 @@ class RayPPOTrainer:
     def save_checkpoints(self):
         """
         Save the model, optimizer, and training states to disk.
+
+        If colocate_all is True, assumes that the policy model is currently on GPU.
         """
         # Create global step folder structure
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         policy_save_dir = os.path.join(global_step_folder, "policy")
         critic_save_dir = os.path.join(global_step_folder, "critic")
-        # TODO(tgriggs): Add reward model checkpointing.
 
         io.makedirs(global_step_folder, exist_ok=True)
 
@@ -1243,7 +1165,7 @@ class RayPPOTrainer:
 
         # Save critic checkpoint (if it exists)
         if self.critic_model is not None:
-            if self.cfg.trainer.placement.colocate_all:
+            if self.colocate_all:
                 self.policy_model.offload_to_cpu()
                 self.critic_model.backload_to_gpu()
 
@@ -1256,7 +1178,7 @@ class RayPPOTrainer:
                 )
             )
 
-            if self.cfg.trainer.placement.colocate_all:
+            if self.colocate_all:
                 self.critic_model.offload_to_cpu()
                 self.policy_model.backload_to_gpu()
 
@@ -1304,22 +1226,28 @@ class RayPPOTrainer:
         # NOTE (sumanthrh): the function will get called twice on the node with driver process, but it's ok because it's idempotent
         cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, self.cfg.trainer.max_ckpts_to_keep)
 
-    def load_checkpoints(self) -> int:
+    def load_checkpoints(self) -> Tuple[int, str]:
         """
         Load complete checkpoint state and return the global_step to resume from.
         Returns 0 if no checkpoint is loaded.
+
+        If colocate_all is True, assumes that the policy model is currently on GPU.
+
+        Returns:
+            global_step: The global step to resume from.
+            checkpoint_path: The path to the checkpoint.
         """
         checkpoint_path = None
         # Check if resumption is enabled
         if self.resume_mode == ResumeMode.NONE:
             logger.info("Checkpoint resumption disabled, starting training from scratch")
-            return 0
+            return 0, None
         # first, let's get resume_path
         elif self.resume_mode == ResumeMode.LATEST:
             latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
             if not io.exists(latest_checkpoint_file):
                 logger.info("No checkpoint found, starting training from scratch")
-                return 0
+                return 0, None
             with io.open_file(latest_checkpoint_file, "r") as f:
                 ckpt_iteration = int(f.read().strip())
             checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{ckpt_iteration}")
@@ -1415,7 +1343,7 @@ class RayPPOTrainer:
             logger.info("Successfully loaded critic checkpoint")
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
-        return global_step
+        return global_step, str(checkpoint_path)
 
     def save_models(self):
         """
@@ -1449,10 +1377,10 @@ class RayPPOTrainer:
         )
         # NOTE (sumanthrh): This is for the memory efficient case where we can't keep policy and ref model state on GPU together
         # We thus offload the policy model to CPU and then load the ref model from the policy model checkpoint, and then backload the policy model to GPU
-        if self.cfg.trainer.placement.colocate_all:
+        if self.colocate_all:
             self.policy_model.offload_to_cpu()
         ray.get(self.ref_model.async_init_model(policy_export_dir))
-        if self.cfg.trainer.placement.colocate_all:
+        if self.colocate_all:
             self.ref_model.offload_to_cpu()
             self.policy_model.backload_to_gpu()
 

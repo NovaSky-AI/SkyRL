@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, TypedDict, Any, Optional, Hashable
+from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -31,7 +31,9 @@ class NamedWeightsUpdateRequest(TypedDict):
     names: List[str]
     dtypes: List[str]
     shapes: List[List[int]]
+    sizes: NotRequired[List[int]]
     extras: Optional[List[Dict[str, Any]]]
+    packed: NotRequired[bool]
 
 
 class InferenceEngineInterface(ABC):
@@ -96,6 +98,20 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def pp_size(self) -> int:
+        """Return the pipeline parallel size of this inference engine."""
+        raise NotImplementedError()
+
+    @abstractmethod
     def dp_size(self) -> int:
         """Return the data parallel size of this inference engine."""
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def abort_generation(self) -> None:
+        """
+        Abort all running and waiting requests, which make the ongoing requests return the
+        already-generated tokens with a stop_reason of "abort". If the request was waiting,
+        it returns a response with zero completion tokens.
+        """
         raise NotImplementedError()

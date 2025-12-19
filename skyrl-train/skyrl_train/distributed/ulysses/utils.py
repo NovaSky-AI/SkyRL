@@ -25,6 +25,7 @@ from typing import Any, Optional, Tuple
 
 import torch
 import torch.distributed as dist
+from loguru import logger
 from torch import Tensor
 from torch.distributed import ProcessGroup
 
@@ -96,7 +97,7 @@ def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: Proc
     """
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if not group:
-        print("No group found for gather_heads_scatter_seq")
+        logger.info("No group found for gather_heads_scatter_seq")
         return x
     dim_size = x.size(seq_dim)
     sp_world = get_ulysses_sequence_parallel_world_size(group)
@@ -249,7 +250,7 @@ def gather_outputs_and_unpad(
 ):
     group = get_ulysses_sequence_parallel_group() if group is None else group
     if group is None:
-        print("No group found for gather_outputs_and_unpad")
+        logger.info("No group found for gather_outputs_and_unpad")
         return x
     x = Gather.apply(group, x, gather_dim, grad_scaler)
     if unpad_dim is not None:
@@ -278,7 +279,7 @@ def ulysses_pad_and_slice_inputs(
 
     Args:
         input_ids_rmpad: shape of [bsz, seqlen]
-        position_ids_rmpad: shape of [bsz, seqlen], where bsz must be 1
+        position_ids_rmpad: shape of [bsz, seqlen]
         sp_size (int): ulysses sequence parallelism size
 
     Returns:
@@ -286,9 +287,7 @@ def ulysses_pad_and_slice_inputs(
         torch.Tensor: padded and sliced position_ids
         int: pad size
     """
-    if position_ids_rmpad is not None:
-        assert position_ids_rmpad.size(0) == 1
-        assert input_ids_rmpad.size(1) == position_ids_rmpad.size(1)
+
     if sp_size <= 1:
         return input_ids_rmpad, position_ids_rmpad, attention_mask_rmpad, 0
 
@@ -301,11 +300,19 @@ def ulysses_pad_and_slice_inputs(
     if pad_size > 0:
         input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=0)
         if position_ids_rmpad is not None:
-            pad_pos_ids = torch.arange(pad_size, device=position_ids_rmpad.device).unsqueeze(0)
+            pad_pos_ids = (
+                torch.arange(pad_size, device=position_ids_rmpad.device)
+                .unsqueeze(0)
+                .repeat(position_ids_rmpad.size(0), 1)
+            )
             position_ids_rmpad = torch.cat((position_ids_rmpad, pad_pos_ids), dim=-1)
 
         if attention_mask_rmpad is not None:
-            pad_attn_mask = torch.zeros(pad_size, device=attention_mask_rmpad.device).unsqueeze(0)
+            pad_attn_mask = (
+                torch.zeros(pad_size, device=attention_mask_rmpad.device)
+                .unsqueeze(0)
+                .repeat(attention_mask_rmpad.size(0), 1)
+            )
             attention_mask_rmpad = torch.cat((attention_mask_rmpad, pad_attn_mask), dim=-1)
 
     input_ids_rmpad = slice_input_tensor(input_ids_rmpad, dim=1, padding=False)

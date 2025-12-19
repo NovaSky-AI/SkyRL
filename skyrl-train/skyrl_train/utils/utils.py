@@ -1,16 +1,23 @@
+import ipaddress
 import os
 import time
 import sys
 import logging
 import math
+import socket
 
 import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy, PlacementGroup
+from ray.util.placement_group import (
+    placement_group,
+    PlacementGroupSchedulingStrategy,
+    PlacementGroup,
+    placement_group_table,
+)
 
-from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S
+from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
 
 
 class Timer:
@@ -60,7 +67,19 @@ def validate_batch_sizes(cfg: DictConfig):
 
     # Validate policy mini batch size
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
-    policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
+    if cfg.trainer.strategy == "megatron":
+        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
+        cp = cfg.trainer.policy.megatron_config.context_parallel_size
+        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
+        assert policy_world_size % (pp * cp * tp) == 0, (
+            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
+        )
+        policy_dp_size = policy_world_size // (pp * cp * tp)
+    else:
+        policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
     assert (
         cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0
     ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
@@ -124,7 +143,17 @@ def validate_batch_sizes(cfg: DictConfig):
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
-        ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
+        if cfg.trainer.strategy == "megatron":
+            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
+            cp = cfg.trainer.ref.megatron_config.context_parallel_size
+            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
+            assert ref_world_size % (pp * cp * tp) == 0, (
+                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+                "This ensures that the data parallel size is an integer."
+            )
+            ref_dp_size = ref_world_size // (pp * cp * tp)
+        else:
+            ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
     assert cfg.trainer.train_batch_size >= lcm_dp_size, (
@@ -139,7 +168,6 @@ def validate_megatron_cfg(cfg: DictConfig):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
-    assert cfg.trainer.placement.colocate_all, "only colocate_all=True is supported for megatron training"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     if cfg.trainer.flash_attn:
@@ -154,12 +182,6 @@ def validate_megatron_cfg(cfg: DictConfig):
         # context, expert, and expert tensor parallel are not yet supported for megatron
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
-        assert (
-            config.megatron_config.expert_model_parallel_size == 1
-        ), f"found {worker_type}.expert_model_parallel_size > 1, expert model parallel is not yet supported for megatron"
-        assert (
-            config.megatron_config.expert_tensor_parallel_size == 1
-        ), f"found {worker_type}.expert_tensor_parallel_size > 1, expert tensor parallel is not yet supported for megatron"
         # check that sequence parallel is not configured outside of megatron
         assert (
             config.sequence_parallel_size == 1
@@ -170,8 +192,7 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
-
-    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry
+    from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -207,13 +228,19 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    assert (
-        cfg.trainer.algorithm.policy_loss_type in PolicyLossRegistry.list_available()
-    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {PolicyLossRegistry.list_available()}"
+    # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
+    repopulate_all_registries()
+    available_policy_losses = PolicyLossRegistry.list_available()
+    assert available_policy_losses != [], "Policy loss registry is not populated."
 
     assert (
-        cfg.trainer.algorithm.advantage_estimator in AdvantageEstimatorRegistry.list_available()
-    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {AdvantageEstimatorRegistry.list_available()}"
+        cfg.trainer.algorithm.policy_loss_type in available_policy_losses
+    ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+
+    available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
+    assert (
+        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
+    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
@@ -239,19 +266,6 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    # Validate inference engine parallelism.
-    ep_size = cfg.generator.inference_engine_expert_parallel_size
-    dp_size = cfg.generator.inference_engine_data_parallel_size
-    tp_size = cfg.generator.inference_engine_tensor_parallel_size
-    assert (
-        dp_size == 1
-    ), "Inference data parallelism is not yet supported, but is in active development and testing: https://github.com/NovaSky-AI/SkyRL/issues/202"
-    if ep_size > 1:
-        assert dp_size * tp_size == ep_size, (
-            f"If expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
-            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
-        )
-
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
         and cfg.trainer.critic.optimizer_config.offload_after_step
@@ -274,11 +288,47 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
+        assert cfg.trainer.algorithm.policy_loss_type in [
+            "regular",
+            "dual_clip",
+        ], "TIS is only implemented for regular and dual_clip policy loss types"
 
-        if not cfg.generator.batched:
-            raise ValueError(
-                "Gneration with `trainer.algorithm.use_tis` needs to be batched with only single turn generation"
+    if cfg.trainer.policy.model.lora.rank > 0:
+        # LoRA enabled
+        # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
+        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
+        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+
+        if cfg.trainer.target_modules is not None:
+            logger.warning(
+                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
             )
+        if cfg.trainer.exclude_modules is not None:
+            logger.warning(
+                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
+            )
+
+    # Validate placement
+    if cfg.trainer.placement.colocate_all:
+        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        num_rollout_gpus = (
+            cfg.generator.num_inference_engines
+            * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+        )
+        assert (
+            num_policy_gpus == num_rollout_gpus
+        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+    else:
+        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
+            assert (
+                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
+            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            assert (
+                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
+            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
 
 
 def validate_generator_cfg(cfg: DictConfig):
@@ -339,10 +389,6 @@ def validate_generator_cfg(cfg: DictConfig):
             raise ValueError(
                 f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
             )
-        if not cfg.generator.batched:
-            raise NotImplementedError(
-                "Async generation with `generator.batched=false` doesn't support `sampling_params.logprobs`"
-            )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
@@ -385,6 +431,19 @@ def validate_generator_cfg(cfg: DictConfig):
             )
         if not cfg.generator.async_engine:
             raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
+
+    # Validate inference engine parallelism.
+    ep_size = cfg.generator.inference_engine_expert_parallel_size
+    dp_size = cfg.generator.inference_engine_data_parallel_size
+    tp_size = cfg.generator.inference_engine_tensor_parallel_size
+    if cfg.generator.backend == "sglang":
+        assert dp_size == 1, "Inference data parallelism is not yet supported for SGLang backend."
+        assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
+    if ep_size > 1:
+        assert dp_size * tp_size == ep_size, (
+            f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
+            f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
+        )
 
 
 @ray.remote
@@ -444,12 +503,18 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if cfg.generator.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
-    if cfg.trainer.strategy == "megatron" and cfg.trainer.flash_attn:
-        # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
-        # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
-        env_vars["NVTE_FUSED_ATTN"] = "0"
+    if cfg.trainer.strategy == "megatron":
+        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
+        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
+        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        if cfg.trainer.flash_attn:
+            # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
+            # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
+            env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
+        env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
+
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
         # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
@@ -478,7 +543,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
                 placement.policy_num_gpus_per_node,
                 placement.critic_num_gpus_per_node,
                 placement.ref_num_gpus_per_node,
-                placement.reward_num_gpus_per_node,
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
@@ -486,11 +550,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
-
-    if cfg.trainer.strategy == "megatron":
-        # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
-        # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
-        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
@@ -512,6 +571,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
         env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
 
+    if SKYRL_PYTHONPATH_EXPORT:
+        # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
+        # not recommended since it can cause unexpected conflicts with UV packages, but keeping for backwards compatibility
+        logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
+        env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
+
     return env_vars
 
 
@@ -519,14 +584,17 @@ def configure_ray_worker_logging() -> None:
     """
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third‑party logs match formatting
+    through Loguru so third-party logs match formatting
     """
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+
     # 1) Loguru formatting (force colors)
     logger.remove()
     logger.level("INFO", color="<bold><green>")
     logger.add(
         sys.stderr,
         colorize=True,  # keep ANSI even without a TTY
+        level=level_name,  # ensure Loguru filters below this level
         enqueue=True,
         backtrace=False,
         diagnose=False,
@@ -546,7 +614,6 @@ def configure_ray_worker_logging() -> None:
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
     logging.root.handlers = [_InterceptHandler()]
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.root.setLevel(level)
 
@@ -586,6 +653,44 @@ def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
         )
 
 
+@ray.remote(num_gpus=1)
+class InfoActor:
+    def get_gpu_id(self):
+        return ray.get_gpu_ids()[0]
+
+
+def get_reordered_bundle_indices(pg: PlacementGroup):
+    pg_data = placement_group_table(pg)
+    num_bundles = len(pg_data["bundles"])
+    bundle_to_node_ids = pg_data["bundles_to_node_id"]
+
+    # use info actor to get the GPU id
+    info_actors = []
+    for i in range(num_bundles):
+        info_actors.append(
+            InfoActor.options(
+                num_cpus=0.01,  # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
+                num_gpus=0.01,
+                resources=None,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=i,
+                ),
+            ).remote()
+        )
+
+    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
+    for actor in info_actors:
+        ray.kill(actor)
+
+    # original index, node_id, gpu_id
+    bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
+    pg_reordered_bundle_indices = [
+        bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
+    ]  # sort by node_id, then gpu_id
+    return pg_reordered_bundle_indices
+
+
 # NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
 # This is because we do not control the update weight implementation with SGLang backend.
 # With VLLM, we use a custom Worker extension to have a custom update weight implementation.
@@ -616,7 +721,7 @@ def format_gib(mem_bytes: int) -> str:
 
 
 def print_mem(tag: str, mem: dict):
-    print(
+    logger.info(
         f"{tag} - Allocated: {format_gib(mem['allocated'])}, "
         f"Reserved: {format_gib(mem['reserved'])}, "
         f"Free: {format_gib(mem['free'])}, "
@@ -674,3 +779,30 @@ def update_model_config(module_config, override_config_kwargs):
             update_model_config(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
+
+
+def get_tcp_url(host: str, port: int) -> str:
+    """
+    Formats the TCP URL for the given host and port,
+    handling IPv6 addresses correctly.
+    Args:
+        host (str): The hostname or IP address.
+        port (int): The port number.
+    Returns:
+        str: The formatted TCP URL.
+    """
+    try:
+        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+            return f"tcp://[{host}]:{port}"
+    except ValueError:
+        # not a literal IP, probably a hostname
+        pass
+    return f"tcp://{host}:{port}"
+
+
+def get_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port

@@ -1,8 +1,11 @@
 """
 Test save_hf_model and load_hf_model functionality for different strategies.
 
-Run with:
-uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_load_model.py
+For FSDP and DeepSpeed, run with:
+uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
+
+For Megatron, run with:
+uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_model.py -m "megatron"
 """
 
 import ray
@@ -14,6 +17,7 @@ import shutil
 import tempfile
 from omegaconf import DictConfig
 import json
+from transformers import AutoTokenizer
 
 from tests.gpu.utils import (
     init_worker_with_type,
@@ -24,9 +28,9 @@ from tests.gpu.utils import (
 )
 from skyrl_train.entrypoints.main_base import config_dir
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-MODEL_ARCH = "Qwen2ForCausalLM"
-NUM_GPUS = 1
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_ARCH = "Qwen3ForCausalLM"
+NUM_GPUS = 4
 
 
 def get_test_actor_config(strategy: str) -> DictConfig:
@@ -40,10 +44,32 @@ def get_test_actor_config(strategy: str) -> DictConfig:
     # Use temporary directories for testing
     cfg.trainer.ckpt_path = tempfile.mkdtemp(prefix="model_test_ckpt_")
     cfg.trainer.export_path = tempfile.mkdtemp(prefix="model_test_save_")
+    cfg.trainer.logger = "console"
 
     validate_cfg(cfg)
 
     return cfg
+
+
+def run_one_training_step(
+    actor_group,
+    strategy,
+    experience=None,
+    global_step=None,
+    local_step=None,
+    accumulation_steps=None,
+    megatron_batch=None,
+):
+    if strategy == "megatron":
+        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
+        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
+    else:
+        assert experience is not None, f"{strategy} requires an Experience for training_step"
+        return ray.get(
+            actor_group.async_run_ray_method(
+                "pass_through", "training_step", experience, global_step, local_step, accumulation_steps
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -52,6 +78,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
         "deepspeed",
         "fsdp",
         "fsdp2",
+        pytest.param("megatron", marks=pytest.mark.megatron),
     ],
 )
 def test_save_load_hf_model(ray_init_fixture, strategy):
@@ -75,16 +102,33 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
             cfg=cfg,
         )
 
-        # Create dummy experience for training step
-        dummy_experience = make_dummy_experience()
+        # Prepare training input and run one training step
         global_step, local_step, accumulation_steps = 0, 0, 1
+        if "megatron" in strategy:
+            from tests.gpu.test_megatron_worker import get_test_training_batch
 
-        # Step 1: Do one training step
-        ray.get(
-            actor_group_1.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
+            dp_size = actor_group_1.actor_infos[0].rank.dp_size
+            train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
+            run_one_training_step(
+                actor_group_1,
+                strategy,
+                experience=None,
+                global_step=global_step,
+                local_step=local_step,
+                accumulation_steps=accumulation_steps,
+                megatron_batch=train_batch_1,
             )
-        )
+        else:
+            dummy_experience = make_dummy_experience()
+            run_one_training_step(
+                actor_group_1,
+                strategy,
+                experience=dummy_experience,
+                global_step=global_step,
+                local_step=local_step,
+                accumulation_steps=accumulation_steps,
+                megatron_batch=None,
+            )
 
         # Step 2: Create test input and compute logits from trained model
         dp_size = actor_group_1.actor_infos[0].rank.dp_size
@@ -93,22 +137,25 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
 
         logits_from_trained_model = get_model_logits_from_actor(actor_group_1, test_input, attention_mask)
 
-        # Step 3: Save model in HuggingFace format
+        # Step 3: Save model in HuggingFace format (include tokenizer so Megatron can reload it)
         export_dir = os.path.join(cfg.trainer.export_path, "global_step_1", "policy")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         ray.get(
-            actor_group_1.async_run_ray_method("pass_through", "save_hf_model", export_dir=export_dir, tokenizer=None)
+            actor_group_1.async_run_ray_method(
+                "pass_through", "save_hf_model", export_dir=export_dir, tokenizer=tokenizer
+            )
         )
 
         # Verify that model files were saved
         model_save_dir = export_dir
-        expected_files = ["config.json", "model.safetensors"]  # Basic HuggingFace model files
+        expected_files = ["config.json", "model.safetensors", "tokenizer.json"]  # Basic HuggingFace model files
         for expected_file in expected_files:
             file_path = os.path.join(model_save_dir, expected_file)
             assert os.path.exists(file_path), f"Expected model file not found: {file_path}"
 
         with open(os.path.join(model_save_dir, "config.json"), "r") as f:
             config = json.load(f)
-        assert config["architectures"] == [MODEL_ARCH], "Architecture should be Qwen2ForCausalLM"
+        assert config["architectures"] == [MODEL_ARCH], f"Architecture should be {MODEL_ARCH}"
 
         # Step 4: Destroy first worker to ensure fresh weights.
         ray.shutdown()

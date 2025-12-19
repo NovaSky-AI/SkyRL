@@ -331,8 +331,7 @@ class TrainingInput(TypedDict, total=False):
     returns: Float[torch.Tensor, "batch_size seq_len"]
     advantages: Float[torch.Tensor, "batch_size seq_len"]
     kl: Float[torch.Tensor, "batch_size seq_len"]
-    rm_rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    custom_rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
 
 

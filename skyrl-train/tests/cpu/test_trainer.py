@@ -17,6 +17,13 @@ import numpy as np
 from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.config.utils import get_default_config
+from tests.cpu.util import example_dummy_config
+
+
+@pytest.fixture
+def dummy_config():
+    return example_dummy_config()
 
 
 class DummyDataset:
@@ -53,59 +60,6 @@ def dummy_tokenizer():
 
 
 @pytest.fixture
-def dummy_config():
-    return OmegaConf.create(
-        {
-            "trainer": {
-                "project_name": "unit-test",
-                "run_name": "test-run",
-                "logger": "tensorboard",
-                "micro_train_batch_size_per_gpu": 2,
-                "train_batch_size": 2,
-                "eval_batch_size": 2,
-                "update_epochs_per_batch": 1,
-                "epochs": 1,
-                "max_prompt_length": 20,
-                "gamma": 0.99,
-                "lambd": 0.95,
-                "use_sample_packing": False,
-                "seed": 42,
-                "algorithm": {
-                    "advantage_estimator": "grpo",
-                    "use_kl_estimator_k3": False,
-                    "use_abs_kl": False,
-                    "kl_estimator_type": "k1",
-                    "reward_clip_range": 5.0,
-                    "use_kl_loss": True,
-                    "kl_loss_coef": 0.0,
-                    "lambd": 1.0,
-                    "gamma": 1.0,
-                    "eps_clip_low": 0.2,
-                    "eps_clip_high": 0.2,
-                    "clip_ratio_c": 3.0,
-                    "value_clip": 0.2,
-                    "normalize_reward": True,
-                    "policy_loss_type": "regular",
-                    "loss_reduction": "token_mean",
-                    "grpo_norm_by_std": True,
-                },
-                "resume_mode": "none",
-            },
-            "generator": {
-                "max_generate_length": 20,
-                "n_samples_per_prompt": 1,
-                "batched": False,
-                "env_class": "gsm8k",
-                "max_turns": 1,
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 8000,
-            },
-        }
-    )
-
-
-@pytest.fixture
 def dummy_generator():
     return MagicMock()
 
@@ -133,11 +87,10 @@ def _get_test_data(trainer: RayPPOTrainer):
         [torch.tensor([1, 1, 1, 0, 0], dtype=torch.int32), torch.tensor([1, 1, 1, 1, 1], dtype=torch.int32)], dim=0
     )
     actual_response_lengths: Float[torch.Tensor, "batch_size"] = action_masks.sum(dim=-1).to(float)
-    custom_rewards_all: Float[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
+    rewards_all: Float[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
         [torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0]), torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0])], dim=0
     )
     values: Float[torch.Tensor, "batch_size action_len"] = torch.randn(batch_size, action_len)
-    r: Float[torch.Tensor, "batch_size action_len"] = torch.randn(batch_size, action_len)
     uids: np.ndarray[str] = np.array(["0", "0"])
 
     # Run method
@@ -149,9 +102,8 @@ def _get_test_data(trainer: RayPPOTrainer):
             "base_action_log_probs": base_log_probs,
             "action_log_probs": action_log_probs,
             "response_mask": action_masks,
-            "custom_rewards": custom_rewards_all,
+            "rewards": rewards_all,
             "values": values,
-            "rm_rewards": r,
         },
     )
     data.metadata = {
@@ -210,7 +162,7 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     assert torch.allclose(data["advantages"], mock_advantages)
     assert torch.allclose(data["returns"], mock_returns)
     assert isinstance(metrics, dict)
-    assert "avg_rewards" in metrics
+    assert "avg_final_rewards" in metrics
     assert "avg_response_length" in metrics
     assert "avg_advantages_abs" in metrics
     assert metrics["avg_advantages"] == approx(
@@ -400,39 +352,23 @@ def test_validate_batch_sizes():
         critic_model_path=None,
     ):
         """Helper to create config for validation testing."""
-        return OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    "policy_mini_batch_size": policy_mini_batch_size,
-                    "critic_mini_batch_size": critic_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                    "micro_forward_batch_size_per_gpu": micro_forward_batch_size_per_gpu,
-                    "placement": {
-                        "policy_num_nodes": policy_num_nodes,
-                        "policy_num_gpus_per_node": policy_num_gpus_per_node,
-                        "critic_num_nodes": critic_num_nodes,
-                        "critic_num_gpus_per_node": critic_num_gpus_per_node,
-                    },
-                    "policy": {
-                        "sequence_parallel_size": policy_sequence_parallel_size,
-                    },
-                    "critic": {
-                        "model": {
-                            "path": critic_model_path,
-                        },
-                        "sequence_parallel_size": critic_sequence_parallel_size,
-                    },
-                    "algorithm": {
-                        "use_kl_loss": False,
-                        "use_kl_in_reward": False,
-                    },
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
+        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+        cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
+        cfg.trainer.placement.policy_num_nodes = policy_num_nodes
+        cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
+        cfg.trainer.placement.critic_num_nodes = critic_num_nodes
+        cfg.trainer.placement.critic_num_gpus_per_node = critic_num_gpus_per_node
+        cfg.trainer.policy.sequence_parallel_size = policy_sequence_parallel_size
+        cfg.trainer.critic.model.path = critic_model_path
+        cfg.trainer.critic.sequence_parallel_size = critic_sequence_parallel_size
+        cfg.trainer.algorithm.use_kl_loss = False
+        cfg.trainer.algorithm.use_kl_in_reward = False
+        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
+        return cfg
 
     # Test Case 1: Valid configuration
     cfg = create_test_config()
@@ -734,144 +670,30 @@ def test_ppo_train_batch_calculations():
     assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
 
 
-def test_build_dataloader_seeding(dummy_config):
-    """Test that build_dataloader correctly seeds the dataloader for reproducible shuffling."""
-
-    # Create a dataset with multiple distinct items to test shuffling
-    class MultiItemDataset:
-        def __init__(self, size=10):
-            self.data = [f"item_{i}" for i in range(size)]
-
-        def __len__(self):
-            return len(self.data)
-
-        def __getitem__(self, idx):
-            return self.data[idx]
-
-        def collate_fn(self, batch):
-            return batch
-
-    dataset = MultiItemDataset(size=20)
-
-    # Test 1: Same seed should produce same shuffling
-    config1 = dummy_config.copy()
-    config1.trainer.seed = 42
-    config1.trainer.train_batch_size = 5
-
-    config2 = dummy_config.copy()
-    config2.trainer.seed = 42  # Same seed
-    config2.trainer.train_batch_size = 5
-
-    # Create trainers with same seed
-    trainer1 = RayPPOTrainer(
-        cfg=config1,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=dataset,
-        eval_dataset=None,
-        inference_engine_client=None,
-        generator=None,
-    )
-
-    trainer2 = RayPPOTrainer(
-        cfg=config2,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=dataset,
-        eval_dataset=None,
-        inference_engine_client=None,
-        generator=None,
-    )
-
-    # Build dataloaders
-    dataloader1 = trainer1.build_dataloader(dataset, is_train=True)
-    dataloader2 = trainer2.build_dataloader(dataset, is_train=True)
-
-    # Get first batch from each dataloader
-    first_batch1 = next(iter(dataloader1))
-    first_batch2 = next(iter(dataloader2))
-
-    # With same seed, first batches should be identical
-    assert (
-        first_batch1 == first_batch2
-    ), f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
-
-    # Test 2: Different seeds should produce different shuffling
-    config3 = dummy_config.copy()
-    config3.trainer.seed = 123  # Different seed
-    config3.trainer.train_batch_size = 5
-
-    trainer3 = RayPPOTrainer(
-        cfg=config3,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=dataset,
-        eval_dataset=None,
-        inference_engine_client=None,
-        generator=None,
-    )
-
-    dataloader3 = trainer3.build_dataloader(dataset, is_train=True)
-    first_batch3 = next(iter(dataloader3))
-
-    # With different seed, first batch should be different
-    # Note: There's a tiny chance they could be the same by random chance, but very unlikely with 20 items
-    assert (
-        first_batch1 != first_batch3
-    ), f"Different seeds should produce different first batches, but both gave {first_batch1}"
-
-
 def test_validate_batch_sizes_lcm_dp_requirement():
     """Ensure train_batch_size is >= lcm(policy_dp, ref_dp) when ref is used; else >= policy_dp."""
 
     def create_config(train_batch_size, policy_dp, ref_dp, include_ref=True):
-        return OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    # Make policy checks pass cleanly
-                    "policy_mini_batch_size": train_batch_size,
-                    "critic_mini_batch_size": 1,
-                    "micro_train_batch_size_per_gpu": 1,
-                    "micro_forward_batch_size_per_gpu": 1,
-                    "placement": {
-                        "policy_num_nodes": 1,
-                        "policy_num_gpus_per_node": policy_dp,
-                        "ref_num_nodes": 1,
-                        "ref_num_gpus_per_node": ref_dp if include_ref else 1,
-                        # Ensure critic fields exist but do not affect this test
-                        "critic_num_nodes": 1,
-                        "critic_num_gpus_per_node": 1,
-                    },
-                    "policy": {
-                        # Set SP=1 so DP equals gpus_per_node
-                        "sequence_parallel_size": 1,
-                    },
-                    "ref": {
-                        # Set SP=1 so DP equals gpus_per_node
-                        "sequence_parallel_size": 1,
-                    },
-                    "critic": {
-                        "model": {
-                            # Disable critic for this test
-                            "path": None,
-                        },
-                        # Keep present to satisfy schema
-                        "sequence_parallel_size": 1,
-                    },
-                    "algorithm": {
-                        # Control ref usage via KL flags
-                        "use_kl_loss": include_ref,
-                        "use_kl_in_reward": False,
-                        "policy_loss_type": "regular",
-                    },
-                },
-                "generator": {
-                    # Keep per-gpu mini/micro calculations straightforward
-                    "n_samples_per_prompt": 1,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.policy_mini_batch_size = train_batch_size
+        cfg.trainer.critic_mini_batch_size = 1
+        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.placement.policy_num_nodes = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = policy_dp
+        cfg.trainer.placement.ref_num_nodes = 1
+        cfg.trainer.placement.ref_num_gpus_per_node = ref_dp if include_ref else 1
+        cfg.trainer.placement.critic_num_nodes = 1
+        cfg.trainer.placement.critic_num_gpus_per_node = 1
+        cfg.trainer.policy.sequence_parallel_size = 1
+        cfg.trainer.ref.sequence_parallel_size = 1
+        cfg.trainer.critic.model.path = None
+        cfg.trainer.critic.sequence_parallel_size = 1
+        cfg.trainer.algorithm.use_kl_loss = include_ref
+        cfg.trainer.algorithm.use_kl_in_reward = False
+        cfg.trainer.algorithm.policy_loss_type = "regular"
+        return cfg
 
     # Fail: lcm(2, 3) = 6, but train_batch_size = 5 when ref is used
     cfg = create_config(train_batch_size=5, policy_dp=2, ref_dp=3, include_ref=True)

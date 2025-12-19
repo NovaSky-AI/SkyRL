@@ -8,4 +8,5 @@ code_review:
     # disable PR summaries
     summary: false
     code_review: true
+    include_drafts: false
 ignore_patterns: []

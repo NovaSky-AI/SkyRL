@@ -4,9 +4,7 @@ set -x
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/algorithm/drgrpo/run_drgrpo_gsm8k.sh
-
-# TODO (erictang000): add a description of the algorithm once GRPO docs are added.
+# bash examples/algorithms/drgrpo/run_drgrpo_gsm8k.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4

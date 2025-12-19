@@ -12,8 +12,6 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_infere
 
 import json
 import pytest
-from pathlib import Path
-import time
 import asyncio
 from http import HTTPStatus
 from typing import Any, Dict, List, Union
@@ -37,7 +35,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     shutdown_server,
 )
 from tests.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from tests.gpu.utils import init_inference_engines, initialize_ray
+from tests.gpu.utils import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
 
 from transformers import AutoTokenizer
@@ -58,13 +56,13 @@ def _get_test_sampling_params(backend: str, cfg: DictConfig, endpoint: str) -> D
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int) -> DictConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> DictConfig:
     """Get base config with test-specific overrides."""
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
 
         # Override specific parameters
-        cfg.trainer.policy.model.path = MODEL
+        cfg.trainer.policy.model.path = model
         cfg.trainer.critic.model.path = ""
         cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
         cfg.generator.async_engine = True
@@ -177,7 +175,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 
 
 @pytest.mark.vllm
-def test_http_endpoint_completions_routing_and_batching():
+def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
     """
     Since /completions endpoint supports both single and batched requests, and we support
     either using session_id or not, we test all combinations.
@@ -189,14 +187,10 @@ def test_http_endpoint_completions_routing_and_batching():
 
     try:
         # 1. Build engine
-        cfg = get_test_actor_config(num_inference_engines=2)
+        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        # Ensure a clean Ray state before initializing engines in this fixture.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
         client, _ = init_inference_engines(
             cfg=cfg,
@@ -247,14 +241,13 @@ def test_http_endpoint_completions_routing_and_batching():
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         if server_thread.is_alive():
             server_thread.join(timeout=5)
-        ray.shutdown()
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
 @pytest.mark.vllm
-def test_http_endpoint_openai_api_with_weight_sync():
+def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
 
@@ -267,14 +260,10 @@ def test_http_endpoint_openai_api_with_weight_sync():
     endpoints = ["chat_completions", "completions"]
     try:
         # 1. Set up engine
-        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        # Ensure a clean Ray state before initializing engines in this fixture.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
         client, pg = init_inference_engines(
             cfg=cfg,
             use_local=True,
@@ -425,7 +414,6 @@ def test_http_endpoint_openai_api_with_weight_sync():
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         if server_thread.is_alive():
             server_thread.join(timeout=5)
-        ray.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -441,7 +429,7 @@ def test_http_endpoint_openai_api_with_weight_sync():
     # ids=["vllm", "sglang"],
     ids=["vllm"],
 )
-def test_http_endpoint_with_remote_servers(backend, tp_size):
+def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
@@ -458,12 +446,8 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
 
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
-        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.generator.backend = backend
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
-        initialize_ray(cfg)
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
         client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
@@ -544,17 +528,12 @@ def test_http_endpoint_with_remote_servers(backend, tp_size):
         if "remote_server_process" in locals():
             remote_server_process.terminate()
             remote_server_process.wait()
-        ray.shutdown()
 
 
 @pytest.mark.vllm
-def test_structured_generation():
+def test_structured_generation(ray_init_fixture):
     try:
-        # Ensure no leftover Ray context from earlier fixtures or tests.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
-        cfg = get_test_actor_config(num_inference_engines=1)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -614,21 +593,16 @@ def test_structured_generation():
         assert json.loads(text) is not None, f"Output is not valid JSON: {text}"
     finally:
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
-        ray.shutdown()
 
 
 # TODO(Charlie): sglang has slightly different error response format. We need to handle it.
 @pytest.mark.vllm
-def test_http_endpoint_error_handling():
+def test_http_endpoint_error_handling(ray_init_fixture):
     """
     Test error handling for various invalid requests.
     """
     try:
-        # Ensure no leftover Ray context from earlier fixtures or tests.
-        if ray.is_initialized():
-            ray.shutdown()
-            time.sleep(5)
-        cfg = get_test_actor_config(num_inference_engines=2)
+        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -690,7 +664,7 @@ def test_http_endpoint_error_handling():
         assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
         print(f"Error data: {error_data}")
-        assert "messages" in error_data["error"]["message"]
+        assert error_data["error"]["message"] == "The field `messages` is required in your `/chat/completions` request."
 
         # Test 4: Invalid request - malformed JSON, raised by SkyRL
         response = requests.post(
@@ -701,12 +675,12 @@ def test_http_endpoint_error_handling():
         print(f"Error data: {error_data}")
         assert "Invalid JSON error" in error_data["error"]["message"]  # JSON decode error
 
-        # Test 5: Invalid request - empty messages array, raised by vLLM
+        # Test 5: Invalid request - empty messages array, raised by SkyRL
         response = requests.post(f"{base_url}/v1/chat/completions", json={"model": MODEL, "messages": []})
         assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
         print(f"Error data: {error_data}")
-        assert "list index out of range list index out of range" in error_data["error"]["message"]
+        assert error_data["error"]["message"] == "The field `messages` in `/chat/completions` cannot be an empty list."
 
         # Test 6: Wrong model name, raised by SkyRL
         response = requests.post(
@@ -761,100 +735,6 @@ def test_http_endpoint_error_handling():
         assert r.status_code == HTTPStatus.BAD_REQUEST
 
     finally:
-        ray.shutdown()
-
-
-@pytest.mark.vllm
-def test_http_endpoint_custom_chat_template():
-    """
-    Test custom chat template for chat completion, especially for Qwen3 accumulating thinking.
-    """
-    qwen3_model = "Qwen/Qwen3-0.6B"
-    tokenizer = AutoTokenizer.from_pretrained(qwen3_model)
-    for acc_thinking in [True, False]:
-        try:
-            # Ensure no leftover Ray context from earlier fixtures or tests.
-            if ray.is_initialized():
-                ray.shutdown()
-                time.sleep(5)
-            cfg = get_test_actor_config(num_inference_engines=1)
-            cfg.trainer.policy.model.path = qwen3_model
-            cfg.trainer.placement.colocate_all = True
-            cfg.generator.weight_sync_backend = "nccl"
-            cfg.trainer.strategy = "fsdp2"
-
-            template_path = Path(__file__).parent / "qwen3_acc_thinking.jinja2"
-            assert template_path.exists(), f"Template path does not exist: {template_path}"
-
-            if acc_thinking:
-                engine_init_kwargs = {"custom_chat_template_chat_completion_path": template_path}
-            else:
-                engine_init_kwargs = {}
-
-            client, _ = init_inference_engines(
-                cfg=cfg,
-                use_local=True,
-                async_engine=cfg.generator.async_engine,
-                tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-                colocate_all=cfg.trainer.placement.colocate_all,
-                backend="vllm",
-                model=qwen3_model,
-                num_inference_engines=cfg.generator.num_inference_engines,
-                sleep_level=1,  # since we do not explicitly sync weights
-                engine_init_kwargs=engine_init_kwargs,
-            )
-
-            from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
-                serve,
-                wait_for_server_ready,
-            )
-
-            # Start server in background thread
-            def run_server():
-                serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
-
-            server_thread = threading.Thread(target=run_server, daemon=True)
-            server_thread.start()
-
-            # Wait for server to be ready
-            wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-
-            base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": "Hello",
-                },
-                {
-                    "role": "assistant",
-                    "content": "<think>Thinking...</think>Hello",
-                },
-                {
-                    "role": "user",
-                    "content": "Hello",
-                },
-            ]
-            response = requests.post(
-                f"{base_url}/v1/chat/completions",
-                json={"model": qwen3_model, "messages": messages, "prompt_logprobs": 1},
-            )
-            print(f"response: {response.json()}")
-
-            prompt_logprobs = response.json()["prompt_logprobs"]  # List of dicts, one per prompt token
-            prompt_token_ids = []
-            for logprob in prompt_logprobs:
-                if logprob is not None:
-                    prompt_token_ids.append(int(list(logprob.keys())[0]))
-            
-            prompt_decoded = tokenizer.decode(prompt_token_ids)
-            print(f"prompt decoded: {prompt_decoded}")
-
-            # This will fail if custom_chat_template_chat_completion_path is None
-            if acc_thinking:
-                assert "<think>" in prompt_decoded
-            else:
-                assert "<think>" not in prompt_decoded
-
-        finally:
-            ray.shutdown()
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)

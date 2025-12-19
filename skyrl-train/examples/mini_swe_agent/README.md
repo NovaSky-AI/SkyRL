@@ -27,7 +27,7 @@ We use [SWE-Gym](https://huggingface.co/SWE-Gym), specifically the subset from [
 
 Execute the following command:
 ```bash
-uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset # or modify to our desired path
+uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset # or modify to your desired path
 ```
 
 ### 2) Configure environment backend

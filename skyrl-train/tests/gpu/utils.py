@@ -27,6 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
+from skyrl_train.utils.constants import SKYRL_PYTHONPATH_EXPORT
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -103,31 +104,6 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
     )
 
 
-def get_test_deepspeed_strategy(cfg):
-    from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
-
-    return DeepspeedStrategy(
-        seed=42,
-        micro_train_batch_size_per_gpu=1,
-        train_batch_size=128,
-        zero_stage=3,
-        bf16=True,
-        cfg=cfg,
-    )
-
-
-def get_test_fsdp_strategy(cfg):
-    from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-
-    return FSDPStrategy(
-        seed=42,
-        max_norm=1.0,
-        micro_train_batch_size_per_gpu=1,
-        train_batch_size=128,
-        cfg=cfg,
-    )
-
-
 def import_worker(strategy: str, worker_type: str):
     if strategy == "deepspeed":
         module_path = "skyrl_train.workers.deepspeed.deepspeed_worker"
@@ -143,7 +119,7 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, cfg=None
+    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
@@ -152,7 +128,7 @@ def init_worker_with_type(
         pg = shared_pg
         num_gpus_per_actor = 0.2
     else:
-        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}]
+        bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
         pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         num_gpus_per_actor = 0.75
@@ -160,7 +136,7 @@ def init_worker_with_type(
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
         cfg,
-        num_nodes=1,  # single node for testing
+        num_nodes=num_nodes,
         num_gpus_per_node=num_gpus_per_node,
         ray_actor_type=worker_cls,
         pg=pg,
@@ -353,6 +329,13 @@ def ray_init_for_tests():
     if not peer_access_supported(max_num_gpus_per_node=4):
         log_once("Disabling NCCL P2P for test environment")
         env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
+    # TODO (erictang000): refactor this to use the same prepare_runtime_environment function as in utils.py for tests
+    # to remove duplicate code
+    if SKYRL_PYTHONPATH_EXPORT:
+        env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
+    env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    env_vars["NVTE_FUSED_ATTN"] = "0"
+    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
     ray.init(runtime_env={"env_vars": env_vars})
 
 
@@ -373,12 +356,14 @@ def init_inference_engines(
     backend,
     gpu_memory_utilization=0.6,
     num_inference_engines=1,
-    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights
-    engine_init_kwargs={},
+    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
+    enable_lora=False,
+    max_num_seqs=1024,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
-    initialize_ray(cfg)
+    if not ray.is_initialized():
+        initialize_ray(cfg)
     if colocate_all:
         pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
@@ -401,11 +386,11 @@ def init_inference_engines(
         inference_engine_enable_sleep=sleep,
         async_engine=async_engine,
         max_num_batched_tokens=8192,
-        max_num_seqs=1024,
+        max_num_seqs=max_num_seqs,
         tokenizer=tokenizer,
         backend=backend,
         sleep_level=sleep_level,
-        engine_init_kwargs=engine_init_kwargs,
+        enable_lora=enable_lora,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:
@@ -504,7 +489,7 @@ def init_remote_inference_servers(
     # Start the vLLM server process
     server_process = subprocess.Popen(remote_server_command, env=env)
 
-    wait_for_server(url=f"localhost:{engine_port}", health_path="health")
+    wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=120)
     print(f"Server at localhost:{engine_port} is online")
 
     engines = create_remote_inference_engines(
@@ -513,6 +498,8 @@ def init_remote_inference_servers(
         tokenizer=tokenizer,
         engine_backend=backend,
         tensor_parallel_size=tp_size,
+        data_parallel_size=1,
+        expert_parallel_size=1,
     )
 
     client = InferenceEngineClient(engines, tokenizer, config)

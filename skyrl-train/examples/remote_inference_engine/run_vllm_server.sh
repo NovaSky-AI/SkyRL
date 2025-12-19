@@ -2,8 +2,6 @@
 # bash examples/remote_inference_engine/run_vllm_server.sh
 set -x
 
-# NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
-# For standalone server, we use mp for now. 
 CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --tensor-parallel-size 4 \

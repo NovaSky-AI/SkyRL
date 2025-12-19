@@ -68,14 +68,14 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
     outputs = tokenizer(outputs)["input_ids"]
 
     loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
-    custom_rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
+    rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
 
-    sequences, attention_mask, action_mask, ret_custom_rewards, ret_loss_masks, ret_log_probs = (
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
             outputs,
-            custom_rewards,
+            rewards,
             loss_masks,
         )
     )
@@ -85,8 +85,8 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
     assert action_mask.shape == ret_loss_masks.shape
     assert torch.equal(ret_loss_masks[0], torch.tensor([1, 1, 0, 0, 0]))
     assert torch.equal(ret_loss_masks[1], torch.tensor([1, 1, 1, 0, 0]))
-    assert torch.equal(ret_custom_rewards[0], torch.tensor([0, 1, 0, 0, 0]))
-    assert torch.equal(ret_custom_rewards[1], torch.tensor([1, 0, 0, 0, 0]))
+    assert torch.equal(ret_rewards[0], torch.tensor([0, 1, 0, 0, 0]))
+    assert torch.equal(ret_rewards[1], torch.tensor([1, 0, 0, 0, 0]))
 
 
 def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, tokenizer):
@@ -95,15 +95,15 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
     outputs = ["Long response here", "Short"]
     prompts = tokenizer(prompts)["input_ids"]
     outputs = tokenizer(outputs)["input_ids"]
-    custom_rewards = [torch.tensor([1.0, 0.5, 0.3]), torch.tensor([0.8])]
+    rewards = [torch.tensor([1.0, 0.5, 0.3]), torch.tensor([0.8])]
     loss_masks = [[1, 1, 1], [1]]
 
-    sequences, attention_mask, action_mask, ret_custom_rewards, ret_loss_masks, ret_log_probs = (
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
             outputs,
-            custom_rewards,
+            rewards,
             loss_masks,
         )
     )
@@ -115,7 +115,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
     assert attention_mask.shape == sequences.shape
     # Tensor.shape can be directly compared with tuples
     assert action_mask.shape == (2, max_response_len)
-    assert ret_custom_rewards.shape == (2, max_response_len)
+    assert ret_rewards.shape == (2, max_response_len)
     assert ret_loss_masks.shape == (2, max_response_len)
 
     # Verify padding is applied correctly
@@ -129,7 +129,7 @@ def test_convert_prompts_responses_to_batch_tensors_empty_input(cfg, tokenizer):
     # Test with empty input
     prompts = []
     outputs = []
-    custom_rewards = []
+    rewards = []
     loss_masks = []
 
     with pytest.raises(AssertionError):
@@ -137,7 +137,7 @@ def test_convert_prompts_responses_to_batch_tensors_empty_input(cfg, tokenizer):
             tokenizer,
             prompts,
             outputs,
-            custom_rewards,
+            rewards,
             loss_masks,
         )
 
@@ -148,7 +148,7 @@ def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(cfg, toke
     outputs = ["Response"]
     prompts = tokenizer(prompts)["input_ids"]
     outputs = tokenizer(outputs)["input_ids"]
-    custom_rewards = [torch.tensor([1.0])]
+    rewards = [torch.tensor([1.0])]
     loss_masks = [[1]]
 
     with pytest.raises(AssertionError):
@@ -156,6 +156,6 @@ def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(cfg, toke
             tokenizer,
             prompts,
             outputs,
-            custom_rewards,
+            rewards,
             loss_masks,
         )

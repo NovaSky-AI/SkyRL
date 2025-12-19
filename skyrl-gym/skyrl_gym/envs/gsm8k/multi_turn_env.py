@@ -59,13 +59,22 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
 
         observations = [] if done else self._make_observation()
 
-        metadata = {
-            "turns": self.turns,
-        }
-
         return BaseTextEnvStepOutput(
             observations=observations,
             reward=reward,
             done=done,
-            metadata=metadata,
+            metadata={},
         )
+
+    def get_metrics(self) -> Dict[str, Any]:
+        return {
+            "steps": self.turns,
+        }
+
+    @staticmethod
+    def aggregate_metrics(metrics: list[Dict[str, Any]]) -> Dict[str, Any]:
+        if not metrics:
+            return {}
+        n = len(metrics)
+        avg_steps = sum(float(m.get("steps", 0)) for m in metrics) / n
+        return {"avg_steps": avg_steps}

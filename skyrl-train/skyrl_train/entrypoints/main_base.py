@@ -38,27 +38,52 @@ __all__ = ["BasePPOExp", "config_dir"]
 def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
-    return create_ray_wrapped_inference_engines(
-        num_inference_engines=cfg.generator.num_inference_engines,
-        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
-        model_dtype=cfg.generator.model_dtype,
-        pretrain=cfg.trainer.policy.model.path,
-        seed=cfg.trainer.seed,
-        vllm_v1_disable_multiproc=cfg.generator.vllm_v1_disable_multiproc,
-        enable_prefix_caching=cfg.generator.enable_prefix_caching,
-        enforce_eager=cfg.generator.enforce_eager,
-        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
-        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
-        shared_pg=colocate_pg,
-        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
-        async_engine=cfg.generator.async_engine,
-        max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
-        max_num_seqs=cfg.generator.max_num_seqs,
-        tokenizer=tokenizer,
-        backend=cfg.generator.backend,
-        engine_init_kwargs=cfg.generator.engine_init_kwargs,
-    )
+    engine_kwargs = {
+        "num_inference_engines": cfg.generator.num_inference_engines,
+        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
+        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
+        "model_dtype": cfg.generator.model_dtype,
+        "pretrain": cfg.trainer.policy.model.path,
+        "seed": cfg.trainer.seed,
+        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
+        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
+        "enforce_eager": cfg.generator.enforce_eager,
+        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
+        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
+        "shared_pg": colocate_pg,
+        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
+        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
+        "async_engine": cfg.generator.async_engine,
+        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
+        "max_num_seqs": cfg.generator.max_num_seqs,
+        "tokenizer": tokenizer,
+        "backend": cfg.generator.backend,
+        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+    }
+
+    # Conditionally add LoRA parameters if LoRA is enabled
+    if cfg.trainer.policy.model.lora.rank > 0:
+        engine_kwargs["enable_lora"] = True
+        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
+        engine_kwargs["sleep_level"] = 1
+        engine_kwargs["max_loras"] = 1
+        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
+
+        # TODO(devpatel): Bandaid solution, replace this once we have a better solution for LoRA performance degradation on the vLLM side
+        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
+            logger.warning(
+                "LoRA is enabled but generator.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            engine_kwargs["enforce_eager"] = False
+
+    if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
+        engine_kwargs["rope_scaling"] = rope_scaling
+    if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
+        engine_kwargs["rope_theta"] = rope_theta
+
+    return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
@@ -69,6 +94,7 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         engine_backend=cfg.generator.backend,
         tokenizer=tokenizer,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
         data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
         expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
     )
@@ -154,6 +180,7 @@ class BasePPOExp:
                 [{"GPU": 1, "CPU": 1}]
                 * self.cfg.generator.num_inference_engines
                 * self.cfg.generator.inference_engine_tensor_parallel_size
+                * self.cfg.generator.inference_engine_pipeline_parallel_size
                 * self.cfg.generator.inference_engine_data_parallel_size,
                 strategy="PACK",
             )
@@ -169,6 +196,17 @@ class BasePPOExp:
             GeneratorInterface: The generator.
         """
         from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+        if cfg.trainer.step_wise_training:
+            from skyrl_train.generators.step_wise_generator import StepWiseGenerator
+
+            return StepWiseGenerator(
+                generator_cfg=cfg.generator,
+                skyrl_gym_cfg=cfg.environment.skyrl_gym,
+                inference_engine_client=inference_engine_client,
+                tokenizer=tokenizer,
+                model_name=cfg.trainer.policy.model.path,
+            )
 
         return SkyRLGymGenerator(
             generator_cfg=cfg.generator,
@@ -235,12 +273,11 @@ class BasePPOExp:
                 PolicyWorker,
                 CriticWorker,
                 RefWorker,
-                RewardWorker,
             )
         elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker, RewardWorker
+            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
         elif self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RewardWorker, RefWorker
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
@@ -270,7 +307,7 @@ class BasePPOExp:
         )
 
         # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker, RewardWorker)
+        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
