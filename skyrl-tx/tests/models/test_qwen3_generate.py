@@ -73,9 +73,9 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
         sampling_params = [
             types.SamplingParams(max_tokens=10, temperature=0.0, seed=42),
             types.SamplingParams(max_tokens=20, temperature=0.0, seed=42),
-            types.SamplingParams(max_tokens=50, temperature=0.0, seed=42, stop=[6149]),
+            types.SamplingParams(max_tokens=50, temperature=0.0, seed=42, stop_tokens=[6149]),
             # Stop token at position 3, but max_tokens=2 should cap output first
-            types.SamplingParams(max_tokens=2, temperature=0.0, seed=42, stop=[6149]),
+            types.SamplingParams(max_tokens=2, temperature=0.0, seed=42, stop_tokens=[6149]),
         ]
         result = model.generate(
             batch.input_ids.numpy(),
@@ -90,8 +90,8 @@ def test_qwen3_generate(mesh_config_idx, mesh_configs):
             prompt_length = batch.input_ids.shape[1]
             hf_tokens_truncated = hf_tokens[prompt_length : prompt_length + sampling_param.max_tokens].tolist()
 
-            if sampling_param.stop and result.stop_reasons[i] == "stop":
-                assert our_tokens[-1] in sampling_param.stop
+            if sampling_param.stop_tokens and result.stop_reasons[i] == "stop":
+                assert our_tokens[-1] in sampling_param.stop_tokens
                 # We need to truncate it manually here since if we use the `eos_token_id`
                 # in huggingface generate, it will pad the sequence with padding tokens
                 hf_tokens_truncated = hf_tokens_truncated[: len(our_tokens)]

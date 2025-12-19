@@ -6,6 +6,7 @@ import functools
 
 import jax
 import jax.numpy as jnp
+from tokenizers.decoders import DecodeStream
 import tx.utils.models
 from tx.tinker import types
 
@@ -75,6 +76,41 @@ def compute_positions(attention_mask: jax.Array) -> jax.Array:
     """
     first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
     return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
+
+
+def find_string_stop_position(
+    tokens: list[int],
+    tokenizer,
+    stop_strings: list[str],
+) -> int | None:
+    """Find the token position where a stop string first appears.
+
+    Incrementally decodes tokens and checks for stop string matches.
+    Uses the tokenizers DecodeStream for efficient incremental decoding.
+
+    Args:
+        tokens: List of generated token IDs
+        tokenizer: HuggingFace tokenizer instance
+        stop_strings: List of stop strings to search for
+
+    Returns:
+        Token index to truncate to (exclusive), or None if no stop found.
+    """
+    if not stop_strings or not tokens:
+        return None
+
+    # Incremental decode using DecodeStream
+    stream = DecodeStream(skip_special_tokens=False)
+    text = ""
+    for i, token in enumerate(tokens):
+        chunk = stream.step(tokenizer._tokenizer, token)
+        if chunk is not None:
+            text += chunk
+        for stop_string in stop_strings:
+            if stop_string in text:
+                return i + 1
+
+    return None
 
 
 def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
@@ -185,8 +221,13 @@ class GeneratorMixin:
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
         prompt_logprobs: bool = False,
+        tokenizer=None,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
+
+        Args:
+            tokenizer: Optional tokenizer for string stop sequence detection.
+                Required if any sampling_params has stop_strings set.
 
         Returns:
             GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
@@ -202,10 +243,10 @@ class GeneratorMixin:
         rngs = jax.vmap(jax.random.PRNGKey)(jnp.array(seeds))
 
         # Extract stop tokens and pad to same length
-        max_stop_tokens = max(len(sp.stop) if sp.stop else 0 for sp in sampling_params)
+        max_stop_tokens = max(len(sp.stop_tokens) if sp.stop_tokens else 0 for sp in sampling_params)
         stop_tokens = []
         for sp in sampling_params:
-            stop = sp.stop or []
+            stop = sp.stop_tokens or []
             stop_tokens.append(stop + [-1] * (max_stop_tokens - len(stop)))
         stop_tokens = jnp.array(stop_tokens, dtype=jnp.int32)
 
@@ -240,10 +281,34 @@ class GeneratorMixin:
             prompt_lengths_host,
         ) = jax.device_get((new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths))
 
+        # Build output lists, applying string stop detection where needed
+        generated_ids = []
+        stop_reasons = []
+        logprobs_out = []
+
+        for i in range(batch_size):
+            tokens = new_tokens_host[i][: end_positions_host[i]].tolist()
+            token_logprobs = new_logprobs_host[i][: end_positions_host[i]].tolist()
+            stop_reason = "stop" if has_stop_host[i] else "length"
+
+            # Apply string stop detection if stop_strings specified
+            if sampling_params[i].stop_strings:
+                assert tokenizer is not None, "tokenizer is required when stop_strings is specified"
+                assert stop_reason == "length", "stop_tokens cannot be specified when stop_strings is specified"
+                string_stop_pos = find_string_stop_position(tokens, tokenizer, sampling_params[i].stop_strings)
+                if string_stop_pos is not None:
+                    tokens = tokens[:string_stop_pos]
+                    token_logprobs = token_logprobs[:string_stop_pos]
+                    stop_reason = "stop"
+
+            generated_ids.append(tokens)
+            stop_reasons.append(stop_reason)
+            logprobs_out.append(token_logprobs)
+
         return GenerateOutput(
-            generated_ids=[new_tokens_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
-            stop_reasons=["stop" if has_stop_host[i] else "length" for i in range(batch_size)],
-            logprobs=[new_logprobs_host[i][: end_positions_host[i]].tolist() for i in range(batch_size)],
+            generated_ids=generated_ids,
+            stop_reasons=stop_reasons,
+            logprobs=logprobs_out,
             prompt_logprobs=(
                 [prompt_logprobs_host[i, : prompt_lengths_host[i] - 1].tolist() for i in range(batch_size)]
                 if prompt_logprobs

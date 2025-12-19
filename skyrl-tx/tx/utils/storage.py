@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import io
+import gzip
 from pathlib import Path
 import tarfile
 from tempfile import TemporaryDirectory
@@ -23,8 +24,9 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
 
         with dest.open("wb") as f:
             # Use compresslevel=0 to prioritize speed, as checkpoint files don't compress well.
-            with tarfile.open(fileobj=f, mode="w|gz", compresslevel=0) as tar:
-                tar.add(tmp_path, arcname="")
+            with gzip.GzipFile(fileobj=f, mode="wb", compresslevel=0) as gz_stream:
+                with tarfile.open(fileobj=gz_stream, mode="w:") as tar:
+                    tar.add(tmp_path, arcname="")
 
 
 @contextmanager
