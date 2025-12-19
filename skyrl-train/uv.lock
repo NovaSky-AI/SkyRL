@@ -49,7 +49,7 @@ conflicts = [[
 overrides = [
     { name = "causal-conv1d", marker = "sys_platform == 'never'" },
     { name = "mamba-ssm", marker = "sys_platform == 'never'" },
-    { name = "megatron-core", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.15.0" },
+    { name = "megatron-core", specifier = "==0.15.0" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "transformer-engine", extras = ["pytorch"], specifier = "==2.9.0" },
 ]
@@ -2178,11 +2178,16 @@ dependencies = [
 [[package]]
 name = "megatron-core"
 version = "0.15.0"
-source = { git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.15.0#0d7e02bd26d3eb347ad8d1bef625002babfa6df7" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "torch", version = "2.8.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0f/bd/6bdffdf3ce9d2bcdd8d32c437c04712ce630c71359b3f29b2b15ab83a5e7/megatron_core-0.15.0.tar.gz", hash = "sha256:58f0d98a4ea2041190a40520aaac1564048ed396bc97a285e54da55830b8ac03", size = 882299, upload-time = "2025-12-18T01:36:02.074Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/8e/6f52874c759aa10f6f5542fb7ae26f1ccdf23a115807715aa1a623df6cc1/megatron_core-0.15.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1baefc30bb53840c5a30197f0dedba3236f4236ef883098e89450253c5eecb2f", size = 2243667, upload-time = "2025-12-18T01:35:53.383Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/50/c12390df40f5b25a8a247f92ab1404efddf444e3910b7c0d07382a3c8d28/megatron_core-0.15.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2e4f01ea4d28f4e7a0450701164cedd23463021bed49b831ebfcf16c54be8232", size = 2268089, upload-time = "2025-12-18T01:35:54.715Z" },
 ]
 
 [[package]]
@@ -4694,13 +4699,13 @@ requires-dist = [
     { name = "flash-attn", marker = "extra == 'sglang'", specifier = "==2.8.3" },
     { name = "flash-attn", marker = "extra == 'vllm'", specifier = "==2.8.3" },
     { name = "flashinfer-jit-cache", marker = "extra == 'mcore'", specifier = "==0.5.2", index = "https://flashinfer.ai/whl/cu128" },
-    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.5.3", index = "https://flashinfer.ai/whl/cu128" },
+    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", index = "https://flashinfer.ai/whl/cu128" },
     { name = "flashinfer-python", marker = "(extra == 'flashrl' and extra == 'mcore') or (extra == 'flashrl' and extra != 'sglang') or (extra == 'flashrl' and extra == 'sglang' and extra == 'vllm')" },
     { name = "flashinfer-python", marker = "extra == 'flashrl' and extra != 'mcore' and extra == 'sglang' and extra != 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'mcore'", specifier = "==0.5.2" },
     { name = "flashinfer-python", marker = "extra != 'mcore' and extra == 'sglang' and extra != 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "(extra == 'mcore' and extra == 'sglang') or (extra == 'sglang' and extra == 'vllm')" },
-    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.5.3" },
+    { name = "flashinfer-python", marker = "extra == 'vllm'" },
     { name = "func-timeout" },
     { name = "hf-transfer" },
     { name = "hydra-core", specifier = "==1.3.2" },
@@ -4710,7 +4715,7 @@ requires-dist = [
     { name = "litellm", extras = ["proxy"], marker = "extra == 'sandboxes'", specifier = ">=1.67.5" },
     { name = "loguru" },
     { name = "megatron-bridge", marker = "extra == 'mcore'", git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge?rev=22ef9ff9f9684ba2f2dbea14db974f5c31bbd683" },
-    { name = "megatron-core", marker = "extra == 'mcore'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.15.0" },
+    { name = "megatron-core", marker = "extra == 'mcore'", specifier = "==0.15.0" },
     { name = "mini-swe-agent", marker = "extra == 'miniswe'", specifier = ">=1.12.0" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
     { name = "ninja" },
