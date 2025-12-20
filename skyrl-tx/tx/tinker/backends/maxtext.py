@@ -27,6 +27,21 @@ from MaxText import sharding as maxtext_sharding
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
 
+
+def reset_adapter_weights(model):
+
+    state = nnx.state(model)
+
+    def update_lora_config(path, value):
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+        j_path  = "/".join(normalized_path)
+        if "lora_b" in j_path:
+            return value.at[...].set(0.0)
+        return value
+
+    updated_state = jax.tree.map_with_path(update_lora_config, state)
+    nnx.update(model, updated_state)
+
 def _get_maxtext_base_config_path() -> str:
     """Get the absolute path to MaxText's base.yml config file."""
     import os
@@ -250,13 +265,14 @@ class MaxTextBackend(AbstractBackend):
     def unregister_model(self, model_id: str, adapter_index: int) -> None:
         """Unregister a model from the backend.
 
-        Removes optimizer and zeros LoRA weights.
+        Removes optimizer and resets LoRA weights (only zeros lora_b, preserves lora_a).
         """
         self.optimizers.pop(model_id, None)
 
-        # Zero out all LoRA weights (single adapter)
-        zeroed_params = jax.tree.map(jnp.zeros_like, self.lora_params)
-        nnx.update(self.lora_params, zeroed_params)
+        # Reset LoRA weights (only zero lora_b, preserve lora_a random init for gradients to flow)
+        reset_adapter_weights(self.model)
+        # Re-split to update lora_params reference
+        self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.lora_filter, ...)
         logger.info(f"Unregistered model {model_id} from MaxText backend")
 
     def precompile_kernels(self, seq_lens: list[int]):
@@ -497,6 +513,8 @@ class MaxTextBackend(AbstractBackend):
         # Update model state
         nnx.update(self.lora_params, resharded_lora)
         nnx.update(nnx.state(optimizer), resharded_optim)
+        # Sync model with updated lora_params
+        self.model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
         logger.info(f"Restored checkpoint data for model {model_id}")
 
     def save_sampler_checkpoint(
