@@ -35,6 +35,9 @@ from tx.utils.log import logger
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 ID_MAX_LENGTH = 255
 
+# Maximum number of sampler checkpoints to keep per model (oldest are evicted)
+MAX_SAMPLER_CHECKPOINTS_PER_MODEL = 3
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -160,6 +163,72 @@ async def create_checkpoint(
             status=CheckpointStatus.PENDING,
         )
         session.add(checkpoint_db)
+        await session.flush()
+
+
+async def evict_old_sampler_checkpoints(
+    request: Request,
+    session: AsyncSession,
+    model_id: str,
+    max_count: int = MAX_SAMPLER_CHECKPOINTS_PER_MODEL,
+):
+    """Delete oldest sampler checkpoints if count exceeds max_count.
+
+    Called before creating a new sampler checkpoint to make room.
+    Deletes the database entry, the checkpoint archive, and the extracted lora directory (if exists).
+
+    Args:
+        request: FastAPI request (for accessing engine config)
+        session: Database session
+        model_id: The model whose checkpoints to manage
+        max_count: Maximum number of sampler checkpoints to keep (default: 3)
+    """
+    import shutil
+
+    engine_config = request.app.state.engine_config
+
+    # Get all sampler checkpoints for this model, ordered by creation time (oldest first)
+    statement = (
+        select(CheckpointDB)
+        .where(CheckpointDB.model_id == model_id)
+        .where(CheckpointDB.checkpoint_type == types.CheckpointType.SAMPLER)
+        .order_by(CheckpointDB.created_at.asc())
+    )
+    result = await session.exec(statement)
+    checkpoints = result.all()
+
+    # If we have max_count or more, delete the oldest ones to make room for the new one
+    if len(checkpoints) >= max_count:
+        # Delete oldest checkpoints, keeping only (max_count - 1) to make room for new one
+        to_delete = checkpoints[: len(checkpoints) - max_count + 1]
+        for checkpoint in to_delete:
+            checkpoint_id = checkpoint.checkpoint_id
+
+            # Delete checkpoint archive from disk
+            checkpoint_path = (
+                engine_config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+            )
+            try:
+                if checkpoint_path.exists():
+                    checkpoint_path.unlink()
+                    logger.info(f"Deleted sampler checkpoint file: {checkpoint_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete checkpoint file {checkpoint_path}: {e}")
+
+            # Delete extracted lora directory (used by external inference / vLLM)
+            if engine_config.external_inference_lora_base:
+                lora_dir = engine_config.external_inference_lora_base / f"{model_id}_{checkpoint_id}"
+                try:
+                    if lora_dir.exists():
+                        shutil.rmtree(lora_dir)
+                        logger.info(f"Deleted extracted lora directory: {lora_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete lora directory {lora_dir}: {e}")
+
+            # Delete from database
+            await session.delete(checkpoint)
+            logger.info(f"Evicted sampler checkpoint: {model_id}/{checkpoint_id}")
+
         await session.flush()
 
 
@@ -704,8 +773,13 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 
 
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
-async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
+async def save_weights_for_sampler(
+    request: SaveWeightsForSamplerRequest, req: Request, session: AsyncSession = Depends(get_session)
+):
     """Saves weights in a format compatible with sampling/inference servers."""
+    # Evict old sampler checkpoints to keep only the last K
+    await evict_old_sampler_checkpoints(req, session, request.model_id)
+
     # Create pending checkpoint entry (validates model exists)
     await create_checkpoint(
         session=session,

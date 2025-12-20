@@ -1,6 +1,7 @@
 import shutil
 
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from datetime import datetime, timezone
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -50,6 +51,12 @@ class ExternalInferenceClient:
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception_type((httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError)),
+        reraise=True,
+    )
     async def _forward_to_engine(
         self, request, model_id: str, checkpoint_id: str, http_client: httpx.AsyncClient
     ) -> types.SampleOutput:

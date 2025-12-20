@@ -15,6 +15,7 @@ from tx.tinker import types
 from tx.tinker.config import EngineConfig
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad_batch
+from tx.tinker.loss_fns import LOSS_FUNCTIONS
 from tx.utils.models import round_up_seq_len, convert_maxtext_lora_to_hf
 from tx.utils.storage import pack_and_upload
 from tx.utils.log import logger
@@ -187,13 +188,34 @@ class MaxTextBackend(AbstractBackend):
             positions: jax.Array,
             target_ids: jax.Array,
             loss_mask: jax.Array,
+            loss_fn_types: jax.Array,
+            sampling_logprobs: jax.Array,
+            advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            """Simple cross-entropy loss for MaxText model."""
+            """Loss for MaxText model with dynamic loss function selection."""
             logits, _ = model(input_ids, positions, None, None, False)
             logprobs = jax.nn.log_softmax(logits, axis=-1)
             target_logprobs = jnp.take_along_axis(logprobs, target_ids[..., None], axis=-1).squeeze(-1)
-            per_token_losses = -target_logprobs * loss_mask
-            per_seq_loss = per_token_losses.sum(axis=-1) / (loss_mask.sum(axis=-1) + 1e-8)
+
+            def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
+                return jax.lax.switch(
+                    loss_fn_type,
+                    LOSS_FUNCTIONS,
+                    target_logprobs,
+                    loss_mask,
+                    sampling_logprobs,
+                    advantages,
+                )
+
+            per_token_losses = jax.vmap(compute_loss_per_example)(
+                loss_fn_types,
+                target_logprobs,
+                loss_mask,
+                sampling_logprobs,
+                advantages,
+            )
+
+            per_seq_loss = per_token_losses.sum(axis=-1) / jnp.maximum(loss_mask.sum(axis=-1), 1e-9)
             total_loss = per_seq_loss.sum()
             return total_loss, (target_logprobs, per_token_losses)
 
@@ -204,11 +226,11 @@ class MaxTextBackend(AbstractBackend):
         )
 
         def forward_backward_maxtext(
-            model, input_ids, positions, target_ids, loss_mask,
+            model, input_ids, positions, target_ids, loss_mask, loss_fn_types, sampling_logprobs, advantages,
         ) -> tuple[jax.Array, jax.Array, jax.Array, nnx.State]:
             """Forward-backward for MaxText model."""
             (loss, (target_logprobs, per_token_losses)), grads = loss_and_grad_fn(
-                model, input_ids, positions, target_ids, loss_mask,
+                model, input_ids, positions, target_ids, loss_mask, loss_fn_types, sampling_logprobs, advantages,
             )
             return loss, target_logprobs, per_token_losses, grads
 
@@ -220,7 +242,8 @@ class MaxTextBackend(AbstractBackend):
             with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(self.maxtext_config.logical_axis_rules):
                 self._forward_backward = jax.jit(
                     forward_backward_maxtext,
-                    in_shardings=(None, data_sharding, data_sharding, data_sharding, data_sharding),
+                    # model, input_ids, positions, target_ids, loss_mask, loss_fn_types (1D), sampling_logprobs, advantages
+                    in_shardings=(None, data_sharding, data_sharding, data_sharding, data_sharding, None, data_sharding, data_sharding),
                 )
 
         def optim_step(model, optimizer, grads):
@@ -289,17 +312,24 @@ class MaxTextBackend(AbstractBackend):
                 dummy_target_ids = jnp.zeros((micro_bs, seq_len), dtype=jnp.int32)
                 dummy_loss_mask = jnp.ones((micro_bs, seq_len), dtype=jnp.float32)
                 dummy_positions = jnp.broadcast_to(jnp.arange(seq_len), (micro_bs, seq_len))
+                dummy_loss_fn_types = jnp.zeros((micro_bs,), dtype=jnp.int32)
+                dummy_sampling_logprobs = jnp.zeros((micro_bs, seq_len), dtype=jnp.float32)
+                dummy_advantages = jnp.zeros((micro_bs, seq_len), dtype=jnp.float32)
 
                 data_sharding = maxtext_sharding.get_input_data_sharding(self.maxtext_config, self.mesh)
                 dummy_input_ids = jax.device_put(dummy_input_ids, data_sharding)
                 dummy_positions = jax.device_put(dummy_positions, data_sharding)
                 dummy_target_ids = jax.device_put(dummy_target_ids, data_sharding)
                 dummy_loss_mask = jax.device_put(dummy_loss_mask, data_sharding)
+                # dummy_loss_fn_types is 1D, no sharding needed
+                dummy_sampling_logprobs = jax.device_put(dummy_sampling_logprobs, data_sharding)
+                dummy_advantages = jax.device_put(dummy_advantages, data_sharding)
 
                 with nn_partitioning.axis_rules(self.maxtext_config.logical_axis_rules):
                     with self._jit_timing_context(seq_len, mode="train"):
                         _, _, _, grads = self._forward_backward(
                             self.model, dummy_input_ids, dummy_positions, dummy_target_ids, dummy_loss_mask,
+                            dummy_loss_fn_types, dummy_sampling_logprobs, dummy_advantages,
                         )
                         self.accumulated_grads = self.accumulated_grads.add(grads, micro_bs)
 
@@ -315,6 +345,9 @@ class MaxTextBackend(AbstractBackend):
         all_input_ids = prepared_batch.all_input_ids
         all_targets = prepared_batch.all_targets
         all_token_weights = prepared_batch.all_token_weights
+        all_sampling_logprobs = prepared_batch.all_sampling_logprobs
+        all_advantages = prepared_batch.all_advantages
+        all_loss_fn_types = prepared_batch.all_loss_fn_types
         request_batch_slices = prepared_batch.request_batch_slices
 
         if not all_input_ids:
@@ -325,6 +358,9 @@ class MaxTextBackend(AbstractBackend):
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
         target_ids = pad_batch(all_targets, max_len, np.int32)
         loss_mask = pad_batch(all_token_weights, max_len, np.float32)
+        sampling_logprobs = pad_batch(all_sampling_logprobs, max_len, np.float32)
+        advantages = pad_batch(all_advantages, max_len, np.float32)
+        loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
 
         batch_size = input_ids.shape[0]
         seq_len = input_ids.shape[1]
@@ -349,6 +385,9 @@ class MaxTextBackend(AbstractBackend):
                     mb_positions = jax.device_put(positions[mb_start:mb_end], data_sharding)
                     mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], data_sharding)
                     mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], data_sharding)
+                    mb_loss_fn_types = loss_fn_types[mb_start:mb_end]  # 1D, no sharding needed
+                    mb_sampling_logprobs = jax.device_put(sampling_logprobs[mb_start:mb_end], data_sharding)
+                    mb_advantages = jax.device_put(advantages[mb_start:mb_end], data_sharding)
 
                     _, target_logprobs, per_token_losses, grads = self._forward_backward(
                         self.model,
@@ -356,6 +395,9 @@ class MaxTextBackend(AbstractBackend):
                         mb_positions,
                         mb_target_ids,
                         mb_loss_mask,
+                        mb_loss_fn_types,
+                        mb_sampling_logprobs,
+                        mb_advantages,
                     )
 
                     _ = jax.device_get(target_logprobs)
