@@ -111,7 +111,8 @@ class NativeBackend(AbstractBackend):
 
         # Create model and load weights
         self.mesh = jax.make_mesh((1, config.tensor_parallel_size), ("dp", "tp"))
-        with jax.set_mesh(self.mesh):
+        
+        with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
             self.model = model_class(
                 self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0)
             )
@@ -226,7 +227,7 @@ class NativeBackend(AbstractBackend):
                 advantages,
             )
 
-            per_seq_loss = per_token_losses.sum(axis=-1) / loss_mask.sum(axis=-1)
+            per_seq_loss = per_token_losses.sum(axis=-1) / jnp.maximum(loss_mask.sum(axis=-1), 1e-9)
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (target_logprobs, per_token_losses)
 
