@@ -1,7 +1,7 @@
 import shutil
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from datetime import datetime, timezone
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -10,6 +10,15 @@ from tx.tinker.config import EngineConfig
 from tx.tinker.db_models import FutureDB, RequestStatus
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    """Check if exception is retryable (connection errors or 5xx status)."""
+    if isinstance(exc, (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
+        return True
+    return False
 
 
 class ExternalInferenceClient:
@@ -54,7 +63,7 @@ class ExternalInferenceClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=30),
-        retry=retry_if_exception_type((httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError)),
+        retry=retry_if_exception(_is_retryable_error),
         reraise=True,
     )
     async def _forward_to_engine(
