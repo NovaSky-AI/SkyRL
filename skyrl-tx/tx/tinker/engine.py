@@ -9,7 +9,6 @@ from pathlib import Path
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from flax import nnx
 from flax.training import checkpoints
 
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
@@ -29,7 +28,7 @@ class TinkerEngine:
     - Database operations (futures, checkpoints)
     - Request finding/scheduling
     - File I/O (download/upload checkpoints)
-    - Storing models and optimizers dicts
+    - Storing models dict
     - Validating requests against loaded models
 
     Computation is delegated to the backend (NativeBackend).
@@ -169,8 +168,6 @@ class TinkerEngine:
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
-        # Store optimizer instances per LoRA adapter (model_id -> optimizer)
-        self.optimizers: dict[str, nnx.Optimizer] = {}
 
         # Initialize the backend (handles model state and computation)
         self.backend = NativeBackend(config)
@@ -335,11 +332,8 @@ class TinkerEngine:
             lora_config=lora_config,
         )
 
-        # Create optimizer via backend
-        self.optimizers[model_id] = self.backend.create_optimizer(model_id)
-
-        # Configure adapter's rank and scaling in all LoRA layers
-        self.backend.configure_adapter(adapter_index, lora_config)
+        # Register model with backend (creates optimizer and configures adapter)
+        self.backend.register_model(model_id, adapter_index, lora_config)
 
         logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, config {lora_config}")
 
@@ -420,9 +414,7 @@ class TinkerEngine:
 
         adapter_index = self.models[model_id].adapter_index
 
-        return self.backend.process_optim_step(
-            model_id, request_data, self.optimizers[model_id], adapter_index
-        )
+        return self.backend.process_optim_step(model_id, adapter_index, request_data)
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
         """Loads a clean, trimmed training checkpoint."""
@@ -436,7 +428,7 @@ class TinkerEngine:
         with download_and_unpack(checkpoint_dir) as temp_dir:
             checkpoint = checkpoints.restore_checkpoint(
                 ckpt_dir=temp_dir,
-                target=self.backend.extract_checkpoint_data(model_id, self.models, self.optimizers),
+                target=self.backend.extract_checkpoint_data(model_id, self.models),
                 prefix="checkpoint_",
             )
 
@@ -444,7 +436,7 @@ class TinkerEngine:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
 
         # Insert checkpoint data into model state via backend
-        self.backend.insert_checkpoint_data(model_id, checkpoint, self.models, self.optimizers)
+        self.backend.insert_checkpoint_data(model_id, checkpoint, self.models)
 
         logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
@@ -461,7 +453,7 @@ class TinkerEngine:
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            self.backend.save_checkpoint(output_path, model_id, self.models, self.optimizers)
+            self.backend.save_checkpoint(output_path, model_id, self.models)
             logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
         return types.SaveWeightsOutput(

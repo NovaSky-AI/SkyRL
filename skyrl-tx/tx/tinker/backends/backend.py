@@ -5,7 +5,7 @@ Backends handle all model state and computation. The engine handles file I/O and
 Design:
   1. AbstractBackend (backend.py)
      Clean interface defining what backends must implement:
-     - create_optimizer
+     - register_model, unregister_model (optimizer lifecycle managed internally)
      - process_forward_backward_batch, process_forward_batch, process_optim_step, process_sample_batch
      - extract_checkpoint_data, insert_checkpoint_data (pure state manipulation)
      - extract_sampler_weights, insert_sampler_weights
@@ -21,7 +21,7 @@ Design:
      - Instantiates backend based on config
      - Delegates computation to self.backend
      - Handles all database operations
-     - Stores models and optimizers dicts
+     - Manages model metadata (backends manage optimizers internally)
 """
 
 from abc import ABC, abstractmethod
@@ -54,23 +54,14 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def create_optimizer(self, model_id: str) -> nnx.Optimizer:
-        """Create an optimizer for a model.
+    def register_model(self, model_id: str, adapter_index: int, lora_config: types.LoraConfig) -> None:
+        """Register a new model with the backend.
+
+        Creates optimizer and configures LoRA adapter internally.
 
         Args:
             model_id: The model identifier
-
-        Returns:
-            An nnx.Optimizer instance for the model
-        """
-        pass
-
-    @abstractmethod
-    def configure_adapter(self, adapter_index: int, lora_config: types.LoraConfig) -> None:
-        """Configure LoRA adapter rank and scaling in all LoRA layers.
-
-        Args:
-            adapter_index: The adapter slot index
+            adapter_index: The adapter slot index to use
             lora_config: LoRA configuration with rank and alpha
         """
         pass
@@ -109,17 +100,15 @@ class AbstractBackend(ABC):
     def process_optim_step(
         self,
         model_id: str,
-        request_data: types.OptimStepInput,
-        optimizer: nnx.Optimizer,
         adapter_index: int,
+        request_data: types.OptimStepInput,
     ) -> types.OptimStepOutput:
         """Process an optimizer step request.
 
         Args:
             model_id: The model identifier
-            request_data: The optimizer step input parameters
-            optimizer: The optimizer instance for this model
             adapter_index: The adapter index for this model
+            request_data: The optimizer step input parameters
 
         Returns:
             OptimStepOutput result
@@ -147,7 +136,6 @@ class AbstractBackend(ABC):
         output_path,
         model_id: str,
         models: dict[str, types.ModelMetadata],
-        optimizers: dict[str, nnx.Optimizer],
     ) -> None:
         """Save training checkpoint to disk.
 
@@ -155,7 +143,6 @@ class AbstractBackend(ABC):
             output_path: Path to save the checkpoint
             model_id: The model identifier
             models: Dict mapping model_id to ModelMetadata
-            optimizers: Dict mapping model_id to Optimizer
         """
         pass
 
@@ -164,14 +151,12 @@ class AbstractBackend(ABC):
         self,
         model_id: str,
         models: dict[str, types.ModelMetadata],
-        optimizers: dict[str, nnx.Optimizer],
     ) -> dict:
         """Extract model state for checkpointing.
 
         Args:
             model_id: The model identifier
             models: Dict mapping model_id to ModelMetadata
-            optimizers: Dict mapping model_id to Optimizer
 
         Returns:
             Dictionary containing checkpoint data (weights, optimizer state, config).
@@ -184,7 +169,6 @@ class AbstractBackend(ABC):
         model_id: str,
         checkpoint_data: dict,
         models: dict[str, types.ModelMetadata],
-        optimizers: dict[str, nnx.Optimizer],
     ) -> None:
         """Insert checkpoint data into model state.
 
@@ -192,7 +176,6 @@ class AbstractBackend(ABC):
             model_id: The model identifier
             checkpoint_data: Dictionary from extract_checkpoint_data or loaded from disk
             models: Dict mapping model_id to ModelMetadata
-            optimizers: Dict mapping model_id to Optimizer
         """
         pass
 
