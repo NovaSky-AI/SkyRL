@@ -174,8 +174,8 @@ def validate_megatron_cfg(cfg: DictConfig):
         import flash_attn
 
         version = flash_attn.__version__
-        if version > "2.7.4.post1":
-            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
+        if version > "2.8.1":
+            logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -504,6 +504,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
+        # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
+        env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"

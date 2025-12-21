@@ -3,14 +3,14 @@
 from transformers import PretrainedConfig
 
 
-class Qwen3Config(PretrainedConfig):
-    """Qwen3 configuration for tx.
+class ModelConfig(PretrainedConfig):
+    """Configuration for tx models with LoRA support.
 
     Wraps a HuggingFace PretrainedConfig with additional parameters
     for Multi-LoRA training and tensor parallelism.
 
     Args:
-        config: A HuggingFace PretrainedConfig object (e.g., from Qwen3Config.from_pretrained())
+        config: A HuggingFace PretrainedConfig object (e.g., from AutoConfig.from_pretrained())
         max_lora_adapters: Maximum number of concurrent LoRA adapters
         max_lora_rank: Maximum rank for LoRA adapters
         shard_attention_heads: Whether to shard attention across tensor parallel devices
@@ -31,3 +31,8 @@ class Qwen3Config(PretrainedConfig):
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
         self.shard_attention_heads = shard_attention_heads
+
+
+# Model-specific aliases for clarity and backwards compatibility
+Llama3Config = ModelConfig
+Qwen3Config = ModelConfig
