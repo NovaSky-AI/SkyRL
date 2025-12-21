@@ -5,10 +5,72 @@ We provide a collection of end-to-end recipes for single and multi-turn RL train
 
 We provide reproduction runs for the following recipes:
 
-1. `Decoupled Clip and Dynamic Sampling Policy Optimization (DAPO) <https://dapo-sia.github.io/>`_ 
-2. `SkyRL-SQL <https://novasky-ai.notion.site/skyrl-sql>`_ 
-3. `SearchR1 <https://arxiv.org/abs/2503.09516>`_ 
+1. Simple training on GSM8K 
+2. `Decoupled Clip and Dynamic Sampling Policy Optimization (DAPO) <https://dapo-sia.github.io/>`_ 
+3. `SkyRL-SQL <https://novasky-ai.notion.site/skyrl-sql>`_ 
+4. `SearchR1 <https://arxiv.org/abs/2503.09516>`_ 
 
+
+
+Simple training on GSM8K
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The scripts for training on GSM8K are available at :code_link:`examples/gsm8k/`.
+
+
+.. raw:: html
+
+   <style>
+     table.skytable {
+       border-collapse: collapse;
+       margin-bottom: 20px;
+     }
+     table.skytable th, table.skytable td {
+       border: 1px solid #ccc;
+       padding: 6px 10px;
+     }
+     table.skytable th {
+       background: #f2f2f2;
+     }
+     table.skytable tr:nth-child(even) {
+       background: #fafafa;
+     }
+   </style>
+
+   <table class="skytable">
+     <thead>
+       <tr>
+         <th>Backend</th>
+         <th>Model</th>
+         <th>Eval Accuracy</th>
+         <th>Hardware</th>
+         <th>Training Steps</th>
+         <th>Commit</th>
+         <th>WandB</th>
+       </tr>
+     </thead>
+     <tbody>
+       <tr>
+         <td>FSDP2</td>
+         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
+         <td>0.796</td>
+         <td>4xH100</td>
+         <td>140</td>
+         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
+         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
+       </tr>
+       <tr>
+         <td>DeepSpeed</td>
+         <td>Qwen/Qwen2.5-1.5B-Instruct</td>
+         <td>0.791</td>
+         <td>4xH100</td>
+         <td>140</td>
+         <td><a href="https://github.com/novasky-ai/SkyRL/commit/a95b699">a95b699</a></td>
+         <td><a href="https://wandb.ai/sky-posttraining-uc-berkeley/gsm8k_recipes?nw=nwusersumanthrh99">Link</a></td>
+       </tr>
+     </tbody>
+   </table>
+  
 
 DAPO Recipes
 ~~~~~~~~~~~~

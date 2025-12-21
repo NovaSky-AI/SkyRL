@@ -2,17 +2,18 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence
+from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import subprocess
 import random
+import time
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -247,6 +248,11 @@ class ForwardBackwardRequest(BaseModel):
     forward_backward_input: ForwardBackwardInput
 
 
+class ForwardRequest(BaseModel):
+    model_id: str
+    forward_input: ForwardBackwardInput
+
+
 class AdamParams(BaseModel):
     learning_rate: float = Field(default=1e-4, ge=0.0)
     beta1: float = Field(default=0.9, ge=0.0, lt=1.0)
@@ -270,7 +276,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | None = None
+    stop: list[int] | list[str] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
@@ -287,11 +293,26 @@ class SamplingParams(BaseModel):
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
+        # Determine if stop values are token IDs (int) or strings
+        stop_tokens = None
+        stop_strings = None
+        if self.stop:
+            if all(isinstance(s, int) for s in self.stop):
+                stop_tokens = list(self.stop)
+            elif all(isinstance(s, str) for s in self.stop):
+                stop_strings = list(self.stop)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="stop must be either all integers (token IDs) or all strings, not mixed",
+                )
+
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=self.stop,
+            stop_tokens=stop_tokens,
+            stop_strings=stop_strings,
         )
 
 
@@ -585,6 +606,23 @@ async def forward_backward(request: ForwardBackwardRequest, session: AsyncSessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
+@app.post("/api/v1/forward", response_model=FutureResponse)
+async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+    """Forward pass to obtain logprobs without accumulating gradients"""
+    await get_model(session, request.model_id)
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.FORWARD,
+        model_id=request.model_id,
+        request_data=request.forward_input.to_types(),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
 @app.post("/api/v1/optim_step", response_model=FutureResponse)
 async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(get_session)):
     """Update model using accumulated gradients."""
@@ -757,28 +795,44 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    poll_interval = 0.1  # 100ms
+    deadline = time.perf_counter() + timeout
 
-    for _ in range(int(timeout / poll_interval)):
-        async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-            result = await session.exec(statement)
-            future = result.first()
+    # Start with 100ms, grow to 1s
+    poll = 0.1
+    max_poll = 1.0
 
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
+    while time.perf_counter() < deadline:
+        try:
+            async with AsyncSession(req.app.state.db_engine) as session:
+                # First, only query the status to avoid deserializing JSON data
+                statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
+                result = await session.exec(statement)
+                status = result.first()
 
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
+                if not status:
+                    raise HTTPException(status_code=404, detail="Future not found")
 
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
+                # Only fetch full record if status is terminal (completed or failed)
+                if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+                    statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+                    result = await session.exec(statement)
+                    future = result.first()
 
-        await asyncio.sleep(poll_interval)
+                    if future.status == RequestStatus.COMPLETED:
+                        return future.result_data
+
+                    if future.status == RequestStatus.FAILED:
+                        # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                        if future.result_data and "error" in future.result_data:
+                            raise HTTPException(status_code=400, detail=future.result_data["error"])
+                        else:
+                            raise HTTPException(status_code=500, detail="Unknown error")
+        except SATimeoutError:
+            pass
+
+        # Exponential backoff
+        await asyncio.sleep(poll)
+        poll = min(poll * 1.5, max_poll)
 
     raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
