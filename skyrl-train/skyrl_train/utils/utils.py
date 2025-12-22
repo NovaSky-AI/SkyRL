@@ -639,7 +639,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     if SKYRL_PYTHONPATH_EXPORT:
         # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # not recommended since it can cause unexpected conflicts with UV packages, but keeping for backwards compatibility
+        # not recommended since it can cause unexpected conflicts with UV packages, 
+        # but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
