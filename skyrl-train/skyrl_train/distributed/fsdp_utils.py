@@ -34,11 +34,11 @@ from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
-    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 elif version.parse(torch.__version__) >= version.parse("2.4"):
-    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 else:
-    fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy = None, None, None, None
+    fully_shard, FSDPModule, CPUOffloadPolicy = None, None, None
 
 
 def init_fn(x: torch.nn.Module):

@@ -55,4 +55,4 @@ class GeneratorInterface(ABC):
         Returns:
             GeneratorOutput: Generated trajectories
         """
-        raise NotImplementedError()
+        raise NotImplementedError
