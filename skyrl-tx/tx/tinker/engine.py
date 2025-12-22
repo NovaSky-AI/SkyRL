@@ -804,10 +804,25 @@ class TinkerEngine:
         all_sequences: list[types.GeneratedSequence] = []
         all_prompt_logprobs: list[list[float]] = []
 
+        # Sharding specs for sampling inputs
+        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+        sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+        fsdp_size = self.mesh.shape["fsdp"]
+
+        def pad_to_fsdp(arr):
+            """Pad array's first dimension to be divisible by FSDP size."""
+            batch = arr.shape[0]
+            pad_size = (fsdp_size - batch % fsdp_size) % fsdp_size
+            if pad_size == 0:
+                return arr
+            pad_width = [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1)
+            return np.pad(arr, pad_width)
+
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
+                batch_size = batch_end - batch_start
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
                 adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
                 sampling_params = pad(
@@ -821,17 +836,25 @@ class TinkerEngine:
                 input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
+                # Shard inputs along FSDP axis (pad to FSDP size if needed)
+                padded_batch_size = input_ids.shape[0]
+                fsdp_pad = (fsdp_size - padded_batch_size % fsdp_size) % fsdp_size
+                input_ids = jax.device_put(pad_to_fsdp(input_ids), sharding_2d)
+                attention_mask = jax.device_put(pad_to_fsdp(attention_mask), sharding_2d)
+                adapter_indices = jax.device_put(pad_to_fsdp(np.array(adapter_indices, dtype=np.int32)), sharding_1d)
+                # Pad sampling_params to match FSDP-padded batch size
+                if fsdp_pad > 0:
+                    sampling_params = sampling_params + [sampling_params[0]] * fsdp_pad
+
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
                         input_ids,
                         attention_mask,
                         sampling_params=sampling_params,
-                        adapter_indices=jnp.array(adapter_indices, dtype=jnp.int32),
+                        adapter_indices=adapter_indices,
                         prompt_logprobs=needs_prompt_logprobs,
                         tokenizer=self.tokenizer,
                     )
-                # Only take the actual results, not the padded ones
-                batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
                     for stop_reason, tokens, logprobs in zip(
