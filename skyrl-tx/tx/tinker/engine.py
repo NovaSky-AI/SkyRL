@@ -663,21 +663,32 @@ class TinkerEngine:
         # Sharding specs for batch inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+        fsdp_size = self.mesh.shape["fsdp"]
+
+        def pad_to_fsdp(arr):
+            """Pad array's first dimension to be divisible by FSDP size."""
+            batch = arr.shape[0]
+            pad_size = (fsdp_size - batch % fsdp_size) % fsdp_size
+            if pad_size == 0:
+                return arr
+            pad_width = [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1)
+            return np.pad(arr, pad_width)
 
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
+                mb_size = mb_end - mb_start
 
                 # Shard the micro-batch inputs appropriately
-                # All batch arrays are sharded along the batch dimension
-                mb_input_ids = jax.device_put(input_ids[mb_start:mb_end], sharding_2d)
-                mb_attention_mask = jax.device_put(attention_mask[mb_start:mb_end], sharding_2d)
-                mb_adapter_indices = jax.device_put(adapter_indices[mb_start:mb_end], sharding_1d)
-                mb_target_ids = jax.device_put(target_ids[mb_start:mb_end], sharding_2d)
-                mb_loss_mask = jax.device_put(loss_mask[mb_start:mb_end], sharding_2d)
-                mb_loss_fn_types = jax.device_put(loss_fn_types[mb_start:mb_end], sharding_1d)
-                mb_sampling_logprobs = jax.device_put(sampling_logprobs[mb_start:mb_end], sharding_2d)
-                mb_advantages = jax.device_put(advantages[mb_start:mb_end], sharding_2d)
+                # Pad to FSDP size if needed, all batch arrays sharded along batch dim
+                mb_input_ids = jax.device_put(pad_to_fsdp(input_ids[mb_start:mb_end]), sharding_2d)
+                mb_attention_mask = jax.device_put(pad_to_fsdp(attention_mask[mb_start:mb_end]), sharding_2d)
+                mb_adapter_indices = jax.device_put(pad_to_fsdp(adapter_indices[mb_start:mb_end]), sharding_1d)
+                mb_target_ids = jax.device_put(pad_to_fsdp(target_ids[mb_start:mb_end]), sharding_2d)
+                mb_loss_mask = jax.device_put(pad_to_fsdp(loss_mask[mb_start:mb_end]), sharding_2d)
+                mb_loss_fn_types = jax.device_put(pad_to_fsdp(loss_fn_types[mb_start:mb_end]), sharding_1d)
+                mb_sampling_logprobs = jax.device_put(pad_to_fsdp(sampling_logprobs[mb_start:mb_end]), sharding_2d)
+                mb_advantages = jax.device_put(pad_to_fsdp(advantages[mb_start:mb_end]), sharding_2d)
 
                 self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
                     self.accumulated_grads,
@@ -692,8 +703,9 @@ class TinkerEngine:
                     mb_sampling_logprobs,
                     mb_advantages,
                 )
-                token_losses_device.append(per_token_losses)
-                logprobs_device.append(target_logprobs)
+                # Slice back to original size (remove FSDP padding)
+                token_losses_device.append(per_token_losses[:mb_size])
+                logprobs_device.append(target_logprobs[:mb_size])
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
