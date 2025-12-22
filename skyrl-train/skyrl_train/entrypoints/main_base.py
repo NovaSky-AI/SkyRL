@@ -198,17 +198,6 @@ class BasePPOExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        if cfg.trainer.step_wise_training:
-            from skyrl_train.generators.step_wise_generator import StepWiseGenerator
-
-            return StepWiseGenerator(
-                generator_cfg=cfg.generator,
-                skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                inference_engine_client=inference_engine_client,
-                tokenizer=tokenizer,
-                model_name=cfg.trainer.policy.model.path,
-            )
-
         from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 
         return SkyRLGymGenerator(

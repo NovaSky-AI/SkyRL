@@ -3,35 +3,17 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
-from tx.layers.lora import LoRAExpert, LoRALinear, LoRAEmbed
-from tx.layers.util import Param, prepare_routing
+from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
+from tx.layers.util import prepare_routing
+from tx.layers.rotary_embedding import apply_rope
 from tx.models.configs import Qwen3Config
+from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
-class RMSNorm(nnx.Module):
-    def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.eps = eps
-        self.weight = Param(
-            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.normal(), (None,)), rngs=rngs
-        )
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-        return self.weight * x / rms
-
-
-def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta: int) -> jax.Array:
-    fraction = 2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32) / head_dim
-    timescale = jnp.pow(theta, fraction)
-    x = (position_ids[..., None] / timescale[None, None, :])[..., None, :]
-    sin, cos = jnp.sin(x), jnp.cos(x)
-    a, b = jnp.split(inputs, 2, axis=-1)
-    return jnp.concatenate([a * cos - b * sin, b * cos + a * sin], axis=-1).astype(inputs.dtype)
-
-
 class Qwen3Attention(nnx.Module):
+    """Multi-head attention with Grouped Query Attention (GQA) support."""
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
