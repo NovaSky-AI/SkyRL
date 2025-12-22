@@ -16,8 +16,8 @@ set -x
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
-: "${NUM_INFERENCE_GPUS:=2}"
-: "${NUM_POLICY_GPUS:=2}"
+: "${NUM_INFERENCE_GPUS:=4}"
+: "${NUM_POLICY_GPUS:=4}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout / or use wandb
 
 : "${INFERENCE_BACKEND:=vllm}"
@@ -28,12 +28,19 @@ set -x
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
 
+USE_TIS=true
+TIS_IMP_RATIO_CAP=2.0
+
+RUN_NAME=gsm8k-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
+
 uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.use_tis=$USE_TIS \
+  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
@@ -66,13 +73,9 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async 
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k-async" \
-  trainer.run_name="gsm8k-test-fully_async-4xl4" \
+  trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
-  generator.chat_template.source=name \
-  generator.chat_template.name_or_path="qwen2_5_with_generation_tag_simplified" \
-  generator.enable_http_endpoint=true \
-  generator.http_endpoint_host="127.0.0.1" \
-  generator.http_endpoint_port=8000 \
+  trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
+  trainer.resume_mode=latest \
   generator.enforce_eager=true \
   $@

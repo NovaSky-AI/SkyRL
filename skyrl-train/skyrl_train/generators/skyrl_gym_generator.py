@@ -156,9 +156,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
     def _validate_cfg(self, generator_cfg: DictConfig):
-        if getattr(generator_cfg.sampling_params, "logprobs", None) is not None and not generator_cfg.batched:
-            raise ValueError("`sampling_params.logprobs` should be `None` if `batched` is `False`")
-
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -315,7 +312,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
-                    # dummy logprobs for EOS token id
+                    # dummy logprobs for EOS token id. It will be loss masked with 0 in TurnOutput.get_turn_loss_mask
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
                     added_eos = True
@@ -435,6 +432,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             assert response_ids is not None and loss_mask is not None
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
+                # TODO(Charlie): this should be 0? Otherwise logprobs will be extremely off. But if it is loss
+                # masked with 0, why bother adding it?
                 loss_mask.append(1)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
@@ -896,7 +895,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) + len(turn_output.output_ids) - 1
             agent_loop_state.input_ids += turn_ids
             agent_loop_state.loss_mask += loss_mask_for_turn
-            if agent_loop_state.rollout_logprobs is not None:
+            if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
                 agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
 
         return agent_loop_state
@@ -966,7 +965,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) + len(new_resp_tokens) - 1
         agent_loop_state.input_ids += turn_ids
         agent_loop_state.loss_mask += loss_mask_for_turn
-        if agent_loop_state.rollout_logprobs is not None:
+        if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
             agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
 
         return agent_loop_state
