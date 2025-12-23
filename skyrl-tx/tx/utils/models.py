@@ -269,14 +269,159 @@ def insert_adapter_state(
     nnx.update(lora_params, updated)
 
 
-def round_up_seq_len(seq_len: int) -> int:
+def convert_maxtext_lora_to_hf(
+    lora_state: nnx.State,
+    output_path: Path,
+    base_model_name: str = "",
+    lora_rank: int = 8,
+    lora_alpha: int = 32,
+) -> None:
+    """Convert MaxText LoRA tensors to HuggingFace PEFT format.
+
+    MaxText LoRA shapes (layer axis in middle, heads sometimes factored):
+        - query/key/value lora_a: (hidden_size, num_layers, rank)
+        - query lora_b: (rank, num_layers, num_heads, head_dim)
+        - key/value lora_b: (rank, num_layers, num_kv_heads, head_dim)
+        - out lora_a: (num_heads, num_layers, head_dim, rank)
+        - out lora_b: (rank, num_layers, hidden_size)
+
+    HuggingFace PEFT format (per layer):
+        - base_model.model.model.layers.{i}.self_attn.{proj}.lora_A.weight: (rank, in_features)
+        - base_model.model.model.layers.{i}.self_attn.{proj}.lora_B.weight: (out_features, rank)
+
+    Args:
+        lora_state: NNX state containing MaxText LoRA parameters
+        output_path: Path to save the PEFT checkpoint (directory)
+        base_model_name: Name of the base model for PEFT config
+        lora_rank: LoRA rank
+        lora_alpha: LoRA alpha scaling factor
+    """
+    # Map MaxText projection names to HuggingFace names
+    proj_name_map = {
+        "query": "q_proj",
+        "key": "k_proj",
+        "value": "v_proj",
+        "out": "o_proj",
+    }
+
+    # Collect all LoRA tensors by path
+    lora_tensors = {}
+    for path, val in jax.tree_util.tree_leaves_with_path(lora_state):
+        path_str = "/".join(str(k.key) if hasattr(k, 'key') else str(k) for k in path)
+        lora_tensors[path_str] = np.asarray(val)
+
+    # Determine num_layers from any tensor (layer axis is at position 1 for most)
+    sample_tensor = next(iter(lora_tensors.values()))
+    # Find layer dimension - it's 48 in the examples
+    num_layers = None
+    for tensor in lora_tensors.values():
+        # Layer axis is typically at position 1 for lora_a, position 1 for lora_b
+        if tensor.ndim >= 2 and tensor.shape[1] == 48:
+            num_layers = 48
+            break
+        if tensor.ndim >= 2 and tensor.shape[0] == 48:
+            num_layers = 48
+            break
+
+    if num_layers is None:
+        # Try to infer from shapes
+        for tensor in lora_tensors.values():
+            for dim in tensor.shape:
+                if dim in [36, 48, 64, 80, 96]:  # Common layer counts
+                    num_layers = dim
+                    break
+            if num_layers:
+                break
+
+    if num_layers is None:
+        raise ValueError("Could not determine num_layers from tensor shapes")
+
+    logger.info(f"Converting MaxText LoRA to HuggingFace format: {num_layers} layers, rank={lora_rank}")
+
+    # Output tensors in HuggingFace format
+    hf_tensors = {}
+
+    for path_str, tensor in lora_tensors.items():
+        # Parse the path to identify projection and lora_a/lora_b
+        # Example: base/decoder/layers/self_attention/query/lora_a/.value
+        parts = path_str.split("/")
+
+        # Find projection name and lora type
+        proj_name = None
+        lora_type = None
+        for i, part in enumerate(parts):
+            if part in proj_name_map:
+                proj_name = proj_name_map[part]
+            if part in ("lora_a", "lora_b"):
+                lora_type = "lora_A" if part == "lora_a" else "lora_B"
+
+        if proj_name is None or lora_type is None:
+            logger.warning(f"Skipping unrecognized path: {path_str}")
+            continue
+
+        logger.info(f"Converting {path_str}: shape {tensor.shape} -> {proj_name}/{lora_type}")
+
+        # Convert based on projection and lora type
+        # MaxText shapes vary, need to handle each case
+        for layer_idx in range(num_layers):
+            if lora_type == "lora_A":
+                if proj_name == "o_proj":
+                    # out lora_a: (num_heads, num_layers, head_dim, rank) -> (rank, num_heads * head_dim)
+                    # Layer axis at position 1
+                    layer_tensor = tensor[:, layer_idx, :, :]  # (num_heads, head_dim, rank)
+                    # Flatten heads: (num_heads * head_dim, rank) then transpose to (rank, in_features)
+                    layer_tensor = layer_tensor.reshape(-1, layer_tensor.shape[-1])  # (in_features, rank)
+                    layer_tensor = layer_tensor.T  # (rank, in_features)
+                else:
+                    # query/key/value lora_a: (hidden_size, num_layers, rank) -> (rank, hidden_size)
+                    # Layer axis at position 1
+                    layer_tensor = tensor[:, layer_idx, :]  # (hidden_size, rank)
+                    layer_tensor = layer_tensor.T  # (rank, hidden_size)
+            else:  # lora_B
+                if proj_name == "o_proj":
+                    # out lora_b: (rank, num_layers, hidden_size) -> (hidden_size, rank)
+                    # Layer axis at position 1
+                    layer_tensor = tensor[:, layer_idx, :]  # (rank, hidden_size)
+                    layer_tensor = layer_tensor.T  # (hidden_size, rank)
+                else:
+                    # query lora_b: (rank, num_layers, num_heads, head_dim) -> (num_heads * head_dim, rank)
+                    # key/value lora_b: (rank, num_layers, num_kv_heads, head_dim) -> (num_kv_heads * head_dim, rank)
+                    # Layer axis at position 1
+                    layer_tensor = tensor[:, layer_idx, ...]  # (rank, num_heads, head_dim) or (rank, num_kv_heads, head_dim)
+                    # Flatten heads and transpose: (rank, out_features) -> (out_features, rank)
+                    layer_tensor = layer_tensor.reshape(layer_tensor.shape[0], -1)  # (rank, out_features)
+                    layer_tensor = layer_tensor.T  # (out_features, rank)
+
+            # HuggingFace PEFT key format
+            hf_key = f"base_model.model.model.layers.{layer_idx}.self_attn.{proj_name}.{lora_type}.weight"
+            hf_tensors[hf_key] = layer_tensor.astype(np.float32)
+
+    # Save as safetensors
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    safetensors.numpy.save_file(hf_tensors, output_path / "adapter_model.safetensors")
+    logger.info(f"Saved {len(hf_tensors)} tensors to {output_path / 'adapter_model.safetensors'}")
+
+    # Save PEFT config
+    peft_config = peft.LoraConfig(
+        base_model_name_or_path=base_model_name,
+        r=lora_rank,
+        lora_alpha=lora_alpha,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    )
+    peft_config.save_pretrained(output_path)
+    logger.info(f"Saved PEFT config to {output_path}")
+
+
+def round_up_seq_len(seq_len: int, min_seq_len: int = 32) -> int:
     """
     Rounds a sequence length up to roughly two significant binary digits.
     We do this to pad sequences, so the Jax JIT compiler needs to
     compile fewer different shapes.
     """
-    if seq_len <= 32:
-        return 32
+    if seq_len <= min_seq_len:
+        return min_seq_len
 
     # Find the position of the most significant bit.
     msb_pos = seq_len.bit_length() - 1

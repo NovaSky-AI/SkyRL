@@ -1,4 +1,7 @@
+import shutil
+
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from datetime import datetime, timezone
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -7,6 +10,15 @@ from tx.tinker.config import EngineConfig
 from tx.tinker.db_models import FutureDB, RequestStatus
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    """Check if exception is retryable (connection errors or 5xx status)."""
+    if isinstance(exc, (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
+        return True
+    return False
 
 
 class ExternalInferenceClient:
@@ -31,7 +43,7 @@ class ExternalInferenceClient:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=httpx.Timeout(300.0, connect=10.0),  # 5 minutes for inference, 10s for connect
+                timeout=httpx.Timeout(600.0, connect=10.0),  # 10 minutes for inference, 10s for connect
             ) as http_client:
                 result = await self._forward_to_engine(sample_req, model_id, checkpoint_id, http_client)
             result_data = result.model_dump()
@@ -48,6 +60,12 @@ class ExternalInferenceClient:
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception(_is_retryable_error),
+        reraise=True,
+    )
     async def _forward_to_engine(
         self, request, model_id: str, checkpoint_id: str, http_client: httpx.AsyncClient
     ) -> types.SampleOutput:
@@ -66,10 +84,10 @@ class ExternalInferenceClient:
         if not target_dir.exists():
             try:
                 with download_and_unpack(checkpoint_path) as extracted_path:
-                    extracted_path.rename(target_dir)
+                    # shutil.move allows moving between filesystems.
+                    shutil.move(str(extracted_path), str(target_dir))
             except FileExistsError:
-                # This could happen if two processes try to download the file.
-                # In that case the other process won the race and created target_dir.
+                # Race condition: another process created target_dir
                 pass
 
         payload = {

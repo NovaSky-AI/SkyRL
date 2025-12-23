@@ -7,7 +7,7 @@ name = "skyrl-tx"
 dynamic = ["version"]
 description = "Unified API for training and inference"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = "==3.12.*"
 dependencies = [
     "datasets>=4.0.0",
     "flax>=0.12.0",
@@ -30,6 +30,10 @@ gpu = [
     "jax[cuda12]>=0.7.2",
 ]
 
+maxtext = [
+    "maxtext @ git+https://github.com/OhadRubin/maxtext@1edde4d1b1d562173d1753650b0234aa5c6a2fea",
+]
+
 tpu = [
     "jax[tpu]>=0.7.2",
 ]
@@ -42,6 +46,7 @@ tinker = [
     "aiosqlite",
     "asyncpg",
     "psycopg2-binary",
+    "tenacity",
 ]
 
 aws = [
