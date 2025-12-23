@@ -88,6 +88,7 @@ class WorkerWrap:
         strategy_cls = init_info.strategy_type()
 
         if hasattr(self, "_weight_receiver") and self._weight_receiver is not None:
+            # TODO(haochen): we should get rid of this flag and override existing receiver.
             if init_info.override_existing_receiver:
                 self._weight_receiver.teardown()
                 self._weight_receiver = None

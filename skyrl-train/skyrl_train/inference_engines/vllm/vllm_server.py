@@ -95,6 +95,11 @@ class VllmServer:
             import pickle
             from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
 
+            # Convert the HTTP request to a BroadcastWeightUpdateRequest
+            # TODO(haochen): only the broadcast strategy is currently supported
+            # for the remote inference engine path.
+            # To support other strategies, we'll need to add a "strategy=xxx"
+            # parameter in the HTTP request.
             data = await request.json()
             weight_request = BroadcastWeightUpdateRequest(**data)
 
