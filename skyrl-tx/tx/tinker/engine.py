@@ -716,8 +716,8 @@ class TinkerEngine:
                     mb_advantages,
                 )
                 # Slice back to original size (remove FSDP padding)
-                token_losses_device.append(per_token_losses[:mb_end - mb_start])
-                logprobs_device.append(target_logprobs[:mb_end - mb_start])
+                token_losses_device.append(per_token_losses[: mb_end - mb_start])
+                logprobs_device.append(target_logprobs[: mb_end - mb_start])
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
