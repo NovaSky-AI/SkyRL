@@ -82,6 +82,34 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
     return jnp.asarray(padded)
 
 
+def shard_batch(
+    arrays: tuple[np.ndarray, ...],
+    shardings: tuple[jax.sharding.NamedSharding, ...],
+    mesh: jax.sharding.Mesh,
+    batch_size: int,
+) -> tuple[jax.Array, ...]:
+    """Pad arrays to FSDP size and shard them in a single batched device_put.
+
+    Args:
+        arrays: Tuple of numpy arrays to shard (first dim must be batch_size)
+        shardings: Tuple of shardings corresponding to each array
+        mesh: The JAX mesh to get FSDP size from
+        batch_size: The batch size (first dimension of all arrays)
+
+    Returns:
+        Tuple of sharded arrays, padded to be divisible by FSDP size
+    """
+    fsdp_size = mesh.shape["fsdp"]
+    pad_size = (fsdp_size - batch_size % fsdp_size) % fsdp_size
+
+    if pad_size > 0:
+        padded = tuple(np.pad(arr, [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1)) for arr in arrays)
+    else:
+        padded = arrays
+
+    return jax.device_put(padded, shardings)
+
+
 @jax.tree_util.register_dataclass
 @dataclass
 class AccumulatedGradients:
@@ -663,32 +691,37 @@ class TinkerEngine:
         # Sharding specs for batch inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
-        fsdp_size = self.mesh.shape["fsdp"]
-
-        def pad_to_fsdp(arr):
-            """Pad array's first dimension to be divisible by FSDP size."""
-            batch = arr.shape[0]
-            pad_size = (fsdp_size - batch % fsdp_size) % fsdp_size
-            if pad_size == 0:
-                return arr
-            pad_width = [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1)
-            return np.pad(arr, pad_width)
 
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
-                mb_size = mb_end - mb_start
+                mb_slice = slice(mb_start, mb_end)
 
-                # Shard the micro-batch inputs appropriately
-                # Pad to FSDP size if needed, all batch arrays sharded along batch dim
-                mb_input_ids = jax.device_put(pad_to_fsdp(input_ids[mb_start:mb_end]), sharding_2d)
-                mb_attention_mask = jax.device_put(pad_to_fsdp(attention_mask[mb_start:mb_end]), sharding_2d)
-                mb_adapter_indices = jax.device_put(pad_to_fsdp(adapter_indices[mb_start:mb_end]), sharding_1d)
-                mb_target_ids = jax.device_put(pad_to_fsdp(target_ids[mb_start:mb_end]), sharding_2d)
-                mb_loss_mask = jax.device_put(pad_to_fsdp(loss_mask[mb_start:mb_end]), sharding_2d)
-                mb_loss_fn_types = jax.device_put(pad_to_fsdp(loss_fn_types[mb_start:mb_end]), sharding_1d)
-                mb_sampling_logprobs = jax.device_put(pad_to_fsdp(sampling_logprobs[mb_start:mb_end]), sharding_2d)
-                mb_advantages = jax.device_put(pad_to_fsdp(advantages[mb_start:mb_end]), sharding_2d)
+                # Shard the micro-batch inputs, padding to FSDP size if needed
+                (
+                    mb_input_ids,
+                    mb_attention_mask,
+                    mb_target_ids,
+                    mb_loss_mask,
+                    mb_sampling_logprobs,
+                    mb_advantages,
+                    mb_adapter_indices,
+                    mb_loss_fn_types,
+                ) = shard_batch(
+                    (
+                        input_ids[mb_slice],
+                        attention_mask[mb_slice],
+                        target_ids[mb_slice],
+                        loss_mask[mb_slice],
+                        sampling_logprobs[mb_slice],
+                        advantages[mb_slice],
+                        adapter_indices[mb_slice],
+                        loss_fn_types[mb_slice],
+                    ),
+                    (sharding_2d,) * 6 + (sharding_1d,) * 2,
+                    self.mesh,
+                    mb_end - mb_start,
+                )
 
                 self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
                     self.accumulated_grads,
@@ -807,22 +840,12 @@ class TinkerEngine:
         # Sharding specs for sampling inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
-        fsdp_size = self.mesh.shape["fsdp"]
-
-        def pad_to_fsdp(arr):
-            """Pad array's first dimension to be divisible by FSDP size."""
-            batch = arr.shape[0]
-            pad_size = (fsdp_size - batch % fsdp_size) % fsdp_size
-            if pad_size == 0:
-                return arr
-            pad_width = [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1)
-            return np.pad(arr, pad_width)
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_size = batch_end - batch_start
+                batch_size = batch_end - batch_start  # actual samples before any padding
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
                 adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
                 sampling_params = pad(
@@ -836,15 +859,15 @@ class TinkerEngine:
                 input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
-                # Shard inputs along FSDP axis (pad to FSDP size if needed)
-                padded_batch_size = input_ids.shape[0]
-                fsdp_pad = (fsdp_size - padded_batch_size % fsdp_size) % fsdp_size
-                input_ids = jax.device_put(pad_to_fsdp(input_ids), sharding_2d)
-                attention_mask = jax.device_put(pad_to_fsdp(attention_mask), sharding_2d)
-                adapter_indices = jax.device_put(pad_to_fsdp(np.array(adapter_indices, dtype=np.int32)), sharding_1d)
+                # Shard inputs along FSDP axis, padding to FSDP size if needed
+                input_ids, attention_mask, adapter_indices = shard_batch(
+                    (input_ids, attention_mask, np.array(adapter_indices, dtype=np.int32)),
+                    (sharding_2d, sharding_2d, sharding_1d),
+                    self.mesh,
+                    max_batch_size,
+                )
                 # Pad sampling_params to match FSDP-padded batch size
-                if fsdp_pad > 0:
-                    sampling_params = sampling_params + [sampling_params[0]] * fsdp_pad
+                sampling_params = pad(sampling_params, input_ids.shape[0], fill=sampling_params[0])
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
