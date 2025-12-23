@@ -10,6 +10,7 @@ from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+from tx.utils.paged_attention import PagedKVCache, paged_attention_with_update
 
 
 class Qwen3Attention(nnx.Module):
@@ -82,8 +83,8 @@ class Qwen3Attention(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
-    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        kv_cache: tuple[jax.Array, jax.Array, int] | PagedKVCache | None = None,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array] | PagedKVCache]:
         B, T, _ = x.shape
 
         # Project and reshape to [B, T, num_heads, head_dim]
@@ -95,23 +96,47 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Handle KV cache
-        if kv_cache is not None:
-            k_cache, v_cache, cache_position = kv_cache
-            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
-            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
+        # Check if using paged attention
+        if isinstance(kv_cache, PagedKVCache):
+            # Paged attention path
+            seq_indices = jnp.arange(B)
 
-        updated_cache = (k, v)
+            # Determine if this is prefill (multiple tokens) or generation (single token)
+            is_prefill = T > 1
 
-        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
-        attn_output = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool),
-            is_causal=kv_cache is None,
-        )
+            # Create padding mask from attention_mask [B, kv_len]
+            # The attention_mask indicates valid (non-padding) positions
+            kv_len = jnp.max(kv_cache.page_offsets) + T
+            paged_attn_mask = jnp.arange(kv_len)[None, :] < (kv_cache.page_offsets[:, None] + T)
+
+            attn_output, updated_cache = paged_attention_with_update(
+                q=q,
+                k_new=k,
+                v_new=v,
+                cache=kv_cache,
+                seq_indices=seq_indices,
+                attention_mask=paged_attn_mask,
+                scale=1.0 / self.head_dim**0.5,
+                is_causal=is_prefill,  # Apply causal mask during prefill
+            )
+        else:
+            # Standard attention path
+            if kv_cache is not None:
+                k_cache, v_cache, cache_position = kv_cache
+                k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
+                v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
+
+            updated_cache = (k, v)
+
+            # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
+            attn_output = jax.nn.dot_product_attention(
+                q,
+                k,
+                v,
+                scale=1.0 / self.head_dim**0.5,
+                mask=attention_mask[:, None, None, :].astype(bool),
+                is_causal=kv_cache is None,
+            )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
@@ -281,8 +306,8 @@ class Qwen3DecoderLayer(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
-    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        kv_cache: tuple[jax.Array, jax.Array, int] | PagedKVCache | None = None,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array] | PagedKVCache]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
@@ -330,7 +355,7 @@ class Qwen3Model(nnx.Module):
         positions: jax.Array,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
-        kv_cache: KVCache | None = None,
+        kv_cache: KVCache | list[PagedKVCache] | None = None,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -338,34 +363,69 @@ class Qwen3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
+        # Check if using paged attention
+        using_paged_attention = (
+            isinstance(kv_cache, list) and len(kv_cache) > 0 and isinstance(kv_cache[0], PagedKVCache)
+        )
+
+        if using_paged_attention:
+            # Paged attention path
+            updated_paged_caches = []
+
+            for layer_idx, layer in enumerate(self.layers):
+                if output_hidden_states:
+                    all_hidden_states.append(hidden_states)
+
+                hidden_states, updated_cache = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    positions=positions,
+                    adapter_indices=adapter_indices,
+                    kv_cache=kv_cache[layer_idx] if kv_cache else None,
+                )
+                updated_paged_caches.append(updated_cache)
+
+            hidden_states = self.norm(hidden_states)
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
+            return ModelOutput(
+                last_hidden_state=hidden_states,
+                kv_cache=updated_paged_caches,
+                hidden_states=all_hidden_states if output_hidden_states else None,
             )
-            updated_keys.append(k)
-            updated_values.append(v)
+        else:
+            # Standard KVCache path
+            updated_keys, updated_values = [], []
 
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden_states.append(hidden_states)
+            for layer_idx, layer in enumerate(self.layers):
+                if output_hidden_states:
+                    all_hidden_states.append(hidden_states)
 
-        # Increment cache_position if cache exists, or use sequence length for new cache
-        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
+                hidden_states, (k, v) = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    positions=positions,
+                    adapter_indices=adapter_indices,
+                    kv_cache=kv_cache
+                    and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
+                )
+                updated_keys.append(k)
+                updated_values.append(v)
 
-        return ModelOutput(
-            last_hidden_state=hidden_states,
-            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
-            hidden_states=all_hidden_states if output_hidden_states else None,
-        )
+            hidden_states = self.norm(hidden_states)
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
+
+            # Increment cache_position if cache exists, or use sequence length for new cache
+            new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
+
+            return ModelOutput(
+                last_hidden_state=hidden_states,
+                kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
+                hidden_states=all_hidden_states if output_hidden_states else None,
+            )
 
 
 class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
@@ -399,7 +459,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         positions: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
-        kv_cache: KVCache | None = None,
+        kv_cache: KVCache | list[PagedKVCache] | None = None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
