@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
-from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.distributed.utils import init_custom_process_group, stateless_init_process_group
 from uuid import uuid4
 import warnings
 from skyrl_train.inference_engines.base import (
@@ -101,13 +101,18 @@ class WorkerWrap:
             f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
         )
 
-        self._model_update_group = init_custom_process_group(
-            backend=backend,
-            init_method=get_tcp_url(master_address, master_port),
-            world_size=world_size,
-            rank=rank,
-            group_name=group_name,
-        )
+        if backend == "nccl":
+            self._model_update_group = stateless_init_process_group(
+                master_address, master_port, rank, world_size, torch.device(f"cuda:{torch.cuda.current_device()}")
+            )
+        else:
+            self._model_update_group = init_custom_process_group(
+                backend=backend,
+                init_method=get_tcp_url(master_address, master_port),
+                world_size=world_size,
+                rank=rank,
+                group_name=group_name,
+            )
         logger.info(
             f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
@@ -667,11 +672,16 @@ class VLLMWeightTransferReceiver:
 
     def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via torch.distributed.broadcast."""
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
             assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
             weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self.model_update_group)
+            if isinstance(self.model_update_group, PyNcclCommunicator):
+                self.model_update_group.broadcast(weight, src=0, stream=torch.cuda.current_stream())
+            else:
+                torch.distributed.broadcast(weight, 0, group=self.model_update_group)
             yield name, weight
 
     def _receive_ipc(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:

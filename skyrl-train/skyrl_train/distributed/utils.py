@@ -41,6 +41,19 @@ def get_free_port():
         return sock.getsockname()[1]
 
 
+# Reference: https://github.com/vllm-project/vllm/blob/196cdc3224112df7f68c901fe4c5314875a65be8/examples/offline_inference/rlhf.py
+def stateless_init_process_group(master_address, master_port, rank, world_size, device):
+    """Uses vLLM's `StatelessProcessGroup` to create a process group
+    without considering the global process group in torch.distributed.
+    """
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.utils import StatelessProcessGroup
+
+    pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
+    pynccl = PyNcclCommunicator(pg, device=device)
+    return pynccl
+
+
 # Copy from pytorch to allow creating multiple main groups.
 # https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/utils/distributed_util.py
