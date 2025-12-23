@@ -844,7 +844,6 @@ class TinkerEngine:
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_size = batch_end - batch_start  # actual samples before any padding
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
                 adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
                 sampling_params = pad(
@@ -873,6 +872,8 @@ class TinkerEngine:
                         prompt_logprobs=needs_prompt_logprobs,
                         tokenizer=self.tokenizer,
                     )
+                # Only take the actual results, not the padded ones
+                batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
                     for stop_reason, tokens, logprobs in zip(
