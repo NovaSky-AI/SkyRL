@@ -858,15 +858,11 @@ class TinkerEngine:
                 input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 
-                # Shard inputs along FSDP axis, padding to FSDP size if needed
-                input_ids, attention_mask, adapter_indices = shard_batch(
+                # Shard inputs along FSDP axis (already padded to max_batch_size)
+                input_ids, attention_mask, adapter_indices = jax.device_put(
                     (input_ids, attention_mask, np.array(adapter_indices, dtype=np.int32)),
                     (sharding_2d, sharding_2d, sharding_1d),
-                    self.mesh,
-                    max_batch_size,
                 )
-                # Pad sampling_params to match FSDP-padded batch size
-                sampling_params = pad(sampling_params, input_ids.shape[0], fill=sampling_params[0])
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
