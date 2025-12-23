@@ -695,7 +695,6 @@ class TinkerEngine:
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
-                mb_slice = slice(mb_start, mb_end)
 
                 # Shard the micro-batch inputs, padding to FSDP size if needed
                 (
@@ -709,14 +708,14 @@ class TinkerEngine:
                     mb_loss_fn_types,
                 ) = shard_batch(
                     (
-                        input_ids[mb_slice],
-                        attention_mask[mb_slice],
-                        target_ids[mb_slice],
-                        loss_mask[mb_slice],
-                        sampling_logprobs[mb_slice],
-                        advantages[mb_slice],
-                        adapter_indices[mb_slice],
-                        loss_fn_types[mb_slice],
+                        input_ids[mb_start:mb_end],
+                        attention_mask[mb_start:mb_end],
+                        target_ids[mb_start:mb_end],
+                        loss_mask[mb_start:mb_end],
+                        sampling_logprobs[mb_start:mb_end],
+                        advantages[mb_start:mb_end],
+                        adapter_indices[mb_start:mb_end],
+                        loss_fn_types[mb_start:mb_end],
                     ),
                     (sharding_2d,) * 6 + (sharding_1d,) * 2,
                     self.mesh,
