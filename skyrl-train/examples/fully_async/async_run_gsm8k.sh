@@ -16,8 +16,8 @@ set -x
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
-: "${NUM_INFERENCE_GPUS:=4}"
-: "${NUM_POLICY_GPUS:=4}"
+: "${NUM_INFERENCE_GPUS:=2}"
+: "${NUM_POLICY_GPUS:=2}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout / or use wandb
 
 : "${INFERENCE_BACKEND:=vllm}"

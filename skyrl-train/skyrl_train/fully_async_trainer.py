@@ -289,7 +289,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert (
             self.cfg.trainer.algorithm.dynamic_sampling.type is None
         ), "dynamic sampling is not supported for fully async training yet."
-        assert not self.cfg.generator.batched, "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
+        assert (
+            not self.cfg.generator.batched
+        ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
         assert self.cfg.generator.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
