@@ -35,6 +35,7 @@ class HFModelWrapper(nn.Module):
         lora_rank (int, optional): Rank for LoRA adaptation. Defaults to 0.
         lora_alpha (int, optional): Alpha parameter for LoRA. Defaults to 16.
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
+        lora_init_method (str, optional): Initialization method for LoRA layers. Defaults to "kaiming".
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
         ds_config (dict, optional): Configuration for DeepSpeed, enabling model partitioning across multiple GPUs. Defaults to None.
@@ -54,6 +55,7 @@ class HFModelWrapper(nn.Module):
         lora_rank=0,
         lora_alpha=16,
         lora_dropout=0,
+        lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
         ds_config=None,
@@ -161,6 +163,7 @@ class HFModelWrapper(nn.Module):
                     exclude_modules=exclude_modules,
                     lora_dropout=lora_dropout,
                     bias="none",
+                    init_lora_weights=True if lora_init_method == "kaiming" else lora_init_method,
                 )
                 self.model = get_peft_model(self.model, lora_config)
 

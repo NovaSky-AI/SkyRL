@@ -297,7 +297,11 @@ def validate_cfg(cfg: DictConfig):
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+        assert cfg.trainer.strategy in (
+            "fsdp",
+            "fsdp2",
+            "megatron",
+        ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
 
         if cfg.trainer.target_modules is not None:
             logger.warning(
