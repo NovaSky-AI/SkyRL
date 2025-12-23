@@ -1,5 +1,5 @@
 """
-uv run --extra dev --isolated pytest tests/gpu/test_worker_offload.py
+uv run --extra dev --isolated pytest tests/gpu/gpu_ci/test_worker_offload.py
 """
 
 import ray

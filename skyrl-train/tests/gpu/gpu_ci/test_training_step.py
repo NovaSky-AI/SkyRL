@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_training_step.py
+uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_training_step.py
 """
 
 import ray
