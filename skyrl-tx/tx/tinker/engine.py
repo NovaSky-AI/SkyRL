@@ -82,32 +82,13 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
     return jnp.asarray(padded)
 
 
-def shard_batch(
-    arrays: tuple[np.ndarray, ...],
-    shardings: tuple[jax.sharding.NamedSharding, ...],
-    mesh: jax.sharding.Mesh,
-    batch_size: int,
-) -> tuple[jax.Array, ...]:
-    """Pad arrays to FSDP size and shard them in a single batched device_put.
-
-    Args:
-        arrays: Tuple of numpy arrays to shard (first dim must be batch_size)
-        shardings: Tuple of shardings corresponding to each array
-        mesh: The JAX mesh to get FSDP size from
-        batch_size: The batch size (first dimension of all arrays)
-
-    Returns:
-        Tuple of sharded arrays, padded to be divisible by FSDP size
-    """
-    fsdp_size = mesh.shape["fsdp"]
+def pad_to_fsdp(arr: np.ndarray, fsdp_size: int) -> np.ndarray:
+    """Pad array's first dimension to be divisible by FSDP size."""
+    batch_size = arr.shape[0]
     pad_size = (fsdp_size - batch_size % fsdp_size) % fsdp_size
-
-    if pad_size > 0:
-        padded = tuple(np.pad(arr, [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1)) for arr in arrays)
-    else:
-        padded = arrays
-
-    return jax.device_put(padded, shardings)
+    if pad_size == 0:
+        return arr
+    return np.pad(arr, [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1))
 
 
 @jax.tree_util.register_dataclass
@@ -691,12 +672,13 @@ class TinkerEngine:
         # Sharding specs for batch inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+        fsdp_size = self.mesh.shape["fsdp"]
 
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
 
-                # Shard the micro-batch inputs, padding to FSDP size if needed
+                # Pad and shard the micro-batch inputs
                 (
                     mb_input_ids,
                     mb_attention_mask,
@@ -706,20 +688,18 @@ class TinkerEngine:
                     mb_advantages,
                     mb_adapter_indices,
                     mb_loss_fn_types,
-                ) = shard_batch(
+                ) = jax.device_put(
                     (
-                        input_ids[mb_start:mb_end],
-                        attention_mask[mb_start:mb_end],
-                        target_ids[mb_start:mb_end],
-                        loss_mask[mb_start:mb_end],
-                        sampling_logprobs[mb_start:mb_end],
-                        advantages[mb_start:mb_end],
-                        adapter_indices[mb_start:mb_end],
-                        loss_fn_types[mb_start:mb_end],
+                        pad_to_fsdp(input_ids[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(attention_mask[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(target_ids[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_mask[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(sampling_logprobs[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(advantages[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(adapter_indices[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_types[mb_start:mb_end], fsdp_size),
                     ),
                     (sharding_2d,) * 6 + (sharding_1d,) * 2,
-                    self.mesh,
-                    mb_end - mb_start,
                 )
 
                 self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
@@ -736,8 +716,8 @@ class TinkerEngine:
                     mb_advantages,
                 )
                 # Slice back to original size (remove FSDP padding)
-                token_losses_device.append(per_token_losses[:mb_size])
-                logprobs_device.append(target_logprobs[:mb_size])
+                token_losses_device.append(per_token_losses[:mb_end - mb_start])
+                logprobs_device.append(target_logprobs[:mb_end - mb_start])
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
