@@ -22,7 +22,12 @@ class ModelConfig(PretrainedConfig):
     shard_attention_heads: bool
 
     def __init__(
-        self, config: PretrainedConfig, *, max_lora_adapters: int, max_lora_rank: int, shard_attention_heads: bool
+        self,
+        config: PretrainedConfig,
+        *,
+        max_lora_adapters: int,
+        max_lora_rank: int,
+        shard_attention_heads: bool,
     ):
         # Copy all attributes from the base config
         super().__init__(**config.to_dict())
