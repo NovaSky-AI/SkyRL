@@ -78,7 +78,7 @@ class YouComSearchEngine(BaseTool):
 
     def you_search(self, query: str):
         """
-        Performs a Google search using the Serper API.
+        Performs a search using the YouCom API.
 
         Args:
             query (str): The search query string
