@@ -4,7 +4,7 @@ from typing import List, Optional
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
+from skyrl_train.generators.utils import get_rollout_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
@@ -27,6 +27,7 @@ class TerminalBenchAgentOutput:
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
     summarization_count: Optional[int] = None
+    rollout_logprobs: Optional[List[float]] = None
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -160,6 +161,8 @@ class TerminalBenchGenerator(GeneratorInterface):
                         "max_episodes": self.max_episodes,
                         "session_id": session_id,
                         "enable_summarize": self.enable_summarize,
+                        "store_all_messages": True,
+                        "collect_rollout_details": True,
                     },
                 ),
             )
@@ -230,13 +233,46 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-        rollout_details = getattr(results.agent_result, "rollout_details", None), 
-        # response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-        #     response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
-        # )
-        response_ids = rollout_details._completion_token_ids_list
-        prompt_ids = rollout_details._prompt_token_ids_list
-        rollout_logprobs = rollout_details._logprobs_list
+        rollout_details = getattr(results.agent_result, "rollout_details", None)
+
+        # Extract from rollout_details tuple: ([{'prompt_token_ids': [...], 'completion_token_ids': [...], 'logprobs': [...]}],)
+        try:
+            details = rollout_details[0]
+            if isinstance(details, list):
+                details = details[0]
+        except:
+            logger.info(f"Unpacked details: {rollout_details[0]}")
+        prompt_ids_list = details['prompt_token_ids']
+        completion_ids_list = details['completion_token_ids']
+        logprobs_list = details['logprobs']
+
+        # Initial prompt is the first one
+        prompt_ids = list(prompt_ids_list[0])
+
+        # Build response_ids, loss_mask, and rollout_logprobs turn by turn
+        # Structure: completion[0] + user_feedback[0] + completion[1] + user_feedback[1] + ... + completion[n-1]
+        # where user_feedback[i] = prompt[i+1][len(prompt[i]) + len(completion[i]):]
+        response_ids = []
+        loss_mask = []
+        rollout_logprobs = []
+
+        num_turns = len(prompt_ids_list)
+        for turn in range(num_turns):
+            # Add completion tokens (mask = 1)
+            completion = list(completion_ids_list[turn])
+            logprobs = list(logprobs_list[turn])
+            response_ids.extend(completion)
+            loss_mask.extend([1] * len(completion))
+            rollout_logprobs.extend(logprobs)
+
+            # Add user feedback tokens after this completion (if not last turn)
+            if turn < num_turns - 1:
+                # user_feedback = prompt[turn+1] minus (prompt[turn] + completion[turn])
+                prev_len = len(prompt_ids_list[turn]) + len(completion_ids_list[turn])
+                user_tokens = list(prompt_ids_list[turn + 1][prev_len:])
+                response_ids.extend(user_tokens)
+                loss_mask.extend([0] * len(user_tokens))
+                rollout_logprobs.extend([0.0] * len(user_tokens))
 
         # Determine stop reason
         max_response_tokens = (
@@ -251,6 +287,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
+        if rollout_logprobs is not None:
+            rollout_logprobs = rollout_logprobs[:max_response_tokens]
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
