@@ -7,8 +7,8 @@ Design:
      Clean interface defining what backends must implement:
      - register_model, unregister_model (optimizer lifecycle managed internally)
      - process_forward_backward_batch, process_forward_batch, process_optim_step, process_sample_batch
-     - extract_checkpoint_data, insert_checkpoint_data (pure state manipulation)
-     - extract_sampler_weights, insert_sampler_weights
+     - insert_checkpoint_data (pure state manipulation)
+     - insert_sampler_weights
      - save_checkpoint, save_sampler_checkpoint (file I/O in backend)
 
   2. NativeBackend (native.py)
@@ -136,19 +136,18 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def extract_checkpoint_data(
+    def load_checkpoint(
         self,
+        checkpoint_path,
         model_id: str,
         models: dict[str, types.ModelMetadata],
-    ) -> dict:
-        """Extract model state for checkpointing.
+    ) -> None:
+        """Load training checkpoint from disk.
 
         Args:
+            checkpoint_path: Path to the checkpoint file
             model_id: The model identifier
             models: Dict mapping model_id to ModelMetadata
-
-        Returns:
-            Dictionary containing checkpoint data (weights, optimizer state, config).
         """
         pass
 
@@ -163,7 +162,7 @@ class AbstractBackend(ABC):
 
         Args:
             model_id: The model identifier
-            checkpoint_data: Dictionary from extract_checkpoint_data or loaded from disk
+            checkpoint_data: Dictionary containing checkpoint data loaded from disk
             models: Dict mapping model_id to ModelMetadata
         """
         pass
@@ -181,23 +180,6 @@ class AbstractBackend(ABC):
             output_path: Path to save the checkpoint tar.gz file
             model_id: The model identifier
             models: Dict mapping model_id to ModelMetadata
-        """
-        pass
-
-    @abstractmethod
-    def extract_sampler_weights(
-        self,
-        model_id: str,
-        models: dict[str, types.ModelMetadata],
-    ) -> dict:
-        """Extract weights for sampler checkpoint.
-
-        Args:
-            model_id: The model identifier
-            models: Dict mapping model_id to ModelMetadata
-
-        Returns:
-            Dictionary containing sampler weights data.
         """
         pass
 

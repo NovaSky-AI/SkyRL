@@ -36,7 +36,7 @@ from tx.utils.models import (
     round_up_seq_len,
     resolve_model_path,
 )
-from tx.utils.storage import pack_and_upload
+from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
 
 
@@ -655,7 +655,7 @@ class NativeBackend(AbstractBackend):
     ) -> None:
         """Save training checkpoint as tar.gz using Flax checkpoints."""
         with pack_and_upload(output_path) as temp_dir:
-            checkpoint_data = self.extract_checkpoint_data(model_id, models)
+            checkpoint_data = self._extract_checkpoint_data(model_id, models)
             checkpoints.save_checkpoint(
                 target=checkpoint_data,
                 ckpt_dir=temp_dir,
@@ -665,7 +665,7 @@ class NativeBackend(AbstractBackend):
             )
         logger.info(f"Saved training checkpoint to {output_path}")
 
-    def extract_checkpoint_data(
+    def _extract_checkpoint_data(
         self,
         model_id: str,
         models: dict[str, types.ModelMetadata],
@@ -702,6 +702,26 @@ class NativeBackend(AbstractBackend):
             adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
         )
 
+    def load_checkpoint(
+        self,
+        checkpoint_path,
+        model_id: str,
+        models: dict[str, types.ModelMetadata],
+    ) -> None:
+        """Load training checkpoint from tar.gz using Flax checkpoints."""
+        with download_and_unpack(checkpoint_path) as temp_dir:
+            checkpoint = checkpoints.restore_checkpoint(
+                ckpt_dir=temp_dir,
+                target=self._extract_checkpoint_data(model_id, models),
+                prefix="checkpoint_",
+            )
+
+        if checkpoint is None:
+            raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
+
+        self.insert_checkpoint_data(model_id, checkpoint, models)
+        logger.info(f"Loaded training checkpoint from {checkpoint_path}")
+
     def save_sampler_checkpoint(
         self,
         output_path,
@@ -718,22 +738,6 @@ class NativeBackend(AbstractBackend):
             output_path,
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
-
-    def extract_sampler_weights(
-        self,
-        model_id: str,
-        models: dict[str, types.ModelMetadata],
-    ) -> dict:
-        """Extract weights for sampler checkpoint.
-
-        Returns data needed for save_lora_checkpoint.
-        """
-        return {
-            "model": self.model,
-            "base_model": self.config.base_model,
-            "lora_config": models[model_id].lora_config,
-            "adapter_index": models[model_id].adapter_index,
-        }
 
     def insert_sampler_weights(
         self,

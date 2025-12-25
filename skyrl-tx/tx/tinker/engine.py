@@ -9,15 +9,12 @@ from pathlib import Path
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from flax.training import checkpoints
-
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends import NativeBackend
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
-from tx.utils.storage import download_and_unpack
 from tx.utils.log import logger
 
 
@@ -420,24 +417,12 @@ class TinkerEngine:
         if model_id not in self.models:
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
-        checkpoint_dir = (
+        checkpoint_path = (
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        with download_and_unpack(checkpoint_dir) as temp_dir:
-            checkpoint = checkpoints.restore_checkpoint(
-                ckpt_dir=temp_dir,
-                target=self.backend.extract_checkpoint_data(model_id, self.models),
-                prefix="checkpoint_",
-            )
+        self.backend.load_checkpoint(checkpoint_path, model_id, self.models)
 
-        if checkpoint is None:
-            raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_dir}")
-
-        # Insert checkpoint data into model state via backend
-        self.backend.insert_checkpoint_data(model_id, checkpoint, self.models)
-
-        logger.info(f"Loaded training checkpoint for model {model_id} from {checkpoint_dir}")
         return types.LoadWeightsOutput(type="load_weights")
 
     def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
