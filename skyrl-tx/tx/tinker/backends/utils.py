@@ -48,3 +48,12 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
         else:
             padded[i, : len(seq)] = seq
     return jnp.asarray(padded)
+
+
+def pad_to_fsdp(arr: np.ndarray, fsdp_size: int) -> np.ndarray:
+    """Pad array's first dimension to be divisible by FSDP size."""
+    batch_size = arr.shape[0]
+    pad_size = (fsdp_size - batch_size % fsdp_size) % fsdp_size
+    if pad_size == 0:
+        return arr
+    return np.pad(arr, [(0, pad_size)] + [(0, 0)] * (arr.ndim - 1))
