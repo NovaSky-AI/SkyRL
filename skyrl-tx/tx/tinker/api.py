@@ -869,20 +869,16 @@ async def list_training_runs(
 ) -> TrainingRunsResponse:
     """List all training runs"""
 
-    count_future = select(func.count()).select_from(ModelDB)
-    models_future = select(ModelDB).offset(offset).limit(limit)
+    # Use window function to get total count alongside paginated results in a single query
+    statement = select(ModelDB, func.count().over().label("total_count")).offset(offset).limit(limit)
+    result = await session.exec(statement)
+    rows = result.all()
 
-    count_result, models_result = await asyncio.gather(
-        session.exec(count_future),
-        session.exec(models_future),
-    )
-
-    total_count = count_result.one()
-    models = models_result.all()
+    total_count = rows[0].total_count if rows else 0
 
     training_runs = []
-
-    for model in models:
+    for row in rows:
+        model = row.ModelDB
         lora_config = types.LoraConfig.model_validate(model.lora_config)
 
         training_runs.append(
