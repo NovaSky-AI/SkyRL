@@ -681,7 +681,7 @@ class NativeBackend(AbstractBackend):
             "lora_config": models[model_id].lora_config.model_dump(),
         }
 
-    def insert_checkpoint_data(
+    def _insert_checkpoint_data(
         self,
         model_id: str,
         checkpoint_data: dict,
@@ -719,7 +719,7 @@ class NativeBackend(AbstractBackend):
         if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
 
-        self.insert_checkpoint_data(model_id, checkpoint, models)
+        self._insert_checkpoint_data(model_id, checkpoint, models)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
     def save_sampler_checkpoint(

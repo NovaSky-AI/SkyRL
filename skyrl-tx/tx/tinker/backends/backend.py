@@ -7,9 +7,8 @@ Design:
      Clean interface defining what backends must implement:
      - register_model, unregister_model (optimizer lifecycle managed internally)
      - process_forward_backward_batch, process_forward_batch, process_optim_step, process_sample_batch
-     - insert_checkpoint_data (pure state manipulation)
+     - load_checkpoint, save_checkpoint, save_sampler_checkpoint (file I/O in backend)
      - insert_sampler_weights
-     - save_checkpoint, save_sampler_checkpoint (file I/O in backend)
 
   2. NativeBackend (native.py)
      - Implements all abstract methods fully for Qwen3 + LoRA
@@ -147,22 +146,6 @@ class AbstractBackend(ABC):
         Args:
             checkpoint_path: Path to the checkpoint file
             model_id: The model identifier
-            models: Dict mapping model_id to ModelMetadata
-        """
-        pass
-
-    @abstractmethod
-    def insert_checkpoint_data(
-        self,
-        model_id: str,
-        checkpoint_data: dict,
-        models: dict[str, types.ModelMetadata],
-    ) -> None:
-        """Insert checkpoint data into model state.
-
-        Args:
-            model_id: The model identifier
-            checkpoint_data: Dictionary containing checkpoint data loaded from disk
             models: Dict mapping model_id to ModelMetadata
         """
         pass
