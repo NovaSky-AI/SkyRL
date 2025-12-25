@@ -384,7 +384,7 @@ class NativeBackend(AbstractBackend):
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
-        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids), self.config.min_seq_len)
+        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
 
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
         target_ids = pad_batch(all_targets, max_len, np.int32)
@@ -562,7 +562,7 @@ class NativeBackend(AbstractBackend):
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 # Use left-padding for sampling so the last position is always the last real token.
-                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0), self.config.min_seq_len)
+                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
 

@@ -249,7 +249,7 @@ class TinkerEngine:
         batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return {
-            f.request_id: (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
+            str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
         }
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
@@ -288,7 +288,7 @@ class TinkerEngine:
         if self.config.sample_max_num_sequences > 0:
             batchable = batchable[: self.config.sample_max_num_sequences]
 
-        return {f.request_id: (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
+        return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
     def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
@@ -310,7 +310,7 @@ class TinkerEngine:
         )
         other_futures = session.exec(statement).all()
 
-        return {f.request_id: (f.model_id, f.request_type, f.request_data) for f in other_futures}
+        return {str(f.request_id): (f.model_id, f.request_type, f.request_data) for f in other_futures}
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
