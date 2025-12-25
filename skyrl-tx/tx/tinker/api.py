@@ -6,7 +6,7 @@ from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
@@ -436,6 +436,17 @@ class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
 
 
+class Cursor(BaseModel):
+    offset: int
+    limit: int
+    total_count: int
+
+
+class TrainingRunsResponse(BaseModel):
+    training_runs: list[TrainingRun]
+    cursor: Cursor
+
+
 class WeightsInfoRequest(BaseModel):
     tinker_path: str
 
@@ -850,6 +861,44 @@ async def validate_checkpoint(
 
     subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
     return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
+
+
+@app.get("/api/v1/training_runs")
+async def list_training_runs(
+    limit: int = 20, offset: int = 0, session: AsyncSession = Depends(get_session)
+) -> TrainingRunsResponse:
+    """List all training runs"""
+
+    # Use window function to get total count alongside paginated results in a single query
+    statement = select(ModelDB, func.count().over().label("total_count")).offset(offset).limit(limit)
+    result = await session.exec(statement)
+    rows = result.all()
+
+    total_count = rows[0].total_count if rows else 0
+
+    training_runs = []
+    for row in rows:
+        model = row.ModelDB
+        lora_config = types.LoraConfig.model_validate(model.lora_config)
+
+        training_runs.append(
+            TrainingRun(
+                training_run_id=model.model_id,
+                base_model=model.base_model,
+                model_owner="default",
+                is_lora=True,
+                corrupted=False,
+                lora_rank=lora_config.rank,
+                last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+                last_checkpoint=None,
+                last_sampler_checkpoint=None,
+                user_metadata=None,
+            )
+        )
+
+    return TrainingRunsResponse(
+        training_runs=training_runs, cursor=Cursor(offset=offset, limit=limit, total_count=total_count)
+    )
 
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
