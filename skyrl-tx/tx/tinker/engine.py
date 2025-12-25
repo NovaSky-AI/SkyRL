@@ -503,7 +503,7 @@ class TinkerEngine:
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
 
                     # Use backend to insert sampler weights
-                    self.backend.insert_sampler_weights(model_id, checkpoint_id, checkpoint_path, self.models)
+                    self.backend.load_sampler_checkpoint(model_id, checkpoint_id, checkpoint_path, self.models)
                     adapter_indices.append(adapter_index)
             else:
                 # This code path is for sampling from the base model

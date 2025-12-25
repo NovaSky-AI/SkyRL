@@ -739,7 +739,7 @@ class NativeBackend(AbstractBackend):
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
-    def insert_sampler_weights(
+    def load_sampler_checkpoint(
         self,
         model_id: str,
         checkpoint_id: str,
