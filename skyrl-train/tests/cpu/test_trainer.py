@@ -5,7 +5,6 @@ uv  run --isolated --extra dev pytest tests/cpu/test_trainer.py
 import torch
 import pytest
 from jaxtyping import Float, Integer
-from omegaconf import OmegaConf
 from pytest import approx
 from unittest.mock import MagicMock, patch
 
@@ -204,21 +203,12 @@ def test_normalize_mini_batch_size():
         train_batch_size, policy_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
     ):
         """Helper to create policy worker with specific config."""
-        cfg = OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    "policy_mini_batch_size": policy_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                    "algorithm": {
-                        "policy_loss_type": "regular",
-                    },
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+        cfg.trainer.algorithm.policy_loss_type = "regular"
+        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
 
         worker = TestPolicyWorker(
             cfg=cfg,
@@ -239,18 +229,11 @@ def test_normalize_mini_batch_size():
         train_batch_size, critic_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
     ):
         """Helper to create critic worker with specific config."""
-        cfg = OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    "critic_mini_batch_size": critic_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
 
         worker = TestCriticWorker(
             cfg=cfg,
@@ -507,22 +490,11 @@ def test_ppo_train_batch_calculations():
     """Test the key batch calculations and control flow in ppo_train methods."""
 
     # Create test configuration
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "micro_train_batch_size_per_gpu": 2,
-                "update_epochs_per_batch": 1,
-                "algorithm": {
-                    "policy_loss_type": "regular",
-                },
-            },
-            "generator": {
-                "sampling_params": {
-                    "temperature": 1.0,
-                },
-            },
-        }
-    )
+    cfg = get_default_config()
+    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.update_epochs_per_batch = 1
+    cfg.trainer.algorithm.policy_loss_type = "regular"
+    cfg.generator.sampling_params.temperature = 1.0
 
     # Create dummy databatch with known size
     batch_size = 12  # This will create 6 micro batches with micro_train_batch_size_per_gpu=2

@@ -1,15 +1,18 @@
 import ray
 from packaging import version
 from ray.actor import ActorHandle
-from typing import Any, List, Dict
+from typing import Any, List, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
+from skyrl_train.weight_sync import WeightUpdateRequest
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 
 
@@ -40,14 +43,10 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.sleep.remote(*args, **kwargs)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
-        return await self.inference_engine_actor.init_weight_update_communicator.remote(
-            master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
-        )
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        return await self.inference_engine_actor.init_weight_update_communicator.remote(init_info)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+    async def update_named_weights(self, request: WeightUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
     async def teardown(self):
