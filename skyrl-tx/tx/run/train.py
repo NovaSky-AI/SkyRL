@@ -82,7 +82,7 @@ def train(
     loader = get_loader(loader_name)
 
     model_class = get_model_class(base_config)
-    mesh = jax.make_mesh((1, tp_size), ("dp", "tp"))
+    mesh = jax.make_mesh((1, tp_size), ("fsdp", "tp"))
     with jax.set_mesh(mesh):
         model = model_class(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         optimizer = nnx.Optimizer(model, get_optimizer(optimizer_name, optimizer_args), wrt=nnx.Param)

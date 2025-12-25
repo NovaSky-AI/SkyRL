@@ -166,6 +166,15 @@ def test_training_workflow(service_client):
     checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
     assert "0000" in checkpoint_ids
 
+    # Verify the training run appears in list_training_runs with correct fields
+    training_runs = rest_client.list_training_runs().result()
+    assert training_runs.cursor.total_count == len(training_runs.training_runs)
+    training_run = next(tr for tr in training_runs.training_runs if tr.training_run_id == original_training_run_id)
+    assert training_run.base_model == BASE_MODEL
+    assert training_run.is_lora is True
+    assert training_run.lora_rank == 32
+    assert training_run.corrupted is False
+
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
 def test_sample(service_client, use_lora):

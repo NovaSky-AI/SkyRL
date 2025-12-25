@@ -642,91 +642,9 @@ class PolicyWorkerBase(Worker):
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
 
-    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
-
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
-
-        status_list = []
-        all_metrics = defaultdict(list)
-        policy_update_steps = 0
-
-        for epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            pbar = tqdm(
-                dataloader,
-                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
-                disable=not self.strategy.is_rank_0(),
-            )
-            for local_step, experience in enumerate(pbar):
-                status = self.training_step(
-                    experience,
-                    global_step,
-                    local_step,
-                    accumulation_steps,
-                )
-                policy_update_steps += 1
-
-                # for DP
-                # TODO (sumanthrh): this assumes all workers are data parallel.
-                # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-                status = self.strategy.all_reduce(status)
-
-                # weighted mean for kl
-                # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
-                # we can log this in the driver
-                # if "kl" in status:
-                #     status["kl"] *= status["response_length"]
-                #     status["kl"] /= status["response_length"]
-
-                short_status = {}
-
-                if "policy_loss" in status:
-                    short_status = {
-                        "pg": status["policy_loss"],
-                        "glen": status["response_length"],
-                        "policy_lr": status["policy_lr"],
-                        "ent": status["policy_entropy"],
-                    }
-                    if "raw_grad_norm" in status:
-                        short_status["grad_norm"] = status["raw_grad_norm"]
-                    if "reward" in status:
-                        short_status["rm"] = status["reward"]
-
-                if "critic_loss" in status:
-                    short_status["cri"] = status["critic_loss"]
-                    short_status["vals"] = status["values"]
-                    short_status["cri_lr"] = status["critic_lr"]
-
-                if "ptx_loss" in status:
-                    short_status["ptx"] = status["ptx_loss"]
-
-                status_list.append(status)
-                for k, v in status.items():
-                    all_metrics[k].append(v)
-                pbar.set_postfix(short_status)
-
-        torch.distributed.barrier()
-        # not needed beyond status logging
-        all_metrics.pop("response_length", None)
-
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps / accumulation_steps
-
-        # should return an `TrainingOutputBatch`
-        output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
-        return output
-
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+    def forward_backward(self, experience: Experience, accumulation_steps: int) -> Dict[str, float]:
         """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
+        Perform the forward and backward pass for one micro-batch.
         """
         self.model.train()
         experience.to_device(torch.cuda.current_device())
@@ -794,37 +712,129 @@ class PolicyWorkerBase(Worker):
         loss = loss / accumulation_steps
         self.strategy.backward(loss, self.model, self.optimizer)
 
-        grad_norm = None
-        if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
-            if grad_norm is not None:
-                grad_norm = grad_norm.detach().cpu().item()
-
-        if self.record_memory:
-            self.save_memory_snapshot(global_step, local_step)
-
-        # status
         status = {
             "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
-            "policy_lr": self.scheduler.get_last_lr()[0],
             "ppo_clip_ratio": clip_ratio,
             "policy_entropy": entropy.item(),
+            "response_length": num_actions,
         }
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
+        return status
+
+    def optim_step(self) -> float:
+        """
+        Perform optimizer step and return the gradient norm.
+        """
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
         if grad_norm is not None:
+            grad_norm = grad_norm.detach().cpu().item()
+        return grad_norm
+
+    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        global_step = train_data.metadata["global_step"]
+        dataloader = BatchIterator(
+            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+        )
+
+        micro_batches_per_mini_batch = (
+            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+        )
+        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
+        accumulation_steps = micro_batches_per_mini_batch
+
+        status_list = []
+        all_metrics = defaultdict(list)
+        policy_update_steps = 0
+
+        for epoch in range(self.cfg.trainer.update_epochs_per_batch):
+            pbar = tqdm(
+                dataloader,
+                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
+                disable=not self.strategy.is_rank_0(),
+            )
+            for local_step, experience in enumerate(pbar):
+                status = self.forward_backward(experience, accumulation_steps)
+
+                if (local_step + 1) % accumulation_steps == 0:
+                    grad_norm = self.optim_step()
+                    status["raw_grad_norm"] = grad_norm
+
+                if self.record_memory:
+                    self.save_memory_snapshot(global_step, local_step)
+
+                status["policy_lr"] = self.scheduler.get_last_lr()[0]
+
+                policy_update_steps += 1
+
+                # for DP
+                # TODO (sumanthrh): this assumes all workers are data parallel.
+                # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
+                status = self.strategy.all_reduce(status)
+
+                # weighted mean for kl
+                # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
+                # we can log this in the driver
+                # if "kl" in status:
+                #     status["kl"] *= status["response_length"]
+                #     status["kl"] /= status["response_length"]
+
+                short_status = {}
+
+                if "policy_loss" in status:
+                    short_status = {
+                        "pg": status["policy_loss"],
+                        "glen": status["response_length"],
+                        "policy_lr": status["policy_lr"],
+                        "ent": status["policy_entropy"],
+                    }
+                    if "raw_grad_norm" in status:
+                        short_status["grad_norm"] = status["raw_grad_norm"]
+                    if "reward" in status:
+                        short_status["rm"] = status["reward"]
+
+                if "critic_loss" in status:
+                    short_status["cri"] = status["critic_loss"]
+                    short_status["vals"] = status["values"]
+                    short_status["cri_lr"] = status["critic_lr"]
+
+                if "ptx_loss" in status:
+                    short_status["ptx"] = status["ptx_loss"]
+
+                status_list.append(status)
+                for k, v in status.items():
+                    all_metrics[k].append(v)
+                pbar.set_postfix(short_status)
+
+        torch.distributed.barrier()
+        # not needed beyond status logging
+        all_metrics.pop("response_length", None)
+
+        status_mean = reduce_metrics(all_metrics)
+        status_mean["policy_update_steps"] = policy_update_steps / accumulation_steps
+
+        # should return an `TrainingOutputBatch`
+        output = TrainingOutputBatch()
+        output.metadata = {"train_status": status_mean}
+        return output
+
+    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
+        """
+        Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
+        """
+        status = self.forward_backward(experience, accumulation_steps)
+
+        if (local_step + 1) % accumulation_steps == 0:
+            grad_norm = self.optim_step()
             status["raw_grad_norm"] = grad_norm
 
-        for k, v in experience.info.items():
-            if k == "kl":
-                # just use the same value as loss if available
-                status[k] = kl_loss.item() if isinstance(kl_loss, torch.Tensor) else status["policy_kl"]
-            else:
-                status[k] = v.mean().item() if isinstance(v, torch.Tensor) else v
+        if self.record_memory:
+            self.save_memory_snapshot(global_step, local_step)
 
-        status["response_length"] = num_actions
+        status["policy_lr"] = self.scheduler.get_last_lr()[0]
+
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
@@ -908,6 +918,54 @@ class CriticWorkerBase(Worker):
             self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
 
+    def forward_backward(self, experience: Experience, accumulation_steps: int) -> Dict[str, float]:
+        """
+        Perform the forward and backward pass for one micro-batch.
+        """
+        experience.to_device(torch.cuda.current_device())
+
+        sequences = experience.sequences
+        old_values = experience.values
+        returns = experience.returns
+        num_actions = experience.num_actions
+        attention_mask = experience.attention_mask
+        loss_mask = experience.loss_mask
+
+        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+            # critic loss
+            values, output = self.model(
+                sequences,
+                num_actions=num_actions,
+                attention_mask=attention_mask,
+                return_output=True,
+            )
+            # loss function
+            loss, clipfrac = self.critic_loss_fn(
+                values,
+                old_values,
+                returns,
+                config=self.cfg.trainer.algorithm,
+                loss_mask=loss_mask,
+            )
+        loss = loss / accumulation_steps
+        self.strategy.backward(loss, self.model, self.optimizer)
+
+        status = {
+            "critic_loss": loss.item(),
+            "values_mean": masked_mean(values, loss_mask).item(),
+            "values_clipfrac": clipfrac,
+        }
+        return status
+
+    def optim_step(self) -> float:
+        """
+        Perform optimizer step and return the gradient norm.
+        """
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
+        if grad_norm is not None:
+            grad_norm = grad_norm.detach().cpu().item()
+        return grad_norm
+
     def _forward_micro_batch(
         self,
         micro_batch: TrainingInputBatch,
@@ -942,7 +1000,6 @@ class CriticWorkerBase(Worker):
         )
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        global_step = train_data.metadata["global_step"]
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
@@ -965,7 +1022,13 @@ class CriticWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
-                status = self.training_step(experience, global_step, local_step, accumulation_steps)
+                status = self.forward_backward(experience, accumulation_steps)
+
+                if (local_step + 1) % accumulation_steps == 0:
+                    grad_norm = self.optim_step()
+                    status["raw_grad_norm"] = grad_norm
+
+                status["critic_lr"] = self.scheduler.get_last_lr()[0]
                 critic_update_steps += 1
 
                 # for DP
@@ -991,48 +1054,13 @@ class CriticWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        experience.to_device(torch.cuda.current_device())
+        status = self.forward_backward(experience, accumulation_steps)
 
-        sequences = experience.sequences
-        old_values = experience.values
-        returns = experience.returns
-        num_actions = experience.num_actions
-        attention_mask = experience.attention_mask
-        loss_mask = experience.loss_mask
-
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            # critic loss
-            values, output = self.model(
-                sequences,
-                num_actions=num_actions,
-                attention_mask=attention_mask,
-                return_output=True,
-            )
-            # loss function
-            loss, clipfrac = self.critic_loss_fn(
-                values,
-                old_values,
-                returns,
-                config=self.cfg.trainer.algorithm,
-                loss_mask=loss_mask,
-            )
-        loss = loss / accumulation_steps
-        self.strategy.backward(loss, self.model, self.optimizer)
-        grad_norm = None
         if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
-            if grad_norm is not None:
-                grad_norm = grad_norm.detach().cpu().item()
-
-        # status
-        status = {
-            "critic_loss": loss.item(),
-            "values_mean": masked_mean(values, loss_mask).item(),
-            "critic_lr": self.scheduler.get_last_lr()[0],
-            "values_clipfrac": clipfrac,
-        }
-        if grad_norm is not None:
+            grad_norm = self.optim_step()
             status["raw_grad_norm"] = grad_norm
+
+        status["critic_lr"] = self.scheduler.get_last_lr()[0]
         return status
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):

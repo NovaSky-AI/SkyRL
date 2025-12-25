@@ -130,7 +130,7 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
-        if self.cfg.trainer.step_wise_training:
+        if self.cfg.generator.step_wise_trajectories:
             eval_metrics = await evaluate_step_wise(
                 eval_dataloader=self.eval_dataloader,
                 generator=self.generator,
@@ -209,7 +209,7 @@ class RayPPOTrainer:
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
 
-                    if self.cfg.trainer.step_wise_training:
+                    if self.cfg.generator.step_wise_trajectories:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
                         # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
                         uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
@@ -583,7 +583,7 @@ class RayPPOTrainer:
         training_input.metadata = {"uids": uids}
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        if self.cfg.trainer.step_wise_training:
+        if self.cfg.generator.step_wise_trajectories:
             assert (
                 "trajectory_ids" in generator_output
             ), "Expected `trajectory_ids` in generator output for step wise training"
@@ -626,7 +626,7 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        if not self.cfg.trainer.step_wise_training:
+        if not self.cfg.generator.step_wise_trajectories:
             validate_generator_output(len(input_batch["prompts"]), generator_output)
 
         return generator_output
@@ -640,7 +640,7 @@ class RayPPOTrainer:
         """
         generator_output_for_metrics = generator_output
         uids_for_metrics = uids
-        if self.cfg.trainer.step_wise_training:
+        if self.cfg.generator.step_wise_trajectories:
             generator_output_for_metrics = defaultdict(list)
             for key in generator_output:
                 if isinstance(generator_output[key], list):
@@ -707,7 +707,7 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
-        if self.cfg.trainer.step_wise_training:
+        if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
             response_mask = data["response_mask"]
             index = np.array(data.metadata["uids"])
@@ -759,7 +759,7 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
-        if self.cfg.trainer.step_wise_training:
+        if self.cfg.generator.step_wise_trajectories:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:
             avg_rewards: float = return_sums.mean().item()

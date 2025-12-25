@@ -190,7 +190,9 @@ async def evaluate_step_wise(
     is_last_step_mask = concat_generator_outputs["is_last_step"]
     for key in concat_generator_outputs:
         if isinstance(concat_generator_outputs[key], list):
-            assert len(concat_generator_outputs[key]) == len(is_last_step_mask)
+            assert len(concat_generator_outputs[key]) == len(
+                is_last_step_mask
+            ), f"Length mismatch: {len(concat_generator_outputs[key])} != {len(is_last_step_mask)} for key {key}"
             generator_output_last_step[key] = [
                 val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
             ]

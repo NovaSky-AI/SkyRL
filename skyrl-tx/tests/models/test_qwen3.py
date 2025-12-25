@@ -43,7 +43,7 @@ def test_qwen3(tp: int):
 
         base_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
         config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
-        mesh = jax.make_mesh((1, tp), ("dp", "tp"))
+        mesh = jax.make_mesh((1, tp), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
@@ -75,7 +75,7 @@ def test_qwen3_moe_layer():
     with torch.no_grad():
         hf_final_hidden_states, hf_router_logits = hf_moe_layer.forward(x)
 
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
     with jax.set_mesh(mesh):
         moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_moe_base_weights(moe_layer, hf_moe_layer)
@@ -117,7 +117,7 @@ def test_qwen3_moe_layer_lora():
     hf_moe_layer = hf_model.model.layers[0].mlp
     x = torch.randn(3, 4, config.hidden_size)
 
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
     with jax.set_mesh(mesh):
         moe_layer = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_moe_base_weights(moe_layer, hf_moe_layer)
@@ -216,7 +216,7 @@ def test_qwen3_lora():
             shard_attention_heads=True,
         )
 
-        mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+        mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
             load_safetensors(base_tmp, config, model)
