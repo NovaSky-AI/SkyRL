@@ -197,6 +197,7 @@ class EngineMetrics(BaseModel):
 # Prepared batch data for backend processing
 # These are prepared by the engine and passed to the backend
 
+
 class PreparedModelPassBatch(BaseModel):
     """Prepared batch data for forward/forward_backward operations.
 

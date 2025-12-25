@@ -114,23 +114,17 @@ class NativeBackend(AbstractBackend):
             (config.fully_sharded_data_parallel_size, config.tensor_parallel_size), ("fsdp", "tp")
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
-            self.model = model_class(
-                self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0)
-            )
+            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
-            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(
-                self.model, self.model.is_lora_param, ...
-            )
+            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
 
             # Initialize adapter 0 with dummy config (required for base model sampling path)
             update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
 
             # Initialize global accumulated gradients
-            self.accumulated_grads = AccumulatedGradients.create(
-                self.lora_params, config.max_lora_adapters
-            )
+            self.accumulated_grads = AccumulatedGradients.create(self.lora_params, config.max_lora_adapters)
 
         # Per-model optimizer storage (managed internally)
         self.optimizers: dict[str, nnx.Optimizer] = {}
@@ -155,11 +149,7 @@ class NativeBackend(AbstractBackend):
             seq_len: The sequence length being compiled
             mode: Either 'train' or 'sample' to track separately
         """
-        jit_times = (
-            self.metrics.train_seq_len_jit_times
-            if mode == "train"
-            else self.metrics.sample_seq_len_jit_times
-        )
+        jit_times = self.metrics.train_seq_len_jit_times if mode == "train" else self.metrics.sample_seq_len_jit_times
         if not self.config.enforce_eager and seq_len not in jit_times:
             logger.info(f"JIT compiling for {mode} seq_len={seq_len} in progress...")
             start_time = time.time()
@@ -708,7 +698,9 @@ class NativeBackend(AbstractBackend):
             )
 
         insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
-        insert_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank)
+        insert_adapter_state(
+            adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
+        )
 
     def save_sampler_checkpoint(
         self,

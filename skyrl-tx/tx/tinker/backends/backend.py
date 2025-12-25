@@ -26,9 +26,6 @@ Design:
 
 from abc import ABC, abstractmethod
 
-import jax
-from flax import nnx
-
 from tx.tinker import types
 from tx.tinker.config import EngineConfig
 
@@ -39,14 +36,6 @@ class AbstractBackend(ABC):
     Backends handle computation and model state manipulation.
     Database operations are handled by TinkerEngine.
     """
-
-    config: EngineConfig
-    mesh: jax.sharding.Mesh
-    model: nnx.Module
-    metrics: types.EngineMetrics
-    graphdef: nnx.GraphDef
-    lora_params: nnx.State
-    non_lora_params: nnx.State
 
     @abstractmethod
     def __init__(self, config: EngineConfig, **kwargs):

@@ -132,9 +132,7 @@ class TinkerEngine:
         all_adapter_indices = []
         request_batch_slices = []
 
-        needs_prompt_logprobs = any(
-            request_data.prompt_logprobs for (_, request_data) in requests.values()
-        )
+        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
 
         for i, (request_id, (model_id, request_data)) in enumerate(requests.items()):
             request_start = len(all_prompts)
@@ -146,9 +144,9 @@ class TinkerEngine:
                 all_sampling_params.append(request_data.sampling_params)
                 all_adapter_indices.append(adapter_indices[i])
 
-            request_batch_slices.append((
-                request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs
-            ))
+            request_batch_slices.append(
+                (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
+            )
 
         return types.PreparedSampleBatch(
             all_prompts=all_prompts,
@@ -249,7 +247,8 @@ class TinkerEngine:
         batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
         return {
-            str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data)) for f in batchable
+            str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
+            for f in batchable
         }
 
     def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
