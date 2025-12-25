@@ -4,10 +4,17 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Union
 import requests
 import os
+import logging
 
 
 @register_tool("youcom_search_engine")
 class YouComSearchEngine(BaseTool):
+    def __init__(self):
+        super().__init__()
+        self.you_search_key = os.getenv("YDC_API_KEY")
+        if not self.you_search_key:
+            raise ValueError("YDC_API_KEY environment variable is required")
+
     name = "youcom_search_engine"
     description = (
         "Performs batched web searches: supply an array 'query'; the tool retrieves the top 10 results for each query in one call.\n\n"
@@ -27,9 +34,6 @@ class YouComSearchEngine(BaseTool):
         },
         "required": ["query"],
     }
-    you_search_key = os.getenv("YDC_API_KEY")
-    if not you_search_key:
-        raise ValueError("YDC_API_KEY environment variable is required")
 
     # Optional blocklists to prevent data leakage (e.g., excluding benchmark/dataset sites)
     # Configure via env vars:
@@ -52,7 +56,7 @@ class YouComSearchEngine(BaseTool):
     blocklist_domains = {d.strip().lower() for d in _default_block_domains.split(",") if d.strip()}
     blocklist_keywords = {k.strip().lower() for k in _default_block_keywords.split(",") if k.strip()}
     
-    def _process_results(self, source: str, results: list):
+    def _process_results(self, results: list):
         filtered_pages = []
         for p in results:
             try:
@@ -71,8 +75,9 @@ class YouComSearchEngine(BaseTool):
                 )
                 if not blocked_domain and not blocked_keyword:
                     filtered_pages.append(p)
-            except Exception:
+            except Exception as e:
                 # If anything goes wrong during filtering, conservatively keep the page
+                logging.warning(f"Error processing a search result: {e}", exc_info=True)
                 filtered_pages.append(p)
         return filtered_pages
 
@@ -99,21 +104,17 @@ class YouComSearchEngine(BaseTool):
             except Exception:
                 q = query
 
-        data = {
+        request_params = {
             "query": q,
             "count": 10,
-            "extendParams": {
-                "country": "en",
-                "page": 1,
-            },
         }
 
         for i in range(5):
             try:
-                response = requests.get(url, headers=headers, params=data, timeout=10)
+                response = requests.get(url, headers=headers, params=request_params, timeout=10)
                 results = response.json()
                 break
-            except Exception:
+            except requests.exceptions.RequestException as re:
                 if i == 4:
                     return f"YouSearchEngine search timeout for query '{query}'. Please try again later."
                 continue
@@ -127,8 +128,8 @@ class YouComSearchEngine(BaseTool):
 
             # Filter results by blocklists (domains/keywords) to reduce leakage
             results = results.get("results", [])
-            filtered_pages = self._process_results("web", results.get("web", []))
-            filtered_pages.extend(self._process_results("news", results.get("news", [])))
+            filtered_pages = self._process_results(results.get("web", []))
+            filtered_pages.extend(self._process_results(results.get("news", [])))
 
             web_snippets = []
             idx = 0
@@ -224,15 +225,9 @@ class YouComSearchEngine(BaseTool):
         query = params.get("query")
 
         try:
-            if isinstance(query, str):
-                response = self.you_search(query)
-            elif isinstance(query, list):
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    response = list(executor.map(self.you_search, query))
-                response = "\n=======\n".join(response)
-            else:
-                return {"error": "Query must be a string or array of strings."}
-
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                response = list(executor.map(self.you_search, query))
+            response = "\n=======\n".join(response)
             return {"results": response}
 
         except Exception as e:
