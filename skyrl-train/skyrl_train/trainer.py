@@ -1,4 +1,3 @@
-import asyncio
 import math
 import os
 import shutil
@@ -148,7 +147,7 @@ class RayPPOTrainer:
             )
         return eval_metrics
 
-    def train(self):
+    async def train(self):
         """
         Main training loop for PPO
         """
