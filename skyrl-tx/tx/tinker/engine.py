@@ -449,26 +449,19 @@ class TinkerEngine:
             results[request_id] = result
         self._complete_futures(results)
 
-    def process_batch_requests(self, requests, prepare_fn, backend_fn, name: str):
-        """Process a batch of requests: filter, prepare, delegate to backend, complete futures.
+    def process_batch_requests(self, requests, processor, name: str):
+        """Process a batch of requests with error handling and future completion.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            prepare_fn: Function to prepare the batch data
-            backend_fn: Backend method to process the prepared batch
+            processor: Function that processes requests and returns results dict
             name: Name for logging
         """
         if not requests:
             return
         with log_timing(f"process_batch_requests({name}, n={len(requests)})"):
             try:
-                error_results, valid_requests = self._filter_valid_requests(requests)
-                if valid_requests:
-                    prepared_batch = prepare_fn(valid_requests)
-                    results = backend_fn(prepared_batch)
-                    results.update(error_results)
-                else:
-                    results = error_results
+                results = processor(requests)
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
                 results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
@@ -490,24 +483,9 @@ class TinkerEngine:
                 other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
-            self.process_batch_requests(
-                forward_backward_requests,
-                self._prepare_model_pass_batch,
-                self.backend.forward_backward,
-                "forward_backward",
-            )
-            self.process_batch_requests(
-                forward_requests,
-                self._prepare_model_pass_batch,
-                self.backend.forward,
-                "forward",
-            )
-            self.process_batch_requests(
-                sample_requests,
-                self._prepare_sample_batch,
-                self.backend.sample,
-                "sample",
-            )
+            self.process_batch_requests(forward_backward_requests, self.process_forward_backward, "forward_backward")
+            self.process_batch_requests(forward_requests, self.process_forward, "forward")
+            self.process_batch_requests(sample_requests, self.process_sample, "sample")
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
