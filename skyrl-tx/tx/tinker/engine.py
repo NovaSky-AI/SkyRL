@@ -461,7 +461,12 @@ class TinkerEngine:
             return
         with log_timing(f"process_batch_requests({name}, n={len(requests)})"):
             try:
-                results = processor(requests)
+                error_results, valid_requests = self._filter_valid_requests(requests)
+                if valid_requests:
+                    results = processor(valid_requests)
+                    results.update(error_results)
+                else:
+                    results = error_results
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
                 results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
