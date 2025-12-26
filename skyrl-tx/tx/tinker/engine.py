@@ -48,6 +48,18 @@ class TinkerEngine:
         for request_id, (model_id, request_data) in requests.items():
             if model_id and not self.backend.has_model(model_id):
                 results[request_id] = types.ErrorResponse(error=f"Model {model_id} not loaded", status="failed")
+            elif not model_id and isinstance(request_data, types.SampleInput):
+                if request_data.base_model != self.config.base_model:
+                    results[request_id] = types.ErrorResponse(
+                        error=f"Engine is configured for '{self.config.base_model}' but request specified '{request_data.base_model}'",
+                        status="failed",
+                    )
+                elif request_data.checkpoint_id:
+                    results[request_id] = types.ErrorResponse(
+                        error="checkpoint_id must be empty for base model sampling", status="failed"
+                    )
+                else:
+                    valid_requests[request_id] = (model_id, request_data)
             else:
                 valid_requests[request_id] = (model_id, request_data)
 
