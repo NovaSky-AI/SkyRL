@@ -547,11 +547,7 @@ class NativeBackend(AbstractBackend):
         """Run forward-only pass on a batch (no gradient computation)."""
         return self._process_model_pass_batch(prepared_batch, self._forward)
 
-    def optim_step(
-        self,
-        model_id: str,
-        request_data: types.OptimStepInput,
-    ) -> types.OptimStepOutput:
+    def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Apply an optimizer step using accumulated gradients."""
         adapter_index = self.models[model_id].adapter_index
         adapter_index_arr = jnp.int32(adapter_index)
@@ -674,11 +670,7 @@ class NativeBackend(AbstractBackend):
 
         return results
 
-    def save_checkpoint(
-        self,
-        output_path,
-        model_id: str,
-    ) -> None:
+    def save_checkpoint(self, output_path, model_id: str) -> None:
         """Save training checkpoint as tar.gz using Flax checkpoints."""
         with pack_and_upload(output_path) as temp_dir:
             checkpoint_data = self._extract_checkpoint_data(model_id)
@@ -691,10 +683,7 @@ class NativeBackend(AbstractBackend):
             )
         logger.info(f"Saved training checkpoint to {output_path}")
 
-    def _extract_checkpoint_data(
-        self,
-        model_id: str,
-    ) -> dict:
+    def _extract_checkpoint_data(self, model_id: str) -> dict:
         """Extract adapter state and optimizer state for checkpointing."""
         adapter_index = self.models[model_id].adapter_index
         rank = self.models[model_id].lora_config.rank
@@ -706,11 +695,7 @@ class NativeBackend(AbstractBackend):
             "lora_config": self.models[model_id].lora_config.model_dump(),
         }
 
-    def _insert_checkpoint_data(
-        self,
-        model_id: str,
-        checkpoint_data: dict,
-    ) -> None:
+    def _insert_checkpoint_data(self, model_id: str, checkpoint_data: dict) -> None:
         """Insert checkpoint data into model state."""
         adapter_index = self.models[model_id].adapter_index
         rank = checkpoint_data["lora_config"]["rank"]
@@ -726,11 +711,7 @@ class NativeBackend(AbstractBackend):
             adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
         )
 
-    def load_checkpoint(
-        self,
-        checkpoint_path,
-        model_id: str,
-    ) -> None:
+    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
         """Load training checkpoint from tar.gz using Flax checkpoints."""
         with download_and_unpack(checkpoint_path) as temp_dir:
             checkpoint = checkpoints.restore_checkpoint(
@@ -745,11 +726,7 @@ class NativeBackend(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(
-        self,
-        output_path,
-        model_id: str,
-    ) -> None:
+    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -761,12 +738,7 @@ class NativeBackend(AbstractBackend):
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
-    def load_sampler_checkpoint(
-        self,
-        model_id: str,
-        checkpoint_id: str,
-        checkpoint_path,
-    ) -> None:
+    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
         """Insert sampler weights from checkpoint file."""
         adapter_index = self.models[model_id].adapter_index
         adapter_config = self.models[model_id].lora_config

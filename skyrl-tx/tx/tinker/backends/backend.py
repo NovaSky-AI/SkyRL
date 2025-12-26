@@ -84,11 +84,7 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def optim_step(
-        self,
-        model_id: str,
-        request_data: types.OptimStepInput,
-    ) -> types.OptimStepOutput:
+    def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Apply an optimizer step using accumulated gradients.
 
         Args:
@@ -116,11 +112,7 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def save_checkpoint(
-        self,
-        output_path,
-        model_id: str,
-    ) -> None:
+    def save_checkpoint(self, output_path, model_id: str) -> None:
         """Save training checkpoint to disk.
 
         Args:
@@ -130,11 +122,7 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def load_checkpoint(
-        self,
-        checkpoint_path,
-        model_id: str,
-    ) -> None:
+    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
         """Load training checkpoint from disk.
 
         Args:
@@ -144,11 +132,7 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def save_sampler_checkpoint(
-        self,
-        output_path,
-        model_id: str,
-    ) -> None:
+    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
         """Save sampler checkpoint to disk as tar.gz.
 
         Args:
@@ -158,12 +142,7 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def load_sampler_checkpoint(
-        self,
-        model_id: str,
-        checkpoint_id: str,
-        checkpoint_path,
-    ) -> None:
+    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
         """Insert sampler weights into model state from checkpoint file.
 
         Args:
