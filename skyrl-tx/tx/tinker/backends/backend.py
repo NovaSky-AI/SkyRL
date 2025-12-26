@@ -37,7 +37,7 @@ class AbstractBackend(ABC):
     """
 
     @abstractmethod
-    def __init__(self, config: EngineConfig, **kwargs):
+    def __init__(self, config: EngineConfig):
         """Initialize the backend."""
         pass
 
