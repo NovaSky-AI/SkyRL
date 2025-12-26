@@ -317,67 +317,6 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def process_forward_backward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
-    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward_backward requests by delegating to backend."""
-        # Filter invalid requests before delegating to backend
-        error_results, valid_requests = self._filter_valid_requests(requests)
-        if not valid_requests:
-            return error_results
-
-        # Prepare batch data
-        prepared_batch = self._prepare_model_pass_batch(valid_requests)
-
-        # Delegate computation to backend
-        results = self.backend.process_forward_backward_batch(prepared_batch)
-        results.update(error_results)
-        return results
-
-    def process_forward_batch(
-        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
-    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward-only requests by delegating to backend."""
-        # Filter invalid requests before delegating to backend
-        error_results, valid_requests = self._filter_valid_requests(requests)
-        if not valid_requests:
-            return error_results
-
-        # Prepare batch data
-        prepared_batch = self._prepare_model_pass_batch(valid_requests)
-
-        # Delegate computation to backend
-        results = self.backend.process_forward_batch(prepared_batch)
-        results.update(error_results)
-        return results
-
-    def process_sample_batch(
-        self, requests: dict[str, tuple[str, types.SampleInput]]
-    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Process multiple sample requests in a single batch.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples
-
-        Returns:
-            Dict mapping request_id --> result_data or error info
-        """
-        if not requests:
-            return {}
-
-        # Filter invalid requests before delegating to backend
-        error_results, valid_requests = self._filter_valid_requests(requests)
-        if not valid_requests:
-            return error_results
-
-        # Prepare batch data (backend handles loading sampler weights)
-        prepared_batch = self._prepare_sample_batch(valid_requests)
-
-        # Delegate computation to backend
-        results = self.backend.process_sample_batch(prepared_batch)
-        results.update(error_results)
-        return results
-
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
@@ -495,18 +434,26 @@ class TinkerEngine:
             results[request_id] = result
         self._complete_futures(results)
 
-    def process_batch_requests(self, requests: dict[str, tuple[str, BaseModel]], batch_processor):
-        """Generic function to process a batch of requests.
+    def process_batch_requests(self, requests, prepare_fn, backend_fn, name: str):
+        """Process a batch of requests: filter, prepare, delegate to backend, complete futures.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples
-            batch_processor: Function to call to process the batch
+            prepare_fn: Function to prepare the batch data
+            backend_fn: Backend method to process the prepared batch
+            name: Name for logging
         """
         if not requests:
             return
-        with log_timing(f"process_batch_requests({batch_processor.__name__}, n={len(requests)})"):
+        with log_timing(f"process_batch_requests({name}, n={len(requests)})"):
             try:
-                results = batch_processor(requests)
+                error_results, valid_requests = self._filter_valid_requests(requests)
+                if valid_requests:
+                    prepared_batch = prepare_fn(valid_requests)
+                    results = backend_fn(prepared_batch)
+                    results.update(error_results)
+                else:
+                    results = error_results
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
                 results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
@@ -528,9 +475,24 @@ class TinkerEngine:
                 other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
-            self.process_batch_requests(forward_backward_requests, self.process_forward_backward_batch)
-            self.process_batch_requests(forward_requests, self.process_forward_batch)
-            self.process_batch_requests(sample_requests, self.process_sample_batch)
+            self.process_batch_requests(
+                forward_backward_requests,
+                self._prepare_model_pass_batch,
+                self.backend.process_forward_backward_batch,
+                "forward_backward",
+            )
+            self.process_batch_requests(
+                forward_requests,
+                self._prepare_model_pass_batch,
+                self.backend.process_forward_batch,
+                "forward",
+            )
+            self.process_batch_requests(
+                sample_requests,
+                self._prepare_sample_batch,
+                self.backend.process_sample_batch,
+                "sample",
+            )
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
