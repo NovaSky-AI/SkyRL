@@ -32,8 +32,8 @@ class TinkerEngine:
 
     def _filter_valid_requests(
         self,
-        requests: dict[str, tuple[str, any]],
-    ) -> tuple[dict[str, any], dict[str, tuple[str, any]]]:
+        requests: dict[str, tuple[str, BaseModel]],
+    ) -> tuple[dict[str, types.ErrorResponse], dict[str, tuple[str, BaseModel]]]:
         """Filter out requests with invalid model_ids and return error results for them.
 
         Args:
