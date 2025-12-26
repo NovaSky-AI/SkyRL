@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
@@ -458,7 +459,12 @@ class TinkerEngine:
             results[request_id] = result
         self._complete_futures(results)
 
-    def process_batch_requests(self, requests, processor, name: str):
+    def process_batch_requests(
+        self,
+        requests: dict[str, tuple[str, BaseModel]],
+        processor: Callable[[dict[str, tuple[str, BaseModel]]], dict[str, BaseModel]],
+        name: str,
+    ):
         """Process a batch of requests with error handling and future completion.
 
         Args:
