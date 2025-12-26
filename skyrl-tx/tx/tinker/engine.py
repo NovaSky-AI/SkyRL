@@ -324,6 +324,21 @@ class TinkerEngine:
 
         return self.backend.optim_step(model_id, request_data)
 
+    def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
+        """Run forward and backward pass on a batch of requests."""
+        prepared = self._prepare_model_pass_batch(requests)
+        return self.backend.forward_backward(prepared)
+
+    def process_forward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
+        """Run forward-only pass on a batch of requests."""
+        prepared = self._prepare_model_pass_batch(requests)
+        return self.backend.forward(prepared)
+
+    def process_sample(self, requests: dict[str, tuple[str, types.SampleInput]]) -> dict:
+        """Generate samples for a batch of requests."""
+        prepared = self._prepare_sample_batch(requests)
+        return self.backend.sample(prepared)
+
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
         """Loads a clean, trimmed training checkpoint."""
         if not self.backend.has_model(model_id):

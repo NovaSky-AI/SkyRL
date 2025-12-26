@@ -93,17 +93,17 @@ def test_adapter_gradient_calculation():
     }
 
     # Process round 1 batch
-    engine.process_forward_backward_batch(reqs_round1)
+    engine.process_forward_backward(reqs_round1)
 
-    adapter1_idx = engine.models[adapter1_id].adapter_index
-    adapter2_idx = engine.models[adapter2_id].adapter_index
+    adapter1_idx = engine.backend.models[adapter1_id].adapter_index
+    adapter2_idx = engine.backend.models[adapter2_id].adapter_index
 
     # Extract gradients for adapter 1
-    grads_A1_round1 = jax.tree.map(lambda x: x[adapter1_idx], engine.accumulated_grads.grad_sum)
+    grads_A1_round1 = jax.tree.map(lambda x: x[adapter1_idx], engine.backend.accumulated_grads.grad_sum)
 
     # Clear stored grads so we can run another fwd/bwd without optimizer update.
-    engine.accumulated_grads = engine.accumulated_grads.reset_adapter(adapter1_idx)
-    engine.accumulated_grads = engine.accumulated_grads.reset_adapter(adapter2_idx)
+    engine.backend.accumulated_grads = engine.backend.accumulated_grads.reset_adapter(adapter1_idx)
+    engine.backend.accumulated_grads = engine.backend.accumulated_grads.reset_adapter(adapter2_idx)
 
     a1_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8]])
     a2_input2 = make_fwd_bwd_input([[9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20], [21, 22, 23, 24]])
@@ -113,9 +113,9 @@ def test_adapter_gradient_calculation():
     }
 
     # Process round 2 batch
-    engine.process_forward_backward_batch(reqs_round2)
+    engine.process_forward_backward(reqs_round2)
 
-    grads_A1_round2 = jax.tree.map(lambda x: x[adapter1_idx], engine.accumulated_grads.grad_sum)
+    grads_A1_round2 = jax.tree.map(lambda x: x[adapter1_idx], engine.backend.accumulated_grads.grad_sum)
 
     # Compare gradients using 99% match threshold
     _assert_tree_allclose(grads_A1_round1, grads_A1_round2, rtol=1e-3, atol=1e-2, min_match_pct=99.0)
@@ -163,17 +163,17 @@ def test_micro_batch_grad_accumulation():
     }
 
     # Run 1: micro-batching enabled
-    engine.process_forward_backward_batch(reqs)
+    engine.process_forward_backward(reqs)
 
-    adapter1_idx = engine.models[adapter1_id].adapter_index
-    adapter2_idx = engine.models[adapter2_id].adapter_index
+    adapter1_idx = engine.backend.models[adapter1_id].adapter_index
+    adapter2_idx = engine.backend.models[adapter2_id].adapter_index
 
-    mean_micro_a1 = engine.accumulated_grads.get_mean(adapter1_idx)
-    mean_micro_a2 = engine.accumulated_grads.get_mean(adapter2_idx)
+    mean_micro_a1 = engine.backend.accumulated_grads.get_mean(adapter1_idx)
+    mean_micro_a2 = engine.backend.accumulated_grads.get_mean(adapter2_idx)
 
     # Sanity check gradient sum denominators with micro-batching
-    assert engine.accumulated_grads.counts[adapter1_idx] == 2
-    assert engine.accumulated_grads.counts[adapter2_idx] == 4
+    assert engine.backend.accumulated_grads.counts[adapter1_idx] == 2
+    assert engine.backend.accumulated_grads.counts[adapter2_idx] == 4
 
     # Build a second engine without micro-batching
     config = EngineConfig(
@@ -193,20 +193,20 @@ def test_micro_batch_grad_accumulation():
     )
 
     # Run 2: micro-batching disabled
-    engine.process_forward_backward_batch(reqs)
+    engine.process_forward_backward(reqs)
 
     # Note: adapter indices might be different in new engine instance if logic changed,
     # but here we create them in same order so it should be fine.
     # Better to fetch them again to be safe.
-    adapter1_idx_full = engine.models[adapter1_id].adapter_index
-    adapter2_idx_full = engine.models[adapter2_id].adapter_index
+    adapter1_idx_full = engine.backend.models[adapter1_id].adapter_index
+    adapter2_idx_full = engine.backend.models[adapter2_id].adapter_index
 
-    mean_full_a1 = engine.accumulated_grads.get_mean(adapter1_idx_full)
-    mean_full_a2 = engine.accumulated_grads.get_mean(adapter2_idx_full)
+    mean_full_a1 = engine.backend.accumulated_grads.get_mean(adapter1_idx_full)
+    mean_full_a2 = engine.backend.accumulated_grads.get_mean(adapter2_idx_full)
 
     # Sanity check gradient sum denominators without micro-batching
-    assert engine.accumulated_grads.counts[adapter1_idx_full] == 2
-    assert engine.accumulated_grads.counts[adapter2_idx_full] == 4
+    assert engine.backend.accumulated_grads.counts[adapter1_idx_full] == 2
+    assert engine.backend.accumulated_grads.counts[adapter2_idx_full] == 4
 
     # Compare MEAN gradients with and without micro-batching
     _assert_tree_allclose(mean_micro_a1, mean_full_a1, rtol=1e-3, atol=5e-3)
@@ -237,10 +237,10 @@ def test_process_optim_step_hyperparams_behavior():
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
 
     def apply_step(request_id: int, model_id: str, request: types.OptimStepInput) -> float:
-        engine.process_forward_backward_batch({str(request_id): (model_id, make_fwd_bwd_input(tokens))})
-        params_before = jax.tree.map(jnp.copy, engine.lora_params)
+        engine.process_forward_backward({str(request_id): (model_id, make_fwd_bwd_input(tokens))})
+        params_before = jax.tree.map(jnp.copy, engine.backend.lora_params)
         engine.process_optim_step(model_id, request)
-        delta = jax.tree.map(lambda old, new: (new - old).astype(jnp.float32), params_before, engine.lora_params)
+        delta = jax.tree.map(lambda old, new: (new - old).astype(jnp.float32), params_before, engine.backend.lora_params)
         return float(optax.global_norm(delta))
 
     tiny_request = types.OptimStepInput(
@@ -278,7 +278,7 @@ def test_gradient_checkpointing():
 
         # Create batch
         B, T = 2, 8
-        vocab = engine.model.config.vocab_size
+        vocab = engine.backend.model.config.vocab_size
         input_ids = jnp.arange(B * T, dtype=jnp.int32).reshape(B, T) % vocab
         attention_mask = jnp.ones((B, T), dtype=jnp.int32)
         adapter_indices = jnp.zeros((B,), dtype=jnp.int32)
@@ -289,10 +289,10 @@ def test_gradient_checkpointing():
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
 
         # Compute loss, using gradient checkpointing if enabled
-        _, per_token_losses, _ = engine._forward_backward_and_accumulate(
-            engine.accumulated_grads,
-            engine.lora_params,
-            engine.non_lora_params,
+        _, per_token_losses, _ = engine.backend._forward_backward_and_accumulate(
+            engine.backend.accumulated_grads,
+            engine.backend.lora_params,
+            engine.backend.non_lora_params,
             input_ids,
             attention_mask,
             adapter_indices,
@@ -346,7 +346,7 @@ def test_sample_max_num_sequences():
     reqs = {str(request_id): ("", make_sample_input(tokens)) for request_id, tokens in enumerate(prompts)}
 
     # Process sample requests.
-    results = engine.process_sample_batch(reqs)
+    results = engine.process_sample(reqs)
 
     # Verify results
     assert len(results) == len(prompts), f"Expected {len(prompts)} results, got {len(results)}"
@@ -405,7 +405,7 @@ def test_sample_with_prompt_logprobs():
         for i, tokens in enumerate(prompts)
     }
 
-    results_with = engine.process_sample_batch(reqs_with_logprobs)
+    results_with = engine.process_sample(reqs_with_logprobs)
 
     for i, tokens in enumerate(prompts):
         request_id = f"req_{i}"
@@ -445,7 +445,7 @@ def test_sample_with_prompt_logprobs():
         ),
     }
 
-    results_mixed = engine.process_sample_batch(reqs_mixed)
+    results_mixed = engine.process_sample(reqs_mixed)
 
     # Verify request with prompt_logprobs=True has logprobs
     assert results_mixed["req_with_0"].prompt_logprobs is not None
@@ -493,7 +493,7 @@ def test_sample_prompt_logprobs_with_microbatching():
         for i, tokens in enumerate(prompts)
     }
 
-    results = engine.process_sample_batch(reqs)
+    results = engine.process_sample(reqs)
 
     # Verify that each request got its correct prompt_logprobs
     for i, tokens in enumerate(prompts):
