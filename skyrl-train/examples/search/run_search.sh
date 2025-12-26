@@ -9,6 +9,11 @@ set -x
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
+RUN_NAME="skyrl-search_4turns_maxgeneratelen_500-multiturn-sync-TIS_2.0"
+
+USE_TIS=true
+TIS_IMP_RATIO_CAP=2.0
+
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
@@ -18,6 +23,8 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
+  trainer.algorithm.use_tis=$USE_TIS \
+  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -55,17 +62,16 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   environment.skyrl_gym.search.topk=3 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
-  trainer.run_name="skyrl-search_4turns_maxgeneratelen_500" \
+  trainer.run_name="${RUN_NAME}" \
   trainer.ckpt_interval=20 \
   trainer.hf_save_interval=100 \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/skyrl-search_4turns_maxgeneratelen_500" \
+  trainer.ckpt_path="$HOME/${RUN_NAME}" \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
-  trainer.export_path="$HOME/skyrl-search_4turns_maxgeneratelen_500/exports" \
+  trainer.export_path="$HOME/${RUN_NAME}/exports" \
   trainer.eval_interval=50 \
   $@
-  

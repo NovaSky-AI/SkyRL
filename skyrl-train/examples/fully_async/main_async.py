@@ -34,22 +34,6 @@ class AsyncPPOExp(BasePPOExp):
             colocate_pg=colocate_pg,
         )
 
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
-        """Initializes the generator.
-
-        Returns:
-            GeneratorInterface: The generator.
-        """
-        from .skyrl_gym_http_generator import SkyRLGymHTTPGenerator
-
-        return SkyRLGymHTTPGenerator(
-            generator_cfg=cfg.generator,
-            skyrl_gym_cfg=cfg.environment.skyrl_gym,
-            inference_engine_client=inference_engine_client,
-            tokenizer=tokenizer,
-            model_name=cfg.trainer.policy.model.path,
-        )
-
     def run(self):
         trainer = self._setup_trainer()
         # Start the async training loop
