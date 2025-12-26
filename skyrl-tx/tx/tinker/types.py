@@ -212,7 +212,7 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
 
     # Per-example scalars
-    all_adapter_indices: list[int]
+    all_model_ids: list[str]
     all_loss_fn_types: list[int]
 
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
@@ -231,7 +231,8 @@ class PreparedSampleBatch(BaseModel):
     # Per-sample data
     all_prompts: list[list[int]]
     all_sampling_params: list[SamplingParams]
-    all_adapter_indices: list[int]
+    all_model_ids: list[str]
+    all_checkpoint_ids: list[str]
 
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool

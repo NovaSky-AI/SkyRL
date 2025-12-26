@@ -129,6 +129,9 @@ class NativeBackend(AbstractBackend):
         # Per-model optimizer storage (managed internally)
         self.optimizers: dict[str, nnx.Optimizer] = {}
 
+        # Store LoRA model metadata (model_id -> metadata)
+        self.models: dict[str, types.ModelMetadata] = {}
+
         logger.info(
             f"Initialized base model {config.base_model} with "
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
@@ -348,11 +351,31 @@ class NativeBackend(AbstractBackend):
         else:
             self._compute_grads_and_update = nnx.jit(compute_grads_and_update)
 
-    def register_model(self, model_id: str, adapter_index: int, lora_config: types.LoraConfig) -> None:
+    def has_model(self, model_id: str) -> bool:
+        """Check if a model is registered with the backend."""
+        return model_id in self.models
+
+    def register_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         """Register a new model with the backend.
 
-        Creates optimizer and configures LoRA adapter.
+        Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
         """
+        # Allocate adapter index for this model_id
+        adapter_index = max((m.adapter_index for m in self.models.values()), default=0) + 1
+
+        if adapter_index >= self.config.max_lora_adapters:
+            raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
+
+        # Validate rank doesn't exceed max
+        if not (0 < lora_config.rank <= self.config.max_lora_rank):
+            raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
+
+        # Store model metadata
+        self.models[model_id] = types.ModelMetadata(
+            adapter_index=adapter_index,
+            lora_config=lora_config,
+        )
+
         # Create optimizer
         with jax.set_mesh(self.mesh):
             tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
@@ -360,7 +383,7 @@ class NativeBackend(AbstractBackend):
 
         # Configure adapter
         update_adapter_config(self.model, adapter_index, lora_config)
-        logger.info(f"Registered model {model_id} with adapter_index={adapter_index}")
+        logger.info(f"Registered model {model_id} with adapter_index={adapter_index}, config={lora_config}")
 
     def _process_model_pass_batch(
         self,
@@ -387,9 +410,11 @@ class NativeBackend(AbstractBackend):
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
         all_advantages = prepared_batch.all_advantages
-        all_adapter_indices = prepared_batch.all_adapter_indices
         all_loss_fn_types = prepared_batch.all_loss_fn_types
         request_batch_slices = prepared_batch.request_batch_slices
+
+        # Convert model_ids to adapter_indices
+        all_adapter_indices = [self.models[model_id].adapter_index for model_id in prepared_batch.all_model_ids]
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
@@ -525,10 +550,10 @@ class NativeBackend(AbstractBackend):
     def process_optim_step(
         self,
         model_id: str,
-        adapter_index: int,
         request_data: types.OptimStepInput,
     ) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
+        adapter_index = self.models[model_id].adapter_index
         adapter_index_arr = jnp.int32(adapter_index)
         optimizer = self.optimizers[model_id]
 
@@ -576,9 +601,11 @@ class NativeBackend(AbstractBackend):
         # Extract data from prepared batch
         all_prompts = prepared_batch.all_prompts
         all_sampling_params = prepared_batch.all_sampling_params
-        all_adapter_indices = prepared_batch.all_adapter_indices
         request_batch_slices = prepared_batch.request_batch_slices
         needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
+
+        # Load sampler weights and get adapter indices
+        all_adapter_indices = self.load_sampler_weights(prepared_batch)
 
         total_batch_size = len(all_prompts)
         max_batch_size = (
@@ -651,11 +678,10 @@ class NativeBackend(AbstractBackend):
         self,
         output_path,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Save training checkpoint as tar.gz using Flax checkpoints."""
         with pack_and_upload(output_path) as temp_dir:
-            checkpoint_data = self._extract_checkpoint_data(model_id, models)
+            checkpoint_data = self._extract_checkpoint_data(model_id)
             checkpoints.save_checkpoint(
                 target=checkpoint_data,
                 ckpt_dir=temp_dir,
@@ -668,33 +694,31 @@ class NativeBackend(AbstractBackend):
     def _extract_checkpoint_data(
         self,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> dict:
         """Extract adapter state and optimizer state for checkpointing."""
-        adapter_index = models[model_id].adapter_index
-        rank = models[model_id].lora_config.rank
+        adapter_index = self.models[model_id].adapter_index
+        rank = self.models[model_id].lora_config.rank
         lora_weights = extract_adapter_state(adapter_index, self.lora_params, rank)
         optimizer_state = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), rank)
         return {
             "lora_weights": lora_weights,
             "optimizer_state": optimizer_state,
-            "lora_config": models[model_id].lora_config.model_dump(),
+            "lora_config": self.models[model_id].lora_config.model_dump(),
         }
 
     def _insert_checkpoint_data(
         self,
         model_id: str,
         checkpoint_data: dict,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Insert checkpoint data into model state."""
-        adapter_index = models[model_id].adapter_index
+        adapter_index = self.models[model_id].adapter_index
         rank = checkpoint_data["lora_config"]["rank"]
 
-        if models[model_id].lora_config.rank != rank:
+        if self.models[model_id].lora_config.rank != rank:
             raise ValueError(
                 f"Rank mismatch: checkpoint has rank {rank}, "
-                f"model configured with rank {models[model_id].lora_config.rank}"
+                f"model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
         insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
@@ -706,30 +730,28 @@ class NativeBackend(AbstractBackend):
         self,
         checkpoint_path,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Load training checkpoint from tar.gz using Flax checkpoints."""
         with download_and_unpack(checkpoint_path) as temp_dir:
             checkpoint = checkpoints.restore_checkpoint(
                 ckpt_dir=temp_dir,
-                target=self._extract_checkpoint_data(model_id, models),
+                target=self._extract_checkpoint_data(model_id),
                 prefix="checkpoint_",
             )
 
         if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
 
-        self._insert_checkpoint_data(model_id, checkpoint, models)
+        self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
     def save_sampler_checkpoint(
         self,
         output_path,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
-        lora_model = models[model_id]
+        lora_model = self.models[model_id]
         save_lora_checkpoint(
             self.model,
             self.config.base_model,
@@ -744,11 +766,52 @@ class NativeBackend(AbstractBackend):
         model_id: str,
         checkpoint_id: str,
         checkpoint_path,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Insert sampler weights from checkpoint file."""
-        adapter_index = models[model_id].adapter_index
-        adapter_config = models[model_id].lora_config
+        adapter_index = self.models[model_id].adapter_index
+        adapter_config = self.models[model_id].lora_config
         load_lora_checkpoint(self.model, adapter_config, adapter_index, checkpoint_path)
-        models[model_id].loaded_checkpoint_id = checkpoint_id
+        self.models[model_id].loaded_checkpoint_id = checkpoint_id
         logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+
+    def load_sampler_weights(self, prepared_batch: types.PreparedSampleBatch) -> list[int]:
+        """Load sampler weights for all requests and return adapter indices array.
+
+        Ensures all required checkpoints are loaded before sampling.
+
+        Args:
+            prepared_batch: PreparedSampleBatch with model_ids, checkpoint_ids, and other batch data
+
+        Returns:
+            The adapter_indices array for LoRA sampling [batch_size]
+            Uses adapter index 0 for base model sampling (no LoRA)
+        """
+        adapter_indices = []
+        loaded_adapters = set()  # Track adapters already used in this batch
+
+        for model_id, checkpoint_id in zip(prepared_batch.all_model_ids, prepared_batch.all_checkpoint_ids):
+            if model_id:
+                # This code path is for sampling from a LoRA adapter
+                assert checkpoint_id != "", "checkpoint_id must be not empty"
+
+                adapter_index = self.models[model_id].adapter_index
+                if self.models[model_id].loaded_checkpoint_id == checkpoint_id:
+                    # Weights already loaded in RAM
+                    adapter_indices.append(adapter_index)
+                else:
+                    # Need to load from disk
+                    assert adapter_index not in loaded_adapters, "Cannot override already used adapter"
+
+                    checkpoint_path = (
+                        self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+                    )
+                    logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
+                    self.load_sampler_checkpoint(model_id, checkpoint_id, checkpoint_path)
+                    adapter_indices.append(adapter_index)
+
+                loaded_adapters.add(adapter_index)
+            else:
+                # This code path is for sampling from the base model
+                adapter_indices.append(0)
+
+        return adapter_indices

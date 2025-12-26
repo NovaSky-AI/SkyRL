@@ -25,10 +25,9 @@ class TinkerEngine:
     - Database operations (futures, checkpoints)
     - Request finding/scheduling
     - File I/O (download/upload checkpoints)
-    - Storing models dict
     - Validating requests against loaded models
 
-    Computation is delegated to the backend (NativeBackend).
+    Computation and model management are delegated to the backend (NativeBackend).
     """
 
     def _filter_valid_requests(
@@ -47,7 +46,7 @@ class TinkerEngine:
         valid_requests = {}
 
         for request_id, (model_id, request_data) in requests.items():
-            if model_id and model_id not in self.models:
+            if model_id and not self.backend.has_model(model_id):
                 results[request_id] = types.ErrorResponse(error=f"Model {model_id} not loaded", status="failed")
             else:
                 valid_requests[request_id] = (model_id, request_data)
@@ -61,7 +60,7 @@ class TinkerEngine:
         """Prepare batch data for forward/forward_backward operations.
 
         Extracts tokens, targets, and metadata from requests into lists
-        that the backend will convert to JAX arrays.
+        that the backend will convert to arrays.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
@@ -72,14 +71,13 @@ class TinkerEngine:
         all_input_ids = []
         all_targets = []
         all_token_weights = []
-        all_adapter_indices = []
+        all_model_ids = []
         all_sampling_logprobs = []
         all_advantages = []
         all_loss_fn_types = []
         request_batch_slices = []
 
         for request_id, (model_id, request_data) in requests.items():
-            adapter_index = self.models[model_id].adapter_index
             loss_fn_type = LOSS_TYPES[request_data.loss_fn]
 
             request_start = len(all_input_ids)
@@ -91,7 +89,7 @@ class TinkerEngine:
                 all_token_weights.append(loss_fn_inputs.weights.data)
                 all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
                 all_advantages.append(loss_fn_inputs.advantages.data)
-                all_adapter_indices.append(adapter_index)
+                all_model_ids.append(model_id)
                 all_loss_fn_types.append(loss_fn_type)
 
             request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
@@ -102,7 +100,7 @@ class TinkerEngine:
             all_token_weights=all_token_weights,
             all_sampling_logprobs=all_sampling_logprobs,
             all_advantages=all_advantages,
-            all_adapter_indices=all_adapter_indices,
+            all_model_ids=all_model_ids,
             all_loss_fn_types=all_loss_fn_types,
             request_batch_slices=request_batch_slices,
         )
@@ -110,28 +108,27 @@ class TinkerEngine:
     def _prepare_sample_batch(
         self,
         requests: dict[str, tuple[str, types.SampleInput]],
-        adapter_indices: list[int],
     ) -> types.PreparedSampleBatch:
         """Prepare batch data for sample operations.
 
         Extracts prompts and sampling params from requests into lists
-        that the backend will convert to JAX arrays.
+        that the backend will convert to arrays.
 
         Args:
             requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-            adapter_indices: List of adapter indices corresponding to each request
 
         Returns:
             PreparedSampleBatch with all data extracted from requests
         """
         all_prompts = []
         all_sampling_params = []
-        all_adapter_indices = []
+        all_model_ids = []
+        all_checkpoint_ids = []
         request_batch_slices = []
 
         needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
 
-        for i, (request_id, (model_id, request_data)) in enumerate(requests.items()):
+        for request_id, (model_id, request_data) in requests.items():
             request_start = len(all_prompts)
 
             # Expand requests for num_samples
@@ -139,7 +136,8 @@ class TinkerEngine:
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
                 all_sampling_params.append(request_data.sampling_params)
-                all_adapter_indices.append(adapter_indices[i])
+                all_model_ids.append(model_id)
+                all_checkpoint_ids.append(request_data.checkpoint_id)
 
             request_batch_slices.append(
                 (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
@@ -148,7 +146,8 @@ class TinkerEngine:
         return types.PreparedSampleBatch(
             all_prompts=all_prompts,
             all_sampling_params=all_sampling_params,
-            all_adapter_indices=all_adapter_indices,
+            all_model_ids=all_model_ids,
+            all_checkpoint_ids=all_checkpoint_ids,
             needs_prompt_logprobs=needs_prompt_logprobs,
             request_batch_slices=request_batch_slices,
         )
@@ -161,10 +160,7 @@ class TinkerEngine:
         self.config = config
         self.db_engine = create_engine(config.database_url, echo=False)
 
-        # Store LoRA model metadata (model_id -> metadata)
-        self.models: dict[str, types.ModelMetadata] = {}
-
-        # Initialize the backend (handles model state and computation)
+        # Initialize the backend (handles model state, computation, and adapter management)
         self.backend = NativeBackend(config)
 
         logger.info(
@@ -310,28 +306,10 @@ class TinkerEngine:
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
-        # Assign adapter index for this model_id
-        adapter_index = max((m.adapter_index for m in self.models.values()), default=0) + 1
+        # Register model with backend (allocates adapter_index, creates optimizer, and configures adapter)
+        self.backend.register_model(model_id, request_data.lora_config)
 
-        if adapter_index >= self.config.max_lora_adapters:
-            raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
-
-        # Extract LoRA configuration
-        lora_config = request_data.lora_config
-
-        # Validate rank doesn't exceed max
-        if not (0 < lora_config.rank <= self.config.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
-
-        self.models[model_id] = types.ModelMetadata(
-            adapter_index=adapter_index,
-            lora_config=lora_config,
-        )
-
-        # Register model with backend (creates optimizer and configures adapter)
-        self.backend.register_model(model_id, adapter_index, lora_config)
-
-        logger.info(f"Created LoRA model {model_id} with adapter index {adapter_index}, config {lora_config}")
+        logger.info(f"Created LoRA model {model_id}")
 
         return types.CreateModelOutput(
             model_id=model_id,
@@ -392,11 +370,8 @@ class TinkerEngine:
         if not valid_requests:
             return error_results
 
-        # Load sampler weights and get adapter indices
-        adapter_indices = self.load_sampler_weights(valid_requests)
-
-        # Prepare batch data
-        prepared_batch = self._prepare_sample_batch(valid_requests, adapter_indices)
+        # Prepare batch data (backend handles loading sampler weights)
+        prepared_batch = self._prepare_sample_batch(valid_requests)
 
         # Delegate computation to backend
         results = self.backend.process_sample_batch(prepared_batch)
@@ -405,23 +380,21 @@ class TinkerEngine:
 
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
-        if model_id not in self.models:
+        if not self.backend.has_model(model_id):
             raise ValueError(f"Model {model_id} not loaded")
 
-        adapter_index = self.models[model_id].adapter_index
-
-        return self.backend.process_optim_step(model_id, adapter_index, request_data)
+        return self.backend.process_optim_step(model_id, request_data)
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
         """Loads a clean, trimmed training checkpoint."""
-        if model_id not in self.models:
+        if not self.backend.has_model(model_id):
             raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
 
         checkpoint_path = (
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
         )
 
-        self.backend.load_checkpoint(checkpoint_path, model_id, self.models)
+        self.backend.load_checkpoint(checkpoint_path, model_id)
 
         return types.LoadWeightsOutput(type="load_weights")
 
@@ -430,14 +403,14 @@ class TinkerEngine:
         Saves a clean training checkpoint by converting the trimmed NNX graph
         to a pure dictionary before serialization, following official Flax docs.
         """
-        if model_id not in self.models:
+        if not self.backend.has_model(model_id):
             raise ValueError(f"Model {model_id} not loaded")
 
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
-            self.backend.save_checkpoint(output_path, model_id, self.models)
+            self.backend.save_checkpoint(output_path, model_id)
             logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
 
         return types.SaveWeightsOutput(
@@ -449,72 +422,21 @@ class TinkerEngine:
         self, model_id: str, request_data: types.SaveWeightsForSamplerInput
     ) -> types.SaveWeightsForSamplerOutput:
         """Process a save_weights_for_sampler request and save model weights."""
-        if model_id not in self.models:
+        if not self.backend.has_model(model_id):
             raise ValueError(f"Model {model_id} not loaded")
-
-        lora_model = self.models[model_id]
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
-            self.backend.save_sampler_checkpoint(output_path, model_id, self.models)
-
-            logger.info(
-                f"Saved LoRA adapter weights for model {model_id} (adapter {lora_model.adapter_index}) to {output_path}"
-            )
+            self.backend.save_sampler_checkpoint(output_path, model_id)
+            logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
 
         return types.SaveWeightsForSamplerOutput(
             path=f"tinker://{model_id}/{checkpoint_id}",
             type="save_weights_for_sampler",
         )
-
-    def load_sampler_weights(self, requests: dict[str, tuple[str, types.SampleInput]]) -> list[int]:
-        """Load sampler weights for all requests and return full adapter indices array.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples for the batch
-
-        Returns:
-            The adapter_indices array for LoRA sampling [batch_size]
-            Uses adapter index 0 for base model sampling (no LoRA)
-        """
-        adapter_indices = []
-
-        for _, (model_id, request_data) in requests.items():
-            base_model = request_data.base_model
-            checkpoint_id = request_data.checkpoint_id
-            if base_model is None:
-                # This code path is for sampling from a LoRA adapter
-                assert checkpoint_id != "", "checkpoint_id must be not empty"
-
-                adapter_index = self.models[model_id].adapter_index
-                if self.models[model_id].loaded_checkpoint_id == checkpoint_id:
-                    # Load model from RAM
-                    adapter_indices.append(adapter_index)
-                else:
-                    # Load model from disk
-                    assert adapter_index not in adapter_indices, "Cannot override already used adapter"
-
-                    checkpoint_path = (
-                        self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
-                    )
-                    logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-
-                    # Use backend to insert sampler weights
-                    self.backend.load_sampler_checkpoint(model_id, checkpoint_id, checkpoint_path, self.models)
-                    adapter_indices.append(adapter_index)
-            else:
-                # This code path is for sampling from the base model
-                if base_model != self.config.base_model:
-                    raise ValueError(
-                        f"Requested base_model '{base_model}' does not match engine's base_model '{self.config.base_model}'"
-                    )
-                assert model_id == "" and checkpoint_id == ""
-                adapter_indices.append(0)
-
-        return adapter_indices
 
     def _complete_futures(self, results: dict[str, BaseModel]):
         """Helper method to complete multiple futures in the database.

@@ -1,11 +1,12 @@
 """Abstract backend interface for TinkerEngine.
 
-Backends handle all model state and computation. The engine handles file I/O and database operations.
+Backends handle all model state, adapter management, and computation.
+The engine handles file I/O and database operations.
 
 Design:
   1. AbstractBackend (backend.py)
      Clean interface defining what backends must implement:
-     - register_model, unregister_model (optimizer lifecycle managed internally)
+     - register_model (manages model metadata, adapter allocation, and optimizer lifecycle)
      - process_forward_backward_batch, process_forward_batch, process_optim_step, process_sample_batch
      - load_checkpoint, save_checkpoint, load_sampler_checkpoint, save_sampler_checkpoint
 
@@ -14,12 +15,12 @@ Design:
      - Uses jax.value_and_grad for gradient computation
      - Uses 2D mesh (dp, tp)
      - Multi-adapter AccumulatedGradients with counts array
+     - Manages model metadata and adapter_index allocation internally
 
   3. TinkerEngine (engine.py)
      - Instantiates backend based on config
-     - Delegates computation to self.backend
+     - Delegates computation and model management to self.backend
      - Handles all database operations
-     - Manages model metadata (backends manage optimizers internally)
 """
 
 from abc import ABC, abstractmethod
@@ -41,14 +42,13 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def register_model(self, model_id: str, adapter_index: int, lora_config: types.LoraConfig) -> None:
+    def register_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         """Register a new model with the backend.
 
-        Creates optimizer and configures LoRA adapter internally.
+        Creates optimizer, configures LoRA adapter, and allocates adapter_index internally.
 
         Args:
             model_id: The model identifier
-            adapter_index: The adapter slot index to use
             lora_config: LoRA configuration with rank and alpha
         """
         pass
@@ -87,14 +87,12 @@ class AbstractBackend(ABC):
     def process_optim_step(
         self,
         model_id: str,
-        adapter_index: int,
         request_data: types.OptimStepInput,
     ) -> types.OptimStepOutput:
         """Process an optimizer step request.
 
         Args:
             model_id: The model identifier
-            adapter_index: The adapter index for this model
             request_data: The optimizer step input parameters
 
         Returns:
@@ -122,14 +120,12 @@ class AbstractBackend(ABC):
         self,
         output_path,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Save training checkpoint to disk.
 
         Args:
             output_path: Path to save the checkpoint
             model_id: The model identifier
-            models: Dict mapping model_id to ModelMetadata
         """
         pass
 
@@ -138,14 +134,12 @@ class AbstractBackend(ABC):
         self,
         checkpoint_path,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Load training checkpoint from disk.
 
         Args:
             checkpoint_path: Path to the checkpoint file
             model_id: The model identifier
-            models: Dict mapping model_id to ModelMetadata
         """
         pass
 
@@ -154,14 +148,12 @@ class AbstractBackend(ABC):
         self,
         output_path,
         model_id: str,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Save sampler checkpoint to disk as tar.gz.
 
         Args:
             output_path: Path to save the checkpoint tar.gz file
             model_id: The model identifier
-            models: Dict mapping model_id to ModelMetadata
         """
         pass
 
@@ -171,7 +163,6 @@ class AbstractBackend(ABC):
         model_id: str,
         checkpoint_id: str,
         checkpoint_path,
-        models: dict[str, types.ModelMetadata],
     ) -> None:
         """Insert sampler weights into model state from checkpoint file.
 
@@ -179,6 +170,17 @@ class AbstractBackend(ABC):
             model_id: The model identifier
             checkpoint_id: The checkpoint identifier
             checkpoint_path: Path to the checkpoint file
-            models: Dict mapping model_id to ModelMetadata
+        """
+        pass
+
+    @abstractmethod
+    def has_model(self, model_id: str) -> bool:
+        """Check if a model is registered with the backend.
+
+        Args:
+            model_id: The model identifier
+
+        Returns:
+            True if the model is registered, False otherwise
         """
         pass
