@@ -240,7 +240,9 @@ def test_process_optim_step_hyperparams_behavior():
         engine.process_forward_backward({str(request_id): (model_id, make_fwd_bwd_input(tokens))})
         params_before = jax.tree.map(jnp.copy, engine.backend.lora_params)
         engine.process_optim_step(model_id, request)
-        delta = jax.tree.map(lambda old, new: (new - old).astype(jnp.float32), params_before, engine.backend.lora_params)
+        delta = jax.tree.map(
+            lambda old, new: (new - old).astype(jnp.float32), params_before, engine.backend.lora_params
+        )
         return float(optax.global_norm(delta))
 
     tiny_request = types.OptimStepInput(
