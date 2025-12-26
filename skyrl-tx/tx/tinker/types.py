@@ -218,9 +218,6 @@ class PreparedModelPassBatch(BaseModel):
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
     request_batch_slices: list[tuple[str, str, int, int]]
 
-    class Config:
-        arbitrary_types_allowed = True
-
 
 class PreparedSampleBatch(BaseModel):
     """Prepared batch data for sample operations.
@@ -239,6 +236,3 @@ class PreparedSampleBatch(BaseModel):
 
     # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
     request_batch_slices: list[tuple[str, str, int, int, bool]]
-
-    class Config:
-        arbitrary_types_allowed = True
