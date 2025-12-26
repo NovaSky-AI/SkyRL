@@ -130,6 +130,7 @@ class DSPyGenerator(GeneratorInterface):
 
         
         # TODO: make each DSPy trial configurable.
+        trial_config = None
 
         trial = Trial(trial_config)
 
