@@ -355,8 +355,8 @@ class NativeBackend(AbstractBackend):
         """Check if a model is registered with the backend."""
         return model_id in self.models
 
-    def register_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        """Register a new model with the backend.
+    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
+        """Create a new model in the backend.
 
         Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
         """
@@ -533,26 +533,26 @@ class NativeBackend(AbstractBackend):
 
         return results
 
-    def process_forward_backward_batch(
+    def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward_backward requests in a batch."""
+        """Run forward and backward pass on a batch."""
         return self._process_model_pass_batch(prepared_batch, self._forward_backward_and_accumulate)
 
-    def process_forward_batch(
+    def forward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward-only requests in a batch (no gradient computation)."""
+        """Run forward-only pass on a batch (no gradient computation)."""
         return self._process_model_pass_batch(prepared_batch, self._forward)
 
-    def process_optim_step(
+    def optim_step(
         self,
         model_id: str,
         request_data: types.OptimStepInput,
     ) -> types.OptimStepOutput:
-        """Process an optim_step request and apply accumulated gradients."""
+        """Apply an optimizer step using accumulated gradients."""
         adapter_index = self.models[model_id].adapter_index
         adapter_index_arr = jnp.int32(adapter_index)
         optimizer = self.optimizers[model_id]
@@ -581,17 +581,17 @@ class NativeBackend(AbstractBackend):
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
 
-    def process_sample_batch(
+    def sample(
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Process multiple sample requests in a single batch.
+        """Generate samples for a batch of requests.
 
         Args:
             prepared_batch: PreparedSampleBatch with all data extracted from requests
 
         Returns:
-            Dict mapping request_id --> result_data or error info
+            Dict mapping request_id to result or error
         """
         if not prepared_batch.all_prompts:
             return {}

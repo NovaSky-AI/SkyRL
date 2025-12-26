@@ -306,8 +306,8 @@ class TinkerEngine:
 
     def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
         """Create and initialize a model."""
-        # Register model with backend (allocates adapter_index, creates optimizer, and configures adapter)
-        self.backend.register_model(model_id, request_data.lora_config)
+        # Create model in backend (allocates adapter_index, creates optimizer, and configures adapter)
+        self.backend.create_model(model_id, request_data.lora_config)
 
         logger.info(f"Created LoRA model {model_id}")
 
@@ -322,7 +322,7 @@ class TinkerEngine:
         if not self.backend.has_model(model_id):
             raise ValueError(f"Model {model_id} not loaded")
 
-        return self.backend.process_optim_step(model_id, request_data)
+        return self.backend.optim_step(model_id, request_data)
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
         """Loads a clean, trimmed training checkpoint."""
@@ -478,19 +478,19 @@ class TinkerEngine:
             self.process_batch_requests(
                 forward_backward_requests,
                 self._prepare_model_pass_batch,
-                self.backend.process_forward_backward_batch,
+                self.backend.forward_backward,
                 "forward_backward",
             )
             self.process_batch_requests(
                 forward_requests,
                 self._prepare_model_pass_batch,
-                self.backend.process_forward_batch,
+                self.backend.forward,
                 "forward",
             )
             self.process_batch_requests(
                 sample_requests,
                 self._prepare_sample_batch,
-                self.backend.process_sample_batch,
+                self.backend.sample,
                 "sample",
             )
 

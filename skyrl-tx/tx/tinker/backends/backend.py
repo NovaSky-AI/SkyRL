@@ -6,8 +6,8 @@ The engine handles file I/O and database operations.
 Design:
   1. AbstractBackend (backend.py)
      Clean interface defining what backends must implement:
-     - register_model (manages model metadata, adapter allocation, and optimizer lifecycle)
-     - process_forward_backward_batch, process_forward_batch, process_optim_step, process_sample_batch
+     - create_model (manages model metadata, adapter allocation, and optimizer lifecycle)
+     - forward_backward, forward, optim_step, sample
      - load_checkpoint, save_checkpoint, load_sampler_checkpoint, save_sampler_checkpoint
 
   2. NativeBackend (native.py)
@@ -42,8 +42,8 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def register_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        """Register a new model with the backend.
+    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
+        """Create a new model in the backend.
 
         Creates optimizer, configures LoRA adapter, and allocates adapter_index internally.
 
@@ -54,11 +54,11 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def process_forward_backward_batch(
+    def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward_backward requests in a batch.
+        """Run forward and backward pass on a batch.
 
         Args:
             prepared_batch: PreparedModelPassBatch with all data extracted from requests
@@ -69,11 +69,11 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def process_forward_batch(
+    def forward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Process forward-only requests in a batch (no gradient computation).
+        """Run forward-only pass on a batch (no gradient computation).
 
         Args:
             prepared_batch: PreparedModelPassBatch with all data extracted from requests
@@ -84,12 +84,12 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def process_optim_step(
+    def optim_step(
         self,
         model_id: str,
         request_data: types.OptimStepInput,
     ) -> types.OptimStepOutput:
-        """Process an optimizer step request.
+        """Apply an optimizer step using accumulated gradients.
 
         Args:
             model_id: The model identifier
@@ -101,11 +101,11 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def process_sample_batch(
+    def sample(
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Process multiple sample requests in a single batch.
+        """Generate samples for a batch of requests.
 
         Args:
             prepared_batch: PreparedSampleBatch with all data extracted from requests
