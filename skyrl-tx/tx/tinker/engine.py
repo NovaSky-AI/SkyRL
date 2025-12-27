@@ -142,8 +142,8 @@ class TinkerEngine:
             request_start = len(all_prompts)
 
             # Expand requests for num_samples
+            prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
             for _ in range(request_data.num_samples):
-                prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
                 all_sampling_params.append(request_data.sampling_params)
                 all_model_ids.append(model_id)
