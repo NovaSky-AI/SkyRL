@@ -785,11 +785,9 @@ class TinkerEngine:
         if not valid_requests:
             return results
 
-        # Computes prompt_logprobs for the whole batch if any request asked for them
-        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in valid_requests.values())
-
         all_prompts = []
         all_sampling_params = []
+        all_request_logprobs = []
         all_adapter_indices = []
         request_batch_slices = []
 
@@ -804,9 +802,10 @@ class TinkerEngine:
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
                 all_sampling_params.append(request_data.sampling_params)
+                all_request_logprobs.append(request_data.prompt_logprobs)
                 all_adapter_indices.append(adapter_indices_batch[i])
 
-            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts)))
 
         total_batch_size = len(all_prompts)
         max_batch_size = (
@@ -814,7 +813,7 @@ class TinkerEngine:
         )
         # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
-        all_prompt_logprobs: list[list[float]] = []
+        all_prompt_logprobs: list[list[float] | None] = []
 
         # Sharding specs for sampling inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
@@ -829,7 +828,8 @@ class TinkerEngine:
                 sampling_params = pad(
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
                 )
-
+                # Compute prompt_logprobs if any request in this micro-batch needs them
+                needs_prompt_logprobs = any(all_request_logprobs[batch_start:batch_end])
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 # Use left-padding for sampling so the last position is always the last real token.
@@ -862,15 +862,15 @@ class TinkerEngine:
                         result.logprobs[:batch_size],
                     )
                 )
-                if needs_prompt_logprobs and result.prompt_logprobs:
-                    all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
+                all_prompt_logprobs.extend(
+                    result.prompt_logprobs[i] if request_logprobs else None
+                    for i, request_logprobs in enumerate(all_request_logprobs[batch_start:batch_end])
+                )
 
-        for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
+        for request_id, _, start_idx, end_idx in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
-            prompt_logprobs = (
-                all_prompt_logprobs[start_idx] if request_data.prompt_logprobs and all_prompt_logprobs else None
-            )
+            prompt_logprobs = all_prompt_logprobs[start_idx]
             results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
 
         return results
