@@ -233,6 +233,7 @@ class PreparedSampleBatch:
     all_sampling_params: list[SamplingParams]
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]
+    all_checkpoint_paths: list[str]
 
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool

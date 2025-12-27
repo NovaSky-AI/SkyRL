@@ -1,4 +1,4 @@
-"""Native LoRA backend for TinkerEngine.
+"""JAX LoRA backend for TinkerEngine.
 
 This backend implements the full training and inference pipeline for models
 with LoRA adapters. It uses jax.value_and_grad for gradient computation and supports
@@ -10,18 +10,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
 
+from cloudpathlib import AnyPath
 import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
 from flax.training import checkpoints
+from pydantic import BaseModel
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
 from tx.layers.lora import update_adapter_config
 from tx.tinker import types
-from tx.tinker.config import EngineConfig
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
 from tx.tinker.loss_fns import LOSS_FUNCTIONS
@@ -38,6 +39,21 @@ from tx.utils.models import (
 )
 from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
+
+
+class JaxBackendConfig(BaseModel, extra="allow"):
+    """Configuration specific to the JAX backend."""
+
+    base_model: str
+    max_lora_adapters: int = 32
+    max_lora_rank: int = 32
+    tensor_parallel_size: int = 1
+    fully_sharded_data_parallel_size: int = 1
+    train_micro_batch_size: int = 0
+    sample_max_num_sequences: int = 0
+    enforce_eager: bool = False
+    shard_attention_heads: bool = True
+    gradient_checkpointing: bool = False
 
 
 @jax.tree_util.register_dataclass
@@ -81,8 +97,8 @@ class AccumulatedGradients:
         )
 
 
-class NativeBackend(AbstractBackend):
-    """Backend for models with LoRA adapters.
+class JaxBackend(AbstractBackend):
+    """JAX backend for models with LoRA adapters.
 
     This backend:
     - Uses jax.value_and_grad for gradient computation
@@ -91,8 +107,8 @@ class NativeBackend(AbstractBackend):
     - Supports both FORWARD and FORWARD_BACKWARD request types
     """
 
-    def __init__(self, config: EngineConfig):
-        """Initialize Native LoRA backend."""
+    def __init__(self, config: JaxBackendConfig):
+        """Initialize JAX LoRA backend."""
         self.config = config
         self.metrics = types.EngineMetrics()
 
@@ -759,7 +775,9 @@ class NativeBackend(AbstractBackend):
         adapter_indices = []
         loaded_adapters = set()  # Track adapters already used in this batch
 
-        for model_id, checkpoint_id in zip(prepared_batch.all_model_ids, prepared_batch.all_checkpoint_ids):
+        for model_id, checkpoint_id, checkpoint_path in zip(
+            prepared_batch.all_model_ids, prepared_batch.all_checkpoint_ids, prepared_batch.all_checkpoint_paths
+        ):
             if model_id:
                 # This code path is for sampling from a LoRA adapter
                 assert checkpoint_id != "", "checkpoint_id must be not empty"
@@ -772,11 +790,8 @@ class NativeBackend(AbstractBackend):
                     # Need to load from disk
                     assert adapter_index not in loaded_adapters, "Cannot override already used adapter"
 
-                    checkpoint_path = (
-                        self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
-                    )
                     logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    self.load_sampler_checkpoint(model_id, checkpoint_id, checkpoint_path)
+                    self.load_sampler_checkpoint(model_id, checkpoint_id, AnyPath(checkpoint_path))
                     adapter_indices.append(adapter_index)
 
                 loaded_adapters.add(adapter_index)

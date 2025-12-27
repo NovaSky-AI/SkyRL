@@ -62,8 +62,7 @@ def test_adapter_gradient_calculation():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=8,
-        max_lora_rank=32,
+        backend_config={"max_lora_adapters": 8, "max_lora_rank": 32},
     )
     engine = TinkerEngine(config)
 
@@ -130,9 +129,7 @@ def test_micro_batch_grad_accumulation():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=8,
-        max_lora_rank=32,
-        train_micro_batch_size=4,
+        backend_config={"max_lora_adapters": 8, "max_lora_rank": 32, "train_micro_batch_size": 4},
     )
     engine = TinkerEngine(config)
 
@@ -179,9 +176,7 @@ def test_micro_batch_grad_accumulation():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=8,
-        max_lora_rank=32,
-        train_micro_batch_size=0,
+        backend_config={"max_lora_adapters": 8, "max_lora_rank": 32, "train_micro_batch_size": 0},
     )
     engine = TinkerEngine(config)
 
@@ -218,8 +213,7 @@ def test_process_optim_step_hyperparams_behavior():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=8,
-        max_lora_rank=32,
+        backend_config={"max_lora_adapters": 8, "max_lora_rank": 32},
     )
 
     engine = TinkerEngine(config)
@@ -269,12 +263,13 @@ def test_gradient_checkpointing():
     for use_gradient_checkpointing in (False, True):
         cfg = EngineConfig(
             base_model=BASE_MODEL,
-            enforce_eager=False,
-            train_batch_size=2,
-            train_micro_batch_size=1,
-            max_lora_adapters=1,
-            max_lora_rank=4,
-            gradient_checkpointing=use_gradient_checkpointing,
+            backend_config={
+                "enforce_eager": False,
+                "train_micro_batch_size": 1,
+                "max_lora_adapters": 1,
+                "max_lora_rank": 4,
+                "gradient_checkpointing": use_gradient_checkpointing,
+            },
         )
         engine = TinkerEngine(cfg)
 
@@ -317,9 +312,11 @@ def test_sample_max_num_sequences():
     cfg = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=2,
-        max_lora_rank=32,
-        sample_max_num_sequences=2,  # Set max sample batch size to 2
+        backend_config={
+            "max_lora_adapters": 2,
+            "max_lora_rank": 32,
+            "sample_max_num_sequences": 2,  # Set max sample batch size to 2
+        },
     )
     engine = TinkerEngine(cfg)
 
@@ -378,8 +375,7 @@ def test_sample_with_prompt_logprobs():
     cfg = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=2,
-        max_lora_rank=32,
+        backend_config={"max_lora_adapters": 2, "max_lora_rank": 32},
     )
     engine = TinkerEngine(cfg)
 
@@ -462,9 +458,11 @@ def test_sample_prompt_logprobs_with_microbatching():
     cfg = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
-        max_lora_adapters=2,
-        max_lora_rank=32,
-        sample_max_num_sequences=2,  # Force micro-batching with batch size of 2
+        backend_config={
+            "max_lora_adapters": 2,
+            "max_lora_rank": 32,
+            "sample_max_num_sequences": 2,  # Force micro-batching with batch size of 2
+        },
     )
     engine = TinkerEngine(cfg)
 

@@ -13,10 +13,16 @@ from sqlmodel import create_engine, Session, select, update, func
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends import NativeBackend
+from tx.tinker.backends import JaxBackend
+from tx.tinker.backends.jax import JaxBackendConfig
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
+
+
+BACKENDS = {
+    "jax": (JaxBackend, JaxBackendConfig),
+}
 
 
 class TinkerEngine:
@@ -28,7 +34,7 @@ class TinkerEngine:
     - File I/O (download/upload checkpoints)
     - Validating requests against loaded models
 
-    Computation and model management are delegated to the backend (NativeBackend).
+    Computation and model management are delegated to the backend.
     """
 
     def _filter_valid_requests(
@@ -134,6 +140,7 @@ class TinkerEngine:
         all_sampling_params = []
         all_model_ids = []
         all_checkpoint_ids = []
+        all_checkpoint_paths = []
         request_batch_slices = []
 
         needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
@@ -143,11 +150,17 @@ class TinkerEngine:
 
             # Expand requests for num_samples
             prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+            checkpoint_path = ""
+            if model_id and request_data.checkpoint_id:
+                checkpoint_path = str(
+                    self.config.checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
+                )
             for _ in range(request_data.num_samples):
                 all_prompts.append(prompt_tokens)
                 all_sampling_params.append(request_data.sampling_params)
                 all_model_ids.append(model_id)
                 all_checkpoint_ids.append(request_data.checkpoint_id)
+                all_checkpoint_paths.append(checkpoint_path)
 
             request_batch_slices.append(
                 (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
@@ -158,6 +171,7 @@ class TinkerEngine:
             all_sampling_params=all_sampling_params,
             all_model_ids=all_model_ids,
             all_checkpoint_ids=all_checkpoint_ids,
+            all_checkpoint_paths=all_checkpoint_paths,
             needs_prompt_logprobs=needs_prompt_logprobs,
             request_batch_slices=request_batch_slices,
         )
@@ -171,12 +185,17 @@ class TinkerEngine:
         self.db_engine = create_engine(config.database_url, echo=False)
 
         # Initialize the backend (handles model state, computation, and adapter management)
-        self.backend = NativeBackend(config)
+        if config.backend not in BACKENDS:
+            raise ValueError(f"Unknown backend: {config.backend}. Available backends: {list(BACKENDS.keys())}")
 
-        logger.info(
-            f"Initialized TinkerEngine with backend={type(self.backend).__name__}, "
-            f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
+        backend_class, backend_config_class = BACKENDS[config.backend]
+        backend_config = backend_config_class(
+            base_model=config.base_model,
+            **config.backend_config,
         )
+        self.backend = backend_class(backend_config)
+
+        logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
     @property
     def metrics(self) -> types.EngineMetrics:
@@ -287,8 +306,10 @@ class TinkerEngine:
             if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
                 batchable.append(op)
 
-        if self.config.sample_max_num_sequences > 0:
-            batchable = batchable[: self.config.sample_max_num_sequences]
+        # TODO: This leaks the abstraction by accessing backend-specific config.
+        # We should find a better way to handle this going forward.
+        if isinstance(self.backend, JaxBackend) and self.backend.config.sample_max_num_sequences > 0:
+            batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
         return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 
