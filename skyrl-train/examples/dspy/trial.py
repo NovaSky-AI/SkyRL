@@ -3,6 +3,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Union
+import dspy
 # ---------------------------
 # Result containers
 # ---------------------------
@@ -20,25 +21,19 @@ class VerifierResult:
 @dataclass
 class TrialResults:
     """Returned by Trial.run()."""
-    agent_result: Optional[AgentResult] = None
-    verifier_result: Optional[VerifierResult] = None
+    reward: Optional[AgentResult] = None
     traces: List[Dict[str, Any]] = field(default_factory=list)
-    exception_info: Optional[str] = None
 # ---------------------------
 # Config
 # ---------------------------
 @dataclass
 class TrialConfig:
     """
-    dspy_program: a dspy.Module instance (or anything callable like program(**kwargs))
-    example: an input example (dict-like or object with attrs)
-    verifier: optional callable(pred, kwargs, example) -> VerifierResult|dict|float|bool
-    reward_key: if verifier returns dict rewards, we read this key as the scalar reward
+    Configuration for a single Trial execution.
     """
-    dspy_program: Any
+    dspy_program: dspy.Module
     example: Any
-    verifier: Optional[Callable[..., Any]] = None
-    reward_key: str = "reward"
+    reward_fn: Optional[Callable[[Any, Any], float]] = None
 # ---------------------------
 # Trial
 # ---------------------------
@@ -55,9 +50,7 @@ class Trial:
         self.cfg = config
         self.program = config.dspy_program
         self.example = config.example
-        # We store one (or many) traces from this trial.
-        self.traces: List[Dict[str, Any]] = []
-        self.reward_fn = None
+        self.reward_fn = config.reward_fn
     # -------- utilities --------
     # -------- public API --------
     async def run(self) -> TrialResults:
@@ -71,6 +64,7 @@ class Trial:
             self.program.update_reward(final_reward)
 
             # 4) Collect trace
+            # We need to put the dspy 
             trace = self.program_collect_trace()
             return results
         except Exception as e:

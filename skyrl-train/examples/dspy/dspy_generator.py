@@ -146,8 +146,8 @@ class DSPyGenerator(GeneratorInterface):
                 if not results.verifier_result:
                     logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
-                reward = results.verifier_result.rewards["reward"]
-                chat_history = results.agent_result.metadata['all_messages']
+                reward = results.reward
+                chat_history = results.traces
                 if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
                     logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
