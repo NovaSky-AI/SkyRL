@@ -549,7 +549,6 @@ class NativeBackend(AbstractBackend):
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Apply an optimizer step using accumulated gradients."""
         adapter_index = self.models[model_id].adapter_index
-        adapter_index_arr = jnp.int32(adapter_index)
         optimizer = self.optimizers[model_id]
 
         # Check if we have any gradients accumulated (count > 0)
@@ -570,7 +569,7 @@ class NativeBackend(AbstractBackend):
                 self.accumulated_grads,
                 self.lora_params,
                 optimizer,
-                adapter_index_arr,
+                jnp.int32(adapter_index),
             )
 
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
