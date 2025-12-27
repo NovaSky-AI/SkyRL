@@ -4,7 +4,6 @@ import time
 from contextlib import contextmanager
 
 import numpy as np
-import jax.numpy as jnp
 
 from tx.utils.log import logger
 
@@ -25,7 +24,7 @@ def pad(xs, pad_to: int, *, fill):
     return xs + ([fill] * (pad_to - len(xs)))
 
 
-def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False):
+def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False) -> np.ndarray:
     """Pad a batch of sequences to max_length.
 
     Args:
@@ -37,7 +36,7 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
             If False (default), use right-padding (tokens at start).
 
     Returns:
-        A JAX array of shape (batch_size, max_length) with the padded sequences.
+        A NumPy array of shape (batch_size, max_length) with the padded sequences.
     """
     batch_size = len(sequences)
     padded = np.zeros((batch_size, max_length), dtype=dtype)
@@ -47,7 +46,7 @@ def pad_batch(sequences: list[list], max_length: int, dtype, left: bool = False)
             padded[i, max_length - len(seq) :] = seq
         else:
             padded[i, : len(seq)] = seq
-    return jnp.asarray(padded)
+    return padded
 
 
 def pad_to_fsdp(arr: np.ndarray, fsdp_size: int) -> np.ndarray:

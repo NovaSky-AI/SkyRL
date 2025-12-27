@@ -420,8 +420,8 @@ class NativeBackend(AbstractBackend):
 
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
         target_ids = pad_batch(all_targets, max_len, np.int32)
-        adapter_indices = jnp.array(all_adapter_indices, dtype=jnp.int32)
-        loss_fn_types = jnp.array(all_loss_fn_types, dtype=jnp.int32)
+        adapter_indices = np.array(all_adapter_indices, dtype=np.int32)
+        loss_fn_types = np.array(all_loss_fn_types, dtype=np.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
