@@ -1,7 +1,7 @@
 """Abstract backend interface for TinkerEngine.
 
 Backends handle all model state, adapter management, and computation.
-The engine handles file I/O and database operations.
+The engine handles database operations and scheduling.
 
 Design:
   1. AbstractBackend (backend.py)
@@ -11,9 +11,9 @@ Design:
      - load_checkpoint, save_checkpoint, load_sampler_checkpoint, save_sampler_checkpoint
 
   2. NativeBackend (native.py)
-     - Implements all abstract methods fully for Qwen3 + LoRA
+     - Implements all abstract methods in Jax, fully supporting MultiLoRA for training and sampling
      - Uses jax.value_and_grad for gradient computation
-     - Uses 2D mesh (dp, tp)
+     - Uses 2D mesh (fsdp, tp)
      - Multi-adapter AccumulatedGradients with counts array
      - Manages model metadata and adapter_index allocation internally
 
@@ -45,7 +45,7 @@ class AbstractBackend(ABC):
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         """Create a new model in the backend.
 
-        Creates optimizer, configures LoRA adapter, and allocates adapter_index internally.
+        Creates optimizer and configures LoRA adapter.
 
         Args:
             model_id: The model identifier

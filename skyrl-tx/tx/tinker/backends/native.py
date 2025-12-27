@@ -1,6 +1,6 @@
-"""Native LoRA backend for TinkerEngine (Qwen3 + LoRA).
+"""Native LoRA backend for TinkerEngine.
 
-This backend implements the full training and inference pipeline for Qwen3 models
+This backend implements the full training and inference pipeline for models
 with LoRA adapters. It uses jax.value_and_grad for gradient computation and supports
 multiple LoRA adapters via the AccumulatedGradients dataclass.
 """
@@ -82,7 +82,7 @@ class AccumulatedGradients:
 
 
 class NativeBackend(AbstractBackend):
-    """Backend for Qwen3 models with LoRA adapters.
+    """Backend for models with LoRA adapters.
 
     This backend:
     - Uses jax.value_and_grad for gradient computation
@@ -166,7 +166,6 @@ class NativeBackend(AbstractBackend):
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        # Wrap the model forward call to use nnx.remat for gradient checkpointing
         def _model_forward(
             graphdef: nnx.GraphDef,
             lora_params: nnx.State,
@@ -180,6 +179,7 @@ class NativeBackend(AbstractBackend):
             return output.logits
 
         if self.config.gradient_checkpointing:
+            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
             # policy=None corresponds to full activation recomputation
             _model_forward = jax.checkpoint(_model_forward, policy=None)
 
@@ -304,7 +304,6 @@ class NativeBackend(AbstractBackend):
                 lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.accumulated_grads)
             )
 
-            replicated = jax.NamedSharding(self.mesh, jax.P(None))
             # Shard batch inputs along the FSDP axis (batch, seq_len)
             batch_sharded_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
 
@@ -331,8 +330,8 @@ class NativeBackend(AbstractBackend):
             )
             self._forward = jax.jit(
                 forward_only,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + (replicated,) * 8,
-                out_shardings=(accumulated_grads_shardings, replicated, replicated),
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
@@ -383,9 +382,9 @@ class NativeBackend(AbstractBackend):
 
         # Configure adapter
         update_adapter_config(self.model, adapter_index, lora_config)
-        logger.info(f"Registered model {model_id} with adapter_index={adapter_index}, config={lora_config}")
+        logger.info(f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}")
 
-    def _process_model_pass_batch(
+    def _model_pass(
         self,
         prepared_batch: types.PreparedModelPassBatch,
         model_pass_fn: Callable,
@@ -538,14 +537,14 @@ class NativeBackend(AbstractBackend):
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Run forward and backward pass on a batch."""
-        return self._process_model_pass_batch(prepared_batch, self._forward_backward_and_accumulate)
+        return self._model_pass(prepared_batch, self._forward_backward_and_accumulate)
 
     def forward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Run forward-only pass on a batch (no gradient computation)."""
-        return self._process_model_pass_batch(prepared_batch, self._forward)
+        return self._model_pass(prepared_batch, self._forward)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Apply an optimizer step using accumulated gradients."""
