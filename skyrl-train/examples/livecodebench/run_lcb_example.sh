@@ -5,8 +5,8 @@ set -x
 # bash examples/livecodebench/run_lcb.sh
 
 DATA_DIR="$HOME/data/lcb"
-train_data="['${DATA_DIR}/deepcoder_train.json']"
-val_data="['${DATA_DIR}/test_livecodebench.json']"
+train_data='${DATA_DIR}/train/code/livecodebench.json'
+val_data='${DATA_DIR}/test/code/livecodebench.json'
 
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
