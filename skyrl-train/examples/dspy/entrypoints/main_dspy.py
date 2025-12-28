@@ -13,14 +13,11 @@ from examples.dspy.dataset import DSPyDataset
 
 
 class DSPyExp(BasePPOExp):
-    def get_generator(self, cfg, tokenizer, inference_engine_client, val_data_path: str, train_data_path: str, max_num_examples: int = 400):
+    def get_generator(self, cfg, tokenizer, inference_engine_client):
         """
         Initializes the TerminalBenchGenerator.
         """
-        self.val_data_path = val_data_path
-        self.train_data_path = train_data_path
-        self.max_num_examples = max_num_examples
-        
+      
         return DSPyGenerator(
             generator_cfg=cfg.generator,
             terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
@@ -35,8 +32,8 @@ class DSPyExp(BasePPOExp):
             TerminalBenchTaskDataset: The training dataset.
         """
         prompts_dataset = DSPyDataset(
-            data_file=self.train_data_path,
-            max_num_examples=self.max_num_examples,
+            data_file=self.cfg.data.train_data,
+            max_num_examples=self.cfg.data.max_num_examples,
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -52,9 +49,9 @@ class DSPyExp(BasePPOExp):
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
             prompts_dataset = DSPyDataset(
-                data_file=self.val_data_path,
-                max_num_examples=self.max_num_examples,
-            )
+                data_file=self.cfg.data.val_data,
+                max_num_examples=self.cfg.data.max_num_examples,
+            )   
             return prompts_dataset
         return None
 
