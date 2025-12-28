@@ -100,7 +100,7 @@ flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm' o
 flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
 ]
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "22ef9ff9f9684ba2f2dbea14db974f5c31bbd683"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "953aabf75c0500180dc14a6a76cf9e7e7c4baec7"}
 
 
 [project.optional-dependencies]

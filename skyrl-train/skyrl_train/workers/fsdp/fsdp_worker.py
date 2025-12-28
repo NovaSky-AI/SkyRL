@@ -133,6 +133,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 lora_rank=self.cfg.trainer.policy.model.lora.rank,
                 lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
+                lora_init_method=self.cfg.trainer.policy.model.lora.init_method,
                 target_modules=self.cfg.trainer.policy.model.lora.target_modules,
                 exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
