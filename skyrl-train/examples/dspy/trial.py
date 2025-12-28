@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass, field
+import re
 from typing import Any, Callable, Dict, List, Mapping, Optional, Union
 import dspy
 # ---------------------------
@@ -22,7 +23,7 @@ class VerifierResult:
 class TrialResults:
     """Returned by Trial.run()."""
     reward: Optional[AgentResult] = None
-    traces: List[Dict[str, Any]] = field(default_factory=list)
+    chat_history: List[Dict[str, Any]] = field(default_factory=list)
 # ---------------------------
 # Config
 # ---------------------------
@@ -61,11 +62,13 @@ class Trial:
             pred = self.program(kwargs)
             # 2) Verify (optional)
             final_reward = await self.reward_fn(self.example, pred)
-            self.program.update_reward(final_reward)
+            # self.program.update_reward(final_reward)
 
             # 4) Collect trace
             # We need to put the dspy 
-            trace = self.program_collect_trace()
+            chat_history = self.program.collect_trace(pred, kwargs)
+            results.chat_history = chat_history
+            results.reward = final_reward
             return results
         except Exception as e:
             results.exception_info = f"{type(e).__name__}: {e}"

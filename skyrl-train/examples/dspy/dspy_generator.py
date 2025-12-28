@@ -9,6 +9,9 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
+from trial import Trial, TrialConfig
+from lcb.program import NaiveCodeGenerator_dspy
+from lcb.utils import reward_fn_dspy
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -129,8 +132,8 @@ class DSPyGenerator(GeneratorInterface):
         # "api_base": f"{self.base_url}/v1",
 
         
-        # TODO: make each DSPy trial configurable.
-        trial_config = None
+        # TODO: make each DSPy trial configurable. This is hard coded for now
+        trial_config = TrialConfig(dspy_program=NaiveCodeGenerator_dspy, example=prompt, reward_fn=reward_fn_dspy)
 
         trial = Trial(trial_config)
 
@@ -140,6 +143,7 @@ class DSPyGenerator(GeneratorInterface):
         chat_history = None
         summarization_count = None
         for i in range(MAX_NUM_RETRIES_PER_TRIAL):
+            prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
             try:
                 results = await trial.run()

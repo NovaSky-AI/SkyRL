@@ -907,6 +907,47 @@ def assert_prog(pred, **kwargs):
     return "", num_passed / len(tests)
 
 
+
+def reward_fn_dspy(input, pred, trace=None):
+    print("pred", pred)
+
+
+    # TODO: add a check to see the output is empty
+    
+    prompt = input["prompt"]
+    task_id = input["task_id"]
+    is_stdin = input["is_stdin"]
+    gold_pred = gold_preds[task_id]
+
+    try:
+        tests = post_process_tests_inputs(pred.tests, is_stdin)
+    except Exception:
+        print("test parsing failed")
+        return 0
+
+    if len(tests) == 0:
+        print("no test found!")
+        return 0
+    
+
+
+    tests_as_strings = [json.dumps(test, sort_keys=True) for test in tests]
+    tests_counter = Counter(tests_as_strings)
+    tests = [
+        {"test": json.loads(test_str), "count": count}
+        for test_str, count in tests_counter.items()
+    ]
+    
+
+    num_passed = 0
+    for test in tests:
+        results = check_test([test["test"]], gold_pred, 0, prompt, "dummy", runtime_debug=True)
+        passed = results[0]
+        if passed:
+            num_passed += 1
+    print("reward:", num_passed / len(tests))
+    return num_passed / len(tests)
+
     # # teacher_stdin_prog = dspy.ChainOfThought(GenerateLCBcodestdin)
     # # teacher_stdin_prog.set_lm(lm)
     

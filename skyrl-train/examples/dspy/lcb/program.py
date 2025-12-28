@@ -98,6 +98,8 @@ class NaiveCodeGenerator(dspy.Module):
             prog_lm=self.prog_lm
             )
 
+from dspy.adapters.xml_adapter import XMLAdapter
+
 class NaiveCodeGenerator_dspy(dspy.Module):
     def __init__(self, cot=False):
         if cot:
@@ -106,6 +108,8 @@ class NaiveCodeGenerator_dspy(dspy.Module):
         else:
             self.stdin_prog = dspy.Predict(GenerateLCBcodestdin)
             self.functional_prog = dspy.Predict(GenerateLCBcodefunctional)
+        
+        self.adapter = XMLAdapter()
 
     # def forward(self, prompt, is_stdin, **kargs):
     def forward(self, **kwargs):
@@ -118,6 +122,32 @@ class NaiveCodeGenerator_dspy(dspy.Module):
 
         pred = prog(prompt=prompt)
         return pred
+    
+    def collect_trace(self, pred, kwargs):
+        inp_messages = self.adapter.format(
+                                signature=self.original_sig,
+                                inputs=kwargs,
+                                demos=[] # TODO: Add support for demos
+                            )
+        
+        all_messages = self.adapter.format_finetune_data(
+                                signature=self.original_sig,
+                                inputs=kwargs,
+                                outputs=pred,
+                                demos=[] # TODO: Add support for demos
+                            )['messages']
+        
+        trace = []
+        trace.append({
+            "role": "user",
+            "content": inp_messages,
+        })
+        trace.append({
+            "role": "assistant",
+            "content": all_messages[-1]["content"],
+        })
+        return trace
+        
 
 
 class CodeGeneratorWithRanker_Original(dspy.Module):
