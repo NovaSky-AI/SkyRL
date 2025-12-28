@@ -191,8 +191,10 @@ class DSPyDataset:
             )
             # Add UUID to the example
             example.uuid = uuid4()
+            # Add is_stdin to the example
+            example.is_stdin = _has_test_type(example.tests, "stdin")
+            
             examples.append(example)
-
         return examples
 
     def _process_json_entry(self, entry: dict, index: int = None) -> dict:
