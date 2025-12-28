@@ -807,31 +807,31 @@ class TinkerEngine:
         results: dict[str, types.SampleOutput | types.ErrorResponse],
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Process sample requests using external inference engine."""
-        
+
         # Prepare prompts and parameters for external engine
         all_prompts = []
         all_sampling_params = []
         request_batch_slices = []
-        
+
         for request_id, (model_id, request_data) in valid_requests.items():
             request_start = len(all_prompts)
-            
+
             # Expand for num_samples
             for _ in range(request_data.num_samples):
                 prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
                 all_prompts.append(prompt_tokens)
                 all_sampling_params.append(request_data.sampling_params)
-            
+
             request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
-        
+
         # Determine model and LoRA path
         # For now, use base model (LoRA support via external engine needs adapter upload)
         model_name = self.config.base_model
         lora_path = None
-        
+
         # TODO: Handle LoRA adapters by uploading to external_inference_lora_base
         # and passing the path to the external engine
-        
+
         # Call external inference engine
         try:
             all_sequences = self.external_inference_client.generate_batch(
@@ -849,19 +849,19 @@ class TinkerEngine:
                     status="failed",
                 )
             return results
-        
+
         # Group results by request
         for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
-            
+
             # External engines don't typically return prompt logprobs in this flow
             prompt_logprobs = None
-            
+
             results[request_id] = types.SampleOutput(
                 sequences=sequences,
                 prompt_logprobs=prompt_logprobs,
             )
-        
+
         return results
 
     def _process_sample_batch_local(
@@ -870,7 +870,7 @@ class TinkerEngine:
         results: dict[str, types.SampleOutput | types.ErrorResponse],
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Process sample requests using local JAX model."""
-        
+
         # Computes prompt_logprobs for the whole batch if any request asked for them
         needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in valid_requests.values())
 

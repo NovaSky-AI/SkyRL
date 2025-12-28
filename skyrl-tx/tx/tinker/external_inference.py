@@ -1,6 +1,5 @@
 """External inference engine integration for vLLM/SGLang."""
 
-import json
 from typing import Any
 from pathlib import Path
 
@@ -14,7 +13,7 @@ class ExternalInferenceClient:
 
     def __init__(self, base_url: str, api_key: str = "EMPTY"):
         """Initialize the external inference client.
-        
+
         Args:
             base_url: Base URL of the inference server (e.g., http://localhost:8000)
             api_key: API key for authentication (default: "EMPTY" for local servers)
@@ -23,7 +22,7 @@ class ExternalInferenceClient:
         self.api_key = api_key
         self.completions_url = f"{self.base_url}/v1/completions"
         self.chat_url = f"{self.base_url}/v1/chat/completions"
-        
+
         # Test connection
         try:
             response = requests.get(f"{self.base_url}/health", timeout=5)
@@ -40,21 +39,21 @@ class ExternalInferenceClient:
         lora_path: str | None = None,
     ) -> list[types.GeneratedSequence]:
         """Generate completions for a batch of prompts.
-        
+
         Args:
             prompts: List of token sequences (prompt tokens)
             sampling_params: Sampling parameters for each prompt
             model: Model name (optional, uses server default if None)
             lora_path: Path to LoRA adapter on the server (optional)
-            
+
         Returns:
             List of generated sequences with tokens and logprobs
         """
         # Send all prompts in parallel using batch API
         # vLLM/SGLang will handle batching internally for better throughput
-        
+
         import concurrent.futures
-        
+
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:
             futures = []
@@ -67,7 +66,7 @@ class ExternalInferenceClient:
                     lora_path,
                 )
                 futures.append(future)
-            
+
             # Collect results in order
             for future in futures:
                 try:
@@ -83,7 +82,7 @@ class ExternalInferenceClient:
                             logprobs=[],
                         )
                     )
-        
+
         return results
 
     def _generate_single(
@@ -102,25 +101,25 @@ class ExternalInferenceClient:
             "seed": params.seed,
             "logprobs": 1,  # Request logprobs for generated tokens
         }
-        
+
         if model:
             payload["model"] = model
-        
+
         if lora_path:
             payload["lora_path"] = lora_path
-        
+
         # Add stop tokens/strings if specified
         if params.stop_tokens:
             payload["stop_token_ids"] = params.stop_tokens
         if params.stop_strings:
             payload["stop"] = params.stop_strings
-        
+
         # Make request
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-        
+
         response = requests.post(
             self.completions_url,
             headers=headers,
@@ -128,25 +127,25 @@ class ExternalInferenceClient:
             timeout=300,  # 5 minute timeout for long generations
         )
         response.raise_for_status()
-        
+
         # Parse response
         result = response.json()
         choice = result["choices"][0]
-        
+
         # Extract tokens and logprobs
         tokens = choice.get("tokens", [])
         logprobs_data = choice.get("logprobs", {})
-        
+
         # Extract token logprobs (vLLM format)
         if logprobs_data and "token_logprobs" in logprobs_data:
             logprobs = logprobs_data["token_logprobs"]
         else:
             logprobs = [0.0] * len(tokens)
-        
+
         # Determine stop reason
         finish_reason = choice.get("finish_reason", "stop")
         stop_reason = "length" if finish_reason == "length" else "stop"
-        
+
         return types.GeneratedSequence(
             stop_reason=stop_reason,
             tokens=tokens,
@@ -159,20 +158,20 @@ class ExternalInferenceClient:
         model_id: str,
     ) -> str:
         """Upload LoRA adapter to the external inference server.
-        
+
         Args:
             adapter_path: Local path to the LoRA adapter directory
             model_id: Model ID for the adapter
-            
+
         Returns:
             Path to the adapter on the server
         """
         # For vLLM, we need to use the LoRA management API
         # This is a simplified version - actual implementation depends on server setup
-        
+
         # vLLM expects adapters to be accessible via filesystem
         # In production, you'd sync adapters to a shared storage location
         logger.info(f"LoRA adapter at {adapter_path} should be accessible to inference server")
-        
+
         # Return the path that the server can access
         return str(adapter_path)
