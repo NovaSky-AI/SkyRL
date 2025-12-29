@@ -2,7 +2,7 @@ from flax import nnx
 import jax.numpy as jnp
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
-from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache
+from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch
 
 
 class DummyModel(GeneratorMixin, nnx.Module):
@@ -128,8 +128,6 @@ def test_prompt_logprobs():
 
 def test_top_k_filtering():
     """Test apply_top_k_batch function directly."""
-    from tx.utils.generator import apply_top_k_batch
-
     # Create test logits [batch_size, vocab_size]
     logits = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0]])
 
