@@ -44,8 +44,8 @@ from tx.utils.log import logger
 def initialize_distributed(config: "JaxBackendConfig") -> None:
     """Initialize JAX distributed for multi-node training if configured.
 
-    This must be called before creating the device mesh. If coordinator_address is None,
-    the backend runs in single-node mode.
+    This must be called before creating the device mesh and before any other JAX calls.
+    If coordinator_address is None, the backend runs in single-node mode.
 
     Args:
         config: JaxBackendConfig with multi-node settings
@@ -53,10 +53,10 @@ def initialize_distributed(config: "JaxBackendConfig") -> None:
     Raises:
         RuntimeError: If JAX distributed is already initialized
     """
-    if jax.process_count() > 1:
+    if jax.distributed.is_initialized():
         raise RuntimeError(
-            f"JAX distributed already initialized with {jax.process_count()} processes. "
-            "Cannot reinitialize."
+            "JAX distributed already initialized. Cannot reinitialize. "
+            "Ensure initialize_distributed is called before any other JAX operations."
         )
 
     if config.coordinator_address is None:
