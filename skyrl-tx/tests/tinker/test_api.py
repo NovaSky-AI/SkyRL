@@ -239,7 +239,10 @@ def test_sample_top_k(service_client):
                 prompt=prompt,
                 sampling_params=types.SamplingParams(temperature=1.0, max_tokens=5, seed=42 + i, top_k=top_k),
                 num_samples=1,
-            ).result().sequences[0].tokens
+            )
+            .result()
+            .sequences[0]
+            .tokens
             for i in range(num_runs)
         ]
 
