@@ -31,13 +31,12 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
-from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.utils import configure_ray_worker_logging, get_tcp_url
+from skyrl_train.utils.utils import configure_ray_worker_logging
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -191,8 +190,11 @@ class DistributedTorchRayActor:
 
 class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
+        from skyrl_train.weight_sync import get_transfer_strategy_cls
+
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -256,67 +258,44 @@ class Worker(DistributedTorchRayActor):
     async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
         """Initialize state for weight syncing with Inference Engine Client
 
-        Initializes a custom process group with the rank 0 Worker and all the inference engine ranks
-        for weight syncing.
+        Creates init info and sender, then sends init info to inference engines
+        so they can create receivers.
 
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
+
         assert inference_engine_client is not None
 
+        # Create init info on all ranks (it's deterministic from cfg)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+
+        # Create sender on all ranks
+        # Strategy implementations may have different logic for different ranks
+        tasks = [
+            asyncio.to_thread(
+                self._transfer_strategy_cls.create_sender,
+                init_info=init_info,
+                inference_client=inference_engine_client,
+            ),
+        ]
+
+        # Only rank 0 initializes receivers on inference engines
+        # NOTE: For broadcast strategy, sender and receiver init must run concurrently
+        # because both need to join the same process group to avoid deadlock
         if torch.distributed.get_rank() == 0:
-            master_addr = ray._private.services.get_node_ip_address()
-            with socket.socket() as sock:
-                sock.bind(("", 0))
-                master_port = sock.getsockname()[1]
+            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
-            num_inference_engines, tensor_parallel_size, pipeline_parallel_size, data_parallel_size = (
-                self.cfg.generator.num_inference_engines,
-                self.cfg.generator.inference_engine_tensor_parallel_size,
-                self.cfg.generator.inference_engine_pipeline_parallel_size,
-                self.cfg.generator.inference_engine_data_parallel_size,
-            )
-            world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
+        results = await asyncio.gather(*tasks)
+        self._weight_transfer_sender = results[0]  # sender is always first task
 
-            backend = self.cfg.generator.weight_sync_backend
-
-            override_existing = False if self.cfg.generator.override_existing_update_group == "disable" else True
-            group_name = "skyrl"
-            self._model_update_group_name = group_name
-
-            tasks = []
-            tasks.append(
-                inference_engine_client.init_weight_update_communicator(
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                    group_name=group_name,
-                    backend=backend,
-                    override_existing=override_existing,
-                )
-            )
-
-            tasks.append(
-                asyncio.to_thread(
-                    init_custom_process_group,
-                    backend=backend,
-                    init_method=get_tcp_url(master_addr, master_port),
-                    world_size=world_size,
-                    rank=0,
-                    group_name=group_name,
-                )
-            )
-            results = await asyncio.gather(*tasks)
-            self._model_update_group = results[-1]
-
-            # # Register signal handlers for termination only on rank 0
-            # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
-            # The better way is to just have this specified in __del__, but there is
-            # no guarattee that __del__ will be called in general. Ray also doesn't
-            # explictly call __del__ when the actor shuts down.
-            # It's commented out so that we can fix this in the future.
-            # atexit.register(self._handle_termination)
+        # # Register signal handlers for termination only on rank 0
+        # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
+        # The better way is to just have this specified in __del__, but there is
+        # no guarattee that __del__ will be called in general. Ray also doesn't
+        # explictly call __del__ when the actor shuts down.
+        # It's commented out so that we can fix this in the future.
+        # atexit.register(self._handle_termination)
 
         torch.distributed.barrier()
 
