@@ -79,6 +79,15 @@ def test_capabilities(service_client):
     assert BASE_MODEL in model_names
 
 
+def custom_cross_entropy_loss(data, model_logprobs):
+    total_loss = 0.0
+    for datum, log_p in zip(data, model_logprobs):
+        weights = datum.loss_fn_inputs.get("weights")
+        weights = weights.to_torch() if weights else 1.0
+        total_loss += -(log_p * weights).sum()
+    return total_loss, {}
+
+
 def test_training_workflow(service_client):
     """Test a complete training workflow."""
     training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
@@ -126,6 +135,11 @@ def test_training_workflow(service_client):
     training_client.load_state(resume_path)
     fwdbwd_result2 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result2.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
+    # Also check that custom loss function produces the same loss
+    fwdbwd_result_custom = training_client.forward_backward_custom(
+        processed_examples, loss_fn=custom_cross_entropy_loss
+    ).result()
+    assert fwdbwd_result_custom.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
     # Test that we can restore the training run
     training_client = service_client.create_training_client_from_state(resume_path)
@@ -151,6 +165,15 @@ def test_training_workflow(service_client):
     # Verify that the checkpoint we created is in the list
     checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
     assert "0000" in checkpoint_ids
+
+    # Verify the training run appears in list_training_runs with correct fields
+    training_runs = rest_client.list_training_runs().result()
+    assert training_runs.cursor.total_count == len(training_runs.training_runs)
+    training_run = next(tr for tr in training_runs.training_runs if tr.training_run_id == original_training_run_id)
+    assert training_run.base_model == BASE_MODEL
+    assert training_run.is_lora is True
+    assert training_run.lora_rank == 32
+    assert training_run.corrupted is False
 
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
@@ -250,3 +273,47 @@ def test_sample_top_k(service_client):
     assert not all(
         seq == results_no_top_k[0] for seq in results_no_top_k
     ), "Without top_k, different seeds should produce different outputs"
+
+
+def test_sample_with_stop_strings(service_client):
+    """Test the sample endpoint with string stop sequences."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
+
+    # Generate a baseline sample without stop strings
+    baseline_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=50, seed=42),
+        num_samples=1,
+    ).result()
+
+    baseline_tokens = baseline_result.sequences[0].tokens
+    baseline_text = tokenizer.decode(baseline_tokens)
+
+    # Find a substring that appears in the generated text to use as stop string
+    # Use a short substring from the middle of the text
+    mid_point = len(baseline_text) // 2
+    stop_string = baseline_text[mid_point : mid_point + 5]
+
+    # Skip test if we couldn't find a good stop string
+    if not stop_string or stop_string not in baseline_text:
+        pytest.skip("Could not find a suitable stop string in generated text")
+
+    # Generate with the stop string
+    stopped_result = sampling_client.sample(
+        prompt=prompt,
+        sampling_params=types.SamplingParams(temperature=0.0, max_tokens=50, seed=42, stop=[stop_string]),
+        num_samples=1,
+    ).result()
+
+    stopped_tokens = stopped_result.sequences[0].tokens
+    stopped_text = tokenizer.decode(stopped_tokens)
+
+    # Verify the stop string handling
+    assert stopped_result.sequences[0].stop_reason == "stop"
+    # The output should be shorter than or equal to baseline
+    assert len(stopped_tokens) <= len(baseline_tokens)
+    # The stop string should appear at or near the end of the decoded text
+    assert stop_string in stopped_text

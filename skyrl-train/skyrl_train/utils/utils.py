@@ -174,8 +174,8 @@ def validate_megatron_cfg(cfg: DictConfig):
         import flash_attn
 
         version = flash_attn.__version__
-        if version > "2.7.4.post1":
-            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
+        if version > "2.8.1":
+            logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -297,7 +297,20 @@ def validate_cfg(cfg: DictConfig):
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+        assert cfg.trainer.strategy in (
+            "fsdp",
+            "fsdp2",
+            "megatron",
+        ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
+
+        if cfg.trainer.target_modules is not None:
+            logger.warning(
+                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
+            )
+        if cfg.trainer.exclude_modules is not None:
+            logger.warning(
+                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
+            )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -495,6 +508,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
+        # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
+        env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"

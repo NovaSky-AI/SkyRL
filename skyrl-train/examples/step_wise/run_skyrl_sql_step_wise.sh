@@ -71,5 +71,5 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
-  trainer.step_wise_training=true \
+  generator.step_wise_trajectories=true \
   $@

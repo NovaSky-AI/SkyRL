@@ -1,5 +1,8 @@
 import os
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
@@ -20,19 +23,16 @@ from vllm.entrypoints.openai.protocol import (
     CompletionResponse,
 )
 from vllm.lora.request import LoRARequest
-from torch.distributed import destroy_process_group
-from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
+from skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
 from packaging import version
 
@@ -71,114 +71,53 @@ class WorkerWrap:
         """Test RPC call to worker"""
         return args, kwargs
 
-    def init_weight_update_communicator(
-        self,
-        master_address,
-        master_port,
-        rank_offset,
-        world_size,
-        group_name,
-        backend="nccl",
-        override_existing: bool = False,
-    ):
-        """Init torch process group for model weights update"""
-        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
-        assert group_name != "", "group name must not be empty"
+    def init_weight_update_communicator(self, init_info: bytes):
+        """Init weight update communicator from init info.
 
-        if getattr(self, "_model_update_group", None):
-            if override_existing:
-                logger.info("Destroying existing model update group")
-                destroy_process_group(self._model_update_group)
-                self._model_update_group = None
+        Args:
+            init_info: Pickled bytes of WeightSyncInitInfo from the sender.
+        """
+        import pickle
+
+        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
+
+        # Unpickle init_info to restore the original object type
+        assert isinstance(init_info, bytes), f"Expected bytes, got {type(init_info).__name__}"
+        init_info = pickle.loads(init_info)
+
+        strategy_cls = init_info.strategy_type()
+
+        if hasattr(self, "_weight_receiver") and self._weight_receiver is not None:
+            # TODO(haochen): we should get rid of this flag and override existing receiver.
+            if init_info.override_existing_receiver:
+                self._weight_receiver.teardown()
+                self._weight_receiver = None
             else:
                 warnings.warn(
-                    "Detected an existing weights update group. For overriding, use `generator.override_existing_update_group=True`"
+                    "Detected an existing weight receiver. "
+                    "For overriding, use `generator.override_existing_update_group=enable`"
                 )
+                return
 
-        rank = torch.distributed.get_rank() + rank_offset
-        logger.info(
-            f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
-        )
+        self._weight_receiver = strategy_cls.create_receiver(init_info)
 
-        self._model_update_group = init_custom_process_group(
-            backend=backend,
-            init_method=get_tcp_url(master_address, master_port),
-            world_size=world_size,
-            rank=rank,
-            group_name=group_name,
-        )
-        logger.info(
-            f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
-            f"rank={rank}, world_size={world_size}, group_name={group_name}",
-        )
+    def load_weights(self, request: bytes) -> None:
+        """Load weights using the receiver.
 
-    def update_weights(self, names: List[str], dtypes: List[str], shapes: List[List[int]]):
-        """Broadcast weight to all vllm workers from source rank 0 (actor model)"""
+        This method is called via collective_rpc from VLLMWeightLoader.
+
+        Args:
+            request: Pickled bytes of WeightUpdateRequest.
+        """
+        import pickle
+
+        # Unpickle request to restore the original object type
+        assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
+        request = pickle.loads(request)
+
         weight_list = []
-        for name, dtype, shape in zip(names, dtypes, shapes):
-            dtype = str_to_torch_dtype(dtype)
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-            weight_list.append((name, weight))
-
-        self.model_runner.model.load_weights(weights=weight_list)
-        for weight in weight_list:
-            del weight
-
-    def update_weights_cuda_ipc(
-        self,
-        names: List[str],
-        dtypes: List[str],
-        shapes: List[int],
-        sizes: List[int],
-        ipc_handles: List[Dict[str, Any]],
-        packed: bool = False,
-    ):
-        weight_list = []
-
-        if packed:
-            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
-            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-            assert (
-                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
-            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
-            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
-            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
-
-            device = torch.cuda.current_device()
-            props = torch.cuda.get_device_properties(device)
-            physical_gpu_id = str(props.uuid)
-
-            handle = ipc_handles[0][physical_gpu_id]
-            device_id = self.device.index
-            func, args = handle
-            list_args = list(args)
-            list_args[6] = device_id
-            packed_tensor = func(*list_args)
-
-            offset = 0
-            for name, shape, size in zip(names, shapes, sizes):
-                weight_list.append((name, packed_tensor[offset : offset + size].view(*shape)))
-                offset += size
-        else:
-            for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
-
-                dtype = str_to_torch_dtype(dtype)
-                device = torch.cuda.current_device()
-                props = torch.cuda.get_device_properties(device)
-                physical_gpu_id = str(props.uuid)
-
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-
-                handle = ipc_handle[physical_gpu_id]
-
-                device_id = self.device.index
-                func, args = handle
-                list_args = list(args)
-                list_args[6] = device_id
-                weight = func(*list_args)
-                weight_list.append((name, weight))
+        for name, tensor in self._weight_receiver.receive_weights(request):
+            weight_list.append((name, tensor))
 
         self.model_runner.model.load_weights(weights=weight_list)
 
@@ -186,11 +125,11 @@ class WorkerWrap:
             del weight
 
     # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
-    def destroy_weights_update_group(self):
-        if not self._model_update_group:
-            warnings.warn("No model update group to destroy")
+    def teardown_weight_receiver(self):
+        if not hasattr(self, "_weight_receiver") or self._weight_receiver is None:
+            warnings.warn("No weight receiver to teardown")
             return
-        destroy_process_group(self._model_update_group)
+        self._weight_receiver.teardown()
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -211,6 +150,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
+
+        # Weight loader is created by subclass after engine initialization
+        self._weight_loader = None
 
     def tp_size(self):
         return self._tp_size
@@ -282,15 +224,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
-    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
-        """Check if this is a LoRA disk loading request."""
-        is_lora = request["names"][0] == "lora_disk_load"
-        if is_lora:
-            assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
-            )
-        return is_lora
-
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
@@ -301,6 +234,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_loader = VLLMWeightLoader(self.llm, is_async=False)
 
     def _create_engine(self, *args, **kwargs):
         # Pipeline parallelism requires AsyncLLMEngine
@@ -361,14 +298,16 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await asyncio.to_thread(self.llm.sleep, level=level)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        import pickle
+
         engine = self._get_engine()
+        # Pickle the init_info to preserve type through collective_rpc
+        pickled_init_info = pickle.dumps(init_info)
         return await asyncio.to_thread(
             engine.collective_rpc,
             "init_weight_update_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+            args=(pickled_init_info,),
         )
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -378,54 +317,36 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
-        if not len(request["names"]):
-            raise ValueError("Update weight request should have at least one entry in 'names'")
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        from skyrl_train.weight_sync import LoraLoadRequest
 
         # Handle LoRA disk loading request
-        if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
-            return await self._load_lora_from_disk(lora_path)
+        if isinstance(request, LoraLoadRequest):
+            return await self._load_lora_from_disk(request.lora_path)
 
-        engine = self._get_engine()
-        # Use IPC if handles are provided
-        if request.get("extras") and "ipc_handles" in request["extras"][0]:
-            return await asyncio.to_thread(
-                engine.collective_rpc,
-                "update_weights_cuda_ipc",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                    request.get("sizes", []),
-                    [extra["ipc_handles"] for extra in request["extras"]],
-                    request.get("packed", False),
-                ),
-            )
-        else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await asyncio.to_thread(
-                engine.collective_rpc, "update_weights", args=(request["names"], request["dtypes"], request["shapes"])
-            )
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
+
+        # Use the weight loader to coordinate weight transfer
+        return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
+        await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):
         return await asyncio.to_thread(self.llm.llm_engine.reset_prefix_cache)
 
-    async def _destroy_weights_update_group(self):
+    async def _teardown_weight_receiver(self):
         engine = self._get_engine()
-        return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
+        return await asyncio.to_thread(engine.collective_rpc, "teardown_weight_receiver")
 
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
@@ -537,67 +458,40 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await self.llm.sleep(level=level)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        import pickle
+
         engine = self._get_engine()
+        # Pickle the init_info to preserve type through collective_rpc
+        pickled_init_info = pickle.dumps(init_info)
         return await engine.collective_rpc(
             "init_weight_update_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+            args=(pickled_init_info,),
         )
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
-        if not len(request["names"]):
-            raise ValueError("Update weight request should have atleast one entry in 'names'")
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        from skyrl_train.weight_sync import LoraLoadRequest
 
         # Check for LoRA disk loading request
-        if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
-            return await self._load_lora_from_disk(lora_path)
+        if isinstance(request, LoraLoadRequest):
+            return await self._load_lora_from_disk(request.lora_path)
 
-        engine = self._get_engine()
-        # Use IPC if handles are provided
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
 
-        is_ipc = request.get("extras") and "ipc_handles" in request["extras"][0]
-
-        if is_ipc:
-            return await engine.collective_rpc(
-                "update_weights_cuda_ipc",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                    request.get("sizes", []),
-                    [extra["ipc_handles"] for extra in request["extras"]],
-                    request.get("packed", False),
-                ),
-            )
-        else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await engine.collective_rpc(
-                "update_weights",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                ),
-            )
+        # Use the weight loader to coordinate weight transfer
+        return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
+        await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()
         await engine.reset_prefix_cache()
 
-    async def _destroy_weights_update_group(self):
+    async def _teardown_weight_receiver(self):
         engine = self._get_engine()
-        return await engine.collective_rpc("destroy_weights_update_group")
+        return await engine.collective_rpc("teardown_weight_receiver")
 
     # ----------------------------------------
     # Methods for handling OpenAI API requests
@@ -714,6 +608,50 @@ class _MinimalRequest:
     def __init__(self, headers):
         self.headers = headers  # Expect a mapping with .get support
         self.state = SimpleNamespace()  # vLLM sets raw_request.state.request_metadata
+
+
+class VLLMWeightLoader(WeightLoader):
+    """Loads weights into vLLM engine, managing RPC coordination.
+
+    This loader encapsulates the collective_rpc calls to workers.
+    Workers create the appropriate receiver locally for the actual weight transfer.
+    """
+
+    def __init__(self, engine: Any, is_async: bool = False) -> None:
+        """Initialize the loader.
+
+        Args:
+            engine: The vLLM engine (LLM or AsyncLLMEngine).
+            is_async: Whether this is for AsyncVLLMInferenceEngine.
+        """
+        self._engine = engine.engine if hasattr(engine, "engine") else engine
+        self._is_async = is_async
+
+    async def load_weights(self, request: WeightUpdateRequest) -> None:
+        """Load weights by coordinating RPC to workers.
+
+        Sends the request to workers via collective_rpc. Workers create
+        the receiver locally and use it to receive and load weights.
+
+        Args:
+            request: Weight update request.
+        """
+        import pickle
+
+        # Pickle the request to preserve type through collective_rpc
+        pickled_request = pickle.dumps(request)
+
+        if self._is_async:
+            await self._engine.collective_rpc(
+                "load_weights",
+                args=(pickled_request,),
+            )
+        else:
+            await asyncio.to_thread(
+                self._engine.collective_rpc,
+                "load_weights",
+                args=(pickled_request,),
+            )
 
 
 VLLMRayActor = ray.remote(VLLMInferenceEngine)

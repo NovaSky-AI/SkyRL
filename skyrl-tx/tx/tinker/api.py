@@ -2,17 +2,18 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, Sequence
+from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import subprocess
 import random
+import time
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
@@ -247,6 +248,11 @@ class ForwardBackwardRequest(BaseModel):
     forward_backward_input: ForwardBackwardInput
 
 
+class ForwardRequest(BaseModel):
+    model_id: str
+    forward_input: ForwardBackwardInput
+
+
 class AdamParams(BaseModel):
     learning_rate: float = Field(default=1e-4, ge=0.0)
     beta1: float = Field(default=0.9, ge=0.0, lt=1.0)
@@ -270,7 +276,7 @@ class SaveWeightsForSamplerRequest(BaseModel):
 class SamplingParams(BaseModel):
     max_tokens: int | None = None
     seed: int | None = None
-    stop: Sequence[int] | None = None
+    stop: list[int] | list[str] | None = None
     temperature: float = 1
     top_k: int = -1
     top_p: float = 1
@@ -285,11 +291,26 @@ class SamplingParams(BaseModel):
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
 
+        # Determine if stop values are token IDs (int) or strings
+        stop_tokens = None
+        stop_strings = None
+        if self.stop:
+            if all(isinstance(s, int) for s in self.stop):
+                stop_tokens = list(self.stop)
+            elif all(isinstance(s, str) for s in self.stop):
+                stop_strings = list(self.stop)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="stop must be either all integers (token IDs) or all strings, not mixed",
+                )
+
         return types.SamplingParams(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=seed,
-            stop=self.stop,
+            stop_tokens=stop_tokens,
+            stop_strings=stop_strings,
             top_k=self.top_k,
         )
 
@@ -412,6 +433,30 @@ class GetServerCapabilitiesResponse(BaseModel):
 
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
+
+
+class Cursor(BaseModel):
+    offset: int
+    limit: int
+    total_count: int
+
+
+class TrainingRunsResponse(BaseModel):
+    training_runs: list[TrainingRun]
+    cursor: Cursor
+
+
+class WeightsInfoRequest(BaseModel):
+    tinker_path: str
+
+
+class WeightsInfoResponse(BaseModel):
+    """Minimal information for loading public checkpoints."""
+
+    # from: https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/weights_info_response.py
+    base_model: str
+    is_lora: bool
+    lora_rank: int | None = None
 
 
 @app.get("/api/v1/healthz", response_model=HealthResponse)
@@ -554,6 +599,23 @@ async def forward_backward(request: ForwardBackwardRequest, session: AsyncSessio
         request_type=types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
         request_data=request.forward_backward_input.to_types(),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
+@app.post("/api/v1/forward", response_model=FutureResponse)
+async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+    """Forward pass to obtain logprobs without accumulating gradients"""
+    await get_model(session, request.model_id)
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.FORWARD,
+        model_id=request.model_id,
+        request_data=request.forward_input.to_types(),
     )
 
     await session.commit()
@@ -733,28 +795,44 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    poll_interval = 0.1  # 100ms
+    deadline = time.perf_counter() + timeout
 
-    for _ in range(int(timeout / poll_interval)):
-        async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-            result = await session.exec(statement)
-            future = result.first()
+    # Start with 100ms, grow to 1s
+    poll = 0.1
+    max_poll = 1.0
 
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
+    while time.perf_counter() < deadline:
+        try:
+            async with AsyncSession(req.app.state.db_engine) as session:
+                # First, only query the status to avoid deserializing JSON data
+                statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
+                result = await session.exec(statement)
+                status = result.first()
 
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
+                if not status:
+                    raise HTTPException(status_code=404, detail="Future not found")
 
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
+                # Only fetch full record if status is terminal (completed or failed)
+                if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+                    statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+                    result = await session.exec(statement)
+                    future = result.first()
 
-        await asyncio.sleep(poll_interval)
+                    if future.status == RequestStatus.COMPLETED:
+                        return future.result_data
+
+                    if future.status == RequestStatus.FAILED:
+                        # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                        if future.result_data and "error" in future.result_data:
+                            raise HTTPException(status_code=400, detail=future.result_data["error"])
+                        else:
+                            raise HTTPException(status_code=500, detail="Unknown error")
+        except SATimeoutError:
+            pass
+
+        # Exponential backoff
+        await asyncio.sleep(poll)
+        poll = min(poll * 1.5, max_poll)
 
     raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
@@ -783,6 +861,44 @@ async def validate_checkpoint(
 
     subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
     return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
+
+
+@app.get("/api/v1/training_runs")
+async def list_training_runs(
+    limit: int = 20, offset: int = 0, session: AsyncSession = Depends(get_session)
+) -> TrainingRunsResponse:
+    """List all training runs"""
+
+    # Use window function to get total count alongside paginated results in a single query
+    statement = select(ModelDB, func.count().over().label("total_count")).offset(offset).limit(limit)
+    result = await session.exec(statement)
+    rows = result.all()
+
+    total_count = rows[0].total_count if rows else 0
+
+    training_runs = []
+    for row in rows:
+        model = row.ModelDB
+        lora_config = types.LoraConfig.model_validate(model.lora_config)
+
+        training_runs.append(
+            TrainingRun(
+                training_run_id=model.model_id,
+                base_model=model.base_model,
+                model_owner="default",
+                is_lora=True,
+                corrupted=False,
+                lora_rank=lora_config.rank,
+                last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+                last_checkpoint=None,
+                last_sampler_checkpoint=None,
+                user_metadata=None,
+            )
+        )
+
+    return TrainingRunsResponse(
+        training_runs=training_runs, cursor=Cursor(offset=offset, limit=limit, total_count=total_count)
+    )
 
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
@@ -865,6 +981,35 @@ async def list_checkpoints_models(
 ):
     """Just to be compatible with tinker SDK"""
     return await list_checkpoints(unique_id=unique_id, session=session)
+
+
+@app.post("/api/v1/weights_info", response_model=WeightsInfoResponse)
+async def get_weights_info(request: WeightsInfoRequest, req: Request, session: AsyncSession = Depends(get_session)):
+    """Get information about weights/checkpoint from a tinker path."""
+    path = types.TinkerPath.parse(request.tinker_path)
+
+    if not path or path.kind != "weights":
+        raise HTTPException(
+            status_code=400, detail="Invalid tinker path format. Expected: tinker://model_id/weights/checkpoint_id"
+        )
+
+    model_id = path.primary_id
+    checkpoint_id = path.secondary_id
+
+    # Get model info (this will raise 404 if model doesn't exist)
+    model = await get_model(session, model_id)
+
+    # Validate checkpoint exists and is completed
+    await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
+
+    lora_config = types.LoraConfig.model_validate(model.lora_config)
+    is_lora = lora_config.rank > 0
+
+    return WeightsInfoResponse(
+        base_model=model.base_model,
+        is_lora=is_lora,
+        lora_rank=lora_config.rank,
+    )
 
 
 @app.get("/")

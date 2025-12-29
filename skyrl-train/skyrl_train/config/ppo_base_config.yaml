@@ -27,10 +27,15 @@ trainer:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       lora:
-          rank: 0
-          alpha: 16
-          dropout: 0
-          lora_sync_path: "/tmp/skyrl_lora_sync"
+        rank: 0
+        alpha: 16
+        dropout: 0
+        lora_sync_path: "/tmp/skyrl_lora_sync"
+        target_modules: "all-linear"
+        exclude_modules: null
+        # see https://huggingface.co/docs/peft/v0.18.0/en/package_reference/lora#peft.LoraConfig.init_lora_weights for supported initialization methods for FSDP
+        # for megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported
+        init_method: "kaiming"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
@@ -65,6 +70,8 @@ trainer:
         rank: 0
         alpha: 16
         dropout: 0
+        target_modules: "all-linear"
+        exclude_modules: null
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
@@ -112,6 +119,10 @@ trainer:
     # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
+    sapo:
+      tau_pos: 1.0
+      tau_neg: 1.05 # default values used in the paper with Qwen3-30B-A3B-Base
     
     # value loss parameters
     value_clip: 0.2
@@ -178,8 +189,8 @@ trainer:
   max_prompt_length: 512
   flash_attn: true
   disable_fast_tokenizer: false
-  target_modules: "all-linear"
-  exclude_modules: null
+  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
+  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -194,7 +205,6 @@ trainer:
   #   factor: 1.0
   #   original_max_position_embeddings: 32768
 
-  step_wise_training: false
 
 generator:
   model_name: ${trainer.policy.model.path}
@@ -293,6 +303,8 @@ generator:
   # rope parameters, can be optionally different from the trainer , useful in some cases like with thinking models.
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}
+
+  step_wise_trajectories: false
 
 environment:
   env_class: "gsm8k"

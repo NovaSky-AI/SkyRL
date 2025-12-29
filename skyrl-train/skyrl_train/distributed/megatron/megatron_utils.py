@@ -158,13 +158,33 @@ def offload_megatron_model_to_cpu(models):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
-                    # offload parameters
+                    # offload parameters from fused Megatron buffers
                     if buffer.param_data.storage().size() > 0:
                         buffer.param_data.cpu_data = buffer.param_data.data.cpu().pin_memory()
                         buffer.param_data_size = buffer.param_data.storage().size()
                         buffer.param_data.storage().resize_(0)
 
                     assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
+
+            # lora aware offloading - if using lora,offload non-lora base weights, since megatron fused buffers do not include the HF/bridge "to_wrap" weights
+            for name, param in model_chunk.named_parameters():
+                if (
+                    param.is_cuda
+                    and not param.requires_grad
+                    and "adapter" not in name
+                    and param.data.storage().size() > 0
+                ):
+                    # Always refresh the CPU copy and release GPU storage.
+                    cpu_tensor = param.data.detach().cpu().pin_memory()
+                    param._offload_cpu_data = cpu_tensor
+                    param._offload_cuda_numel = param.data.numel()
+                    # Release GPU storage while keeping dtype/device metadata.
+                    empty_cuda = torch.empty(
+                        0,
+                        dtype=param.data.dtype,
+                        device=param.data.device,
+                    )
+                    param.data = empty_cuda
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
@@ -184,6 +204,13 @@ def load_megatron_model_to_gpu(models):
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+
+            # Restore any LoRA-frozen base weights that were offloaded above.
+            device_id = torch.cuda.current_device()
+            for name, param in model_chunk.named_parameters():
+                if hasattr(param, "_offload_cpu_data") and param.data.storage().size() == 0:
+                    restored = param._offload_cpu_data.to(device_id, non_blocking=True)
+                    param.data = restored
         else:
             # we need this for ref module
             device_id = torch.cuda.current_device()

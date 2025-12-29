@@ -21,7 +21,7 @@ from skyrl_train.training_batch import TensorBatch, TrainingInputBatch, Training
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl_train.generators.base import GeneratorInput, ConversationType
+from skyrl_train.generators.base import GeneratorInput, ConversationType, TrajectoryID
 from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -291,6 +291,7 @@ def get_test_generator_input(
         "prompts": prompts,
         "env_classes": env_classes,
         "env_extras": env_extras,
+        "trajectory_ids": [TrajectoryID(instance_id=f"{i}", repetition_id=0) for i in range(len(prompts))],
     }
 
     return input_batch

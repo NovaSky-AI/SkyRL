@@ -61,7 +61,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
-    if cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
         engine_kwargs["enable_lora"] = True
         engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
         engine_kwargs["sleep_level"] = 1
@@ -195,17 +195,6 @@ class BasePPOExp:
             GeneratorInterface: The generator.
         """
         from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
-
-        if cfg.trainer.step_wise_training:
-            from skyrl_train.generators.step_wise_generator import StepWiseGenerator
-
-            return StepWiseGenerator(
-                generator_cfg=cfg.generator,
-                skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                inference_engine_client=inference_engine_client,
-                tokenizer=tokenizer,
-                model_name=cfg.trainer.policy.model.path,
-            )
 
         return SkyRLGymGenerator(
             generator_cfg=cfg.generator,

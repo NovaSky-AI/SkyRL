@@ -17,6 +17,7 @@ class RequestType(str, Enum):
 
     CREATE_MODEL = "create_model"
     FORWARD_BACKWARD = "forward_backward"
+    FORWARD = "forward"
     OPTIM_STEP = "optim_step"
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
     SAVE_WEIGHTS = "save_weights"
@@ -157,7 +158,8 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
-    stop: list[int] | None = None
+    stop_tokens: list[int] | None = None
+    stop_strings: list[str] | None = None
     top_k: int = -1
 
 
