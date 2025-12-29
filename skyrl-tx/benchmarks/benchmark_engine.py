@@ -47,10 +47,10 @@ def build_engine(config: EngineConfig, num_adapters: int) -> TinkerEngine:
         engine.process_single_request(
             types.RequestType.CREATE_MODEL,
             model_id,
-            {"lora_config": {"rank": config.max_lora_rank, "alpha": 32}},
+            {"lora_config": {"rank": config.backend_config["max_lora_rank"], "alpha": 32}},
         )
         # Mark as loaded so sampling uses in-memory weights
-        engine.models[model_id].loaded_checkpoint_id = model_id
+        engine.backend.models[model_id].loaded_checkpoint_id = model_id
     return engine
 
 
@@ -62,17 +62,17 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args: argparse.Namespace):
         for i in range(args.samples_per_request)
     ]
     fb_input = make_fwd_bwd_input(token_lists)
-    model_ids = list(engine.models.keys())
+    model_ids = list(engine.backend.models.keys())
     reqs = {str(i): (model_ids[i % len(model_ids)], fb_input) for i in range(args.num_requests)}
 
     print(f"Warming up ({args.num_warmup_steps} steps)...")
     for _ in range(args.num_warmup_steps):
-        engine.process_forward_backward_batch(reqs)
+        engine.process_forward_backward(reqs)
 
     print(f"Running benchmark ({args.num_steps} steps)...")
     start = time.perf_counter()
     for _ in range(args.num_steps):
-        engine.process_forward_backward_batch(reqs)
+        engine.process_forward_backward(reqs)
     elapsed = time.perf_counter() - start
 
     total_tokens = args.num_steps * args.num_requests * args.samples_per_request * args.seq_len
@@ -86,7 +86,7 @@ def run_fwd_bwd_bench(engine: TinkerEngine, args: argparse.Namespace):
 def run_sample_bench(engine: TinkerEngine, args: argparse.Namespace):
     print("\n=== Sampling Benchmark ===")
 
-    model_ids = list(engine.models.keys())
+    model_ids = list(engine.backend.models.keys())
     reqs = {}
     for i in range(args.num_requests):
         prompt_tokens = [int(x) for x in jax.random.randint(jax.random.PRNGKey(i), (args.seq_len,), 1, 1000)]
@@ -95,12 +95,12 @@ def run_sample_bench(engine: TinkerEngine, args: argparse.Namespace):
 
     print(f"Warming up ({args.num_warmup_steps} steps)...")
     for _ in range(args.num_warmup_steps):
-        engine.process_sample_batch(reqs)
+        engine.process_sample(reqs)
 
     print(f"Running benchmark ({args.num_steps} steps)...")
     start = time.perf_counter()
     for _ in range(args.num_steps):
-        engine.process_sample_batch(reqs)
+        engine.process_sample(reqs)
     elapsed = time.perf_counter() - start
 
     total_tokens = args.num_steps * args.num_requests * args.sample_max_tokens

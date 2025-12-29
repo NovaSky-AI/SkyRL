@@ -33,8 +33,8 @@ def api_server():
             "--base-model",
             BASE_MODEL,
             # Set number of LoRA adapters lower to avoid OOMs in the CI
-            "--max-lora-adapters",
-            "4",
+            "--backend-config",
+            '{"max_lora_adapters": 4}',
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
