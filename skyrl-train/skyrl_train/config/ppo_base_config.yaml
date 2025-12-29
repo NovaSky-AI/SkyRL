@@ -235,6 +235,7 @@ generator:
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
   max_turns: 1
+  summarize_chat: false
 
   # chat template configuration
   chat_template:
