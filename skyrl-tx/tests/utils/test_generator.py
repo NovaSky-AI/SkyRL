@@ -145,10 +145,10 @@ def test_top_k_filtering():
     filtered = apply_top_k_batch(logits, k_values=jnp.array([-1]), max_k=5)
     assert jnp.array_equal(filtered, logits)
 
-    # Test per-example k values in batch
-    logits_batch = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0], [5.0, 4.0, 3.0, 2.0, 1.0]])
+    # Test per-example k values in batch (second row has ties: two 3.0s)
+    logits_batch = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0], [5.0, 4.0, 3.0, 3.0, 1.0]])
     filtered = apply_top_k_batch(logits_batch, k_values=jnp.array([2, 3]), max_k=3)
-    # Check that filtering is applied correctly for each example in the batch
+    # Second row keeps exactly 3 values despite ties (5.0, 4.0, and first 3.0)
     expected = jnp.array(
         [
             [-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0],
