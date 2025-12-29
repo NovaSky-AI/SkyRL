@@ -248,7 +248,7 @@ def test_sample_top_k(service_client):
 
     # top_k=1 should produce identical outputs regardless of seed
     results_top_1 = sample_with_top_k(top_k=1)
-    assert results_top_1[0] == results_top_1[1] == results_top_1[2], "top_k=1 should produce identical outputs"
+    assert all(r == results_top_1[0] for r in results_top_1), "top_k=1 should produce identical outputs"
 
     # top_k=-1 (disabled) should vary with different seeds
     results_no_top_k = sample_with_top_k(top_k=-1)
