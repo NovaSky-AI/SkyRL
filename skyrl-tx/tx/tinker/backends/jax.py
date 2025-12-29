@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 from flax.training import checkpoints
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -41,19 +41,33 @@ from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
 
 
-class JaxBackendConfig(BaseModel, extra="allow"):
+class JaxBackendConfig(BaseModel):
     """Configuration specific to the JAX backend."""
 
     base_model: str
-    max_lora_adapters: int = 32
-    max_lora_rank: int = 32
-    tensor_parallel_size: int = 1
-    fully_sharded_data_parallel_size: int = 1
-    train_micro_batch_size: int = 0
-    sample_max_num_sequences: int = 0
-    enforce_eager: bool = False
-    shard_attention_heads: bool = True
-    gradient_checkpointing: bool = False
+    max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
+    max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
+    tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
+    fully_sharded_data_parallel_size: int = Field(
+        default=1, description="Fully sharded data parallelism degree for the model"
+    )
+    train_micro_batch_size: int = Field(
+        default=0,
+        description="Micro-batch size (measured in number of sequences) for gradient accumulation; 0 means disabled (use full batch)",
+    )
+    sample_max_num_sequences: int = Field(
+        default=0,
+        description="Maximum batch size (measured in number of sequences) for sampling/generation; 0 means disabled (use full batch)",
+    )
+    enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
+    shard_attention_heads: bool = Field(
+        default=True,
+        description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
+    )
+    gradient_checkpointing: bool = Field(
+        default=False,
+        description="Whether to use gradient checkpointing (full recomputation strategy)",
+    )
 
 
 @jax.tree_util.register_dataclass
