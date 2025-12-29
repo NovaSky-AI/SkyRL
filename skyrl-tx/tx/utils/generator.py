@@ -343,14 +343,14 @@ def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax
     if max_k <= 0:
         return logits
 
-    # Get top max_k values for each example (max_k is static)
-    top_values, _ = jax.lax.top_k(logits, max_k)  # [batch_size, max_k]
+    top_values, top_indices = jax.lax.top_k(logits, max_k)
 
-    # Get per-example threshold by indexing with (k-1), clamped to valid range
-    k_indices = jnp.clip(k_values - 1, 0, max_k - 1)[:, None]
-    thresholds = jnp.take_along_axis(top_values, k_indices, axis=1)[:, 0]
+    # Keep only first k values per example
+    keep = jnp.arange(max_k) < k_values[:, None]
+    top_values = jnp.where(keep, top_values, -jnp.inf)
 
-    # When k <= 0, keep all logits (set threshold to -inf)
-    thresholds = jnp.where(k_values <= 0, -jnp.inf, thresholds)
+    # Scatter back to original positions
+    batch_idx = jnp.arange(logits.shape[0])[:, None]
+    result = jnp.full_like(logits, -jnp.inf).at[batch_idx, top_indices].set(top_values)
 
-    return jnp.where(logits < thresholds[:, None], -jnp.inf, logits)
+    return jnp.where(k_values[:, None] <= 0, logits, result)
