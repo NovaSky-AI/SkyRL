@@ -25,8 +25,9 @@ Design:
 
 from abc import ABC, abstractmethod
 
+from pydantic import BaseModel
+
 from tx.tinker import types
-from tx.tinker.config import EngineConfig
 
 
 class AbstractBackend(ABC):
@@ -37,7 +38,7 @@ class AbstractBackend(ABC):
     """
 
     @abstractmethod
-    def __init__(self, config: EngineConfig):
+    def __init__(self, base_model: str, config: BaseModel):
         """Initialize the backend."""
         pass
 

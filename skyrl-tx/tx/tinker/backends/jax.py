@@ -44,7 +44,6 @@ from tx.utils.log import logger
 class JaxBackendConfig(BaseModel):
     """Configuration specific to the JAX backend."""
 
-    base_model: str
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
@@ -121,13 +120,14 @@ class JaxBackend(AbstractBackend):
     - Supports both FORWARD and FORWARD_BACKWARD request types
     """
 
-    def __init__(self, config: JaxBackendConfig):
+    def __init__(self, base_model: str, config: JaxBackendConfig):
         """Initialize JAX LoRA backend."""
+        self.base_model = base_model
         self.config = config
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
-        checkpoint_path = resolve_model_path(config.base_model)
+        checkpoint_path = resolve_model_path(base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
         base_config = PretrainedConfig.from_pretrained(checkpoint_path)
         self.model_config = Qwen3Config(
@@ -163,7 +163,7 @@ class JaxBackend(AbstractBackend):
         self.models: dict[str, types.ModelMetadata] = {}
 
         logger.info(
-            f"Initialized base model {config.base_model} with "
+            f"Initialized base model {base_model} with "
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
 
@@ -759,7 +759,7 @@ class JaxBackend(AbstractBackend):
         lora_model = self.models[model_id]
         save_lora_checkpoint(
             self.model,
-            self.config.base_model,
+            self.base_model,
             lora_model.lora_config,
             lora_model.adapter_index,
             output_path,

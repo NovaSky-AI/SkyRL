@@ -189,11 +189,8 @@ class TinkerEngine:
             raise ValueError(f"Unknown backend: {config.backend}. Available backends: {list(BACKENDS.keys())}")
 
         backend_class, backend_config_class = BACKENDS[config.backend]
-        backend_config = backend_config_class(
-            base_model=config.base_model,
-            **config.backend_config,
-        )
-        self.backend = backend_class(backend_config)
+        backend_config = backend_config_class(**config.backend_config)
+        self.backend = backend_class(config.base_model, backend_config)
 
         logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
