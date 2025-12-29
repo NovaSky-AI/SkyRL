@@ -41,7 +41,7 @@ from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
 
 
-class JaxBackendConfig(BaseModel):
+class JaxBackendConfig(BaseModel, extra="forbid"):
     """Configuration specific to the JAX backend."""
 
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
