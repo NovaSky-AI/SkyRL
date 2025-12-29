@@ -688,6 +688,7 @@ def test_validate_batch_sizes_lcm_dp_requirement():
         cfg.trainer.algorithm.use_kl_loss = include_ref
         cfg.trainer.algorithm.use_kl_in_reward = False
         cfg.trainer.algorithm.policy_loss_type = "regular"
+        cfg.generator.n_samples_per_prompt = 1
         return cfg
 
     # Fail: lcm(2, 3) = 6, but train_batch_size = 5 when ref is used
