@@ -133,13 +133,9 @@ def test_top_k_filtering():
 
     # Test k=2: should keep only top 2 values (4.0 and 5.0)
     filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=2)
-    # Values below threshold should be -inf
-    assert jnp.isinf(filtered[0, 0]) and filtered[0, 0] < 0
-    assert jnp.isinf(filtered[0, 1]) and filtered[0, 1] < 0
-    assert jnp.isinf(filtered[0, 2]) and filtered[0, 2] < 0
-    # Top 2 values should be unchanged
-    assert filtered[0, 3] == 4.0
-    assert filtered[0, 4] == 5.0
+    # Values below threshold should be -inf, and top 2 values should be unchanged
+    expected = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0]])
+    assert jnp.array_equal(filtered, expected)
 
     # Test max_k=0: should not filter anything regardless of k_values
     filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=0)
