@@ -10,7 +10,7 @@ Design:
      - forward_backward, forward, optim_step, sample
      - load_checkpoint, save_checkpoint, load_sampler_checkpoint, save_sampler_checkpoint
 
-  2. NativeBackend (native.py)
+  2. JaxBackend (jax.py)
      - Implements all abstract methods in Jax, fully supporting MultiLoRA for training and sampling
      - Uses jax.value_and_grad for gradient computation
      - Uses 2D mesh (fsdp, tp)
