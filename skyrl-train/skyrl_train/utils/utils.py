@@ -156,8 +156,8 @@ def validate_batch_sizes(cfg: DictConfig):
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
-    assert cfg.trainer.train_batch_size >= lcm_dp_size, (
-        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
+    assert cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt >= lcm_dp_size, (
+        f"train_batch_size * n_samples_per_prompt ({cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
         f"lcm_dp_size={lcm_dp_size}"

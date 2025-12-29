@@ -347,13 +347,41 @@ class RayPPOTrainer:
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
-        """Remove tail data to have even shards"""
+        """Remove tail data to have even shards in terms of *effective* samples.
+
+        Each prompt produces `n_samples_per_prompt` samples. For data-parallel
+        training we care that the total number of samples is nicely splittable
+        across the (combined) data-parallel size of all enabled models.
+
+        Concretely, we compute the LCM of the DP sizes of policy / critic / ref
+        and only keep a prefix of prompts such that:
+
+            kept_prompts * n_samples_per_prompt % lcm_dp_size == 0
+
+        This allows configurations like
+        train_batch_size == 1 with n_samples_per_prompt == dp_size without
+        dropping the entire batch.
+        """
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
         if self.ref_model is not None:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-        return entries[: (len(entries) // dp_size) * dp_size]
+
+        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
+
+        # We want the largest m <= len(entries) such that:
+        #   (m * n_samples_per_prompt) % dp_size == 0
+        #
+        # Let g = gcd(dp_size, n_samples_per_prompt). Then this is equivalent
+        # to requiring m to be a multiple of (dp_size / g).
+        stride = dp_size // math.gcd(dp_size, n_samples_per_prompt)
+        if stride <= 1:
+            # Every prompt count is valid, keep all entries.
+            return entries
+
+        kept_prompts = (len(entries) // stride) * stride
+        return entries[:kept_prompts]
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker):
         """
