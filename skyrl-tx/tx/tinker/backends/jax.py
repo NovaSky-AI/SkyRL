@@ -41,6 +41,39 @@ from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
 
 
+def initialize_distributed(config: "JaxBackendConfig") -> None:
+    """Initialize JAX distributed for multi-node training if configured.
+
+    This must be called before creating the device mesh. If coordinator_address is None,
+    the backend runs in single-node mode.
+
+    Args:
+        config: JaxBackendConfig with multi-node settings
+
+    Raises:
+        RuntimeError: If JAX distributed is already initialized
+    """
+    if jax.process_count() > 1:
+        raise RuntimeError(
+            f"JAX distributed already initialized with {jax.process_count()} processes. "
+            "Cannot reinitialize."
+        )
+
+    if config.coordinator_address is None:
+        logger.info("Running in single-node mode")
+        return
+
+    jax.distributed.initialize(
+        coordinator_address=config.coordinator_address,
+        num_processes=config.num_processes,
+        process_id=config.process_id,
+    )
+    logger.info(
+        f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
+        f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
+    )
+
+
 class JaxBackendConfig(BaseModel, extra="forbid"):
     """Configuration specific to the JAX backend."""
 
@@ -66,6 +99,19 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     gradient_checkpointing: bool = Field(
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
+    )
+    # Multi-node configuration
+    coordinator_address: str | None = Field(
+        default=None,
+        description="JAX coordinator address (host:port) for multi-node training. If not set, runs in single-node mode.",
+    )
+    num_processes: int | None = Field(
+        default=None,
+        description="Total number of processes in the multi-node cluster",
+    )
+    process_id: int | None = Field(
+        default=None,
+        description="This process's ID (0-indexed) in the multi-node cluster",
     )
 
 
@@ -125,6 +171,9 @@ class JaxBackend(AbstractBackend):
         self.base_model = base_model
         self.config = config
         self.metrics = types.EngineMetrics()
+
+        # Initialize JAX distributed for multi-node training (must happen before mesh creation)
+        initialize_distributed(config)
 
         # Initialize the shared base model with LoRA config
         checkpoint_path = resolve_model_path(base_model)
