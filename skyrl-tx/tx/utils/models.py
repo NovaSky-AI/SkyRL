@@ -145,7 +145,18 @@ def save_safetensors(
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
         tensors[key] = param if "embed_tokens" in path else param.T
-    safetensors.numpy.save_file(tensors, filename)
+
+    # In multi-host mode, gather all shards and only save from rank 0
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+
+        tensors = {k: multihost_utils.process_allgather(v) for k, v in tensors.items()}
+        if jax.process_index() == 0:
+            # Convert to numpy arrays for saving
+            tensors = {k: np.asarray(v) for k, v in tensors.items()}
+            safetensors.numpy.save_file(tensors, filename)
+    else:
+        safetensors.numpy.save_file(tensors, filename)
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
