@@ -121,23 +121,31 @@ class NaiveCodeGenerator_dspy(dspy.Module):
     
     def collect_trace(self, kwargs, pred):
 
-        trace = self.adapter.format_finetune_data(
+        inp_messages = self.adapter.format(
+                                signature=self.original_sig,
+                                inputs=kwargs,
+                                demos=[] # TODO: Add support for demos
+                            )
+
+        completion = self.adapter.format_finetune_data(
                                 signature=self.original_sig,
                                 inputs=kwargs,
                                 outputs=pred,
                                 demos=[] # TODO: Add support for demos
                             )['messages']
-                            
 
-        trace = {
-                'messages': inp_messages,
-                'completion': {
-                    "role": "assistant",
-                    "content": all_messages[-1]["content"],
-                },
-                'reward': float(total),
-            }
-    # TODO; add trace collection
+
+        chat_history = [
+            {
+                "role": "user",
+                "content": inp_messages
+            },
+            {
+                "role": "assistant",
+                "content": all_messages[-1]["content"],
+            },
+            ]
+        return chat_history
 
 
 class CodeGeneratorWithRanker_Original(dspy.Module):
