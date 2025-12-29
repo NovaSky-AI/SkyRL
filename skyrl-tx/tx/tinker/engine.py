@@ -25,6 +25,7 @@ from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, Checkpoin
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.loss_fns import LOSS_TYPES, LOSS_FUNCTIONS
+from tx.tinker.external_inference import ExternalInferenceClient
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.utils.models import (
     get_dtype,
@@ -181,6 +182,15 @@ class TinkerEngine:
         logger.info(
             f"Initialized base model {self.config.base_model} with max_lora_adapters={self.config.max_lora_adapters}, max_lora_rank={self.config.max_lora_rank}"
         )
+
+        # Initialize external inference client if configured
+        self.external_inference_client = None
+        if self.config.external_inference_url:
+            self.external_inference_client = ExternalInferenceClient(
+                base_url=self.config.external_inference_url,
+                api_key=self.config.external_inference_api_key,
+            )
+            logger.info(f"Initialized external inference client: {self.config.external_inference_url}")
 
         self._create_loss_and_grad_fn()
 
@@ -784,6 +794,82 @@ class TinkerEngine:
 
         if not valid_requests:
             return results
+
+        # Use external inference if configured
+        if self.external_inference_client:
+            return self._process_sample_batch_external(valid_requests, results)
+        else:
+            return self._process_sample_batch_local(valid_requests, results)
+
+    def _process_sample_batch_external(
+        self,
+        valid_requests: dict[str, tuple[str, types.SampleInput]],
+        results: dict[str, types.SampleOutput | types.ErrorResponse],
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Process sample requests using external inference engine."""
+
+        # Prepare prompts and parameters for external engine
+        all_prompts = []
+        all_sampling_params = []
+        request_batch_slices = []
+
+        for request_id, (model_id, request_data) in valid_requests.items():
+            request_start = len(all_prompts)
+
+            # Expand for num_samples
+            for _ in range(request_data.num_samples):
+                prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+                all_prompts.append(prompt_tokens)
+                all_sampling_params.append(request_data.sampling_params)
+
+            request_batch_slices.append((request_id, model_id, request_start, len(all_prompts), request_data))
+
+        # Determine model and LoRA path
+        # For now, use base model (LoRA support via external engine needs adapter upload)
+        model_name = self.config.base_model
+        lora_path = None
+
+        # TODO: Handle LoRA adapters by uploading to external_inference_lora_base
+        # and passing the path to the external engine
+
+        # Call external inference engine
+        try:
+            all_sequences = self.external_inference_client.generate_batch(
+                prompts=all_prompts,
+                sampling_params=all_sampling_params,
+                model=model_name,
+                lora_path=lora_path,
+            )
+        except Exception as e:
+            logger.error(f"External inference failed: {e}")
+            # Return errors for all requests
+            for request_id in valid_requests:
+                results[request_id] = types.ErrorResponse(
+                    error=f"External inference failed: {str(e)}",
+                    status="failed",
+                )
+            return results
+
+        # Group results by request
+        for request_id, _, start_idx, end_idx, request_data in request_batch_slices:
+            sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
+
+            # External engines don't typically return prompt logprobs in this flow
+            prompt_logprobs = None
+
+            results[request_id] = types.SampleOutput(
+                sequences=sequences,
+                prompt_logprobs=prompt_logprobs,
+            )
+
+        return results
+
+    def _process_sample_batch_local(
+        self,
+        valid_requests: dict[str, tuple[str, types.SampleInput]],
+        results: dict[str, types.SampleOutput | types.ErrorResponse],
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Process sample requests using local JAX model."""
 
         # Computes prompt_logprobs for the whole batch if any request asked for them
         needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in valid_requests.values())

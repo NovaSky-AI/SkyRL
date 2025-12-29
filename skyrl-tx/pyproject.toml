@@ -42,6 +42,7 @@ tinker = [
     "aiosqlite",
     "asyncpg",
     "psycopg2-binary",
+    "requests>=2.31.0",
 ]
 
 aws = [
