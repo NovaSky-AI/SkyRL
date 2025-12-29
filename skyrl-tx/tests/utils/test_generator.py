@@ -2,7 +2,7 @@ from flax import nnx
 import jax.numpy as jnp
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
-from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache
+from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch
 
 
 class DummyModel(GeneratorMixin, nnx.Module):
@@ -124,3 +124,35 @@ def test_prompt_logprobs():
         assert (
             len(result_batch.prompt_logprobs[i]) == expected_length
         ), f"Sequence {i}: expected prompt_logprobs length {expected_length}"
+
+
+def test_top_k_filtering():
+    """Test apply_top_k_batch function directly."""
+    # Create test logits [batch_size, vocab_size]
+    logits = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0]])
+
+    # Test k=2: should keep only top 2 values (4.0 and 5.0)
+    filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=2)
+    # Values below threshold should be -inf, and top 2 values should be unchanged
+    expected = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0]])
+    assert jnp.array_equal(filtered, expected)
+
+    # Test max_k=0: should not filter anything regardless of k_values
+    filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=0)
+    assert jnp.array_equal(filtered, logits)
+
+    # Test k<=0 with max_k>0: should not filter that example
+    filtered = apply_top_k_batch(logits, k_values=jnp.array([-1]), max_k=5)
+    assert jnp.array_equal(filtered, logits)
+
+    # Test per-example k values in batch (second row has ties: two 3.0s)
+    logits_batch = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0], [5.0, 4.0, 3.0, 3.0, 1.0]])
+    filtered = apply_top_k_batch(logits_batch, k_values=jnp.array([2, 3]), max_k=3)
+    # Second row keeps exactly 3 values despite ties (5.0, 4.0, and first 3.0)
+    expected = jnp.array(
+        [
+            [-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0],
+            [5.0, 4.0, 3.0, -jnp.inf, -jnp.inf],
+        ]
+    )
+    assert jnp.array_equal(filtered, expected)
