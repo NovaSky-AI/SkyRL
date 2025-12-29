@@ -362,20 +362,20 @@ class RayPPOTrainer:
         train_batch_size == 1 with n_samples_per_prompt == dp_size without
         dropping the entire batch.
         """
-        dp_size = self.policy_model.actor_infos[0].rank.dp_size
+        lcm_dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
-            dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
+            lcm_dp_size = math.lcm(lcm_dp_size, self.critic_model.actor_infos[0].rank.dp_size)
         if self.ref_model is not None:
-            dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
+            lcm_dp_size = math.lcm(lcm_dp_size, self.ref_model.actor_infos[0].rank.dp_size)
 
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
         # We want the largest m <= len(entries) such that:
-        #   (m * n_samples_per_prompt) % dp_size == 0
+        #   (m * n_samples_per_prompt) % lcm_dp_size == 0
         #
-        # Let g = gcd(dp_size, n_samples_per_prompt). Then this is equivalent
-        # to requiring m to be a multiple of (dp_size / g).
-        stride = dp_size // math.gcd(dp_size, n_samples_per_prompt)
+        # Let g = gcd(lcm_dp_size, n_samples_per_prompt). Then this is equivalent
+        # to requiring m to be a multiple of (lcm_dp_size / g).
+        stride = lcm_dp_size // math.gcd(lcm_dp_size, n_samples_per_prompt)
         if stride <= 1:
             # Every prompt count is valid, keep all entries.
             return entries
