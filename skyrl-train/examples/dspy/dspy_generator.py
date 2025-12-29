@@ -9,6 +9,9 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
+from .trial import TrialConfig
+from .lcb.utils import reward_fn
+from .lcb.program import NaiveCodeGenerator_dspy
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -28,14 +31,12 @@ class DSPyGenerator(GeneratorInterface):
     def __init__(
         self,
         generator_cfg: DictConfig,
-        terminal_bench_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
     ):
         """
         Args:
             generator_cfg: DictConfig object containing the generator configuration
-            terminal_bench_cfg: DictConfig object containing the terminal bench configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
         """
@@ -43,10 +44,6 @@ class DSPyGenerator(GeneratorInterface):
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
-
-        # TerminalBench config. Parse here to ensure everything is passed in.
-        self.trials_dir = terminal_bench_cfg.trials_dir
-        self.agent_name = terminal_bench_cfg.agent_name
 
 
         # Read custom chat template
@@ -60,6 +57,7 @@ class DSPyGenerator(GeneratorInterface):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
+        import pdb; pdb.set_trace()
         for i in range(len(input_batch["prompts"])):
             tasks.append(
                 self.foward(
@@ -130,7 +128,7 @@ class DSPyGenerator(GeneratorInterface):
 
         
         # TODO: make each DSPy trial configurable.
-        trial_config = None
+        trial_config = TrialConfig(dspy_program=NaiveCodeGenerator_dspy, example=prompt, reward_fn=)
 
         trial = Trial(trial_config)
 

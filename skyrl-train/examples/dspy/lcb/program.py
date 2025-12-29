@@ -118,6 +118,26 @@ class NaiveCodeGenerator_dspy(dspy.Module):
 
         pred = prog(prompt=prompt)
         return pred
+    
+    def collect_trace(self, kwargs, pred):
+
+        trace = self.adapter.format_finetune_data(
+                                signature=self.original_sig,
+                                inputs=kwargs,
+                                outputs=pred,
+                                demos=[] # TODO: Add support for demos
+                            )['messages']
+                            
+
+        trace = {
+                'messages': inp_messages,
+                'completion': {
+                    "role": "assistant",
+                    "content": all_messages[-1]["content"],
+                },
+                'reward': float(total),
+            }
+    # TODO; add trace collection
 
 
 class CodeGeneratorWithRanker_Original(dspy.Module):

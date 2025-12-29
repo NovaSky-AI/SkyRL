@@ -11,22 +11,23 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen3-8B"
+MODEL_NAME="Qwen/Qwen2.5-3B-Instruct"
 
 
 FLASH_ATTN=true
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=1
 
-DATA_DIR="$HOME/data/lcb"
-train_data="['${DATA_DIR}/deepcoder_train_short.json']"
-val_data="['${DATA_DIR}/test_livecodebench_short.json']"
+train_data="$HOME/data/lcb/deepcoder_train_short.json"
+# train_data="['${DATA_DIR}/deepcoder_train_short.json']"
+# val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra dspy -m examples.dspy.entrypoints.main_dspy \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data=$train_data \
   data.val_data=$train_data \
+  +data.max_num_examples=400 \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -51,7 +52,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
   trainer.ckpt_interval=100000 \
-  trainer.flash_attn=false \
+  trainer.flash_attn=$FLASH_ATTN \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \

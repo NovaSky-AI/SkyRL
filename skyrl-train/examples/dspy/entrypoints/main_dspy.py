@@ -20,7 +20,6 @@ class DSPyExp(BasePPOExp):
       
         return DSPyGenerator(
             generator_cfg=cfg.generator,
-            terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )

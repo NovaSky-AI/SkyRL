@@ -65,7 +65,7 @@ class Trial:
 
             # 4) Collect trace
             # We need to put the dspy 
-            trace = self.program_collect_trace()
+            trace = self.program.collect_trace(kwargs, pred)
             return results
         except Exception as e:
             results.exception_info = f"{type(e).__name__}: {e}"
