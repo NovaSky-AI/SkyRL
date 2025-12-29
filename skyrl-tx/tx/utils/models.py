@@ -150,7 +150,7 @@ def save_safetensors(
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
 
-        tensors = {k: multihost_utils.process_allgather(v) for k, v in tensors.items()}
+        tensors = {k: multihost_utils.process_allgather(v, tiled=True) for k, v in tensors.items()}
         if jax.process_index() == 0:
             # Convert to numpy arrays for saving
             tensors = {k: np.asarray(v) for k, v in tensors.items()}
