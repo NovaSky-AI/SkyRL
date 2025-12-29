@@ -3,10 +3,12 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
-from skyrl_train.weight_sync import WeightLoader
-from typing import List, Optional, Any, Dict
+from skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest, BroadcastWeightUpdateRequest
+from typing import List, Optional, Any, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 import json
 from transformers import PreTrainedTokenizerBase
 
@@ -28,79 +30,87 @@ class RemoteWeightLoader(WeightLoader):
         self._url = url
         self._engine_backend = engine_backend
 
-    async def init_communicator(
-        self,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str,
-        override_existing: bool = False,
-    ) -> Dict[str, Any]:
+    async def init_communicator(self, init_info: "WeightSyncInitInfo") -> Dict[str, Any]:
         """Initialize the distributed process group for syncing weights.
 
         Args:
-            master_address: Master address for the process group.
-            master_port: Master port for the process group.
-            rank_offset: Rank offset for this process.
-            world_size: Total world size.
-            group_name: Name of the process group.
-            backend: Backend to use (e.g., "nccl", "gloo").
-            override_existing: Whether to override an existing group.
+            init_info: WeightSyncInitInfo from the sender.
 
         Returns:
             Response from the remote server.
-        """
-        path = "/init_weights_update_group" if self._engine_backend == "sglang" else "/init_weight_update_communicator"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self._url}{path}",
-                json={
-                    "master_address": master_address,
-                    "master_port": master_port,
-                    "rank_offset": rank_offset,
-                    "world_size": world_size,
-                    "group_name": group_name,
-                    "backend": backend,
-                    "override_existing": override_existing,
-                },
-            ) as response:
-                return await response.json()
 
-    async def load_weights(self, request: NamedWeightsUpdateRequest) -> Dict[str, Any]:
+        Raises:
+            ValueError: If init_info strategy is not BroadcastTransferStrategy (remote only supports broadcast).
+        """
+        from skyrl_train.weight_sync import BroadcastTransferStrategy
+
+        if init_info.strategy_type() is not BroadcastTransferStrategy:
+            raise ValueError(
+                f"Remote inference engines only support BroadcastTransferStrategy, got: {init_info.strategy_type().__name__}"
+            )
+
+        async with aiohttp.ClientSession() as session:
+            if self._engine_backend == "sglang":
+                # SGLang native API - only send fields it expects
+                async with session.post(
+                    f"{self._url}/init_weights_update_group",
+                    json={
+                        "master_address": init_info.master_addr,
+                        "master_port": init_info.master_port,
+                        "rank_offset": init_info.rank_offset,
+                        "world_size": init_info.world_size,
+                        "group_name": init_info.group_name,
+                        "backend": init_info.backend,
+                    },
+                ) as response:
+                    return await response.json()
+            elif self._engine_backend == "vllm":
+                # vLLM - our custom API, pass entire init_info
+                from dataclasses import asdict
+
+                async with session.post(
+                    f"{self._url}/init_weight_update_communicator",
+                    json=asdict(init_info),
+                ) as response:
+                    return await response.json()
+            else:
+                raise ValueError(f"Invalid engine backend: {self._engine_backend}")
+
+    async def load_weights(self, request: WeightUpdateRequest) -> Dict[str, Any]:
         """Load weights via HTTP to the remote inference server.
 
         Remote engines only support broadcast weight updates (no IPC).
         Each request should contain a single weight to update.
 
         Args:
-            request: Weight update request containing names, dtypes, shapes.
+            request: Weight update request.
 
         Returns:
             Response from the remote server.
         """
-        if self._engine_backend == "vllm":
-            weight_update_method = "update_weights"
-        elif self._engine_backend == "sglang":
-            weight_update_method = "update_weights_from_distributed"
-        else:
-            raise ValueError(f"Invalid engine backend: {self._engine_backend}")
-
         async with aiohttp.ClientSession() as session:
-            name = request["names"][0]
-            dtype = request["dtypes"][0]
-            shape = request["shapes"][0]
+            if self._engine_backend == "sglang":
+                # SGLang native API expects singular name, dtype, shape
+                resp = await session.post(
+                    f"{self._url}/update_weights_from_distributed",
+                    json={
+                        "name": request.names[0],
+                        "dtype": request.dtypes[0],
+                        "shape": request.shapes[0],
+                    },
+                )
+                return await resp.json()
+            elif self._engine_backend == "vllm":
+                # vLLM - our custom API, pass entire request
+                from dataclasses import asdict
 
-            resp = await session.post(
-                f"{self._url}/{weight_update_method}",
-                json={
-                    "name": name,
-                    "dtype": dtype,
-                    "shape": shape,
-                },
-            )
-            return await resp.json()
+                resp = await session.post(
+                    f"{self._url}/update_weights",
+                    json=asdict(request),
+                )
+                return await resp.json()
+            else:
+                raise ValueError(f"Invalid engine backend: {self._engine_backend}")
 
     async def destroy_group(self) -> Dict[str, Any]:
         """Destroy the weights update group.
@@ -264,26 +274,25 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             resp = await session.post(f"{self.url}/sleep", json={"level": kwargs.get("level", 1)})
             return await resp.json()
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
-        """Initialize the distributed process group for syncing weights."""
-        return await self._weight_loader.init_communicator(
-            master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
-        )
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        """Initialize the distributed process group for syncing weights.
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
 
-        assert (
-            len(request["names"]) == 1
-        ), f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
+        Note: Remote engines only support broadcast strategy.
+        """
+        return await self._weight_loader.init_communicator(init_info)
 
-        if request.get("extras") and "ipc_handles" in request["extras"][0]:
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        if not isinstance(request, BroadcastWeightUpdateRequest):
             raise ValueError(
                 "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
             )
+
+        assert (
+            len(request) == 1
+        ), f"Remote inference engines support only requests with a single named weight at a time, got request with {len(request)} entries"
 
         return await self._weight_loader.load_weights(request)
 

@@ -1,13 +1,14 @@
+from __future__ import annotations
+
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from transformers import PreTrainedTokenizerBase
 import asyncio
-from typing import List, Any, Optional, Dict, Union
+from typing import List, Any, Optional, Dict, Union, TYPE_CHECKING
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
     hash_with_sha256,
@@ -19,6 +20,10 @@ import threading
 from loguru import logger
 import random
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync import WeightUpdateRequest
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 
@@ -320,12 +325,15 @@ class InferenceEngineClient(InferenceEngineInterface):
             )
 
             # 1.3. Parse partial response and in-place update accumulators.
-            finish_reason, stop_reason, response_role, aborted_without_generating = (
-                _parse_partial_response_and_inplace_update_accum(
-                    partial_response=partial_response,
-                    accum=accum,
-                    response_role=response_role,
-                )
+            (
+                finish_reason,
+                stop_reason,
+                response_role,
+                aborted_without_generating,
+            ) = _parse_partial_response_and_inplace_update_accum(
+                partial_response=partial_response,
+                accum=accum,
+                response_role=response_role,
             )
 
             # 1.4. Aborted without generating tokens, so partial_response is useless.
@@ -469,35 +477,23 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("sleep", *args, **kwargs)
 
-    async def init_weight_update_communicator(
-        self,
-        master_addr,
-        master_port,
-        rank_offset,
-        world_size,
-        group_name,
-        backend,
-        override_existing: bool = False,
-    ):
-        tasks = []
-        rank_offset_count = rank_offset
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        """Initialize weight update communicator on all engines.
 
-        for engine in self.engines:
-            tasks.append(
-                engine.init_weight_update_communicator(
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    rank_offset=rank_offset_count,
-                    world_size=world_size,
-                    group_name=group_name,
-                    backend=backend,
-                    override_existing=override_existing,
-                )
-            )
-            rank_offset_count += engine.tp_size() * engine.pp_size()
+        Args:
+            init_info: WeightSyncInitInfo from the sender.
+
+        Note:
+            Per-engine adjustments (e.g., rank_offset for broadcast) are handled
+            by init_info.for_engine().
+        """
+        tasks = []
+        for i, engine in enumerate(self.engines):
+            engine_init_info = init_info.for_engine(i, engine.tp_size(), engine.pp_size())
+            tasks.append(engine.init_weight_update_communicator(engine_init_info))
         await asyncio.gather(*tasks)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+    async def update_named_weights(self, request: WeightUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
     async def reset_prefix_cache(self):

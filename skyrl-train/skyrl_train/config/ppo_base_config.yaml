@@ -27,12 +27,15 @@ trainer:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       lora:
-          rank: 0
-          alpha: 16
-          dropout: 0
-          lora_sync_path: "/tmp/skyrl_lora_sync"
-          target_modules: "all-linear"
-          exclude_modules: null
+        rank: 0
+        alpha: 16
+        dropout: 0
+        lora_sync_path: "/tmp/skyrl_lora_sync"
+        target_modules: "all-linear"
+        exclude_modules: null
+        # see https://huggingface.co/docs/peft/v0.18.0/en/package_reference/lora#peft.LoraConfig.init_lora_weights for supported initialization methods for FSDP
+        # for megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported
+        init_method: "kaiming"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6

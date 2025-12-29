@@ -285,8 +285,6 @@ class SamplingParams(BaseModel):
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
 
-        if self.top_k != -1:
-            raise HTTPException(status_code=501, detail="'top_k' parameter is not yet implemented")
         if self.top_p != 1.0:
             raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
 
@@ -313,6 +311,7 @@ class SamplingParams(BaseModel):
             seed=seed,
             stop_tokens=stop_tokens,
             stop_strings=stop_strings,
+            top_k=self.top_k,
         )
 
 
@@ -582,7 +581,8 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
         is_lora=True,
         corrupted=False,
         lora_rank=lora_config.rank,
-        last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+        # TODO: Once we track modified_at timestamps, update this
+        last_request_time=model.created_at,
         last_checkpoint=None,
         last_sampler_checkpoint=None,
         user_metadata=None,

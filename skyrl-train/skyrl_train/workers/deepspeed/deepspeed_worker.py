@@ -10,7 +10,6 @@ from transformers.trainer import get_scheduler
 
 from skyrl_train.model_wrapper import get_llm_for_sequence_regression, HFModelWrapper
 from skyrl_train.distributed.deepspeed_strategy import DeepspeedStrategy
-from skyrl_train.utils import get_physical_gpu_id
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 from skyrl_train.utils.utils import str_to_torch_dtype
 from skyrl_train.workers.worker import (
@@ -159,19 +158,19 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
         )
 
         # Initialize weight extractor
-        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
+        from skyrl_train.weight_sync import CudaIpcTransferStrategy
+
+        group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
         self.weight_extractor = DeepSpeedWeightExtractor(
             model=self.model.model.module,
             zero_stage=self.zero_stage,
-            group_by_module=self.use_cuda_ipc,
+            group_by_module=group_by_module,
             batch_size_threshold_gb=(
-                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if self.use_cuda_ipc else 0.0
+                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
             ),
         )
-
-        self._model_update_group_name = None
 
     def process_sequences(self, sequences, input_len, eos_token_id, pad_token_id):
         return self.model.process_sequences(sequences, input_len, eos_token_id, pad_token_id)
@@ -199,72 +198,8 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
 
         torch.cuda.empty_cache()
 
-        if not self.use_cuda_ipc:
-            # Broadcast path: one chunk per parameter
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # Each chunk contains one parameter
-                assert len(chunk) == 1
-                name = chunk.names[0]
-                shape = chunk.shapes[0]
-                tensor = chunk.tensors[0]
-
-                if torch.distributed.get_rank() == 0:
-                    update_weight_task = asyncio.create_task(
-                        inference_engine_client.update_named_weights(
-                            {
-                                "names": [name],
-                                "dtypes": [self.cfg.generator.model_dtype],
-                                "shapes": [shape],
-                            }
-                        )
-                    )
-
-                # Broadcast tensor
-                def broadcast_tensor(tensor):
-                    if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
-
-                await asyncio.to_thread(broadcast_tensor, tensor)
-                if torch.distributed.get_rank() == 0:
-                    await update_weight_task
-            torch.distributed.barrier()
-        else:
-            # CUDA IPC path: batched chunks (batching handled by extractor)
-            from torch.multiprocessing.reductions import reduce_tensor
-
-            # Iterate over batched chunks
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                weights_update_request = {"names": [], "dtypes": [], "shapes": [], "extras": [], "packed": False}
-
-                # Process all parameters in this batch
-                # TODO(haochen): Pack tensors into contiguous buffer before creating IPC handle
-                # (like Megatron does) to reduce number of IPC handles and file descriptors
-                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
-                    # Create IPC handle for tensor
-                    ipc_handle = reduce_tensor(tensor)
-                    ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                    ipc_handle_list = [None] * torch.distributed.get_world_size()
-                    torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
-
-                    if torch.distributed.get_rank() == 0:
-                        ipc_handles = {}
-                        for d in ipc_handle_list:
-                            ipc_handles.update(d)
-
-                        weights_update_request["names"].append(name)
-                        weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                        weights_update_request["shapes"].append(shape)
-                        weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-
-                    torch.distributed.barrier()
-                    torch.cuda.synchronize()
-
-                # Send batch
-                if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.update_named_weights(weights_update_request)
-                    torch.cuda.ipc_collect()
-                torch.distributed.barrier()
-                torch.cuda.synchronize()
+        # Extract and send weights using the sender created at init time
+        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
 
         if cache_reset_task is not None:
             await cache_reset_task
