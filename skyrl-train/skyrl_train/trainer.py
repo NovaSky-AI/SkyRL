@@ -231,13 +231,6 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
-                        # since postprocess_generator_output might modify loss masks, check here
-                        if np.concatenate(generator_output["loss_masks"]).sum() == 0:
-                            logger.warning("All outputs are loss masked, skipping this batch and resuming sampling")
-                            continue
-
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
