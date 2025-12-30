@@ -352,15 +352,6 @@ class RayPPOTrainer:
         Each prompt produces `n_samples_per_prompt` samples. For data-parallel
         training we care that the total number of samples is nicely splittable
         across the (combined) data-parallel size of all enabled models.
-
-        Concretely, we compute the LCM of the DP sizes of policy / critic / ref
-        and only keep a prefix of prompts such that:
-
-            kept_prompts * n_samples_per_prompt % lcm_dp_size == 0
-
-        This allows configurations like
-        train_batch_size == 1 with n_samples_per_prompt == dp_size without
-        dropping the entire batch.
         """
         lcm_dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
