@@ -17,13 +17,8 @@ Usage:
         ...
     }'
 
-    # Workers (process 1+) - run only the worker loop:
-    uv run -m tx.tinker.backends.jax --base-model Qwen/Qwen3-8B --backend-config '{
-        "coordinator_address": "localhost:7777",
-        "num_processes": 2,
-        "process_id": 1,
-        ...
-    }'
+    # Workers (process 1+) - run only the worker loop (receives config from coordinator):
+    uv run -m tx.tinker.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
 import pickle
@@ -198,9 +193,6 @@ class JaxBackendImpl(AbstractBackend):
         self.base_model = base_model
         self.config = config
         self.metrics = types.EngineMetrics()
-
-        # Initialize JAX distributed for multi-node training (must happen before mesh creation)
-        initialize_distributed(config)
 
         # Initialize the shared base model with LoRA config
         checkpoint_path = resolve_model_path(base_model)
@@ -987,7 +979,18 @@ class JaxBackend(AbstractBackend):
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
-        """Initialize the distributed backend (coordinator only)."""
+        """Initialize the distributed backend.
+
+        On coordinator: initializes distributed, broadcasts config to workers, creates backend.
+        Workers receive the config via broadcast and initialize their own backend.
+        """
+        # Initialize distributed first (coordinator side)
+        initialize_distributed(config)
+
+        # In multi-host mode, broadcast config to workers so they can initialize
+        if jax.process_count() > 1:
+            _broadcast_object((base_model, config))
+
         self._backend = JaxBackendImpl(base_model, config)
 
     @property
@@ -1058,16 +1061,36 @@ class JaxBackend(AbstractBackend):
         return self._backend.has_model(model_id)
 
 
-def run_worker(base_model: str, config: JaxBackendConfig):
+def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     """Entry point for worker processes.
 
-    Creates a JaxBackendImpl and runs the worker loop. This should be called
-    on non-coordinator processes instead of running the full engine.
+    Initializes JAX distributed, receives config from coordinator, then runs
+    the worker loop. This should be called on non-coordinator processes.
 
     Args:
-        base_model: The base model name
-        config: JaxBackend configuration
+        coordinator_address: JAX coordinator address (host:port)
+        num_processes: Total number of processes in the cluster
+        process_id: This process's ID (must be > 0 for workers)
     """
+    if process_id == 0:
+        raise ValueError("Worker process_id must be > 0 (process 0 is the coordinator)")
+
+    # Initialize JAX distributed first (before any other JAX operations)
+    jax.distributed.initialize(
+        coordinator_address=coordinator_address,
+        num_processes=num_processes,
+        process_id=process_id,
+    )
+    logger.info(
+        f"Worker {jax.process_index()}/{jax.process_count()} initialized, "
+        f"waiting for config from coordinator..."
+    )
+
+    # Receive base_model and config from coordinator
+    base_model, config = _broadcast_object(None)
+    logger.info(f"Worker received config: base_model={base_model}")
+
+    # Now create the backend (skip distributed init since we already did it)
     backend = JaxBackendImpl(base_model, config)
 
     logger.info(f"Worker {jax.process_index()} entering command loop")
@@ -1111,27 +1134,30 @@ def run_worker(base_model: str, config: JaxBackendConfig):
 
 
 def main():
-    """Entry point for running as a worker process.
-
-    Usage:
-        uv run -m tx.tinker.backends.jax --base-model Qwen/Qwen3-8B --backend-config '{...}'
-    """
+    """Entry point for running as a worker process."""
     import argparse
-    import json
 
     parser = argparse.ArgumentParser(description="SkyRL tx tinker worker process")
-    parser.add_argument("--base-model", required=True, help="Base model name")
     parser.add_argument(
-        "--backend-config",
-        type=json.loads,
-        default={},
-        help="Backend configuration as JSON string",
+        "--coordinator-address",
+        required=True,
+        help="JAX coordinator address (host:port)",
+    )
+    parser.add_argument(
+        "--num-processes",
+        type=int,
+        required=True,
+        help="Total number of processes in the cluster",
+    )
+    parser.add_argument(
+        "--process-id",
+        type=int,
+        required=True,
+        help="This process's ID (must be > 0 for workers)",
     )
 
     args = parser.parse_args()
-    config = JaxBackendConfig(**args.backend_config)
-
-    run_worker(args.base_model, config)
+    run_worker(args.coordinator_address, args.num_processes, args.process_id)
 
 
 if __name__ == "__main__":
