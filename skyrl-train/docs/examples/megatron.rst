@@ -121,6 +121,9 @@ for advanced users to fully take advantage of all of Megatron-Core's feature fla
     transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
       # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
       ...
+    lora_config:
+      # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+      lora_type: "lora"
     # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
     # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
     empty_cuda_cache: true

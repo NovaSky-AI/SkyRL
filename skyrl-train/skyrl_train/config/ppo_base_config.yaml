@@ -33,8 +33,8 @@ trainer:
         lora_sync_path: "/tmp/skyrl_lora_sync"
         target_modules: "all-linear"
         exclude_modules: null
-        # see https://huggingface.co/docs/peft/v0.18.0/en/package_reference/lora#peft.LoraConfig.init_lora_weights for supported initialization methods for FSDP
-        # for megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported
+        # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights
+        # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
         init_method: "kaiming"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
@@ -72,6 +72,7 @@ trainer:
         dropout: 0
         target_modules: "all-linear"
         exclude_modules: null
+        init_method: "kaiming"
     deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
