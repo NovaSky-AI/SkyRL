@@ -1137,7 +1137,8 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         elif isinstance(cmd, NoopCommand):
             continue
         else:
-            getattr(backend, cmd.type)(**cmd.model_dump(exclude={"type"}))
+            kwargs = {k: getattr(cmd, k) for k in cmd.model_fields if k != "type"}
+            getattr(backend, cmd.type)(**kwargs)
 
     logger.info(f"Worker {jax.process_index()} exiting command loop")
 
