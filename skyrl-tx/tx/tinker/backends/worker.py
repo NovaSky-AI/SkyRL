@@ -1,19 +1,29 @@
 """Multi-host distributed training backend wrapper.
 
-In multi-host mode, process 0 (coordinator) runs the engine loop that polls the database
-and dispatches work. All other processes run a worker loop that waits for commands
-broadcast from the coordinator and call the same backend methods.
+In multi-host mode, process 0 (coordinator) runs the engine with DistributedJaxBackend,
+which broadcasts commands to workers. Workers run separately using the `run_worker()`
+function or by running this module directly.
 
 This pattern ensures all processes enter collective operations (broadcast/gather) in
 the same order, avoiding deadlocks that would occur if each process independently
 polled the database.
 
 Usage:
-    # Instead of using JaxBackend directly, use DistributedJaxBackend:
-    backend = DistributedJaxBackend(base_model, config)
+    # Coordinator (process 0) - runs the full engine:
+    uv run -m tx.tinker.engine --base-model Qwen/Qwen3-8B --backend-config '{
+        "coordinator_address": "localhost:7777",
+        "num_processes": 2,
+        "process_id": 0,
+        ...
+    }'
 
-    # On coordinator (process 0): use normally, it broadcasts to workers
-    # On workers: automatically enters worker loop and never returns
+    # Workers (process 1+) - run only the worker loop:
+    uv run -m tx.tinker.backends.worker --base-model Qwen/Qwen3-8B --backend-config '{
+        "coordinator_address": "localhost:7777",
+        "num_processes": 2,
+        "process_id": 1,
+        ...
+    }'
 """
 
 import pickle
@@ -80,27 +90,17 @@ def _broadcast_object(obj) -> object:
 class DistributedJaxBackend(AbstractBackend):
     """Distributed wrapper around JaxBackend for multi-host coordination.
 
-    This backend wraps JaxBackend to handle multi-host coordination:
-    - On coordinator (process 0): broadcasts commands before calling JaxBackend methods
-    - On workers (process != 0): enters worker loop on init and never returns
+    This backend wraps JaxBackend to handle multi-host coordination.
+    On the coordinator (process 0), it broadcasts commands before calling JaxBackend methods.
+    Workers should be started separately using `run_worker()` or `python -m tx.tinker.backends.worker`.
 
     The engine only runs on process 0 and uses this backend like a normal JaxBackend.
     Workers automatically participate in collective operations when commands are broadcast.
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
-        """Initialize the multi-host backend.
-
-        On coordinator: creates the underlying JaxBackend.
-        On workers: creates JaxBackend then enters worker loop (blocking).
-        """
+        """Initialize the distributed backend (coordinator only)."""
         self._backend = JaxBackend(base_model, config)
-
-        # Workers enter the command loop and never return
-        if jax.process_count() > 1 and jax.process_index() != 0:
-            self._worker_loop()
-            # Worker loop only exits on shutdown - raise to prevent further execution
-            raise SystemExit(0)
 
     @property
     def config(self) -> JaxBackendConfig:
@@ -169,47 +169,82 @@ class DistributedJaxBackend(AbstractBackend):
         """Check if model is registered - local check only, no broadcast needed."""
         return self._backend.has_model(model_id)
 
-    def _worker_loop(self):
-        """Worker loop - wait for commands from coordinator and execute them.
 
-        This method blocks until the coordinator sends a SHUTDOWN command.
-        """
-        logger.info(f"Worker {jax.process_index()} entering command loop")
+def run_worker(base_model: str, config: JaxBackendConfig):
+    """Entry point for worker processes.
 
-        while True:
-            # Wait for command type from coordinator
-            cmd = _broadcast_command_type(CommandType.NOOP)
+    Creates a JaxBackend and runs the worker loop. This should be called
+    on non-coordinator processes instead of running the full engine.
 
-            if cmd == CommandType.SHUTDOWN:
-                logger.info(f"Worker {jax.process_index()} received shutdown command")
-                break
-            elif cmd == CommandType.NOOP:
-                continue
-            elif cmd == CommandType.FORWARD_BACKWARD:
-                (prepared_batch,) = _broadcast_object(None)
-                self._backend.forward_backward(prepared_batch)
-            elif cmd == CommandType.FORWARD:
-                (prepared_batch,) = _broadcast_object(None)
-                self._backend.forward(prepared_batch)
-            elif cmd == CommandType.SAMPLE:
-                (prepared_batch,) = _broadcast_object(None)
-                self._backend.sample(prepared_batch)
-            elif cmd == CommandType.CREATE_MODEL:
-                model_id, lora_config = _broadcast_object(None)
-                self._backend.create_model(model_id, lora_config)
-            elif cmd == CommandType.OPTIM_STEP:
-                model_id, request_data = _broadcast_object(None)
-                self._backend.optim_step(model_id, request_data)
-            elif cmd == CommandType.LOAD_CHECKPOINT:
-                checkpoint_path, model_id = _broadcast_object(None)
-                self._backend.load_checkpoint(checkpoint_path, model_id)
-            elif cmd == CommandType.SAVE_CHECKPOINT:
-                output_path, model_id = _broadcast_object(None)
-                self._backend.save_checkpoint(output_path, model_id)
-            elif cmd == CommandType.SAVE_SAMPLER_CHECKPOINT:
-                output_path, model_id = _broadcast_object(None)
-                self._backend.save_sampler_checkpoint(output_path, model_id)
-            else:
-                logger.warning(f"Worker received unknown command type: {cmd}")
+    Args:
+        base_model: The base model name
+        config: JaxBackend configuration
+    """
+    backend = JaxBackend(base_model, config)
 
-        logger.info(f"Worker {jax.process_index()} exiting command loop")
+    logger.info(f"Worker {jax.process_index()} entering command loop")
+
+    while True:
+        cmd = _broadcast_command_type(CommandType.NOOP)
+
+        if cmd == CommandType.SHUTDOWN:
+            logger.info(f"Worker {jax.process_index()} received shutdown command")
+            break
+        elif cmd == CommandType.NOOP:
+            continue
+        elif cmd == CommandType.FORWARD_BACKWARD:
+            (prepared_batch,) = _broadcast_object(None)
+            backend.forward_backward(prepared_batch)
+        elif cmd == CommandType.FORWARD:
+            (prepared_batch,) = _broadcast_object(None)
+            backend.forward(prepared_batch)
+        elif cmd == CommandType.SAMPLE:
+            (prepared_batch,) = _broadcast_object(None)
+            backend.sample(prepared_batch)
+        elif cmd == CommandType.CREATE_MODEL:
+            model_id, lora_config = _broadcast_object(None)
+            backend.create_model(model_id, lora_config)
+        elif cmd == CommandType.OPTIM_STEP:
+            model_id, request_data = _broadcast_object(None)
+            backend.optim_step(model_id, request_data)
+        elif cmd == CommandType.LOAD_CHECKPOINT:
+            checkpoint_path, model_id = _broadcast_object(None)
+            backend.load_checkpoint(checkpoint_path, model_id)
+        elif cmd == CommandType.SAVE_CHECKPOINT:
+            output_path, model_id = _broadcast_object(None)
+            backend.save_checkpoint(output_path, model_id)
+        elif cmd == CommandType.SAVE_SAMPLER_CHECKPOINT:
+            output_path, model_id = _broadcast_object(None)
+            backend.save_sampler_checkpoint(output_path, model_id)
+        else:
+            logger.warning(f"Worker received unknown command type: {cmd}")
+
+    logger.info(f"Worker {jax.process_index()} exiting command loop")
+
+
+def main():
+    """Entry point for running as a worker process.
+
+    Usage:
+        uv run -m tx.tinker.backends.worker --base-model Qwen/Qwen3-8B --backend-config '{...}'
+    """
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="SkyRL tx tinker worker process")
+    parser.add_argument("--base-model", required=True, help="Base model name")
+    parser.add_argument(
+        "--backend-config",
+        type=json.loads,
+        default={},
+        help="Backend configuration as JSON string",
+    )
+
+    args = parser.parse_args()
+    config = JaxBackendConfig(**args.backend_config)
+
+    run_worker(args.base_model, config)
+
+
+if __name__ == "__main__":
+    main()
