@@ -1083,11 +1083,6 @@ class JaxBackend(AbstractBackend):
         """Save sampler checkpoint, broadcasting to workers in multi-host mode."""
         self._broadcast_and_call(SaveSamplerCheckpointCommand, output_path=str(output_path), model_id=model_id)
 
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
-        """Load sampler checkpoint - delegates to underlying backend."""
-        # This is called internally by JaxBackendImpl.sample(), not directly by engine
-        self._backend.load_sampler_checkpoint(model_id, checkpoint_id, checkpoint_path)
-
     def has_model(self, model_id: str) -> bool:
         """Check if model is registered - local check only, no broadcast needed."""
         return self._backend.has_model(model_id)
