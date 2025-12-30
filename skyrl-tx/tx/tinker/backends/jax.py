@@ -541,19 +541,6 @@ class JaxBackendImpl(AbstractBackend):
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
         fsdp_size = self.mesh.shape["fsdp"]
 
-        # In multi-host mode, broadcast from rank 0 to ensure all processes have identical data
-        if jax.process_count() > 1:
-            from jax.experimental import multihost_utils
-
-            input_ids = multihost_utils.broadcast_one_to_all(input_ids)
-            target_ids = multihost_utils.broadcast_one_to_all(target_ids)
-            attention_mask = multihost_utils.broadcast_one_to_all(attention_mask)
-            loss_mask = multihost_utils.broadcast_one_to_all(loss_mask)
-            sampling_logprobs = multihost_utils.broadcast_one_to_all(sampling_logprobs)
-            advantages = multihost_utils.broadcast_one_to_all(advantages)
-            adapter_indices = multihost_utils.broadcast_one_to_all(adapter_indices)
-            loss_fn_types = multihost_utils.broadcast_one_to_all(loss_fn_types)
-
         with jax.set_mesh(self.mesh), self._jit_timing_context(seq_len, mode="train"):
             for mb_start in range(0, total_bs, micro_bs):
                 mb_end = min(mb_start + micro_bs, total_bs)
@@ -598,13 +585,6 @@ class JaxBackendImpl(AbstractBackend):
                 # Slice back to original size (remove FSDP padding)
                 token_losses_device.append(per_token_losses[: mb_end - mb_start])
                 logprobs_device.append(target_logprobs[: mb_end - mb_start])
-
-        # In multi-host mode, gather all shards before device_get
-        if jax.process_count() > 1:
-            from jax.experimental import multihost_utils
-
-            token_losses_device = [multihost_utils.process_allgather(x, tiled=True) for x in token_losses_device]
-            logprobs_device = [multihost_utils.process_allgather(x, tiled=True) for x in logprobs_device]
 
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
@@ -749,14 +729,6 @@ class JaxBackendImpl(AbstractBackend):
                 input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
                 adapter_indices = np.array(batch_adapter_indices, dtype=np.int32)
-
-                # In multi-host mode, broadcast from rank 0 to ensure all processes have identical data
-                if jax.process_count() > 1:
-                    from jax.experimental import multihost_utils
-
-                    input_ids = multihost_utils.broadcast_one_to_all(input_ids)
-                    attention_mask = multihost_utils.broadcast_one_to_all(attention_mask)
-                    adapter_indices = multihost_utils.broadcast_one_to_all(adapter_indices)
 
                 # Shard inputs along FSDP axis (already padded to max_batch_size)
                 input_ids, attention_mask, adapter_indices = jax.device_put(
