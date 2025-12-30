@@ -142,7 +142,6 @@ class AbstractBackend(ABC):
         """
         pass
 
-
     @abstractmethod
     def has_model(self, model_id: str) -> bool:
         """Check if a model is registered with the backend.
