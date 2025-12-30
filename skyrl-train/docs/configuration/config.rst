@@ -321,6 +321,7 @@ We support similar configuration options as the policy model, including LoRA.
           dropout: 0                 # LoRA dropout rate
           target_modules: "all-linear"
           exclude_modules: null  # Modules to exclude from LoRA
+          init_method: "kaiming" # Initialization method for LoRA layers
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6
