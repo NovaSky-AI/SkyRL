@@ -937,19 +937,19 @@ class OptimStepCommand(BaseModel):
 
 class LoadCheckpointCommand(BaseModel):
     type: Literal["load_checkpoint"] = "load_checkpoint"
-    checkpoint_path: str
+    checkpoint_path: AnyPath
     model_id: str
 
 
 class SaveCheckpointCommand(BaseModel):
     type: Literal["save_checkpoint"] = "save_checkpoint"
-    output_path: str
+    output_path: AnyPath
     model_id: str
 
 
 class SaveSamplerCheckpointCommand(BaseModel):
     type: Literal["save_sampler_checkpoint"] = "save_sampler_checkpoint"
-    output_path: str
+    output_path: AnyPath
     model_id: str
 
 
@@ -1073,15 +1073,15 @@ class JaxBackend(AbstractBackend):
 
     def save_checkpoint(self, output_path, model_id: str) -> None:
         """Save training checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(SaveCheckpointCommand, output_path=str(output_path), model_id=model_id)
+        self._broadcast_and_call(SaveCheckpointCommand, output_path=output_path, model_id=model_id)
 
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
         """Load training checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(LoadCheckpointCommand, checkpoint_path=str(checkpoint_path), model_id=model_id)
+        self._broadcast_and_call(LoadCheckpointCommand, checkpoint_path=checkpoint_path, model_id=model_id)
 
     def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
         """Save sampler checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(SaveSamplerCheckpointCommand, output_path=str(output_path), model_id=model_id)
+        self._broadcast_and_call(SaveSamplerCheckpointCommand, output_path=output_path, model_id=model_id)
 
     def has_model(self, model_id: str) -> bool:
         """Check if model is registered - local check only, no broadcast needed."""
