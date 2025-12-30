@@ -26,15 +26,18 @@ Usage:
     }'
 """
 
+import pickle
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Callable
 
 from cloudpathlib import AnyPath
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 import optax
 from flax import nnx
 from flax.training import checkpoints
@@ -922,11 +925,6 @@ class JaxBackendImpl(AbstractBackend):
 # =============================================================================
 # Multi-host coordination
 # =============================================================================
-
-import pickle
-from enum import IntEnum
-
-from jax.experimental import multihost_utils
 
 
 class CommandType(IntEnum):
