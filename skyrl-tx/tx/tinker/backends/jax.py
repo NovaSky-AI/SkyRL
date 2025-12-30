@@ -586,6 +586,11 @@ class JaxBackendImpl(AbstractBackend):
                 token_losses_device.append(per_token_losses[: mb_end - mb_start])
                 logprobs_device.append(target_logprobs[: mb_end - mb_start])
 
+        # Gather results from all hosts before device_get
+        if jax.process_count() > 1:
+            token_losses_device = [multihost_utils.process_allgather(x, tiled=True) for x in token_losses_device]
+            logprobs_device = [multihost_utils.process_allgather(x, tiled=True) for x in logprobs_device]
+
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
 
