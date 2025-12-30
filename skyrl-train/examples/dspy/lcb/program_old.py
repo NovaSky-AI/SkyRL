@@ -9,6 +9,7 @@ import dspy
 from .utils import GenerateLCBcodestdin, GenerateLCBcodefunctional, post_process_code, assert_test, assert_test_multiple, assert_dummy
 from .lcb_utils import post_process_tests_inputs, reduce_preds, check_test
 from .utils import assert_test
+from dspy.adapters.xml_adapter import XMLAdapter
 
 # Optional import for assertion module (only used by some classes, not NaiveCodeGenerator_dspy)
 try:
@@ -117,7 +118,7 @@ class NaiveCodeGenerator(dspy.Module):
             prog_lm=self.prog_lm
             )
 
-from dspy.adapters.xml_adapter import XMLAdapter
+
 
 class NaiveCodeGenerator_dspy(dspy.Module):
     def __init__(self, cot=False):

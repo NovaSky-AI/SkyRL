@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from pathlib import Path
 from .trial import TrialConfig, Trial, AgentResult
 from .lcb.utils import reward_fn
-from .lcb.program import NaiveCodeGenerator_dspy
+from .lcb.programs import NaiveCodeGenerator
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -150,7 +150,7 @@ class DSPyGenerator(GeneratorInterface):
         
         # TODO: make each DSPy trial configurable.
         trial_config = TrialConfig(
-            dspy_program=NaiveCodeGenerator_dspy, 
+            dspy_program=NaiveCodeGenerator, 
             example=prompt, 
             reward_fn=reward_fn,
             lm=self.dspy_lm
